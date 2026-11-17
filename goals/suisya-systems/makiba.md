@@ -17,6 +17,8 @@ Every row of docs/design/incidents.md is guarded by a test.
 ## G3 No model touches a terminal or the ledger directly
 - unmet if: a skill or a rules file names a terminal tool or runs the base's command (hc)
 - unmet if: a worker, the curator or the secretary can run the base's command or reach its socket
+- unmet if: a request with no key is accepted at the door, or the person key can be read from inside an agent's sandbox
+- unmet if: an agent's token can be read from inside that agent's own sandbox (its Bash)
 - unmet if: any role other than the dispatcher can write state.db
 
 ## G4 Dispatch and close record what was observed

@@ -18,11 +18,11 @@ made:
 
 | Path | What it is |
 | --- | --- |
-| `docs/design/plan.md` | The measure, the requirement, where this is going, the base and how agents run, scope, decisions, the flow of one task, what is carried, milestones. |
+| `docs/design/plan.md` | The measure, the requirement, where this is going, the base and how agents run, scope and what the predecessors become, decisions, the flow of one task, what is carried, milestones, how it is developed and what limits the schedule. |
 | `docs/design/spec.md` | Names and shapes shared across Issues: tables, the base interface, tags, the door, the message wrapper, event kinds, commands. |
 | `docs/design/incidents.md` | Ten past incidents and the test that guards each. |
-| `docs/design/probes.md` | What paddock measured that makiba relies on, six measurements still to make, and the checks to run if a move to Orca is ever considered. |
-| `issues/` | 49 Issue bodies and `index.md`. Generated from `tools/build_issues.py`. |
+| `docs/design/probes.md` | What paddock measured that makiba relies on, the first host measurements (2026-11-18) and the measurements still to make, and the checks to run if a move to Orca is ever considered. |
+| `issues/` | 51 Issue bodies and `index.md`. Generated from `tools/build_issues.py`. |
 | `goals/suisya-systems/makiba.md` | The goal ledger, checked with claude-org-ja's own validator. |
 | `tools/create_issues.py` | Creates the Issues with `gh` in dependency order and fills in the numbers. |
 
@@ -38,9 +38,15 @@ made:
 
 2. In claude-org-ja: register the project, and copy the ledger to
    `registry/goals/suisya-systems/makiba.md` (that folder is not tracked by git).
-3. Run probes P1 and P2 yourself, from a login shell (`docs/design/probes.md` section 2). P1
-   decides whether the design stands; P2 decides where real-base tests run. Tell the secretary
-   that M3-3 and M4-2 wait for P1.
+3. Upgrade herdr-core on the host to the version M0-2 pins (0.1.21; a host that still has 0.1.18
+   must not run the probes on it). Probes P1, P3, P4 and P5, and parts of P8 to P11, were run on 2026-11-18 and are recorded in
+   `docs/design/probes.md` section 4; the owner's decisions on the door and on delivery that followed are in
+   `plan.md` section 3.3. Still to run, from a login shell, each recorded in the same place: P2 (where
+   real-base tests run; M0-3 waits for it), P7 (whether your own Claude Code settings reach the agents; M3-4,
+   M4-3), and the steps of P8 to P11 that the record says were not run (M2-4, M3-3, M3-5, M6-5; the box and the wake line are M2-7). They need no
+   makiba code. Tell the secretary that no Issue of M2 or M3 is dispatched until every one of P1 to P5 and
+   P7 to P11 has a row there.
+   P6 waits for M6-2.
 4. Start with M0-1. It is merged in `human` mode (its own acceptance job cannot pass); set branch
    protection after it lands. From M0-2 on, `merge_approval_mode` is `acceptance`.
 
@@ -48,8 +54,9 @@ made:
 
 - The Issue bodies name files in the predecessors. Every named path was checked to exist at the
   commits above; what is inside each file was read for some and only listed for others.
-- The estimate of three to four weeks has no track record behind it, and this plan changed
-  direction several times in the two days it was written.
+- There is no calendar estimate. What limits the schedule is the owner-run probes, the
+  owner-checked Issues (M4-5, M7) and the serial chains in the dependency graph, counted in
+  `plan.md` section 9.
 - The choice of herdr-core over Orca rests on the measure and on what was read in Orca's
   repository (the CLI and orchestration guides, the status integration README, the notification
   code). Orca was not run. What Orca does better, and what would reopen the choice, is in
