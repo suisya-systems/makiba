@@ -68,15 +68,26 @@ add("M0-1", "Repository skeleton, CI and the acceptance job",
 
 add("M0-2", "Pin the base's version and install it the same way everywhere",
     "herdr-core releases every few days and calls its API a preview. makiba must run against one known "
-    "version and refuse any other.",
-    ["`makiba/base/version.py`: the supported range (`>=0.1.21,<0.1.22`) and a check of the version "
+    "version and refuse any other. The pin is not meant to follow the releases: moving it costs a test run and "
+    "several probes, so it moves on purpose and rarely.",
+    ["`makiba/base/version.py`: the supported range (`>=0.1.21,<0.1.22`, one patch release; the version the "
+     "design was read against and the probes of `docs/design/probes.md` are run on) and a check of the version "
      "`Base.hello()` returns.",
      "`scripts/install-base.sh`: installs the pinned release into a given prefix; used by CI and by a person.",
-     "`docs/upgrading-the-base.md`: the steps to move the pin (run M1-5's test against the new definition, "
-     "rerun the probes)."],
+     "`docs/upgrading-the-base.md`: when the pin moves, and what a move costs. It moves when a release carries "
+     "something makiba needs, when the pinned release can no longer be installed, or at the owner's monthly "
+     "look at the base's changelog; not on every release, and not more than about once a month. A move reruns: "
+     "M1-5's test against the new release's own definition; the whole suite on the stand-in and on the real "
+     "base; probes P1, P3, P4 and P5 on the new version (they measure how the base is reached, typed into and "
+     "launched, which a patch release has changed before: 0.1.20 changed sends), each a few hours of the "
+     "owner's time; P2 reruns itself in CI. A probe may be skipped only when the changelog shows nothing "
+     "touching its area and the record says so. P6 is not rerun.",
+     "The range stays one patch release. A wider range would let a version in that no probe has run on. It is "
+     "revisited only after three pin moves in a row needed nothing but the number changed."],
     "tests/test_base_version.py",
     ["A version inside the range is accepted.",
-     "A version outside it raises before any other call is made, with a message naming both versions."],
+     "A version outside it raises before any other call is made, with a message naming both versions.",
+     "`docs/upgrading-the-base.md` names M1-5's test file and each of P1, P3, P4 and P5."],
     "G6", deps=["M0-1"])
 
 add("M0-3", "A stand-in for the base, and the real base for CI",
@@ -96,8 +107,9 @@ add("M0-3", "A stand-in for the base, and the real base for CI",
      "With the real base, the fixture's place is never the default one and its folders are under a temp dir."],
     "G6", deps=["M0-2"],
     carry=[f"{PD}: `tests/hc-stub.sh` (as a reference for which behaviours a stand-in needs, not as code)"],
-    note="Probe P2 (docs/design/probes.md) decides whether the real base can run in GitHub's CI. If it "
-         "cannot, this Issue ships the stand-in half and says so in `docs/design/probes.md`.")
+    note="Probe P2 (docs/design/probes.md) has been run before this Issue starts and decided whether the real "
+         "base can run in GitHub's CI. If it did not, this Issue ships the stand-in half and says so in "
+         "`docs/design/probes.md`.")
 
 add("M0-4", "The test agent",
     "Every test through M3 needs an agent that behaves on command: reports status, takes input, shows the "
@@ -133,7 +145,7 @@ add("M0-5", "Carry the state.db schema and writer, and add migration v4",
          "claude-org-ja's old files and are not needed."])
 
 add("M0-6", "The incident table and its check",
-    "G1 is only checkable if the incident table is data a test can read.",
+    "G2 is only checkable if the incident table is data a test can read.",
     ["`docs/design/incidents.md` as delivered, kept as a Markdown table.",
      "`tools/check_incidents.py`: parses the table; fails when a row has an empty `Test` cell or names a file "
      "that does not exist. A row whose guarding Issue is still open may name a file that does not exist yet "
@@ -301,7 +313,8 @@ add("M2-4", "Deliver messages",
      "A body over the limit is cut and carries the `makiba show <id>` line."],
     "G5", deps=["M2-2"],
     note="Probes P3 and P4 measure what the test agent cannot: a person's half-typed draft, and how a real "
-         "composer takes multi-line and slash-leading text.")
+         "composer takes multi-line and slash-leading text. Both have been run before this Issue starts; this "
+         "Issue builds the delivery rules their results chose (probes.md, Results).")
 
 add("M2-5", "Rebuild the view after a restart",
     "`state.db` holds no terminal address. After `makibad` or the base restarts, the tags are the record.",
@@ -363,7 +376,13 @@ add("M3-3", "The door, agent keys, and the message commands",
     "only thing a sandboxed agent may connect to.",
     ["`makiba/daemon/door.py`: the Unix socket of spec section 3; one JSON line in, one out; every request "
      "recorded in `commands`; `(actor, idem)` returns the first answer again.",
-     "`agents` rows and key checks (spec section 4); verbs allowed per role.",
+     "`agents` rows and key checks (spec section 4); verbs allowed per role. A request with no key is "
+     "`denied`, whatever the peer's user id, process lineage or terminal; a connection from another user id "
+     "is refused first. Nothing at the door recognizes the person by the absence of a key.",
+     "The person key (spec sections 2 to 4): `makiba/daemon/person_key.py` creates `$MAKIBA_PERSON_KEY` "
+     "(default `~/.config/makiba/person.key`, mode 0600, in a 0700 folder) when it is absent and stores only "
+     "its SHA-256 in `agents` (`role = 'person'`). `makiba` sends `MAKIBA_KEY` when it is set and otherwise "
+     "the content of that file; with neither, it sends no key. `makiba up` (M4-4) calls the creation.",
      "`makiba/cli.py` with the verbs `send`, `report`, `show`. `report` also moves the run "
      "(`report done` sets `review`).",
      "`makiba` never imports `makiba.db`."],
@@ -373,11 +392,22 @@ add("M3-3", "The door, agent keys, and the message commands",
      "`send` from a process with no access to `state.db` (the file is made unreadable to the test's CLI call) "
      "still results in a `messages` row.",
      "The message's `sender` is the id bound to the key even when the arguments claim another.",
-     "The same `idem` twice creates one message."],
+     "The same `idem` twice creates one message.",
+     "A request with no key, sent from inside a terminal `makibad` launched (the test agent, with `MAKIBA_KEY` "
+     "removed from its environment, writing to the door itself), is `denied` and recorded as `rejected`, for "
+     "every verb including `config` and `down`. The same holds when the test agent first double-forks and "
+     "calls `setsid`, so that its parent is no longer the launched terminal.",
+     "A request carrying the person key, sent from a process outside every launched terminal, may use "
+     "`config`; the same request with a worker's key is `denied`.",
+     "The person key file is mode 0600 in a folder of mode 0700, lies under no worktree and not under the "
+     "role-files folder, and `state.db` holds only its SHA-256."],
     "G3", deps=["M2-1"],
-    note="Probe P1 measures whether a real sandbox lets the agent reach the door and not the base. If the "
-         "door cannot be reached, this Issue's transport becomes a spool folder; the request and response "
-         "shapes stay.")
+    note="Probe P1 has been run before this Issue starts. It measures what this Issue's test cannot: whether a "
+         "real sandbox lets the agent reach the door, and not the base and not the person key file. The test "
+         "here shows that the door asks for a key and takes none from lineage; that a sandboxed worker cannot "
+         "read the person key is P1's and M4-5's to show. If the door cannot be reached, this Issue's transport "
+         "becomes a spool folder; the request and response shapes stay. If the person key can be read from the "
+         "sandbox, the plan stops for a decision (probes.md, P1).")
 
 add("M3-4", "Launch",
     "The launch is where the environment is decided. paddock measured that the base's own variables (`HC_*`) "
@@ -411,7 +441,8 @@ add("M3-5", "Startup dialogs",
     carry=[f"{RT}: `claude_org_runtime/dispatcher/spawn_prompt.py` (`decide`, `screen_lines` and helpers)",
            f"{PD}: the policy-list rule in `skills/org-escalation` and inventory row L-N3"],
     note="Probe P5 measures whether a task given in the launch arguments starts after the dialog on real "
-         "Claude Code.")
+         "Claude Code. It has been run before this Issue starts; if it failed, this Issue and M3-6 deliver the "
+         "task as the first message after the dialog (probes.md, P5).")
 
 add("M3-6", "A launch is verified only by an observed first turn",
     "On 2026-08-18 two workers were reported as dispatched that had never started (I-1).",
@@ -448,12 +479,16 @@ add("M4-1", "Deny the base's command in every role",
     "that no role's settings allow the base's command at all.",
     ["`roles/*/settings.json` for secretary, worker and curator: deny rules for the commands, and `Read`, "
      "`Edit` and sandbox denies for the folders, that `Base.worker_denies()` lists (spec section 6.2). "
-     "These are `hc`, `herdr-core`, `herdr-app` and their config and state folders.",
+     "These are `hc`, `herdr-core`, `herdr-app` and their config and state folders. The same files also "
+     "deny the person key file for read and write, and the unsandboxed run of a command "
+     "(`allowUnsandboxedCommands` off), because the person key is what separates the person's verbs from "
+     "every agent's (spec section 3).",
      "A `PreToolUse` hook that refuses a Bash command naming one of those commands as a command word or as a "
      "path ending in it, fail-closed on unreadable input.",
      "The rules files say why in one sentence."],
     "tests/test_base_denied.py",
-    ["For each role's settings file: every entry of `worker_denies()` is present (a shape test, as paddock's "
+    ["For each role's settings file: every entry of `worker_denies()` is present, and so are the person key "
+     "file's denies and the switch that refuses an unsandboxed run (a shape test, as paddock's "
      "`tests/worker-settings-*.test.sh`).",
      "The hook refuses the command bare, by absolute path and behind `env`, and passes a command that only "
      "mentions the name as an argument.",
@@ -466,16 +501,18 @@ add("M4-1", "Deny the base's command in every role",
 add("M4-2", "The sandbox reaches the door and nothing of the base",
     "A deny rule matches command text; a script or a direct socket connection is outside it. paddock wrote "
     "the sandbox entries for herdr-core but could not measure them, because its deny rule always refused first.",
-    ["Per-task settings (from M3-2) deny the base's socket and state folders for read and write, and allow "
-     "the door's socket.",
-     "`scripts/probes/door-and-base-reach.sh`: probe P1, runnable by a person.",
+    ["Per-task settings (from M3-2) deny the base's socket and state folders and the person key file for "
+     "read and write, and allow the door's socket.",
+     "`scripts/probes/door-and-base-reach.sh`: probe P1 as a script a person can rerun. P1 was run by hand "
+     "before M2 and M3 with hand-written settings; this repeats it with the settings `makibad` really writes.",
      "The result recorded in `docs/design/probes.md` with versions and date."],
     "tests/test_task_settings_shape.py",
-    ["The per-task settings written for a run contain the base's denies and the door's allow.",
+    ["The per-task settings written for a run contain the base's denies, the person key file's denies and the "
+     "door's allow.",
      "The settings name no path inside the worktree as writable configuration."],
     "G3", deps=["M4-1"],
     carry=[f"{PD}: `scripts/probes/core-api-reach.sh`"],
-    note="The shape test goes through the acceptance gate. The host run of probe P1 does not: a person runs it "
+    note="The shape test goes through the acceptance gate. The host rerun of probe P1 does not: a person runs it "
          "and records the result. M4-5 may not start until that result is a pass.")
 
 add("M4-3", "Carry the role settings and the git guard hooks",
@@ -507,13 +544,16 @@ add("M4-4", "makiba up: start the base cleanly",
      "Calls `Base.start()`: the `makiba` session's core with `notes = false`, so that the base sends no "
      "notices and gives agents no rules of its own (requirement R2). Never stops or restarts a base it "
      "did not start.",
+     "Creates the person key file if it is absent (M3-3's function), and refuses nothing about an existing one.",
      "Starts `makibad`. Starts the secretary unless `--no-secretary` (the secretary itself is M6-2)."],
     "tests/test_up.py",
     ["With `CLAUDE_CODE_SESSION_ID` set, `makiba up` exits non-zero and starts nothing.",
      "After `up`, a launched test agent's environment has none of the caller's extra variables named in "
      "spec section 6.4.",
-     "A second `up` starts nothing new and exits 0."],
-    "G3", deps=["M2-1"],
+     "A second `up` starts nothing new and exits 0.",
+     "After `up` the person key file exists with mode 0600 in a folder of mode 0700, and a second `up` leaves "
+     "its content unchanged."],
+    "G3", deps=["M2-1", "M3-3"],
     carry=[f"{PD}: `skills/org-start/scripts/org-start.sh` `--check` (as the list of preconditions)"])
 
 add("M4-5", "One real worker, request to done report",
@@ -522,14 +562,15 @@ add("M4-5", "One real worker, request to done report",
      "repository), the commands, what to look at.",
      "Run it on a host: `makiba up --no-secretary`, a `dispatch` typed by the person, the worker edits one "
      "file and runs `makiba report done`, the person runs `makiba close`.",
-     "Inside the worker, ask it to run the base's command and to connect to the base's socket; record the "
-     "refusals.",
+     "Inside the worker, ask it to run the base's command, to connect to the base's socket, to read the "
+     "person key file and to run `makiba config get` with `MAKIBA_KEY` unset; record the refusals.",
      "Record versions, date and what happened in the runbook's results section. File an Issue for every "
      "surprise."],
     None,
     ["The run reaches `review` with no person typing into the worker's terminal.",
      "`worker_spawn_verified` and `report_done` are in `events`.",
-     "The two attempts to reach the base from the worker are refused."],
+     "The two attempts to reach the base from the worker are refused.",
+     "The read of the person key file is refused, and `makiba config get` without a key is `denied`."],
     "G3", deps=["M3-7", "M4-2", "M4-3", "M4-4"], gate=False,
     note="No failing test can come first: this is a host run with a real agent. It is outside the acceptance "
          "gate and is closed by a person on the recorded result.")
@@ -790,29 +831,41 @@ add("M7-2", "One week of self-hosting",
     "G7", deps=["M7-1"], gate=False,
     note="Outside the acceptance gate: closed by a person.")
 
-add("M7-3", "Move the other projects",
-    "Until the other projects move, two organizations run side by side.",
-    ["Register each project claude-org-ja serves; move their goal ledgers; stop claude-org-ja.",
+add("M7-3", "Move the projects claude-org-ja serves",
+    "Until the projects claude-org-ja serves move, two organizations run side by side. paddock is not one of "
+    "them: it continues as a lightweight organization beside makiba (plan.md section 4.1), and the projects it "
+    "serves stay with it.",
+    ["Register each project claude-org-ja serves; move their goal ledgers; stop claude-org-ja. Nothing of "
+     "paddock's is stopped or moved.",
      "One more week of observation."],
     None,
     ["For seven days after the move, claude-org-ja is not started."],
     "G7", deps=["M7-2"], gate=False,
-    note="Outside the acceptance gate, and outside the three-to-four-week estimate.")
+    note="Outside the acceptance gate, and outside the schedule counted in plan.md section 9.")
 
 add("M7-4", "What was not moved",
     "claude-org-ja has features this plan left behind on purpose (the dashboard, Docker distribution, the "
-    "cockpit, metrics). Each needs a decision, not silence.",
-    ["`docs/design/not-carried.md`: every feature of claude-org-ja and paddock not in makiba, each marked "
-     "build, drop or later, with the stage it belongs to when later."],
+    "cockpit, metrics), and it is stopped at M7-3. Each needs a decision, not silence.",
+    ["`docs/design/not-carried.md`: every feature of claude-org-ja not in makiba, each marked build, drop or "
+     "later, with the stage it belongs to when later. paddock is not on this list as something left behind, "
+     "because it continues; a file makiba copied from it is listed once, as makiba's own from then on."],
     None,
-    ["The list exists and no entry is unmarked."],
+    ["The list exists and no entry is unmarked; no entry marks paddock or any of its features as dropped."],
     "G7", deps=["M7-2"], gate=False,
     note="Outside the acceptance gate: closed by a person.")
+
+
+PROBE_GATE = ("Do not start until probes P1 to P5 are recorded as run, with versions and date, in "
+              "`docs/design/probes.md` (Results). They are run by hand before any Issue of M2 or M3, on the "
+              "pinned base version.")
 
 
 def body(i) -> str:
     out = []
     out.append(f"# {i['id']} {i['title']}\n")
+    if i["id"][:2] in ("M2", "M3"):
+        out.append("## Before starting\n")
+        out.append(PROBE_GATE + "\n")
     out.append("## Why\n")
     out.append(i["why"] + "\n")
     out.append("## What to build\n")
@@ -857,7 +910,9 @@ def main() -> None:
         (d / f"{i['id']}.md").write_text(body(i), encoding="utf-8")
     lines = ["# Issues\n",
              "Generated by `tools/build_issues.py`. Each file is one Issue's body; its first line is the title.",
-             "`Depends on` lines use these ids; `tools/create_issues.py` replaces them with Issue numbers.\n"]
+             "`Depends on` lines use these ids; `tools/create_issues.py` replaces them with Issue numbers.",
+             "Every Issue of M2 and M3 carries a `Before starting` section: probes P1 to P5 are run first "
+             "(`docs/design/probes.md`).\n"]
     for m, name in MILESTONES.items():
         lines.append(f"## {m} {name}\n")
         lines.append("| Id | Title | Goal | Depends on | Gate |")

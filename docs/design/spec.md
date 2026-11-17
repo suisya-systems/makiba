@@ -32,6 +32,7 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 | Secretary folder | `<state>/secretary/` | The secretary's working folder, as in paddock. |
 | Role files | `$MAKIBA_SHARE_DIR`, default `${XDG_DATA_HOME:-~/.local/share}/makiba` | Role rules, role settings, the `makiba` entry point agents call. Agents may read, not write. |
 | The door | `$MAKIBA_DOOR`, default `${XDG_RUNTIME_DIR}/makiba/door.sock` | Unix socket. The only thing a sandboxed agent may connect to. |
+| The person key | `$MAKIBA_PERSON_KEY`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/person.key` | Mode 0600, in a folder of mode 0700. Created by `makiba up` when absent. Every agent role's settings deny reading it (section 3). |
 | Worktrees (code) | `$MAKIBA_WORKERS_DIR`, default `~/makiba-workers/<project>/<task_id>` | Created with `git worktree add` from the project's own repository, which a person trusts once (paddock #216). |
 | Working folders (document) | `$MAKIBA_DOCS_DIR`, default `~/makiba-docs/<task_id>/` | A plain folder under a parent a person trusts once. `out/` holds what is handed over and is kept after close. |
 | The base's own place | `HC_SESSION=makiba`. | Tests use their own (`makiba-test-<pid>`) with scratch folders. |
@@ -55,7 +56,11 @@ Response:
 {"ok": false, "error": {"kind": "denied", "message": "...", "hint": "..."}}
 ```
 
-- `key` is the agent key (section 4). A person's own shell sends no key and is recognized by the socket's peer credentials: same user id, and not inside a terminal that `makibad` launched. The second half is a first proposal; M3-3 measures what can be checked.
+- `key` is the agent key or the person key (section 4). A request with no key is `denied`, for every verb. Nothing at the door takes the absence of a key to mean the person.
+- The person's `makiba` sends `MAKIBA_KEY` when it is set and otherwise the content of the person key file (section 2). Peer credentials are used only to refuse: a connection from another user id is refused before anything is read. The same user id grants nothing, because every agent runs as the person's user.
+- Why not recognize the person by "same user id, and not inside a terminal `makibad` launched": a worker can unset `MAKIBA_KEY` and then looks like the person to any rule that reads who is calling. The lineage half has to be read from `/proc` by the peer's pid; a process leaves its launched terminal by forking twice or calling `setsid`, after which its parent is the init process or a subreaper, and a sandbox's pid namespace translates the pid the door sees or turns it into 0. A rule that depends on where a process came from fails for the first process that changes where it came from.
+- What the person key depends on instead: the sandbox of every agent role denies reading the key file (the role settings of M4-1 and the per-task settings of M4-2), and denies running a command outside the sandbox. That is an operating-system rule on a path, not a check on command text, and it does not look at lineage, so re-parenting changes nothing. Whether it holds for a process of the same user, and whether another process's environment (where the secretary's agent key is) is hidden from it, only a real sandbox can show: probe P1. M3-3's test shows the door's half (no key, no verb); M4-5 shows the sandbox's half once, with a real worker.
+- What it costs: a process of the person's user that runs outside the sandbox can read the key file; that is the person's own programs and any agent run with the sandbox off, which the settings forbid. If P1 shows the sandbox cannot hide the file, no key at the door separates an agent from the person, and the way left is to run the agents as another operating-system user, so that peer credentials mean something. That needs an account made on each host, folders and the door shared by group, and a base that launches terminals as that user, which is not known to be possible. The plan then stops for a decision.
 - `idem` makes a retry safe: the same `(key, idem)` returns the first response again.
 - Every accepted or rejected request becomes one row in `commands` (section 5.2).
 
@@ -74,16 +79,16 @@ Error kinds and the `makiba` exit codes they map to:
 
 ## 4. Agents and keys
 
-Each launched terminal gets one random key (32 bytes, hex) in its environment as `MAKIBA_KEY`. `makibad` stores only its SHA-256.
+Each launched terminal gets one random key (32 bytes, hex) in its environment as `MAKIBA_KEY`. The person has one more, in the person key file (section 2). `makibad` stores only the SHA-256 of each.
 
 | Role | Name (`terminal.name`) | Agent id | Verbs allowed |
 | --- | --- | --- | --- |
 | Secretary | `secretary` | `secretary` | `dispatch`, `close`, `answer`, `pr`, `pending`, `peek`, `status`, `send`, `show`, `renew` |
 | Worker | `w-<task_id>` | `w-<task_id>` | `report`, `send` (to `secretary` only), `show` |
 | Curator | `curator` | `curator` | `report`, `send` (to `secretary` only), `show` |
-| Person | - | `person` | everything, plus `up`, `down`, `config` |
+| Person | - | `person` | everything, plus `down`, `config` (`up` runs locally, before `makibad` exists; it creates the person key) |
 
-A key dies when its terminal is closed or replaced. The sender of a message is the id bound to the key, never a claim in the arguments (paddock's mailbox could not check this: inventory PRM-11).
+An agent's key dies when its terminal is closed or replaced. The person key does not; to replace it, delete the file and run `makiba up`, which stores the new hash and revokes the old one. The sender of a message is the id bound to the key, never a claim in the arguments (paddock's mailbox could not check this: inventory PRM-11).
 
 ## 5. state.db
 
@@ -96,8 +101,8 @@ Times are UTC text, `strftime('%Y-%m-%dT%H:%M:%fZ','now')`, as in the carried sc
 ```sql
 CREATE TABLE agents (
   id          INTEGER PRIMARY KEY,
-  agent_id    TEXT NOT NULL,              -- 'secretary', 'w-<task_id>', 'curator'
-  role        TEXT NOT NULL CHECK (role IN ('secretary','worker','curator')),
+  agent_id    TEXT NOT NULL,              -- 'secretary', 'w-<task_id>', 'curator', 'person'
+  role        TEXT NOT NULL CHECK (role IN ('secretary','worker','curator','person')),
   run_id      INTEGER REFERENCES runs(id) ON DELETE SET NULL,
   key_sha256  TEXT NOT NULL UNIQUE,
   created_at  TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),

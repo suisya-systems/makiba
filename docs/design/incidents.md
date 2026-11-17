@@ -1,6 +1,6 @@
 # Incidents and the tests that guard them
 
-Each row is something that happened in a predecessor. makiba is built so that it cannot happen in the same way, and a test holds that. Goal clause G1 is unmet while any row has no test or a failing one.
+Each row is something that happened in a predecessor. makiba is built so that it cannot happen in the same way, and a test holds that. Goal clause G2 is unmet while any row has no test or a failing one.
 
 The `Test` column is filled by the Issue named in `Guarded by`: that Issue's acceptance test is the row's test. Issue M0-6 adds a check that every row names a test file that exists.
 
