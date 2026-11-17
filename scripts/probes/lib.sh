@@ -149,3 +149,10 @@ wait_idle() { # wait_idle <terminal> <seconds>
 count_prompts() { # count_prompts <terminal> <regex>: prompt lines (composer marker first) in the history
   hc read --lines 3000 "$1" 2>/dev/null | grep -cE "^[[:space:]]*[❯>] *$2"   # TODO(confirm): marker is "❯"
 }
+
+count_submitted() { # count_submitted <terminal>: every prompt line in the history except the live composer (the last one)
+  # Measured 2026-11-18 (p4-result.txt): counting only non-empty prompt lines gave 0 in two cases because the
+  # live composer sometimes shows a grey suggestion, so it was counted before and not after. The last marker line is always the composer.
+  local n; n=$(hc read --lines 3000 "$1" 2>/dev/null | grep -cE '^[[:space:]]*[❯>]')
+  echo $(( n > 0 ? n - 1 : 0 ))
+}
