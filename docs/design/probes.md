@@ -76,7 +76,9 @@ Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): the 
 
 Cause, read in the sources (not run): sandbox-runtime's README, section "Unix Socket Restrictions (Linux)": "The BPF filter intercepts the `socket()` syscall and blocks creation of `AF_UNIX` sockets by returning `EPERM`." Its table of Unix socket settings gives, for `allowUnixSockets`, "Allowlist of socket paths" on macOS and "_Ignored_ (seccomp can't filter by path)" on Linux, and for `allowAllUnixSockets`, "Allow all sockets" on macOS and "Disable seccomp blocking" on Linux. So the settings file of this probe, which named the door's path, could not work on Linux. Claude Code's sandboxing page says, in its WSL2 note, "set `allowAllUnixSockets`, which opens every Unix socket to sandboxed commands". The README also says that where the seccomp filter is not available "sockets are unrestricted and a warning is shown", and the sandboxing page calls the filter optional; so on another host the same settings can give a different result. I read the first part of each page word for word and the rest of the README only in part; the sandboxing page has no text of its own on `allowUnixSockets`, only a link to it.
 
-What this changes: spec section 3 and M4-2 assumed that a sandbox can allow one socket path. On Linux it cannot. How agents reach `makibad` is an open decision for the owner, with the predecessors' forms and this result set side by side in plan.md section 3.3. P1's "if it fails" branch above (a spool folder) is one of four options there, not the decision.
+What this changes: spec section 3 and M4-2 assumed that a sandbox can allow one socket path. On Linux it cannot. The owner decided on 2026-11-18 (plan.md section 3.3) that agents reach `makibad` by MCP tools, and that the Unix socket stays for the person's own `makiba`. P1's "if it fails" branch above (a spool folder) is option A there, the way back, and not the decision.
+
+What P1 still has to run after the decision. The door step is replaced by P11, which tests the port and the token. The steps P1 did not reach remain, for the base and for the person key file: `hc ls` against the running core, the state-folder decoy read made unambiguous (a path that exists), the person key file, `/proc`, the double fork, the unsandboxed run, and the Read and Edit tools. They are run when M4-2 repeats P1 with the settings `makibad` really writes (M4-2).
 
 ### P2. The real base and the test agent run in GitHub's CI
 
@@ -125,7 +127,7 @@ Pass: every body arrives whole, as one prompt, and no line acts as a command.
 
 If a case fails: that shape is never typed. Its body is replaced by the cut line and read with `makiba show` (M2-4).
 
-Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): all 8 cases arrived with the body equal to what was sent. Six passed by the script. Two (`first-line-bang-ls` and `two-wrapped-in-one-send`) were left as NEEDS-HUMAN, because the script counted 0 prompts where it expected 1; the secretary read the screens and reported 1 prompt in each and no command run. I did not read those two screens again for this record. P4 types into a terminal nobody types in, so it supports typed delivery to workers and the curator, and says nothing about the secretary's terminal. Under the first candidate of plan.md section 3.3, typed delivery of bodies is the fallback and a channel is the first route; P4 then shows that the fallback works for terminals nobody types in, and only a fixed one-line wake would ever be typed into the secretary's.
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): all 8 cases arrived with the body equal to what was sent. Six passed by the script. Two (`first-line-bang-ls` and `two-wrapped-in-one-send`) were left as NEEDS-HUMAN, because the script counted 0 prompts where it expected 1; the secretary read the screens and reported 1 prompt in each and no command run. I did not read those two screens again for this record. P4 types into a terminal nobody types in, so it supports typed delivery to workers and the curator, and says nothing about the secretary's terminal. Under the decision of plan.md section 3.3, a channel is the default route and typed bodies are the sender's choice for workers and the curator; P4 shows that typed bodies work for terminals nobody types in, and only a fixed one-line wake is ever typed into the secretary's.
 
 ### P5. A task given in the launch arguments starts after the startup dialog
 
@@ -171,15 +173,17 @@ Pass: for at least one option, no decoy applies to a worker or the curator while
 
 If it fails: when the decoys cannot be kept out, record which user-level items reach agents and how the role rules and settings rank against them; M3-4 and M4-3 then test the role's rule wins for each, and the plan says which user-level items it tolerates. An alternate configuration folder also moves the login and the connectors, so the cost of sharing them into it is recorded. When a worker can notify the person, the notification setting has to be switched off for workers and the curator by their own settings; if it cannot be, requirement R2 and the second clause of goal G1 cannot be held for Claude Code by launch, and the plan stops for a decision.
 
-### P8 to P11: the first candidate of plan.md section 3.3
+### P8 to P11: what the decision of plan.md section 3.3 depends on
 
-These measure what the candidate of plan.md section 3.3 depends on: messages carried by a Claude Code channel (`notifications/claude/channel`), the door as MCP tools. They are steps, not scripts; another worker writes the scripts. Each is run on the pinned base version and a Claude Code version inside the range of M0-2.
+These measure what the decision of plan.md section 3.3 depends on: messages carried by a Claude Code channel (`notifications/claude/channel`), the door as MCP tools. They are written as steps; another worker wrote the scripts and the owner ran them. Each is run on the pinned base version and a Claude Code version inside the range of M0-2.
+
+The scripts carry other numbers than these probes. The script `p8` (commit eee6bea) ran the development-channel dialog (P10 below), the turn start (P8) and a working recipient (P9). The script `p9` (commit f03e8d6) ran the MCP door (P11). Both ran on hc 0.1.21 and Claude Code 2.1.326 on 2026-11-18 (2026-11-17T21:34Z and 21:40Z); I read their result files, `p8-result.txt` and `p9-result.txt`, which hold the dialog screens and the cases quoted below, and did not read the scripts.
 
 Not measured, by the owner's answer: whether a channel notification mixes into what a person has typed. The owner's experience of claude-org-ja, which ran the broker and the channel (2026-11-18): no case where a notification was mixed into a person's input. By the owner's reasoning, a channel is a notification to Claude Code and not keystrokes into a terminal, so it does not depend on the base. This is operating experience, not a measurement made for makiba, and it is recorded as that.
 
 ### P8. A channel delivery to an idle target is seen as a turn starting, in the base's status
 
-Why: under the candidate, `makibad` pushes the body through the channel and treats the message as delivered only when the recipient's turn starts, read from the base's status. If that cannot be read, the candidate cannot tell a lost push from a delivered one.
+Why: under the decision, `makibad` pushes the body through the channel and treats the message as delivered only when the recipient's turn starts, read from the base's status. If that cannot be read, the decision cannot tell a lost push from a delivered one.
 
 Steps:
 
@@ -188,6 +192,8 @@ Steps:
 3. Emit a notification that Claude Code does not act on (for example one it ignores) and record whether any status change appears; and let a turn start for an unrelated reason (a typed line) to see what a false confirmation looks like.
 
 Pass: for `idle` and for `done`, a turn start is visible in the status within a few seconds, and no change appears when nothing was delivered.
+
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit eee6bea): PASS for the idle target. The status went from `idle 0` to `working 0` 0.4 s after the message was queued, and the agent wrote the file it was asked for. With the channel stopped, the status stayed `done 1` for 20 s and no file appeared; after the channel was resumed the held message was delivered. Not run: a delivery to a `done` target that starts a turn, and a turn that starts for another cause (step 3's false confirmation).
 
 If it fails: delivery cannot be confirmed from status. Every delivery gets the fixed one-line wake typed after the push (paddock's form, record 0013), and the recipient reads the box with a tool.
 
@@ -199,15 +205,19 @@ Steps: for a target in each of `working` (a long tool call), `blocked` (a permis
 
 Pass: each notification appears once, at the latest at the end of the turn, and a lost one is visible through P8's check.
 
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit eee6bea): PASS for `working` only. A message sent during a long turn was delivered and acted on before the turn ended: it interrupted the turn at a tool boundary. The result file notes that this means delivered, not lost, and that it interrupts. Not run: `blocked` (a permission prompt), `done`, and two notifications in a row. The status during the working case is not in the result file, so P8's check cannot be applied to it (plan.md section 3.3, point 5 covers it by waking after the turn).
+
 If it fails: `makibad` pushes only to an `idle` or `done` target and holds the message otherwise, as typed delivery does today (spec section 7); a notification that is lost without any status change makes P8's check the only guard and the fixed wake the rule.
 
 ### P10. The development-channel dialog can be passed by the policy list on the base
 
-Why: the contract of claude-org-ja records a prompt, `Load development channel? (Y/n)`, that appears for the channel sidecar in addition to the folder-trust prompt, and was machine-approved by the orchestrator there. Under the candidate `makibad` passes it with the policy list (spec section 7), a startup dialog the plan did not have.
+Why: the contract of claude-org-ja records a prompt, `Load development channel? (Y/n)`, that appears for the channel sidecar in addition to the folder-trust prompt, and was machine-approved by the orchestrator there. Under the decision `makibad` passes it with the policy list (spec section 7), a startup dialog the plan did not have.
 
 Steps: in a folder no person has trusted, launch through the base with the channel flag and with the task as the last argument (as P5). Record every dialog's full text and option lines, the order, and whether each is passed by choosing a line from the policy list with the cursor read again before the key (spec section 7). Launch again with a resume, and renew the secretary, and record whether either dialog comes back.
 
 Pass: every dialog is matched whole and passed by the policy list, the first turn starts on the task, and a resume or renewal passes the same way.
+
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit eee6bea): PASS for a first launch. Two dialogs appeared, in this order, and the policy passed both with three keys in all (down and Enter on the folder-trust dialog, Enter on the second). Folder-trust: the cursor stood on "No, exit" and the line "Yes, I trust this folder" was chosen. The second began "WARNING: Loading development channels", said that `--dangerously-load-development-channels` is for local channel development only and to use `--channels` for approved channels, named the channel (`Channels: server:makiba-channel`), and offered "1. I am using this for local development" (the cursor already on it) and "2. Exit". The result files hold both screens. Not run: a resume, and a renewal of the secretary.
 
 If it fails: for the agent where it fails, no channel; messages go by the box and the fixed wake, and the plan says which roles that is.
 
@@ -221,6 +231,14 @@ Steps:
 2. Record every dialog shown at launch, with its full text, and whether an MCP tool call from the agent reaches the stand-in.
 
 Pass: the tool call reaches the stand-in; the Bash connection to the port fails with a sandbox error; the token appears in neither the readable files nor `/proc` of any process the worker can see; no dialog beyond those already on the policy list appears.
+
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit f03e8d6): PASS for the token in the launch arguments; the same token in the environment FAILS, as the decision expects (plan.md section 3.3, point 2).
+
+- A tool call from the agent reached the stand-in with the probe text. The stand-in's log shows the calls of Claude Code 2.1.326 with a valid token.
+- A connection to the port from a sandboxed Bash failed with `ConnectionRefusedError`, errno 111, both with the default proxy variables and with them ignored. Nothing reached the stand-in, and it answered from outside.
+- A decoy token in the environment: found by the Bash scan, in the Bash process's own environment and in its children's. A decoy in the `--mcp-config` argument: not found. A decoy file under a path denied for reading: refused, errno 2. The other session's decoys, in its environment and its argument: not found. A decoy named in `sandbox.credentials.envVars`: not found in Bash's environment.
+- Dialogs: only the two of P10. The MCP configuration added none.
+- Not examined by the recorded cases: the environment and arguments of the channel server that Claude Code starts for a session; the decoys were in the session's own environment and argument.
 
 If it fails: when the port can be reached from Bash, the token alone protects the daemon, which is weaker than the plan states, and option A is the way back; when the token can be read, it moves to a file in a folder the worker's settings deny, or option A; when a new dialog appears, it is added to the policy list if it can be matched whole, and otherwise option A.
 
@@ -293,7 +311,7 @@ A move is worth considering only if all five pass. O1 or O3 failing means Orca's
 
 ## 4. Results
 
-Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. Times are as the probe scripts wrote them (UTC): the first runs were at 2026-11-17T15:56Z to 15:57Z, which is 2026-11-18 in the owner's time zone. P2 and P6 to P11 have not been run. P1 to P5 and P7 to P11 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
+Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. Times are as the probe scripts wrote them (UTC): the first runs were at 2026-11-17T15:56Z to 15:57Z, which is 2026-11-18 in the owner's time zone. P2, P6 and P7 have not been run, and P8 to P11 were run in part. P1 to P5 and P7 to P11 must have a row with a result before any Issue of M2 or M3 is dispatched, and a row for a probe run in part names the steps not run, which are run before the Issue that relies on them lands; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
 
 | Probe | Date | `hc --version` | `claude --version` | Result | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -304,7 +322,7 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | P5 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS | dialog answered once, first turn on the task in 3 s |
 | P6 | | | | | |
 | P7 | | | | | |
-| P8 | | | | | |
-| P9 | | | | | |
-| P10 | | | | | |
-| P11 | | | | | |
+| P8 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (idle target) | 0.4 s from queue to `working`; with the channel stopped, no change in 20 s, then the held message arrived. Not run: a `done` target, a false confirmation. Script commit eee6bea |
+| P9 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (working target only) | delivered and acted on at a tool boundary, before the turn ended. Not run: `blocked`, `done`, two in a row. Script commit eee6bea |
+| P10 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (first launch) | folder-trust and development-channel dialogs passed with three keys. Not run: resume, renewal. Script commit eee6bea |
+| P11 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (token in the launch arguments); the token in the environment FAILS | tool call reached the stand-in; port refused from Bash (errno 111, two ways); argument and denied file not readable; env readable. Not examined: the channel server's own environment and arguments. Script commit f03e8d6 |

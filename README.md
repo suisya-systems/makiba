@@ -21,7 +21,7 @@ made:
 | `docs/design/plan.md` | The measure, the requirement, where this is going, the base and how agents run, scope and what the predecessors become, decisions, the flow of one task, what is carried, milestones, how it is developed and what limits the schedule. |
 | `docs/design/spec.md` | Names and shapes shared across Issues: tables, the base interface, tags, the door, the message wrapper, event kinds, commands. |
 | `docs/design/incidents.md` | Ten past incidents and the test that guards each. |
-| `docs/design/probes.md` | What paddock measured that makiba relies on, seven measurements still to make, and the checks to run if a move to Orca is ever considered. |
+| `docs/design/probes.md` | What paddock measured that makiba relies on, the first host measurements (2026-11-18) and the measurements still to make, and the checks to run if a move to Orca is ever considered. |
 | `issues/` | 49 Issue bodies and `index.md`. Generated from `tools/build_issues.py`. |
 | `goals/suisya-systems/makiba.md` | The goal ledger, checked with claude-org-ja's own validator. |
 | `tools/create_issues.py` | Creates the Issues with `gh` in dependency order and fills in the numbers. |
@@ -39,11 +39,13 @@ made:
 2. In claude-org-ja: register the project, and copy the ledger to
    `registry/goals/suisya-systems/makiba.md` (that folder is not tracked by git).
 3. Upgrade herdr-core on the host to the version M0-2 pins (0.1.21; a host that still has 0.1.18
-   must not run the probes on it). Then run probes P1 to P5 and P7 to P11 yourself, from a login shell, and
-   record each in `docs/design/probes.md` section 4. They need no makiba code. P1 decides whether
-   the design stands and how the door works; P2 decides where real-base tests run (M0-3 waits for
-   it); P3 and P4 decide how messages are typed (M2-4); P5 decides how the task is given (M3-5,
-   M3-6); P7 decides whether your own Claude Code settings reach the agents (M3-4, M4-3). P8 to P10 decide whether a Claude Code channel can carry messages and P11 whether an MCP door is safe (`plan.md` section 3.3). Tell the secretary that no Issue of M2 or M3 is dispatched until every one of them is recorded.
+   must not run the probes on it). Probes P1, P3, P4 and P5, and parts of P8 to P11, were run on 2026-11-18 and are recorded in
+   `docs/design/probes.md` section 4; the owner's decisions on the door and on delivery that followed are in
+   `plan.md` section 3.3. Still to run, from a login shell, each recorded in the same place: P2 (where
+   real-base tests run; M0-3 waits for it), P7 (whether your own Claude Code settings reach the agents; M3-4,
+   M4-3), and the steps of P8 to P11 that the record says were not run (M2-4, M3-3, M3-5, M6-5). They need no
+   makiba code. Tell the secretary that no Issue of M2 or M3 is dispatched until every one of P1 to P5 and
+   P7 to P11 has a row there.
    P6 waits for M6-2.
 4. Start with M0-1. It is merged in `human` mode (its own acceptance job cannot pass); set branch
    protection after it lands. From M0-2 on, `merge_approval_mode` is `acceptance`.
