@@ -525,7 +525,7 @@ Why one package and one binary, not a workspace of several crates or several bin
 - The seam around the base is held by the compiler without a crate boundary: `herdr` is a private module of `base` (section 6.1), and `tests/base_seam.rs` (M1-1) checks the names.
 - A workspace would add a manifest per crate and a version per crate, to separate parts that are released together and have one user.
 
-Layout. A test reaches the code through the library's public items, so the library is `src/lib.rs` and the binary `src/main.rs` only parses arguments and calls it.
+Layout. A test reaches the code through the library's public items, so the library is `src/lib.rs` and the binary `src/main.rs` only parses arguments (clap, plan.md section 5.1) and calls it.
 
 ```
 Cargo.toml  Cargo.lock  rust-toolchain.toml

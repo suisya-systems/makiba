@@ -908,7 +908,7 @@ add("M6-1", "The secretary's commands",
      "The person's `dispatch` reads `--brief-file` itself and sends the content; the tool takes the brief as "
      "text. `makibad` never opens a path an agent names.",
      "`peek` returns the last lines of a worker's screen, read by `makibad`.",
-     "`makiba --help` and per-verb help, generated from one table."],
+     "`makiba --help` and per-verb help come from the clap definitions (plan.md section 5.1). A test keeps them and the verb table of spec section 12 the same: every verb of the table that the person may run is a subcommand of the clap definition (read through clap's `CommandFactory`), with the arguments the table names, and the definition has no verb the table lacks. The agents' tool list (spec sections 4 and 12) does not come from clap."],
     "tests/cli_secretary.rs",
     ["Each verb, called as the secretary's tool, is recorded in `commands` and returns a result.",
      "`dispatch` creates a `queued` run, its `run_launch` row with the brief and the kind, and `delegate_sent`.",
@@ -916,7 +916,9 @@ add("M6-1", "The secretary's commands",
      "A worker's key cannot `peek` or `dispatch`.",
      "The tool `status` goes through the door and returns what the person's local `status` returns; the "
      "person's `status` is the local read of M2-1.",
-     "Every exit code of spec section 3 is produced by at least one case."],
+     "Every exit code of spec section 3 is produced by at least one case.",
+     "The clap definition and the verb table of spec section 12 name the same verbs for the person, with the same "
+     "arguments; a verb present on one side only fails the test."],
     "G3", deps=["M2-1", "M3-3"])
 
 add("M6-2", "Launch the secretary",
