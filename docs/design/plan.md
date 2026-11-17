@@ -146,7 +146,7 @@ Decided by the owner on 2026-11-18. makiba is one line of work and does not abso
 | --- | --- | --- |
 | claude-org-ja | Stopped at M7-3, for the projects it serves. Its repository stays as the source of the files makiba carries (section 7) and as history. makiba does not run beside it for long: two organizations on one set of projects is the state M7-3 ends. | makiba is its successor. It holds the same requirement by mechanism instead of by asking a model dispatcher (section 1). |
 | paddock | Continues as a lightweight organization beside makiba. makiba does not replace it, and M7-3 does not move its projects. makiba copies files from it (section 7); those copies are makiba's own from then on. | A resident dispatcher, SQLite and Python are a cost. Work that needs none of them is served by an organization that has none, and nothing in makiba requires paddock to stop or to follow makiba's choices. |
-| rondo, with cadenza and continuo | Frozen. Not developed further; makiba takes nothing from it. | Three organizations developed in step is more than one person can keep up, and makiba is the line the work continues on. |
+| rondo, with cadenza and continuo | Frozen. Not developed further; makiba takes nothing from it. | It did not converge toward running real work. Developing several organizations in parallel is also more than one person can follow. |
 
 paddock and makiba can run on one machine. The names are kept apart for that (section 5, "Names"), and each keeps its own state folder.
 
