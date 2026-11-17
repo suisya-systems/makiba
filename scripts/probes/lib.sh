@@ -178,9 +178,9 @@ print(find(st, "state") if st else "none", find(d, "turn"))'
 }
 
 pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy; every new dialog screen goes to the result file
-  DLG_KEYS=0; DLG_ACCEPTED=""; local t=$1 i=0 prev="$WORK/dlg.prev" cur="$WORK/dlg.cur" out last="" n=0
+  DLG_KEYS=0; DLG_ACCEPTED=""; local max=$2 t=$1 i=0 prev="$WORK/dlg.prev" cur="$WORK/dlg.cur" out last="" n=0
   : > "$prev"
-  while [ "$i" -lt "$2" ]; do
+  while [ "$i" -lt "$max" ]; do
     hc read "$t" > "$cur" 2>/dev/null
     out=$(python3 "$HERE/dialog-step.py" --prev "$prev" < "$cur")
     case "$out" in
@@ -191,7 +191,7 @@ pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy;
     esac
     cp -f "$cur" "$prev"; i=$((i + 2)); sleep 2
   done
-  say "dialogs: no composer after $2 s (last: $out)"; return 1
+  say "dialogs: no composer after $max s (last: $out)"; return 1
 }
 
 standin_start() { # standin_start: starts channel-standin.py on a free loopback port; sets PORT TOKEN CRED ADMIN STATE MCPCFG
