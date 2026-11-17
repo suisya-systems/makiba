@@ -34,7 +34,7 @@ Every row of docs/design/incidents.md is guarded by a test.
 
 ## G6 The base is a part that can be replaced, and an update of it does not break makiba
 - unmet if: the base's version is not pinned
-- unmet if: code outside makiba/base/ names the base
+- unmet if: code outside src/base/ names the base
 - unmet if: the base supplies rules to agents or sends notices to the person
 - unmet if: no test checks the operations and fields makiba uses against the base's own definition of them
 

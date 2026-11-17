@@ -1,9 +1,9 @@
 # Test files named in incidents.md whose Issues are still open. Must be empty by M7-1.
-tests/test_delivery.py
-tests/test_events_resync.py
-tests/test_heartbeat.py
-tests/test_pr_watch.py
-tests/test_recover.py
-tests/test_spawn_verified.py
-tests/test_startup_dialog.py
-tests/test_worktree.py
+tests/delivery.rs
+tests/events_resync.rs
+tests/heartbeat.rs
+tests/pr_watch.rs
+tests/recover.rs
+tests/spawn_verified.rs
+tests/startup_dialog.rs
+tests/worktree.rs
