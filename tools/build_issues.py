@@ -315,57 +315,38 @@ add("M2-3", "Anomaly rules",
      "once, as does a secretary with no status 180 s after launch; a gone caused by `makiba renew` does not."],
     "G1", deps=["M2-2"])
 
-add("M2-4", "Deliver messages",
+add("M2-4", "Deliver messages: the push and its confirmation",
     "Three incidents were about a message that did not arrive or arrived by a route nobody read (I-3, I-5, "
-    "I-7). makiba has one default route, and a ledger that shows what is still unconfirmed.",
-    ["`makiba/daemon/delivery.py`: each pass, for every `pending` delivery not yet pushed (`attempt` is 0) whose recipient has a channel "
-     "(the agent module's `has_channel()` and a connected channel server), push the wrapped text of spec section 8 "
-     "through the channel, whatever the recipient's status. `attempt` goes up and `last_attempt_at` is set. "
-     "Nothing is typed for this. Delivery runs inside `makibad` and stops only when the process dies, which the "
-     "heartbeat shows.",
-     "`makiba/channel_server.py`: the per-session channel server that Claude Code starts from the MCP "
-     "configuration. It declares the channel capability, takes the wrapped texts for its agent from `makibad` "
-     "with the agent's token, and emits one `notifications/claude/channel` for each. How it receives them from "
-     "`makibad` (a poll or a held request) is decided here.",
+    "I-7). makiba has one default route, and a ledger that shows what is still unconfirmed. This Issue is the "
+    "push and its confirmation; the box and the wake line are M2-7, and the channel server is M2-8.",
+    ["`makiba/daemon/delivery.py`: each pass, for every `pending` delivery not yet pushed (`attempt` is 0) whose "
+     "recipient has a channel (the agent module's `has_channel()` and a connected channel server), push the "
+     "wrapped text of spec section 8 through the channel, whatever the recipient's status. `attempt` goes up and "
+     "`last_attempt_at` is set. Nothing is typed for this. Delivery runs inside `makibad` and stops only when the "
+     "process dies, which the heartbeat shows. The channel is a seam (a function the agent module supplies), so "
+     "this Issue is tested without the channel server.",
      "Confirmation (spec section 8): a push to a recipient that was `idle` or `done` is confirmed, and the row "
      "becomes `delivered`, when its status shows a turn start within 10 s (a first proposal). In every other "
-     "case the row stays `pending`.",
-     "The wake line: a `pending` row whose recipient is `idle` or `done`, with no push to it in the last 10 s, "
-     "gets `WAKE_LINE` typed with `Base.send`, after the prompt line of the recipient's screen is read (nothing "
-     "is typed that pass if anything is on it), at most once per recipient in 60 s. A recipient with no channel "
-     "is unconfirmed from the start and goes by this route alone.",
-     "The door verb `inbox`: returns the caller's `pending` messages, each wrapped, oldest first, within the "
-     "limit, and marks them `delivered`.",
-     "The typed route, only on the sender's request: `send` and `answer` take `typed`. It goes to a worker or the "
-     "curator whose status is `idle` (`only_if='idle'`) or `done` (status read just before); any other status is "
-     "`conflict`, and nothing is stored or typed. `typed` to the secretary is a `usage` error. The row is "
-     "`delivered` when `Base.send` returns, and `makibad` never retries it.",
-     "Bodies over the limit are cut with the `show` line."],
+     "case the row stays `pending` for M2-7.",
+     "The wrapper of spec section 8 and its limits: bodies over the limit are cut with the `show` line."],
     "tests/test_delivery.py",
     ["A message to an `idle` agent that has a channel is pushed once, nothing is typed, and the row becomes "
      "`delivered` when the test agent starts a turn within the window.",
-     "A push after which no turn starts leaves the row `pending`; the wake line is typed once into the `idle` "
-     "recipient, and the row is `delivered` when the recipient's `inbox` call returns it.",
-     "A message pushed while the recipient is `working` stays `pending`; when the recipient turns `done` the wake "
-     "line is typed, and `inbox` returns the message with the same id it was pushed with.",
-     "A recipient with no channel (the test agent launched without one) gets the wake line and the box only.",
-     "The wake line is not typed while the prompt line shows typed input, and not twice in 60 s (a clock the "
-     "test controls).",
+     "A push after which no turn starts leaves the row `pending`, and it is not pushed a second time.",
+     "A message pushed while the recipient is `working` stays `pending`.",
+     "A recipient with no channel (the test agent launched without one) is never pushed to; its row stays "
+     "`pending` with `attempt` 0.",
      "Killing `makibad` between a push and the ledger write, then restarting, does not lose the message: it may "
-     "be pushed again with the same id, the test asserts at-least-once, and the row ends `delivered`.",
-     "`send` with `typed` to a worker that is `idle` types the wrapped text once and the row is `delivered`; to "
-     "a `working` worker it is `conflict` and nothing is stored or typed; to the secretary it is `usage`.",
-     "Every pushed or typed text begins with `<makiba ` whatever the body is, and a body containing `</makiba>` "
-     "cannot close the wrapper.",
+     "be pushed again with the same id, and the test asserts at-least-once.",
+     "Every pushed text begins with `<makiba ` whatever the body is, and a body containing `</makiba>` cannot "
+     "close the wrapper.",
      "A body over the limit is cut and carries the `show` line."],
     "G5", deps=["M2-2"],
-    note="Decided (owner, 2026-11-18): plan.md section 3.3. A channel is the default route in every direction, "
-         "typed text is the sender's choice, and the wake line and the box are a real route for any agent program "
-         "without a channel, built and tested as such. Steps of probes P8 and P9 not yet run, to run before this "
-         "Issue lands: a delivery to a `done` target, a turn that starts for another cause, a `blocked` recipient "
-         "and two messages in a row (probes.md). P3 failed (typed text joins a person's draft, hc 0.1.20 and "
-         "0.1.21), which is why no body is typed into the secretary's terminal; P4 passed for a terminal nobody "
-         "types in, which is why a typed body to a worker is kept.")
+    note="Decided (owner, 2026-11-18): plan.md section 3.3. A channel is the default route in every direction. "
+         "Steps of probes P8 and P9 not yet run, to run before this Issue lands: a delivery to a `done` target, a "
+         "turn that starts for another cause, a `blocked` recipient and two messages in a row (probes.md). P3 "
+         "failed (typed text joins a person's draft, hc 0.1.20 and 0.1.21), which is why no body is typed into "
+         "the secretary's terminal.")
 
 add("M2-5", "Rebuild the view after a restart",
     "`state.db` holds no terminal address. After `makibad` or the base restarts, the tags are the record.",
@@ -390,6 +371,59 @@ add("M2-6", "Tell the secretary only what it can act on",
      "A suppressed anomaly writes `anomaly_raised` and queues no message."],
     "G1", deps=["M2-4"],
     carry=[f"{CJ}: `tools/notify_gate.py`, `tools/test_notify_gate.py`"])
+
+add("M2-7", "Deliver messages: the box, the wake line and typed delivery",
+    "A push that did not arrive, a recipient that was working, and an agent program with no channel all end in "
+    "the same place: the message is still `pending`, and the recipient has to be told to read it.",
+    ["`makiba/daemon/inbox.py`: the function behind the door verb `inbox` (spec section 12): the caller's "
+     "`pending` messages, each wrapped, oldest first, within the limit, marked `delivered`. The door lists the "
+     "tool (M3-3); this Issue holds the logic.",
+     "The wake line in `makiba/daemon/delivery.py`: a `pending` row whose recipient is `idle` or `done`, with no "
+     "push to it in the last 10 s, gets `WAKE_LINE` typed with `Base.send`, after the prompt line of the "
+     "recipient's screen is read (nothing is typed that pass if anything is on it), at most once per recipient "
+     "in 60 s. A recipient with no channel is unconfirmed from the start and goes by this route alone. This is "
+     "a real route for any agent program, not a fallback left untested.",
+     "The typed route, only on the sender's request: a function for `send` and `answer` with `typed` (M3-3 and "
+     "M6-4 pass the argument through the door). It goes to a worker or the curator whose status is `idle` "
+     "(`only_if='idle'`) or `done` (status read just before); any other status is `conflict`, and nothing is "
+     "stored or typed. `typed` to the secretary is a `usage` error. The row is `delivered` when `Base.send` "
+     "returns, and `makibad` never retries it."],
+    "tests/test_inbox_wake.py",
+    ["A push after which no turn starts: the wake line is typed once into the `idle` recipient, and the row is "
+     "`delivered` when the recipient's `inbox` returns it.",
+     "A message pushed while the recipient was `working`: when the recipient turns `done` the wake line is "
+     "typed, and `inbox` returns the message with the same id it was pushed with.",
+     "A recipient with no channel gets the wake line and the box only.",
+     "The wake line is not typed while the prompt line shows typed input, and not twice in 60 s (a clock the "
+     "test controls).",
+     "`send` with `typed` to a worker that is `idle` types the wrapped text once and the row is `delivered`; to "
+     "a `working` worker it is `conflict` and nothing is stored or typed; to the secretary it is `usage`.",
+     "`inbox` for one agent never returns another agent's message."],
+    "G5", deps=["M2-4"],
+    note="Decided (owner, 2026-11-18): plan.md section 3.3. P4 passed for a terminal nobody types in, which is "
+         "why a typed body to a worker is kept; the prompt-line check follows paddock's watcher (record 0013), "
+         "seen on a host only for the empty prompt.")
+
+add("M2-8", "The channel server",
+    "A Claude Code channel is carried by a small server that Claude Code starts for each session. It is another "
+    "process to start and to give a credential, as claude-org-ja's sidecar is.",
+    ["`makiba/channel_server.py`: the per-session channel server that Claude Code starts from the MCP "
+     "configuration (spec section 4). It declares the channel capability, takes the wrapped texts for its agent "
+     "from `makibad` with the agent's token, and emits one `notifications/claude/channel` for each. How it "
+     "receives them from `makibad` (a poll or a held request) is decided here.",
+     "`makibad` knows whether an agent's channel server is connected (M2-4's `has_channel` and connection "
+     "check). When the server stops, the messages stay `pending`."],
+    "tests/test_channel_server.py",
+    ["With a stand-in for the `makibad` side, one stored message produces exactly one notification whose text "
+     "equals the wrapped text.",
+     "A server given a wrong token receives nothing.",
+     "After the stand-in `makibad` restarts, the server reconnects and receives messages again.",
+     "While the server is stopped, `makibad` reports the agent as not connected and the messages stay "
+     "`pending`."],
+    "G5", deps=["M2-4", "M0-4"],
+    note="Tested here against a stand-in for `makibad`; with the real door it runs from M3-3, and with real "
+         "Claude Code in M4-5. Not yet shown (probes.md, P11): that the environment and arguments of this "
+         "process are out of a sandboxed Bash's reach.")
 
 # ---------------------------------------------------------------- M3
 add("M3-1", "Take queued runs within capacity",
@@ -447,7 +481,7 @@ add("M3-3", "The door, agent tokens, and the message tools",
     ["A request with an unknown key is `denied` and recorded as `rejected`, on the socket and on a tool call.",
      "A worker's key may `report`; it may not `dispatch`: the worker's tool list has no `dispatch`, and a call "
      "to it by name is `denied`.",
-     "The tool list of each role contains exactly the tools of its verbs in spec section 4.",
+     "The tool list of each role contains exactly the tools of its verbs in spec section 4 (the logic of `inbox` is M2-7's).",
      "`send` from a process with no access to `state.db` (the file is made unreadable to the test's CLI call) "
      "still results in a `messages` row.",
      "The message's `sender` is the id bound to the key even when the arguments claim another.",
@@ -584,7 +618,8 @@ add("M4-2", "The sandbox reaches the door and nothing of the base",
      "`state.db` denies, and name no Unix socket path as allowed.",
      "The settings name no path inside the worktree as writable configuration.",
      "The launch arguments written for a run carry the token and the environment does not (shape only; the "
-     "host rerun shows that a sandboxed Bash cannot read it)."],
+     "host rerun of P11 is what shows that a sandboxed Bash cannot read it, and it is the proof of the goal "
+     "clause that an agent's token cannot be read from its own Bash)."],
     "G3", deps=["M4-1"],
     carry=[f"{PD}: `scripts/probes/core-api-reach.sh`"],
     note="The shape test goes through the acceptance gate. The host rerun of probes P1 and P11 does not: a person "

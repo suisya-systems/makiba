@@ -35,9 +35,11 @@ A verb such as `close` or `pr` is both the person's command `makiba close` and t
 | [M2-1](M2-1.md) | makibad: one instance, a heartbeat, a clean stop | G5 | M0-8, M1-3 | acceptance |
 | [M2-2](M2-2.md) | Record status and terminal events | G4 | M2-1 | acceptance |
 | [M2-3](M2-3.md) | Anomaly rules | G1 | M2-2 | acceptance |
-| [M2-4](M2-4.md) | Deliver messages | G5 | M2-2 | acceptance |
+| [M2-4](M2-4.md) | Deliver messages: the push and its confirmation | G5 | M2-2 | acceptance |
 | [M2-5](M2-5.md) | Rebuild the view after a restart | G5 | M2-2 | acceptance |
 | [M2-6](M2-6.md) | Tell the secretary only what it can act on | G1 | M2-4 | acceptance |
+| [M2-7](M2-7.md) | Deliver messages: the box, the wake line and typed delivery | G5 | M2-4 | acceptance |
+| [M2-8](M2-8.md) | The channel server | G5 | M2-4, M0-4 | acceptance |
 
 ## M3 Dispatch
 

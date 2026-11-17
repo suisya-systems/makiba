@@ -22,7 +22,7 @@ made:
 | `docs/design/spec.md` | Names and shapes shared across Issues: tables, the base interface, tags, the door, the message wrapper, event kinds, commands. |
 | `docs/design/incidents.md` | Ten past incidents and the test that guards each. |
 | `docs/design/probes.md` | What paddock measured that makiba relies on, the first host measurements (2026-11-18) and the measurements still to make, and the checks to run if a move to Orca is ever considered. |
-| `issues/` | 49 Issue bodies and `index.md`. Generated from `tools/build_issues.py`. |
+| `issues/` | 51 Issue bodies and `index.md`. Generated from `tools/build_issues.py`. |
 | `goals/suisya-systems/makiba.md` | The goal ledger, checked with claude-org-ja's own validator. |
 | `tools/create_issues.py` | Creates the Issues with `gh` in dependency order and fills in the numbers. |
 
@@ -43,7 +43,7 @@ made:
    `docs/design/probes.md` section 4; the owner's decisions on the door and on delivery that followed are in
    `plan.md` section 3.3. Still to run, from a login shell, each recorded in the same place: P2 (where
    real-base tests run; M0-3 waits for it), P7 (whether your own Claude Code settings reach the agents; M3-4,
-   M4-3), and the steps of P8 to P11 that the record says were not run (M2-4, M3-3, M3-5, M6-5). They need no
+   M4-3), and the steps of P8 to P11 that the record says were not run (M2-4, M3-3, M3-5, M6-5; the box and the wake line are M2-7). They need no
    makiba code. Tell the secretary that no Issue of M2 or M3 is dispatched until every one of P1 to P5 and
    P7 to P11 has a row there.
    P6 waits for M6-2.
