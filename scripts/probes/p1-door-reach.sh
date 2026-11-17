@@ -72,6 +72,7 @@ json.dump(cfg, open(sys.argv[1], "w"), indent=2)
 PY
 say "worker settings: $WORK/settings.json (copied below)"; cat "$WORK/settings.json" >> "$RESULT"
 
+PYBASE='import socket,sys;s=socket.socket(socket.AF_UNIX);s.settimeout(5);s.connect(sys.argv[1]);print("CONNECTED")'
 PYCONN='import socket,sys;s=socket.socket(socket.AF_UNIX);s.connect(sys.argv[1]);s.sendall(b"{}\n");print(s.recv(100))'
 mkc() { # mkc <n> <command...>: a step file that appends "STEP n exit=<code> out=<one line>" to report.txt
   n=$1; shift
@@ -79,8 +80,8 @@ mkc() { # mkc <n> <command...>: a step file that appends "STEP n exit=<code> out
     "printf 'STEP $n exit=%s out=%s\\n' \"\$rc\" \"\$(printf %s \"\$out\" | tr '\\n' ' ')\" >> report.txt" > "$WT/c$n.sh"
 }
 mkc 1 "python3 -c '$PYCONN' \"\$MAKIBA_DOOR\""
-mkc 2 "python3 -c '$PYCONN' '${SOCK1:-/nonexistent-hc-socket}'"
-mkc 3 "python3 -c '$PYCONN' '${SOCK2:-/nonexistent-hc-terminal-socket}'"
+mkc 2 "python3 -c '$PYBASE' '${SOCK1:-/nonexistent-hc-socket}'"
+mkc 3 "python3 -c '$PYBASE' '${SOCK2:-/nonexistent-hc-terminal-socket}'"
 mkc 4 "'$HC_BIN' ls"
 mkc 5 "cat '$STATEDIR/decoy.txt'"
 
@@ -103,10 +104,11 @@ step() { grep "^STEP $1 " "$WT/report.txt" 2>/dev/null | head -n 1; }
 rc_of() { printf '%s' "$1" | sed -n 's/^STEP [0-9]* exit=\([0-9]*\) .*/\1/p'; }
 DENYRE='denied by|deny rule|permission settings|has been denied|Permission to use'
 SBXRE='Operation not permitted|Permission denied|Read-only file system|No such file|Connection refused|not found|unavailable|cannot connect|Failed to connect|sandbox'
-judge_blocked() { # judge_blocked <case> <step n> [token that must not appear]
+judge_blocked() { # judge_blocked <case> <step n> [token that must not appear]; base sockets: CONNECTED = crossed
   local l; l=$(step "$2")
   if [ -z "$l" ]; then record "$1" NEEDS-HUMAN "no STEP $2 line: the call was refused before it ran or never made; read the screen"; screen_dump "$T" "$1"; return; fi
   if printf '%s' "$l" | grep -Eqi "$DENYRE"; then record "$1" FAIL "refused by a deny rule, not by the sandbox: $l"; return; fi
+  if printf '%s' "$l" | grep -q CONNECTED; then record "$1" FAIL "connect() succeeded: $l"; return; fi
   if [ -n "${3:-}" ] && printf '%s' "$l" | grep -q "$3"; then record "$1" FAIL "the call got through: $l"; return; fi
   if [ "$(rc_of "$l")" = 0 ]; then record "$1" FAIL "exit 0, the call got through: $l"; screen_dump "$T" "$1"
   elif printf '%s' "$l" | grep -Eqi "$SBXRE"; then record "$1" PASS "failed with a sandbox-style error: $l"

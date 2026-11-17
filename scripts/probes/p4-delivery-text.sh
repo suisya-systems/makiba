@@ -46,7 +46,7 @@ run_case() { # run_case <name> <mode: one|two|quick> <id:body> ...
   rm -f "$REPO"/echo-*.txt
   hc send --wait --timeout 90 "$T" "$SETUP" >/dev/null 2>&1
   wait_idle "$T" 60 || say "note: $name: the agent was not idle before the case"
-  local p0; p0=$(count_prompts "$T" '<makiba')
+  local p0 a0; p0=$(count_prompts "$T" '<makiba'); a0=$(count_prompts "$T" '[^[:space:]]')
   case $mode in
     one) hc send --wait --timeout 150 "$T" "$(wrap "${1%%:*}" "${1#*:}")" >/dev/null 2>&1 ;;
     two) hc send --wait --timeout 150 "$T" "$(wrap "${1%%:*}" "${1#*:}")
@@ -63,7 +63,7 @@ $(wrap "${2%%:*}" "${2#*:}")" >/dev/null 2>&1 ;;
   done
   sleep 3; wait_idle "$T" 90 || say "note: $name: the turn did not end within 90s"
   local want=1 got; [ "$mode" = quick ] && want=2
-  got=$(( $(count_prompts "$T" '<makiba') - p0 ))
+  got=$(( $(count_prompts "$T" '<makiba') - p0 )); all=$(( $(count_prompts "$T" '[^[:space:]]') - a0 ))   # all = every non-empty submitted prompt in the case
   bad=""
   for spec in "$@"; do
     id=${spec%%:*}; body=${spec#*:}; f=$REPO/echo-$id.txt
@@ -76,8 +76,9 @@ sys.exit(0 if a == b else 1)
 PY
     then bad="$bad id$id:differs"; fi
   done
-  if [ -z "$bad" ] && [ "$got" -eq "$want" ]; then record "$name" PASS "echo file(s) equal what was sent; $got prompt(s) started with the wrapper"
+  if [ -z "$bad" ] && [ "$got" -eq "$want" ] && [ "$all" -eq "$want" ]; then record "$name" PASS "echo file(s) equal what was sent; $want prompt(s) in all, each starting with the wrapper"
   elif [ -z "$bad" ] && [ "$got" -gt "$want" ]; then record "$name" FAIL "echo ok but the wrapper started $got prompts, expected $want (split delivery)"; screen_dump "$T" "$name"
+  elif [ -z "$bad" ] && [ "$got" -eq "$want" ]; then record "$name" NEEDS-HUMAN "echo ok and $got wrapper prompt(s), but $all prompt(s) in all (expected $want): a split after the first line is possible, or the empty-composer placeholder changed; read the screen"; screen_dump "$T" "$name"
   elif [ -z "$bad" ]; then record "$name" NEEDS-HUMAN "echo ok but only $got of $want expected wrapper prompts found on screen (scrolled off or marker differs); read the screen"; screen_dump "$T" "$name"
   else record "$name" FAIL "echo problems:$bad"; screen_dump "$T" "$name"; fi
 }
