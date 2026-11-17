@@ -37,6 +37,16 @@ Pass: all eight PASS. A failing case is a shape that must never be typed (M2-4).
 
 Fresh git repository nobody trusted; `claude` launched through the base with the task as its last argument; the trust dialog is passed by the folder-trust policy (cursor moved onto a Yes line, screen read again, one key); `hc send` is never called. Pass: the reply to the task appears (`task-after-dialog` PASS). NEEDS-HUMAN with "no trust dialog" means the folder was already trusted and the case did not run.
 
+## P8 `p8-channel-delivery.sh <dir>` and P9 `p9-mcp-from-sandbox.sh <dir>` (channel candidate)
+
+Measure the design's new first candidate: an agent asks a resident program through an MCP tool, and the program delivers text through a Claude Code channel (`notifications/claude/channel`), typing into the terminal only as a fallback. `makibad` does not exist, so `channel-standin.py` (python3 standard library, no import from claude-org-runtime) plays it: an HTTP MCP server on 127.0.0.1 (`send_request` tool, bearer token) and a stdio channel server. Message shapes were read from claude-org-runtime (`broker/server.py`, `broker/channel_sidecar.py`, `broker/tokens.py`) and launch arguments from `claude-org-ja/.dispatcher/references/spawn-flow.md` 3-2 / 3-3b: `--mcp-config <json|file>` carrying the http server and the stdio channel server, plus `--dangerously-load-development-channels server:makiba-channel`. `dialog-step.py` is the startup-dialog policy (option text matched whole, cursor moved, screen read again, one key); dialog screens are written to the result file.
+
+P8 cases: `dev-channel-dialog`, `turn-start-visible` (seconds from enqueue to a state or turn change in `hc get --json`; paired with `turn-start-unchanged-without-delivery`, where the stand-in holds the message back), `channel-while-working` (a message sent in the middle of a `sleep 45` turn: PASS means delivered, the detail says whether it acted before or after the turn's end; FAIL means lost). `channel-while-draft` is not measured: the owner reports that channel text never mixed into a person's draft in claude-org-ja.
+
+P9 cases (sandbox on, no network allowance): `mcp-tool-reaches` (the tool call arrives), `bash-http-direct` (PASS = Bash's urllib to 127.0.0.1:<port> is blocked; FAIL = it got through, the token is then the only guard), `token-readable-from-bash` (decoy tokens in an env variable and in the inline `--mcp-config` argv are searched for in every readable environ and cmdline; PASS = not found anywhere).
+
+Notes: P4 counts submitted prompts without the live composer (the 2026-11-18 zero counts came from a grey suggestion in the composer).
+
 ## TODO(confirm)
 
 Lines that use an `hc` or Claude Code feature not shown in paddock's measured scripts or `hc --help`, each marked `TODO(confirm)` in the source:
@@ -47,3 +57,4 @@ Lines that use an `hc` or Claude Code feature not shown in paddock's measured sc
 - Settings key `sandbox.network.allowUnixSockets` for letting a sandboxed command connect to one socket, and `filesystem.allowWrite` for the socket's folder (P1).
 - That the core's API socket sits in the folder of `HC_SOCKET` or `HC_TERMINAL_SOCKET` (P1; the runtime folder `$XDG_RUNTIME_DIR/herdr-core` is denied as well).
 - Used as in paddock but with hc 0.1.18 only: `hc run --bg --no-parent -- env -u ... claude ...` (argv form after `--`), `hc read --lines N`, `hc send --wait --timeout N`.
+- P8/P9: where `turn` sits in `hc get --json` (searched anywhere by name); that Claude Code accepts the stand-in's minimal MCP replies (shapes copied from claude-org-runtime, whose servers are known to work); the exact wording of the development-channel dialog (the policy matches "I am using this for local development" and "Exit" as in claude-org-runtime's spawn_prompt.py; an unknown dialog gives NEEDS-HUMAN with its text); that the MCP tool is named `mcp__makiba__send_request`; that an inline JSON `--mcp-config` is accepted (runtime launcher does this).

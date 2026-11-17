@@ -156,3 +156,69 @@ count_submitted() { # count_submitted <terminal>: every prompt line in the histo
   local n; n=$(hc read --lines 3000 "$1" 2>/dev/null | grep -cE '^[[:space:]]*[❯>]')
   echo $(( n > 0 ? n - 1 : 0 ))
 }
+
+# ---- channel probes (p8, p9) ----
+term_info() { # term_info <terminal>: "<state> <turn>" from hc get --json (key positions are TODO(confirm): searched anywhere)
+  hc get --json "$1" 2>/dev/null | python3 -c '
+import json, sys
+def find(o, k):
+    if isinstance(o, dict):
+        if k in o and not isinstance(o[k], (dict, list)): return o[k]
+        for v in o.values():
+            r = find(v, k)
+            if r is not None: return r
+    elif isinstance(o, list):
+        for v in o:
+            r = find(v, k)
+            if r is not None: return r
+try: d = json.load(sys.stdin)
+except Exception: d = {}
+st = d.get("status") if isinstance(d, dict) else None
+print(find(st, "state") if st else "none", find(d, "turn"))'
+}
+
+pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy; every new dialog screen goes to the result file
+  DLG_KEYS=0; local t=$1 i=0 prev="$WORK/dlg.prev" cur="$WORK/dlg.cur" out last="" n=0
+  : > "$prev"
+  while [ "$i" -lt "$2" ]; do
+    hc read "$t" > "$cur" 2>/dev/null
+    out=$(python3 "$HERE/dialog-step.py" --prev "$prev" < "$cur")
+    case "$out" in
+      done) DLG_KEYS=$n; say "dialogs: finished after $n key(s)"; return 0 ;;
+      key*) { echo "---- dialog screen seen by $t (key ${out#key })"; cat "$cur"; echo "----"; } >> "$RESULT"
+            hc keys "$t" "${out#key }" >/dev/null 2>&1; n=$((n + 1)); DLG_KEYS=$n; : > "$prev"; sleep 1.5; i=$((i + 2)); continue ;;
+      unknown*) say "dialogs: $out"; { echo "---- unknown dialog screen of $t"; cat "$cur"; echo "----"; } >> "$RESULT"; return 2 ;;
+    esac
+    cp -f "$cur" "$prev"; i=$((i + 2)); sleep 2
+  done
+  say "dialogs: no composer after $2 s (last: $out)"; return 1
+}
+
+standin_start() { # standin_start: starts channel-standin.py on a free loopback port; sets PORT TOKEN CRED ADMIN STATE MCPCFG
+  STATE=$WORK/standin; mkdir -p "$STATE"
+  TOKEN=DECOYTOKEN$(python3 -c 'import secrets;print(secrets.token_hex(8))'); CRED=DECOYCRED$$; ADMIN=DECOYADMIN$$
+  PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
+  python3 "$HERE/channel-standin.py" serve --port "$PORT" --state "$STATE" --token "$TOKEN" --cred "$CRED" --admin "$ADMIN" &
+  STANDIN_PID=$!
+  local i=0; while [ ! -s "$STATE/ready" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
+  [ -s "$STATE/ready" ] || return 1
+  MCPCFG=$WORK/mcp.json
+  # Shape of claude-org-runtime tokens.py (http server with a bearer header) and channel_server_config (stdio server).
+  python3 - "$MCPCFG" <<PY
+import json, sys
+json.dump({"mcpServers": {
+  "makiba": {"type": "http", "url": "http://127.0.0.1:$PORT/mcp", "headers": {"Authorization": "Bearer $TOKEN"}},
+  "makiba-channel": {"command": "$(type -P python3)", "args": ["$HERE/channel-standin.py", "channel"],
+                     "env": {"STANDIN_URL": "http://127.0.0.1:$PORT", "STANDIN_CRED": "$CRED", "STANDIN_NAME": "makiba-channel"}}}},
+  open(sys.argv[1], "w"), indent=2)
+PY
+}
+
+admin() { # admin '<json>'
+  python3 - "http://127.0.0.1:$PORT/admin" "$ADMIN" "$1" <<'PY'
+import sys, urllib.request
+r = urllib.request.Request(sys.argv[1], data=sys.argv[3].encode(), method="POST", headers={"Authorization": "Bearer " + sys.argv[2]})
+print(urllib.request.urlopen(r, timeout=5).read().decode())
+PY
+}
+enqueue() { admin "$(python3 -c 'import json,sys;print(json.dumps({"op":"enqueue","content":sys.argv[1]}))' "$1")"; }
