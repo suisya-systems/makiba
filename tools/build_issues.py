@@ -427,7 +427,8 @@ add("M3-3", "The door, agent keys, and the message commands",
      "`config`; the same request with a worker's key is `denied`.",
      "The person key file is mode 0600 in a folder of mode 0700, lies under no worktree and not under the "
      "role-files folder, and `state.db` holds only its SHA-256.",
-     "No module of `makiba` other than `makiba/status_local.py` imports `makiba.db`."],
+     "No module of the `makiba` command (`makiba/cli.py` and every module it imports) other than "
+     "`makiba/status_local.py` imports `makiba.db`; the daemon's own modules (`makiba/daemon/`) do."],
     "G3", deps=["M2-1"],
     note="Decision pending (owner): how agents reach `makibad`. Probe P1 failed: the sandbox refuses the "
          "creation of any Unix socket on Linux and ignores a path allowlist, so a sandboxed agent cannot "
