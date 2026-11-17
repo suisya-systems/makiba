@@ -347,7 +347,7 @@ What is typed for a delivery is one line break-free header, the body, and a clos
 
 A delivery is marked `delivered` when `Base.send` returns. It is not proof the agent acted on it.
 
-Open: on hc 0.1.20, typing a body into a terminal where a person had typed joined the person's input (probes.md, section 1); on hc 0.1.21 it joined in the keys-mode run of P3, and a person typing is not measured yet. P4 shows that typed bodies arrive whole in a terminal nobody types in, so the wrapper stands for workers and the curator. For the secretary, plan.md section 3.3 sets out the options for both outcomes of that measurement (hold while a person is attached, a box with one constant line typed, a box for everyone, a check of the prompt line before typing, or no change); until the owner decides, this section is not final for that recipient.
+Open: on hc 0.1.20, typing a body into a terminal where a person had typed joined the person's input (probes.md, section 1); on hc 0.1.21 it joined in P3, both in keys mode and with a person typing. P4 shows that typed bodies arrive whole in a terminal nobody types in, so the wrapper stands for workers and the curator. For the secretary, plan.md section 3.3 sets out the options (hold while a person is attached, a box with one constant line typed, a box for everyone, a check of the prompt line before typing) and a first candidate in which a channel is the first route and the typed text is a fallback; until the owner decides, this section is not final.
 
 ## 9. Agent module
 

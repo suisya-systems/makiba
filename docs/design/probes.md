@@ -2,7 +2,7 @@
 
 A probe is a script run on a real host against the real base (herdr-core) and a real Claude Code. Its result is recorded here with the versions it ran on. Probes are not CI tests: CI cannot run Claude Code.
 
-Order of use: probes P1 to P5 and P7 are run by a person, by hand, before any Issue of M2 or M3 is started. They need no makiba code, only the base and Claude Code. P3, P4 and P5 decide how messages and the task are delivered (M2-4, M3-5, M3-6), P1 decides the door (M3-3), and P7 decides what an agent takes from the person's own Claude Code settings (M3-4, M4-3), so a result that comes after those Issues are built costs a rebuild. P2 is needed earlier than the rest, by M0-3. P6 waits for M6-2, because nothing else depends on it. The results go into section 4. Until the rows of P1 to P5 and P7 are filled in, no Issue of M2 or M3 is dispatched.
+Order of use: probes P1 to P5 and P7 to P11 are run by a person, by hand, before any Issue of M2 or M3 is started. They need no makiba code, only the base and Claude Code. P3, P4 and P5 decide how messages and the task are delivered (M2-4, M3-5, M3-6), P8 to P10 decide whether a Claude Code channel can be the first route for messages (M2-4), P1 and P11 decide the door (M3-3), and P7 decides what an agent takes from the person's own Claude Code settings (M3-4, M4-3), so a result that comes after those Issues are built costs a rebuild. P2 is needed earlier than the rest, by M0-3. P6 waits for M6-2, because nothing else depends on it. The results go into section 4. Until the rows of P1 to P5 and P7 to P11 are filled in, no Issue of M2 or M3 is dispatched.
 
 Rules for every probe (from herdr-core's own guidance and paddock's practice):
 
@@ -41,7 +41,7 @@ Measured with hc 0.1.18 and Claude Code 2.1.319 to 2.1.322. Each carried probe i
 
 ## 2. Still to measure
 
-Ordered by how much the plan changes on a bad result. Each takes a few hours. P1 to P5 and P7 are a gate before M2 and M3 (see the top of this document); P6 can wait until the secretary exists (M6-2).
+Ordered by how much the plan changes on a bad result. Each takes a few hours. P1 to P5 and P7 to P11 are a gate before M2 and M3 (see the top of this document); P6 can wait until the secretary exists (M6-2).
 
 ### P1. From inside a worker's sandbox: the door is reachable; the base, the person key and other terminals' keys are not
 
@@ -106,7 +106,7 @@ Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): FAIL
 
 1. Measured by paddock (decision record 0002, commit e135de7, 2026-11-17): on hc 0.1.20, with a person attached and a half-typed line, `hc send` waited 65 seconds and the text was still joined.
 2. Measured here, on hc 0.1.21, in `mode=keys`: joined. By the same record, text typed with `hc keys` is not treated as a draft, so a join is the expected result of this condition; it says nothing about how 0.1.21 treats a person's typing.
-3. Not measured: hc 0.1.21 with a person typing. The owner is to run P3 with `P3_MODE=human`; the result goes into the Results table. Until then plan.md section 3.3 gives the options for both outcomes.
+3. Measured later the same day on hc 0.1.21 with Claude Code 2.1.326, in `mode=human` (a person typed `half typed` without Enter): `send-held-20s` PASS (after 20 s the draft was intact, the wrapped text was not typed, the send was still running); `order-after-enter` FAIL: the draft and the wrapped text became one prompt (`half typed<makiba from="probe" kind="message" id="1">`), with the send returning rc 0 after 49 s. The secretary confirmed the joined line with `hc read`. It is not separated whether the join came from the wait running out (`draft_wait`) or from the moment the person pressed Enter. So hc 0.1.21 still joins, as hc 0.1.20 did in paddock's measurement: case J of plan.md section 3.3.
 
 ### P4. Delivery text survives as typed
 
@@ -125,7 +125,7 @@ Pass: every body arrives whole, as one prompt, and no line acts as a command.
 
 If a case fails: that shape is never typed. Its body is replaced by the cut line and read with `makiba show` (M2-4).
 
-Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): all 8 cases arrived with the body equal to what was sent. Six passed by the script. Two (`first-line-bang-ls` and `two-wrapped-in-one-send`) were left as NEEDS-HUMAN, because the script counted 0 prompts where it expected 1; the secretary read the screens and reported 1 prompt in each and no command run. I did not read those two screens again for this record. P4 types into a terminal nobody types in, so it supports typed delivery to workers and the curator, and says nothing about the secretary's terminal.
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): all 8 cases arrived with the body equal to what was sent. Six passed by the script. Two (`first-line-bang-ls` and `two-wrapped-in-one-send`) were left as NEEDS-HUMAN, because the script counted 0 prompts where it expected 1; the secretary read the screens and reported 1 prompt in each and no command run. I did not read those two screens again for this record. P4 types into a terminal nobody types in, so it supports typed delivery to workers and the curator, and says nothing about the secretary's terminal. Under the first candidate of plan.md section 3.3, typed delivery of bodies is the fallback and a channel is the first route; P4 then shows that the fallback works for terminals nobody types in, and only a fixed one-line wake would ever be typed into the secretary's.
 
 ### P5. A task given in the launch arguments starts after the startup dialog
 
@@ -170,6 +170,59 @@ Steps, with a scratch copy of the user-level configuration folder holding decoys
 Pass: for at least one option, no decoy applies to a worker or the curator while the role's own rules and settings do, and no stop of a worker or the curator produces a notification outside its terminal.
 
 If it fails: when the decoys cannot be kept out, record which user-level items reach agents and how the role rules and settings rank against them; M3-4 and M4-3 then test the role's rule wins for each, and the plan says which user-level items it tolerates. An alternate configuration folder also moves the login and the connectors, so the cost of sharing them into it is recorded. When a worker can notify the person, the notification setting has to be switched off for workers and the curator by their own settings; if it cannot be, requirement R2 and the second clause of goal G1 cannot be held for Claude Code by launch, and the plan stops for a decision.
+
+### P8 to P11: the first candidate of plan.md section 3.3
+
+These measure what the candidate of plan.md section 3.3 depends on: messages carried by a Claude Code channel (`notifications/claude/channel`), the door as MCP tools. They are steps, not scripts; another worker writes the scripts. Each is run on the pinned base version and a Claude Code version inside the range of M0-2.
+
+Not measured, by the owner's answer: whether a channel notification mixes into what a person has typed. The owner's experience of claude-org-ja, which ran the broker and the channel (2026-11-18): no case where a notification was mixed into a person's input. By the owner's reasoning, a channel is a notification to Claude Code and not keystrokes into a terminal, so it does not depend on the base. This is operating experience, not a measurement made for makiba, and it is recorded as that.
+
+### P8. A channel delivery to an idle target is seen as a turn starting, in the base's status
+
+Why: under the candidate, `makibad` pushes the body through the channel and treats the message as delivered only when the recipient's turn starts, read from the base's status. If that cannot be read, the candidate cannot tell a lost push from a delivered one.
+
+Steps:
+
+1. Launch Claude Code through the base with the channel flag and a small stand-in channel server that emits one notification on command (record the exact flag and `claude --version`).
+2. Wait until the target is `idle`, then `done` (after a turn); for each, emit one notification and record from `terminal.get` and the event stream: whether the status goes to `working` or the turn counter increases, after how long, and in which order.
+3. Emit a notification that Claude Code does not act on (for example one it ignores) and record whether any status change appears; and let a turn start for an unrelated reason (a typed line) to see what a false confirmation looks like.
+
+Pass: for `idle` and for `done`, a turn start is visible in the status within a few seconds, and no change appears when nothing was delivered.
+
+If it fails: delivery cannot be confirmed from status. Every delivery gets the fixed one-line wake typed after the push (paddock's form, record 0013), and the recipient reads the box with a tool.
+
+### P9. A channel delivery to a target that is working, blocked or done
+
+Why: workers are often mid-turn. Whether a notification arriving then is delivered at the end of the turn, shown at once, or lost decides whether `makibad` may push to a busy target.
+
+Steps: for a target in each of `working` (a long tool call), `blocked` (a permission prompt) and `done`, emit a notification and record: when the text appears in the conversation (during the turn, at its end, after the prompt is answered, never), whether it is shown once, and what the status does. Repeat with two notifications in a row.
+
+Pass: each notification appears once, at the latest at the end of the turn, and a lost one is visible through P8's check.
+
+If it fails: `makibad` pushes only to an `idle` or `done` target and holds the message otherwise, as typed delivery does today (spec section 7); a notification that is lost without any status change makes P8's check the only guard and the fixed wake the rule.
+
+### P10. The development-channel dialog can be passed by the policy list on the base
+
+Why: the contract of claude-org-ja records a prompt, `Load development channel? (Y/n)`, that appears for the channel sidecar in addition to the folder-trust prompt, and was machine-approved by the orchestrator there. Under the candidate `makibad` passes it with the policy list (spec section 7), a startup dialog the plan did not have.
+
+Steps: in a folder no person has trusted, launch through the base with the channel flag and with the task as the last argument (as P5). Record every dialog's full text and option lines, the order, and whether each is passed by choosing a line from the policy list with the cursor read again before the key (spec section 7). Launch again with a resume, and renew the secretary, and record whether either dialog comes back.
+
+Pass: every dialog is matched whole and passed by the policy list, the first turn starts on the task, and a resume or renewal passes the same way.
+
+If it fails: for the agent where it fails, no channel; messages go by the box and the fixed wake, and the plan says which roles that is.
+
+### P11. An MCP door: the HTTP port and the token are out of a sandboxed worker's reach, and no new dialog appears
+
+Why: option B of plan.md section 3.3 has agents call `makibad` through MCP tools. Three points were left unmeasured: whether a sandboxed Bash can reach the daemon's local HTTP port, whether the token can be read, and whether launching with an MCP configuration raises a dialog.
+
+Steps:
+
+1. Start a stand-in daemon on a local port that answers one line, and launch a worker with the sandbox on and the MCP configuration naming it (record the exact option). Give the worker one Bash call each: a connection to that port from Python; the same through the sandbox's network proxy rules; a read of the MCP configuration file; a read of the claude process's command line and environment under `/proc`.
+2. Record every dialog shown at launch, with its full text, and whether an MCP tool call from the agent reaches the stand-in.
+
+Pass: the tool call reaches the stand-in; the Bash connection to the port fails with a sandbox error; the token appears in neither the readable files nor `/proc` of any process the worker can see; no dialog beyond those already on the policy list appears.
+
+If it fails: when the port can be reached from Bash, the token alone protects the daemon, which is weaker than the plan states, and option A is the way back; when the token can be read, it moves to a file in a folder the worker's settings deny, or option A; when a new dialog appears, it is added to the policy list if it can be matched whole, and otherwise option A.
 
 ## 3. If a move to Orca is considered
 
@@ -240,14 +293,18 @@ A move is worth considering only if all five pass. O1 or O3 failing means Orca's
 
 ## 4. Results
 
-Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. Times are as the probe scripts wrote them (UTC): the first runs were at 2026-11-17T15:56Z to 15:57Z, which is 2026-11-18 in the owner's time zone. P2 and P7 have not been run. P1 to P5 and P7 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
+Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. Times are as the probe scripts wrote them (UTC): the first runs were at 2026-11-17T15:56Z to 15:57Z, which is 2026-11-18 in the owner's time zone. P2 and P6 to P11 have not been run. P1 to P5 and P7 to P11 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
 
 | Probe | Date | `hc --version` | `claude --version` | Result | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P1 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (door); base-side steps not shown | `socket()` refused for every Unix socket; plan.md 3.3 |
 | P2 | | | | | |
-| P3 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (mode=keys) | joined, as expected for keys; hc 0.1.21 with a person typing is not measured (owner to run `P3_MODE=human`) |
+| P3 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (keys and human) | keys: joined, as expected. human: held 20 s with the draft intact, then draft and wrapper became one prompt (send rc 0 after 49 s); whether the wait ran out or the person's Enter caused the join is not separated |
 | P4 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (8 of 8; 2 read by the secretary) | typed bodies arrive whole; not tested on a terminal a person types in |
 | P5 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS | dialog answered once, first turn on the task in 3 s |
 | P6 | | | | | |
 | P7 | | | | | |
+| P8 | | | | | |
+| P9 | | | | | |
+| P10 | | | | | |
+| P11 | | | | | |

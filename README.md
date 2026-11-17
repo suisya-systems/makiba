@@ -39,11 +39,11 @@ made:
 2. In claude-org-ja: register the project, and copy the ledger to
    `registry/goals/suisya-systems/makiba.md` (that folder is not tracked by git).
 3. Upgrade herdr-core on the host to the version M0-2 pins (0.1.21; a host that still has 0.1.18
-   must not run the probes on it). Then run probes P1 to P5 and P7 yourself, from a login shell, and
+   must not run the probes on it). Then run probes P1 to P5 and P7 to P11 yourself, from a login shell, and
    record each in `docs/design/probes.md` section 4. They need no makiba code. P1 decides whether
    the design stands and how the door works; P2 decides where real-base tests run (M0-3 waits for
    it); P3 and P4 decide how messages are typed (M2-4); P5 decides how the task is given (M3-5,
-   M3-6); P7 decides whether your own Claude Code settings reach the agents (M3-4, M4-3). Tell the secretary that no Issue of M2 or M3 is dispatched until all six are recorded.
+   M3-6); P7 decides whether your own Claude Code settings reach the agents (M3-4, M4-3). P8 to P10 decide whether a Claude Code channel can carry messages and P11 whether an MCP door is safe (`plan.md` section 3.3). Tell the secretary that no Issue of M2 or M3 is dispatched until every one of them is recorded.
    P6 waits for M6-2.
 4. Start with M0-1. It is merged in `human` mode (its own acceptance job cannot pass); set branch
    protection after it lands. From M0-2 on, `merge_approval_mode` is `acceptance`.
