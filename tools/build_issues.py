@@ -334,8 +334,12 @@ add("M2-4", "Deliver messages",
      "A body over the limit is cut and carries the `makiba show <id>` line."],
     "G5", deps=["M2-2"],
     note="Probes P3 and P4 measure what the test agent cannot: a person's half-typed draft, and how a real "
-         "composer takes multi-line and slash-leading text. Both have been run before this Issue starts; this "
-         "Issue builds the delivery rules their results chose (probes.md, Results).")
+         "composer takes multi-line and slash-leading text. P4 passed for a terminal nobody types in. P3 ran in "
+         "keys mode and joined, as expected; paddock measured a join on hc 0.1.20 with a person typing, and "
+         "hc 0.1.21 with a person typing is not measured yet (the owner is to run it). Decision pending (owner): "
+         "delivery to the secretary's terminal, where a person types (plan.md section 3.3, which gives the "
+         "options for both outcomes). Do not start this Issue's delivery pass for the secretary until it is "
+         "made. Delivery to workers and the curator is as written here.")
 
 add("M2-5", "Rebuild the view after a restart",
     "`state.db` holds no terminal address. After `makibad` or the base restarts, the tags are the record.",
@@ -425,12 +429,14 @@ add("M3-3", "The door, agent keys, and the message commands",
      "role-files folder, and `state.db` holds only its SHA-256.",
      "No module of `makiba` other than `makiba/status_local.py` imports `makiba.db`."],
     "G3", deps=["M2-1"],
-    note="Probe P1 has been run before this Issue starts. It measures what this Issue's test cannot: whether a "
-         "real sandbox lets the agent reach the door, and not the base and not the person key file. The test "
-         "here shows that the door asks for a key and takes none from lineage; that a sandboxed worker cannot "
-         "read the person key is P1's and M4-5's to show. If the door cannot be reached, this Issue's transport "
-         "becomes a spool folder; the request and response shapes stay. If the person key can be read from the "
-         "sandbox, the plan stops for a decision (probes.md, P1).")
+    note="Decision pending (owner): how agents reach `makibad`. Probe P1 failed: the sandbox refuses the "
+         "creation of any Unix socket on Linux and ignores a path allowlist, so a sandboxed agent cannot "
+         "connect to the socket this Issue describes (probes.md, P1; plan.md section 3.3 sets out four options "
+         "and the predecessors' forms). Do not start this Issue until the owner has chosen. The request and "
+         "response shapes, the keys, the verbs, the person key and the assertions about a request with no key "
+         "are written for the socket and are expected to carry over to any option; the transport and what "
+         "carries the agent key may change. That a sandboxed worker cannot read the person key is still to be "
+         "shown by P1 (the steps it did not reach) and by M4-5.")
 
 add("M3-4", "Launch",
     "The launch is where the environment is decided. paddock measured that the base's own variables (`HC_*`) "
@@ -464,8 +470,8 @@ add("M3-5", "Startup dialogs",
     carry=[f"{RT}: `claude_org_runtime/dispatcher/spawn_prompt.py` (`decide`, `screen_lines` and helpers)",
            f"{PD}: the policy-list rule in `skills/org-escalation` and inventory row L-N3"],
     note="Probe P5 measures whether a task given in the launch arguments starts after the dialog on real "
-         "Claude Code. It has been run before this Issue starts; if it failed, this Issue and M3-6 deliver the "
-         "task as the first message after the dialog (probes.md, P5).")
+         "Claude Code. It passed (2026-11-18, hc 0.1.21, Claude Code 2.1.326): the first-message fallback "
+         "(probes.md, P5) is not taken.")
 
 add("M3-6", "A launch is verified only by an observed first turn",
     "On 2026-08-18 two workers were reported as dispatched that had never started (I-1).",
@@ -537,7 +543,10 @@ add("M4-2", "The sandbox reaches the door and nothing of the base",
     "G3", deps=["M4-1"],
     carry=[f"{PD}: `scripts/probes/core-api-reach.sh`"],
     note="The shape test goes through the acceptance gate. The host rerun of probe P1 does not: a person runs it "
-         "and records the result. M4-5 may not start until that result is a pass.")
+         "and records the result. M4-5 may not start until that result is a pass. Decision pending (owner): the "
+         "first run of P1 failed, and what the per-task settings allow for the door, and what P1 is rewritten to "
+         "measure, depend on the option chosen in plan.md section 3.3. The sandbox entries named here for a "
+         "socket path do not work on Linux.")
 
 add("M4-3", "Carry the role settings and the git guard hooks",
     "The lines paddock lists as 'kept' (L-K1 to L-K12) are held by settings and hooks that already exist and "

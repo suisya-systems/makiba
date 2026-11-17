@@ -34,6 +34,10 @@ Measured with hc 0.1.18 and Claude Code 2.1.319 to 2.1.322. Each carried probe i
 | `done` is reported once per turn, after the `Stop` hooks let the turn end. | Claude Code | inventory P3 | M2-2 |
 | A worker cannot rewrite its settings files or write outside its worktree. | Claude Code | `scripts/probes/settings-rewrite.sh`, `write-surface.sh` | M4-3 |
 | A permission prompt can be answered by reading the screen again and pressing one key. | Claude Code | `scripts/probes/worker-prompt-relay.sh` | M6-8 |
+| On hc 0.1.18, a send to an agent with half-typed input was joined to it with no separator and submitted as one prompt; it was refused while the target was starting (exit 5), `blocked` (exit 9), or, with `--if idle`, working (exit 10), and nothing was queued. | herdr-core, Claude Code 2.1.319 | decision record 0002, Context | M2-4 |
+| On hc 0.1.20 (2026-11-17), with a half-typed line in a client a person had attached, `hc send` blocked for 65 seconds (it waits up to 60 s after the person's last key) and the text was still joined to the line. Text typed with `hc keys` is not treated as a draft: it was joined after 0.25 seconds. So the change in 0.1.20 is that the call waits; the joining did not go away. | herdr-core, Claude Code | decision record 0002, Context | M2-4, plan.md section 3.3 |
+| paddock's watcher types one constant line into an idle or `done` secretary or worker that has unread mail, never into a working one, and reads the prompt line of the screen first so that it does not type over input (host check 9: the first version failed, because `❯` is followed by a no-break space and the prompt is not the last screen line; fixed). After the fix the wake of an empty prompt was seen on the host; the skip over typed input was seen only in tests. A turn that starts between the last status read and the paste is still typed into. | herdr-core, Claude Code | decision record 0013, How it wakes and Stage 2 results | M2-4, plan.md section 3.3 |
+| A single-file `allowWrite` entry held for Bash (a sibling file and a new file in the same folder were refused as read-only); the Edit tool, which runs outside the OS sandbox, edited the sibling with no refusal. Measured once, on hc 0.1.18 and Claude Code 2.1.322; a glob entry, the Write tool and `Edit(...)` permission rules were not measured. | Claude Code | predecessor inventory, section 4.1 and row L-N8 (`scripts/probes/own-file-write.sh`, `own-file-allow-write.sh`) | plan.md section 3.3 |
 
 ## 2. Still to measure
 
@@ -53,14 +57,26 @@ Steps:
    - `hc ls`
    - `cat` of a decoy file under herdr-core's state folder
    - `cat` of the decoy person key file
+   - the Read tool and the Edit tool on the same decoy file (they run outside the sandbox, and paddock measured the Edit tool as not bounded by `allowWrite`, so only a permission rule can hold them)
    - `grep -a PROBE-SECRETARY-KEY /proc/*/environ`, and `ls /proc` (what other processes can it see at all)
    - the first command again from a child that forks twice and calls `setsid` before connecting
    - a Bash call that asks to run outside the sandbox
 4. Read the listener's log: for the worker's connection and the double-forked one, record the peer pid and uid the listener saw (the real pid, a translated one, or 0). This is evidence for why the door does not use lineage; it is not a pass condition.
 
-Pass: the first succeeds, also from the double-forked child; the next four fail with a sandbox error, not with a deny-rule refusal; the `grep` finds nothing and no other terminal's process is listed (or its environment is unreadable); the run outside the sandbox is refused.
+Pass: the first succeeds, also from the double-forked child; the next four fail with a sandbox error, not with a deny-rule refusal; the `grep` finds nothing and no other terminal's process is listed (or its environment is unreadable); the run outside the sandbox is refused; the Read and Edit tools on the decoy person key are refused by a permission rule.
 
 If it fails: when the door cannot be reached, the door becomes a spool folder (the agent writes a request file into a folder it may write, `makibad` picks it up) and M3-3 changes. When herdr-core can be reached, M4-2 has no holder and the plan stops for a decision. When the person key file can be read, or another process's key can be found, no key at the door separates an agent from the person; the alternative is to run agents as another operating-system user, with the costs given in spec section 3, and the plan stops for a decision before M3-3.
+
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): the door step FAILED, and the probe ran only part of its steps (it covered the door, `HC_TERMINAL_SOCKET`, `hc ls` and the state-folder decoy; not the person key file, `/proc`, the double fork or the unsandboxed run).
+
+- Steps 1 to 3 (the door's socket, the `HC_SOCKET` step, and `HC_TERMINAL_SOCKET`) all failed at the creation of the socket itself: `PermissionError: [Errno 1] Operation not permitted`, before any path was looked at. The door listener's log has 0 lines.
+- `hc ls` exited 5: it tried to start a core of its own and failed (`cannot start core: Read-only file system`), so it did not reach the running core and tells nothing about whether the base can be reached. The state-folder decoy read failed with `No such file or directory`, which does not separate "hidden by `denyRead`" from "absent".
+- `HC_SOCKET` was unset inside the terminal (the terminal's variable was `HC_TERMINAL_SOCKET`), so that case is not measured.
+- Because every socket was refused, the run does not show that the base stays out of reach when the door alone is open. It shows only that no socket can be opened at all.
+
+Cause, read in the sources (not run): sandbox-runtime's README, section "Unix Socket Restrictions (Linux)": "The BPF filter intercepts the `socket()` syscall and blocks creation of `AF_UNIX` sockets by returning `EPERM`." Its table of Unix socket settings gives, for `allowUnixSockets`, "Allowlist of socket paths" on macOS and "_Ignored_ (seccomp can't filter by path)" on Linux, and for `allowAllUnixSockets`, "Allow all sockets" on macOS and "Disable seccomp blocking" on Linux. So the settings file of this probe, which named the door's path, could not work on Linux. Claude Code's sandboxing page says, in its WSL2 note, "set `allowAllUnixSockets`, which opens every Unix socket to sandboxed commands". The README also says that where the seccomp filter is not available "sockets are unrestricted and a warning is shown", and the sandboxing page calls the filter optional; so on another host the same settings can give a different result. I read the first part of each page word for word and the rest of the README only in part; the sandboxing page has no text of its own on `allowUnixSockets`, only a link to it.
+
+What this changes: spec section 3 and M4-2 assumed that a sandbox can allow one socket path. On Linux it cannot. How agents reach `makibad` is an open decision for the owner, with the predecessors' forms and this result set side by side in plan.md section 3.3. P1's "if it fails" branch above (a spool folder) is one of four options there, not the decision.
 
 ### P2. The real base and the test agent run in GitHub's CI
 
@@ -86,6 +102,12 @@ Pass: the send does not go in while the draft is there; after Enter, `half typed
 
 If it fails: `makibad` does not deliver to a terminal a person is attached to, and holds the messages (a rule added to M2-4; whether an attached client can be detected is then the next thing to measure).
 
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): FAIL, both cases, in `mode=keys`: the script typed the draft with keys as a stand-in for a person, and the send returned at once (rc 0, after about 1 s) with the wrapped text on the screen while the draft was still there; after Enter the draft and the wrapped text were one prompt (`half typed<makiba from="probe" ...>`), and the agent answered that the input looked unfinished. What this shows and what it does not:
+
+1. Measured by paddock (decision record 0002, commit e135de7, 2026-11-17): on hc 0.1.20, with a person attached and a half-typed line, `hc send` waited 65 seconds and the text was still joined.
+2. Measured here, on hc 0.1.21, in `mode=keys`: joined. By the same record, text typed with `hc keys` is not treated as a draft, so a join is the expected result of this condition; it says nothing about how 0.1.21 treats a person's typing.
+3. Not measured: hc 0.1.21 with a person typing. The owner is to run P3 with `P3_MODE=human`; the result goes into the Results table. Until then plan.md section 3.3 gives the options for both outcomes.
+
 ### P4. Delivery text survives as typed
 
 Why: the wrapper of spec section 8 is typed into a real composer.
@@ -103,6 +125,8 @@ Pass: every body arrives whole, as one prompt, and no line acts as a command.
 
 If a case fails: that shape is never typed. Its body is replaced by the cut line and read with `makiba show` (M2-4).
 
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): all 8 cases arrived with the body equal to what was sent. Six passed by the script. Two (`first-line-bang-ls` and `two-wrapped-in-one-send`) were left as NEEDS-HUMAN, because the script counted 0 prompts where it expected 1; the secretary read the screens and reported 1 prompt in each and no command run. I did not read those two screens again for this record. P4 types into a terminal nobody types in, so it supports typed delivery to workers and the curator, and says nothing about the secretary's terminal.
+
 ### P5. A task given in the launch arguments starts after the startup dialog
 
 Why: paddock passed the task through herdr-core's template first message, which is tried only at start, so a dialog lost it. makiba passes the task as an argument to the agent.
@@ -112,6 +136,8 @@ Steps: in a repository no person has trusted, launch through the base with `argv
 Pass: the first turn starts on the task without anything sent afterwards.
 
 If it fails: after a dialog, `makibad` delivers the task as the first message (M3-5 and M3-6 change; the brief is already stored in `run_launch`).
+
+Result (2026-11-18, hc 0.1.21, Claude Code 2.1.326, script commit 52d87c1): PASS. The dialog was answered once and the first turn answered the task given in the launch arguments, 3 seconds later, with no `hc send`. The fallback above is not taken.
 
 ### P6. The secretary can be reached from a phone through Remote Control
 
@@ -214,14 +240,14 @@ A move is worth considering only if all five pass. O1 or O3 failing means Orca's
 
 ## 4. Results
 
-Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. P1 to P5 and P7 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
+Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. Times are as the probe scripts wrote them (UTC): the first runs were at 2026-11-17T15:56Z to 15:57Z, which is 2026-11-18 in the owner's time zone. P2 and P7 have not been run. P1 to P5 and P7 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
 
 | Probe | Date | `hc --version` | `claude --version` | Result | Notes |
 | --- | --- | --- | --- | --- | --- |
-| P1 | | | | | |
+| P1 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (door); base-side steps not shown | `socket()` refused for every Unix socket; plan.md 3.3 |
 | P2 | | | | | |
-| P3 | | | | | |
-| P4 | | | | | |
-| P5 | | | | | |
+| P3 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (mode=keys) | joined, as expected for keys; hc 0.1.21 with a person typing is not measured (owner to run `P3_MODE=human`) |
+| P4 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (8 of 8; 2 read by the secretary) | typed bodies arrive whole; not tested on a terminal a person types in |
+| P5 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS | dialog answered once, first turn on the task in 3 s |
 | P6 | | | | | |
 | P7 | | | | | |
