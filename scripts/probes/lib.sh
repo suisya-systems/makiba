@@ -178,15 +178,15 @@ print(find(st, "state") if st else "none", find(d, "turn"))'
 }
 
 pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy; every new dialog screen goes to the result file
-  DLG_KEYS=0; local t=$1 i=0 prev="$WORK/dlg.prev" cur="$WORK/dlg.cur" out last="" n=0
+  DLG_KEYS=0; DLG_ACCEPTED=""; local t=$1 i=0 prev="$WORK/dlg.prev" cur="$WORK/dlg.cur" out last="" n=0
   : > "$prev"
   while [ "$i" -lt "$2" ]; do
     hc read "$t" > "$cur" 2>/dev/null
     out=$(python3 "$HERE/dialog-step.py" --prev "$prev" < "$cur")
     case "$out" in
       done) DLG_KEYS=$n; say "dialogs: finished after $n key(s)"; return 0 ;;
-      key*) { echo "---- dialog screen seen by $t (key ${out#key })"; cat "$cur"; echo "----"; } >> "$RESULT"
-            hc keys "$t" "${out#key }" >/dev/null 2>&1; n=$((n + 1)); DLG_KEYS=$n; : > "$prev"; sleep 1.5; i=$((i + 2)); continue ;;
+      key*) { echo "---- dialog screen seen by $t ($out)"; cat "$cur"; echo "----"; } >> "$RESULT"
+            set -- $out; hc keys "$t" "$2" >/dev/null 2>&1; [ "$2" = enter ] && DLG_ACCEPTED="$DLG_ACCEPTED $3"; n=$((n + 1)); DLG_KEYS=$n; : > "$prev"; sleep 1.5; i=$((i + 2)); continue ;;
       unknown*) say "dialogs: $out"; { echo "---- unknown dialog screen of $t"; cat "$cur"; echo "----"; } >> "$RESULT"; return 2 ;;
     esac
     cp -f "$cur" "$prev"; i=$((i + 2)); sleep 2

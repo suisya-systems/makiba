@@ -42,6 +42,9 @@ rc=$(cat "$WORK/send.rc" 2>/dev/null || echo running)
 if printf '%s' "$scr" | grep -q 'PROBE-BODY'; then
   record send-held-20s FAIL "wrapped text reached the screen while the draft was there (send rc=$rc, out: $(head -c 200 "$WORK/send.out" 2>/dev/null | tr '\n' ' '))"
   screen_dump "$T" "after 20s"
+elif [ "$rc" != running ] && [ "$rc" != 0 ]; then
+  record send-held-20s NEEDS-HUMAN "hc send exited $rc before 20s (out: $(head -c 200 "$WORK/send.out" 2>/dev/null | tr '\n' ' ')); a failed send says nothing about waiting"
+  screen_dump "$T" "after 20s"
 elif ! printf '%s' "$scr" | grep -q 'half typed'; then
   record send-held-20s NEEDS-HUMAN "the draft is gone from the screen without the wrapped text; read the screen"
   screen_dump "$T" "after 20s"

@@ -4,7 +4,7 @@
 Reads a screen on stdin, optionally the previous screen from --prev FILE, prints one line:
   done                  the composer is visible, no dialog remains
   wait <reason>         nothing to press yet
-  key <down|up|enter>   the one key to press next
+  key <down|up|enter> <dialog>   the one key to press next, and which dialog it is for
   unknown <reason>      a selection dialog that is not on the policy list: press nothing
 Policy list (option text matched whole, spaceless, case-insensitive; never by position):
   folder-trust  accept "Yes, I trust this folder" / "Yes, proceed"; reject "No, exit"
@@ -75,7 +75,7 @@ def main():
         if prev is None or trim(lines) != trim(prev):
             print("wait %s: screen not settled" % k)
             return
-        print("key enter" if cur == a[0] else ("key down" if a[0] > cur else "key up"))
+        print("key %s %s" % ("enter" if cur == a[0] else ("down" if a[0] > cur else "up"), k))
         return
     if any(f in "".join(n.split()) for n in lines for f in ("entertoconfirm", "entertoselect", "↑/↓tonavigate")):
         print("unknown selection dialog not on the policy list")

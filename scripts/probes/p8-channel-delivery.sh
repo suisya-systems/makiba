@@ -21,8 +21,8 @@ T=p8-agent
 launch "$T" "$REPO" -- --permission-mode acceptEdits --settings "$WORK/agent-settings.json" --append-system-prompt-file "$WORK/rules.txt" \
   --mcp-config "$MCPCFG" --dangerously-load-development-channels server:makiba-channel || { record dev-channel-dialog FAIL "hc run failed"; finish; }
 pass_dialogs "$T" 150; rc=$?
-if [ "$rc" -eq 0 ] && [ "$DLG_KEYS" -gt 0 ]; then record dev-channel-dialog PASS "dialog(s) passed by the policy with $DLG_KEYS key press(es); dialog texts are in the result file"
-elif [ "$rc" -eq 0 ]; then record dev-channel-dialog NEEDS-HUMAN "composer reached with no key sent: no dialog was seen, so the case was not exercised (or the screen was read too late)"
+if [ "$rc" -eq 0 ] && case "$DLG_ACCEPTED" in *dev-channel*) true ;; *) false ;; esac; then record dev-channel-dialog PASS "dialog(s) accepted by the policy:$DLG_ACCEPTED ($DLG_KEYS key press(es) in all); dialog texts are in the result file"
+elif [ "$rc" -eq 0 ]; then record dev-channel-dialog NEEDS-HUMAN "composer reached but the development-channel dialog was never accepted (accepted:${DLG_ACCEPTED:- none}): the case was not exercised, or the screen was read too late"
 elif [ "$rc" -eq 2 ]; then record dev-channel-dialog NEEDS-HUMAN "a dialog not on the policy list stopped the launch; text in the result file"
 else record dev-channel-dialog FAIL "no composer within 150s"; screen_dump "$T" "dialog"; fi
 wait_ready "$T" 60 || { record launch NEEDS-HUMAN "agent not ready"; screen_dump "$T" launch; finish; }
@@ -63,10 +63,15 @@ wait_idle "$T" 60
 k=$(tok)
 hc send "$T" "Run this with your Bash tool: sleep 45. Then use the Write tool to create long-done.txt containing LONGDONE. Then reply with the single word LONG-FINISHED." >/dev/null 2>&1
 j=0; while [ "$j" -lt 60 ]; do case "$(term_info "$T")" in working*) break ;; esac; j=$((j + 1)); sleep 0.5; done
-sleep 8; enqueue "$(msg 3 recv-3.txt "$k")" >/dev/null
+LONGON=""; [ "$j" -lt 60 ] && LONGON=1
+sleep 8
+case "$(term_info "$T")" in working*) ;; *) LONGON="" ;; esac
+[ -f "$REPO/long-done.txt" ] && LONGON=""
+enqueue "$(msg 3 recv-3.txt "$k")" >/dev/null
 j=0; while { [ ! -f "$REPO/recv-3.txt" ] || [ ! -f "$REPO/long-done.txt" ]; } && [ "$j" -lt 80 ]; do j=$((j + 1)); sleep 3; done
 wait_idle "$T" 60; sleep 5
-if [ ! -f "$REPO/recv-3.txt" ]; then record channel-while-working FAIL "the message sent during a long turn never produced its file (lost?); long-done.txt $( [ -f "$REPO/long-done.txt" ] && echo present || echo absent)"; screen_dump "$T" "while-working"
+if [ -z "$LONGON" ]; then record channel-while-working NEEDS-HUMAN "the long turn was not seen running when the message was enqueued (state not working, or already finished); the case did not test a busy agent"; screen_dump "$T" "while-working"
+elif [ ! -f "$REPO/recv-3.txt" ]; then record channel-while-working FAIL "the message sent during a long turn never produced its file (lost?); long-done.txt $( [ -f "$REPO/long-done.txt" ] && echo present || echo absent)"; screen_dump "$T" "while-working"
 elif [ ! -f "$REPO/long-done.txt" ]; then record channel-while-working NEEDS-HUMAN "the message arrived but the long turn's own file is missing; read the screen"; screen_dump "$T" "while-working"
 elif python3 - "$REPO/recv-3.txt" "$REPO/long-done.txt" <<'PY'
 import os, sys
