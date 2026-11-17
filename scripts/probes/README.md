@@ -41,6 +41,7 @@ Fresh git repository nobody trusted; `claude` launched through the base with the
 
 Lines that use an `hc` or Claude Code feature not shown in paddock's measured scripts or `hc --help`, each marked `TODO(confirm)` in the source:
 
+- The composer's prompt marker `❯` (P3 order check; without it the result is NEEDS-HUMAN, never PASS).
 - `hc keys` key name `space` (P3 draft typing).
 - A second `hc send` while the first turn is starting is queued and not lost (P4 quick case).
 - Settings key `sandbox.network.allowUnixSockets` for letting a sandboxed command connect to one socket, and `filesystem.allowWrite` for the socket's folder (P1).

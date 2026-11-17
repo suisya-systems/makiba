@@ -120,8 +120,9 @@ else
   record door-reachable FAIL "${l1:-no STEP 1 line}; door.log: $(wc -l < "$WORK/door.log" 2>/dev/null || echo 0) line(s). On failure the door becomes a spool folder (M3-3)."
   screen_dump "$T" door
 fi
-judge_blocked base-socket-HC_SOCKET 2
-judge_blocked base-socket-HC_TERMINAL_SOCKET 3
+# A path that does not exist outside the sandbox proves nothing: its "No such file" would read as a block.
+if [ -S "${SOCK1:-}" ]; then judge_blocked base-socket-HC_SOCKET 2; else record base-socket-HC_SOCKET NEEDS-HUMAN "no socket at HC_SOCKET (${SOCK1:-unset}); find the core's socket path and rerun"; fi
+if [ -S "${SOCK2:-}" ]; then judge_blocked base-socket-HC_TERMINAL_SOCKET 3; else record base-socket-HC_TERMINAL_SOCKET NEEDS-HUMAN "no socket at HC_TERMINAL_SOCKET (${SOCK2:-unset}); find the core's socket path and rerun"; fi
 judge_blocked hc-ls 4 "$T"
 judge_blocked state-decoy-read 5 "$DECOY"
 finish

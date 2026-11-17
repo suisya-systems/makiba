@@ -28,9 +28,9 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   [ -n "$OUTDIR" ] || { echo "RESULT $PROBE: precondition-failed (give a result directory)"; exit 2; }
   HC_BIN=${HC_BIN:-hc}
   for c in "$HC_BIN" claude python3 git mktemp sort; do
-    command -v "$c" >/dev/null 2>&1 || { echo "RESULT $PROBE: precondition-failed ($c not on PATH)"; exit 2; }
+    type -P "$c" >/dev/null 2>&1 || { echo "RESULT $PROBE: precondition-failed ($c not on PATH)"; exit 2; }
   done
-  HC_BIN=$(command -v "$HC_BIN")
+  HC_BIN=$(type -P "$HC_BIN")   # not command -v: that would find the hc function below
   mkdir -p "$OUTDIR" || exit 2
   RESULT="$OUTDIR/$PROBE-result.txt"
   HCVER=$(hc --version 2>&1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)

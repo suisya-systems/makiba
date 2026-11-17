@@ -58,15 +58,16 @@ i=0; while [ "$i" -lt 90 ]; do
 done
 wait=$(( $(cat "$WORK/send.end" 2>/dev/null || date +%s) - S0 ))
 hist=$(hc read --lines 300 "$T" 2>&1)
-dl=$(printf '%s\n' "$hist" | grep -n 'half typed' | head -n 1 | cut -d: -f1)
-bl=$(printf '%s\n' "$hist" | grep -n 'PROBE-BODY' | head -n 1 | cut -d: -f1)
+# Prompt boundaries: each prompt starts with the composer marker. TODO(confirm): the marker is "❯" (paddock's ready check uses it).
+dl=$(printf '%s\n' "$hist" | grep -nE '^[[:space:]]*[❯>] *half typed' | head -n 1 | cut -d: -f1)
+bl=$(printf '%s\n' "$hist" | grep -nE '^[[:space:]]*[❯>] *<makiba' | head -n 1 | cut -d: -f1)
 if printf '%s\n' "$hist" | grep 'half typed' | grep -Eq 'makiba|PROBE-BODY'; then
   record order-after-enter FAIL "the draft and the wrapped text are one prompt (joined); send rc=$(cat "$WORK/send.rc" 2>/dev/null) after ${wait}s"
   screen_dump "$T" "after Enter"
 elif [ -n "$dl" ] && [ -n "$bl" ] && [ "$dl" -lt "$bl" ]; then
-  record order-after-enter PASS "'half typed' is one prompt, the wrapped text the next; send returned rc=$(cat "$WORK/send.rc" 2>/dev/null) after ${wait}s"
+  record order-after-enter PASS "'half typed' and the wrapper each start their own prompt, draft first; send returned rc=$(cat "$WORK/send.rc" 2>/dev/null) after ${wait}s"
 else
-  record order-after-enter NEEDS-HUMAN "could not order the two prompts (draft line ${dl:-none}, body line ${bl:-none})"
+  record order-after-enter NEEDS-HUMAN "no separate prompt line for both (draft prompt line ${dl:-none}, wrapper prompt line ${bl:-none}); read the screen"
   screen_dump "$T" "after Enter"
 fi
 say "note: mode=$MODE$( [ "$MODE" = keys ] && echo ' (stand-in: keys typed by the script, not a person)')"
