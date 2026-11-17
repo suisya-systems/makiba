@@ -66,7 +66,7 @@ add("M0-1", "Repository skeleton, CI and the acceptance job",
          "It is merged in `human` mode. Branch protection (require `acceptance`, `tests`, `lint`; require "
          "branches up to date) is a setting only the owner can make.")
 
-add("M0-2", "Pin the base's version and install it the same way everywhere",
+add("M0-2", "Pin the base's version and the supported Claude Code versions",
     "herdr-core releases every few days and calls its API a preview. makiba must run against one known "
     "version and refuse any other. The pin is not meant to follow the releases: moving it costs a test run and "
     "several probes, so it moves on purpose and rarely.",
@@ -83,12 +83,27 @@ add("M0-2", "Pin the base's version and install it the same way everywhere",
      "owner's time; P2 reruns itself in CI. A probe may be skipped only when the changelog shows nothing "
      "touching its area and the record says so. P6 is not rerun.",
      "The range stays one patch release. A wider range would let a version in that no probe has run on. It is "
-     "revisited only after three pin moves in a row needed nothing but the number changed."],
+     "revisited only after three pin moves in a row needed nothing but the number changed.",
+     "`makiba/agents/version.py`: the supported range of Claude Code and a check of the text `claude --version` "
+     "prints. The range runs from the lowest to the highest version that a recorded run of the probes covers "
+     "(the `claude --version` column of `docs/design/probes.md`, Results; paddock's measurements, 2.1.319 to "
+     "2.1.322, until the new ones exist), and no wider. It is a separate constant from the base's, because "
+     "Claude Code is not behind the seam and updates itself.",
+     "`docs/upgrading-claude-code.md`: when the range moves and what a move reruns. Claude Code releases more "
+     "often than the base, so the range moves only after the owner has rerun the following on the new "
+     "version: probes P1, P3, P4, P5 and P7; paddock's carried probes (probes.md section 1); the runbook of "
+     "M4-5 once; and P6 only when `secretary.remote_control` is on. The startup-dialog and prompt tests of "
+     "M3-5 and M6-8 use the test agent and cannot show a change in the real screens; these reruns can."],
     "tests/test_base_version.py",
     ["A version inside the range is accepted.",
      "A version outside it raises before any other call is made, with a message naming both versions.",
-     "`docs/upgrading-the-base.md` names M1-5's test file and each of P1, P3, P4 and P5."],
-    "G6", deps=["M0-1"])
+     "`docs/upgrading-the-base.md` names M1-5's test file and each of P1, P3, P4 and P5.",
+     "A `claude --version` text inside the range is accepted; one outside it, and one that cannot be parsed, "
+     "raise with a message naming the version found and the range.",
+     "`docs/upgrading-claude-code.md` names each probe and the runbook listed above."],
+    "G6", deps=["M0-1"],
+    note="Claude Code's version goes here and not in a new Issue because it is the same kind of pin, kept in "
+         "the same place and checked by the same kind of test; the check at `makiba up` is M4-4's.")
 
 add("M0-3", "A stand-in for the base, and the real base for CI",
     "claude-org-ja's workers cannot start a herdr-core inside their sandbox (paddock inventory, section 2: "
@@ -174,7 +189,8 @@ add("M0-8", "The shared specification, checked against the code",
     "M2 and M3 are built in parallel. Without one place that fixes table columns, tag keys, event kinds and "
     "exit codes, each worker invents its own.",
     ["`docs/design/spec.md` as delivered, reviewed and corrected against the carried schema.",
-     "`makiba/spec.py`: the same names as constants (tag keys, event kinds, door error kinds and exit codes, "
+     "`makiba/spec.py`: the same names as constants (the wrapper sentence of section 8, tag keys, event kinds, "
+     "door error kinds and exit codes, "
      "agent ids, verbs per role, the wrapper's limits).",
      "A test that reads the tables of `spec.md` and compares them with `makiba/spec.py`."],
     "tests/test_spec_matches_code.py",
@@ -258,8 +274,11 @@ add("M2-1", "makibad: one instance, a heartbeat, a clean stop",
      "establishes the subscription; only then sets `dispatcher.subscribed = 1` and writes `dispatcher_started`.",
      "Writes `dispatcher.heartbeat_at` every 10 s. On SIGTERM: finishes the current step, writes "
      "`dispatcher_stopped`, releases the lock.",
-     "`makiba status` (read-only path, no door needed) prints the heartbeat's age and whether it is subscribed, "
-     "and exits non-zero when the heartbeat is older than 30 s."],
+     "`makiba status` run by the person (no `MAKIBA_KEY` in the environment) reads `state.db` read-only "
+     "itself, with no door, so that it works when `makibad` is dead; it prints the heartbeat's age and whether "
+     "it is subscribed, and exits non-zero when the heartbeat is older than 30 s. With `MAKIBA_KEY` set, "
+     "`status` goes through the door as every agent verb does (M6-1). The local reader is one module, "
+     "`makiba/status_local.py`, and the only code of `makiba` that opens the database."],
     "tests/test_heartbeat.py",
     ["A second `makibad` on the same state folder exits with a message naming the first one's pid.",
      "`subscribed` is 0 until the subscription exists (the stand-in delays it) and 1 after.",
@@ -283,14 +302,16 @@ add("M2-2", "Record status and terminal events",
 add("M2-3", "Anomaly rules",
     "The model dispatcher looked at screens every three minutes and judged. These are the same judgments as "
     "functions, so they can be tested and they run every time.",
-    ["`makiba/daemon/anomalies.py`: the eight rules of spec section 11 as pure functions of "
-     "(run, latest status, events, now).",
+    ["`makiba/daemon/anomalies.py`: the nine rules of spec section 11 as pure functions of "
+     "(run, latest status, events, now); for the secretary, which has no run, of its terminal record instead.",
      "`anomaly_raised` once per (run, rule); `anomaly_cleared` when it stops being true; then it may raise again.",
      "Each raised anomaly queues one `notice` message to the secretary (delivery is M2-4)."],
     "tests/test_anomalies.py",
     ["Each rule: a scene that raises it, and the same scene one second earlier that does not.",
      "A scene held for ten passes raises once.",
-     "`done_no_report` does not raise when a `report_done` exists after the last turn."],
+     "`done_no_report` does not raise when a `report_done` exists after the last turn.",
+     "`secretary_gone`: a `terminal_gone` for the terminal named `secretary` with no renewal under way raises it "
+     "once, as does a secretary with no status 180 s after launch; a gone caused by `makiba renew` does not."],
     "G1", deps=["M2-2"])
 
 add("M2-4", "Deliver messages",
@@ -385,7 +406,8 @@ add("M3-3", "The door, agent keys, and the message commands",
      "the content of that file; with neither, it sends no key. `makiba up` (M4-4) calls the creation.",
      "`makiba/cli.py` with the verbs `send`, `report`, `show`. `report` also moves the run "
      "(`report done` sets `review`).",
-     "`makiba` never imports `makiba.db`."],
+     "`makiba` never imports `makiba.db`, except `makiba/status_local.py` (M2-1), which opens it read-only for "
+     "the person's `status`."],
     "tests/test_door.py",
     ["A request with an unknown key is `denied` and recorded as `rejected`.",
      "A worker's key may `report`; it may not `dispatch`.",
@@ -400,7 +422,8 @@ add("M3-3", "The door, agent keys, and the message commands",
      "A request carrying the person key, sent from a process outside every launched terminal, may use "
      "`config`; the same request with a worker's key is `denied`.",
      "The person key file is mode 0600 in a folder of mode 0700, lies under no worktree and not under the "
-     "role-files folder, and `state.db` holds only its SHA-256."],
+     "role-files folder, and `state.db` holds only its SHA-256.",
+     "No module of `makiba` other than `makiba/status_local.py` imports `makiba.db`."],
     "G3", deps=["M2-1"],
     note="Probe P1 has been run before this Issue starts. It measures what this Issue's test cannot: whether a "
          "real sandbox lets the agent reach the door, and not the base and not the person key file. The test "
@@ -502,13 +525,14 @@ add("M4-2", "The sandbox reaches the door and nothing of the base",
     "A deny rule matches command text; a script or a direct socket connection is outside it. paddock wrote "
     "the sandbox entries for herdr-core but could not measure them, because its deny rule always refused first.",
     ["Per-task settings (from M3-2) deny the base's socket and state folders and the person key file for "
-     "read and write, and allow the door's socket.",
+     "read and write, deny `state.db` for read and write (an agent's `status` goes through the door; the local "
+     "reader is the person's), and allow the door's socket.",
      "`scripts/probes/door-and-base-reach.sh`: probe P1 as a script a person can rerun. P1 was run by hand "
      "before M2 and M3 with hand-written settings; this repeats it with the settings `makibad` really writes.",
      "The result recorded in `docs/design/probes.md` with versions and date."],
     "tests/test_task_settings_shape.py",
-    ["The per-task settings written for a run contain the base's denies, the person key file's denies and the "
-     "door's allow.",
+    ["The per-task settings written for a run contain the base's denies, the person key file's denies, the "
+     "`state.db` denies and the door's allow.",
      "The settings name no path inside the worktree as writable configuration."],
     "G3", deps=["M4-1"],
     carry=[f"{PD}: `scripts/probes/core-api-reach.sh`"],
@@ -527,7 +551,9 @@ add("M4-3", "Carry the role settings and the git guard hooks",
      "in makiba."],
     "tests/test_role_settings.py",
     ["The carried hook tests pass.",
-     "Every line in `docs/design/lines.md` names a settings entry, a hook or a test that exists."],
+     "Every line in `docs/design/lines.md` names a settings entry, a hook or a test that exists.",
+     "The rules file of each role (secretary, worker, curator) contains the wrapper sentence of spec section 8, "
+     "exactly as `makiba/spec.py` holds it."],
     "G3", deps=["M4-1"],
     carry=[f"{PD}: `templates/worker-rules.md`, `worker-settings.json`, `secretary-rules.md`, "
            "`secretary-settings.json`, `curator.md`; `docs/design/predecessor-inventory.md` section 6.2",
@@ -545,6 +571,9 @@ add("M4-4", "makiba up: start the base cleanly",
      "notices and gives agents no rules of its own (requirement R2). Never stops or restarts a base it "
      "did not start.",
      "Creates the person key file if it is absent (M3-3's function), and refuses nothing about an existing one.",
+     "Runs `claude --version` and refuses to start the secretary or any worker outside the supported range of "
+     "M0-2, naming both. Claude Code can update itself between checks; a launch after such an update is caught "
+     "at the next `up`, not at the launch.",
      "Starts `makibad`. Starts the secretary unless `--no-secretary` (the secretary itself is M6-2)."],
     "tests/test_up.py",
     ["With `CLAUDE_CODE_SESSION_ID` set, `makiba up` exits non-zero and starts nothing.",
@@ -552,7 +581,9 @@ add("M4-4", "makiba up: start the base cleanly",
      "spec section 6.4.",
      "A second `up` starts nothing new and exits 0.",
      "After `up` the person key file exists with mode 0600 in a folder of mode 0700, and a second `up` leaves "
-     "its content unchanged."],
+     "its content unchanged.",
+     "With a stand-in `claude` on the path that prints a version outside the range, `up` exits non-zero and "
+     "starts neither secretary nor worker."],
     "G3", deps=["M2-1", "M3-3"],
     carry=[f"{PD}: `skills/org-start/scripts/org-start.sh` `--check` (as the list of preconditions)"])
 
@@ -681,6 +712,8 @@ add("M6-1", "The secretary's commands",
      "`dispatch` creates a `queued` run, its `run_launch` row with the brief and the kind, and `delegate_sent`.",
      "`dispatch --kind code` without `--project` is a usage error; `--kind document` needs none.",
      "A worker's key cannot `peek` or `dispatch`.",
+     "`status` with the secretary's key goes through the door and returns what the person's local `status` "
+     "returns; without `MAKIBA_KEY` it is the local read of M2-1.",
      "Every exit code of spec section 3 is produced by at least one case."],
     "G3", deps=["M2-1", "M3-3"])
 
@@ -722,7 +755,8 @@ add("M6-3", "The secretary's skills, operating no terminal",
     "tests/test_no_terminal_tools.py",
     ["The check passes on the repository.",
      "A scratch skill containing `hc send` fails it.",
-     "Every command a skill names exists in `makiba --help`."],
+     "Every command a skill names exists in `makiba --help`.",
+     "`roles/secretary/rules.md`, as rebuilt here, still contains the wrapper sentence of spec section 8."],
     "G3", deps=["M6-1"],
     carry=[f"{PD}: `skills/org-delegate`, `org-escalation`, `org-pull-request`, `org-issue`, "
            "`org-update-branch`, `org-curate`",
@@ -751,12 +785,20 @@ add("M6-5", "Renew the secretary without typing into it",
      "secretary whose task is to resume from the stored handover, and writes `secretary_renewed`.",
      "Workers are not touched; messages for `secretary` stay `pending` across the gap and are delivered to "
      "the new terminal.",
-     "If the new secretary is not verified, a notice goes to the log and `makiba status` shows it."],
+     "If the new secretary is not verified, a notice goes to the log and `makiba status` shows it.",
+     "When the secretary's terminal ends without a renewal (`secretary_gone`, spec section 11), `makibad` "
+     "launches a new secretary by the same path, from the last stored handover or, if there is none, from the "
+     "open pending entries and running tasks in `state.db`. It tries at most twice in ten minutes (first "
+     "proposal); after that it stops, and `makiba status` shows the secretary as gone until the person runs "
+     "`makiba up`. Nothing tells the person before stage 2: the log and `makiba status` are all there is."],
     "tests/test_renew.py",
     ["After a renewal the terminal named `secretary` is a different terminal; every worker terminal is the "
      "same one.",
      "A message queued during the gap is delivered to the new secretary.",
-     "Open pending entries and `in_use` runs are identical before and after, by id."],
+     "Open pending entries and `in_use` runs are identical before and after, by id.",
+     "A secretary terminal killed with no renewal raises `secretary_gone` once and is relaunched; messages "
+     "queued while it was gone stay `pending` (none is `failed`) and are delivered to the new terminal once; "
+     "after two failed relaunches in the window no third is tried and the secretary shows as gone."],
     "G1", deps=["M6-2"],
     carry=[f"{PD}: `skills/secretary-handover/` and Q16's decision"])
 
@@ -765,12 +807,21 @@ add("M6-6", "Conveyor and the acceptance gate",
     "`ci_completed` rows, which M5-3 now writes.",
     ["`makiba/tools/acceptance_gate.py`, `acceptance_merge_hook.py` and the secretary's `PreToolUse` hook, "
      "carried with their tests; they read `state.db` through a read-only query `makibad` answers over the door.",
-     "`skills/conveyor`, rebuilt from claude-org-ja's, with `merge_approval_mode` in the organization settings."],
+     "`skills/conveyor`, rebuilt from claude-org-ja's, with `merge_approval_mode` in the organization settings.",
+     "The hook also refuses the other ways to merge from a command line: the pull-request merge command with "
+     "any flag, the API command with a write method on a `pulls/<n>/merge` path, its GraphQL form carrying a "
+     "merge mutation, and `curl` or `wget` to the GitHub API."],
     "tests/test_acceptance_gate.py",
     ["The carried gate tests pass.",
      "A merge command for a pull request with no declared test is refused in `acceptance` mode.",
-     "A merge is refused when the latest `ci_completed` is for another head."],
+     "A merge is refused when the latest `ci_completed` is for another head.",
+     "Each of the other ways above is refused in `acceptance` mode, and a command that only mentions them as an "
+     "argument is not."],
     "G7", deps=["M6-3", "M5-3"],
+    note="A hook reads command text and cannot list every way to reach GitHub. It is kept for the ways above and "
+         "is not the bound. The bound is on GitHub's side: branch protection that requires the `acceptance` check "
+         "and lets nobody, the person's own login included, merge around it. M0-1 names that setting for this "
+         "repository; for every other project it is the owner's to set, and makiba does not set it.",
     carry=[f"{CJ}: `tools/acceptance_gate.py`, `tools/acceptance_merge_hook.py`, "
            "`.hooks/gate-acceptance-before-merge.sh`, `tools/test_acceptance_gate.py`, "
            "`tools/test_acceptance_merge_hook.py`, `.claude/skills/org-conveyor/` (translated)"])
@@ -817,8 +868,10 @@ add("M7-1", "Register makiba in makiba",
     None,
     ["`makiba status` shows the project.", "The triage scan returns candidates from makiba's open Issues.",
      "`tools/check_incidents.py` passes with an empty pending list."],
-    "G7", deps=["M6-6", "M5-5"], gate=False,
-    note="Outside the acceptance gate: closed by a person.")
+    "G7", deps=["M6-6", "M5-5", "M4-5", "M5-2", "M6-2", "M6-5", "M6-8"], gate=False,
+    note="Outside the acceptance gate: closed by a person. It waits for what the week uses: one real worker "
+         "through (M4-5), the secretary launched and renewed (M6-2, M6-5), a permission prompt relayed (M6-8) "
+         "and a close (M5-2). Goal G7 still asks for every Issue of M0 to M6 to be closed by the end.")
 
 add("M7-2", "One week of self-hosting",
     "A week is long enough to meet an update of the base, a secretary renewal and a failed launch at least once.",
@@ -855,7 +908,7 @@ add("M7-4", "What was not moved",
     note="Outside the acceptance gate: closed by a person.")
 
 
-PROBE_GATE = ("Do not start until probes P1 to P5 are recorded as run, with versions and date, in "
+PROBE_GATE = ("Do not start until probes P1 to P5 and P7 are recorded as run, with versions and date, in "
               "`docs/design/probes.md` (Results). They are run by hand before any Issue of M2 or M3, on the "
               "pinned base version.")
 
@@ -911,7 +964,7 @@ def main() -> None:
     lines = ["# Issues\n",
              "Generated by `tools/build_issues.py`. Each file is one Issue's body; its first line is the title.",
              "`Depends on` lines use these ids; `tools/create_issues.py` replaces them with Issue numbers.",
-             "Every Issue of M2 and M3 carries a `Before starting` section: probes P1 to P5 are run first "
+             "Every Issue of M2 and M3 carries a `Before starting` section: probes P1 to P5 and P7 are run first "
              "(`docs/design/probes.md`).\n"]
     for m, name in MILESTONES.items():
         lines.append(f"## {m} {name}\n")

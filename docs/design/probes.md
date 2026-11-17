@@ -2,11 +2,11 @@
 
 A probe is a script run on a real host against the real base (herdr-core) and a real Claude Code. Its result is recorded here with the versions it ran on. Probes are not CI tests: CI cannot run Claude Code.
 
-Order of use: probes P1 to P5 are run by a person, by hand, before any Issue of M2 or M3 is started. They need no makiba code, only the base and Claude Code. P3, P4 and P5 decide how messages and the task are delivered (M2-4, M3-5, M3-6) and P1 decides the door (M3-3), so a result that comes after those Issues are built costs a rebuild. P2 is needed earlier than the rest, by M0-3. P6 waits for M6-2, because nothing else depends on it. The results go into section 4. Until the five rows of P1 to P5 are filled in, no Issue of M2 or M3 is dispatched.
+Order of use: probes P1 to P5 and P7 are run by a person, by hand, before any Issue of M2 or M3 is started. They need no makiba code, only the base and Claude Code. P3, P4 and P5 decide how messages and the task are delivered (M2-4, M3-5, M3-6), P1 decides the door (M3-3), and P7 decides what an agent takes from the person's own Claude Code settings (M3-4, M4-3), so a result that comes after those Issues are built costs a rebuild. P2 is needed earlier than the rest, by M0-3. P6 waits for M6-2, because nothing else depends on it. The results go into section 4. Until the rows of P1 to P5 and P7 are filled in, no Issue of M2 or M3 is dispatched.
 
 Rules for every probe (from herdr-core's own guidance and paddock's practice):
 
-- Run on the herdr-core version that M0-2 pins (0.1.21 at the time of writing), after installing it. A host that still has an older `hc` (paddock measured on 0.1.18) upgrades first: a probe on another version tells nothing about the pinned one. The same goes for the next pin (`docs/upgrading-the-base.md`).
+- Run on the herdr-core version that M0-2 pins (0.1.21 at the time of writing), after installing it, and on a Claude Code version inside the range M0-2 sets (paddock measured on 2.1.319 to 2.1.322). A host that still has an older `hc` (paddock measured on 0.1.18) upgrades first: a probe on another version tells nothing about the pinned one. The same goes for the next pin (`docs/upgrading-the-base.md`).
 - Run from a person's login shell, never from inside an agent.
 - Use a dedicated session and scratch folders, and stop only that core at the end, never the one a person works in:
 
@@ -37,7 +37,7 @@ Measured with hc 0.1.18 and Claude Code 2.1.319 to 2.1.322. Each carried probe i
 
 ## 2. Still to measure
 
-Ordered by how much the plan changes on a bad result. Each takes a few hours. P1 to P5 are a gate before M2 and M3 (see the top of this document); P6 can wait until the secretary exists (M6-2).
+Ordered by how much the plan changes on a bad result. Each takes a few hours. P1 to P5 and P7 are a gate before M2 and M3 (see the top of this document); P6 can wait until the secretary exists (M6-2).
 
 ### P1. From inside a worker's sandbox: the door is reachable; the base, the person key and other terminals' keys are not
 
@@ -130,6 +130,21 @@ Pass: steps 2, 4 and 6 work. Steps 3 and 5 are recorded as they are: how reliabl
 
 If it fails: `secretary.remote_control` stays off and stages 2 and 3 come sooner. Nothing else changes, because nothing else depends on it.
 
+### P7. What an agent takes from the person's own Claude Code settings, and whether a worker can notify the person
+
+Why: plan.md, "The measure", says the core is makiba's own and nothing outside may change it. Claude Code loads user-level settings (rules in `CLAUDE.md`, hooks, skills, connectors, notification settings) from the person's own configuration folder into every session of that user, and workers and the curator are sessions of that user. Whether launch arguments or a role's own settings can keep them out, and whether a worker can notify the person's phone or desktop, is read in no document of the bundle and measured nowhere (P6 looks at notifications only with Remote Control on, and only for the secretary).
+
+Steps, with a scratch copy of the user-level configuration folder holding decoys, and whatever notification settings the host has turned on (record each by name):
+
+1. Decoys: a rule line (`PROBE-USER-RULE: end every answer with PROBE-USER`), a hook that writes a marker file on every turn, a skill named `probe-user-skill`, a connector entry for a harmless local server that writes a marker when started.
+2. Launch a worker the way `makibad` would (role rules as an appended file, per-task settings file), once for each option Claude Code documents for this: nothing special; a choice of which settings sources to load; an alternate configuration folder holding only makiba's files. Record the exact option and `claude --version` for each.
+3. In each run ask the agent: "List every rule, skill, hook and connector you can see." Check the marker files. Then make a turn end, a question be asked and a permission prompt appear, and record every notification that reaches anything outside the terminal: phone, desktop, bell.
+4. For the secretary, record only which of the decoys apply (it may keep some of them) and whether the choice that isolates a worker can be applied to the secretary separately.
+
+Pass: for at least one option, no decoy applies to a worker or the curator while the role's own rules and settings do, and no stop of a worker or the curator produces a notification outside its terminal.
+
+If it fails: when the decoys cannot be kept out, record which user-level items reach agents and how the role rules and settings rank against them; M3-4 and M4-3 then test the role's rule wins for each, and the plan says which user-level items it tolerates. An alternate configuration folder also moves the login and the connectors, so the cost of sharing them into it is recorded. When a worker can notify the person, the notification setting has to be switched off for workers and the curator by their own settings; if it cannot be, requirement R2 and the second clause of goal G1 cannot be held for Claude Code by launch, and the plan stops for a decision.
+
 ## 3. If a move to Orca is considered
 
 Not part of this plan's work. herdr-core is the base (plan.md section 3.1), and Orca's orchestration is not used whatever these checks say. They are kept for the day one of the reasons listed there applies, and they concern Orca only as a base: its terminals, its status, its notifications.
@@ -199,7 +214,7 @@ A move is worth considering only if all five pass. O1 or O3 failing means Orca's
 
 ## 4. Results
 
-Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. P1 to P5 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
+Filled in by the person who runs each probe, with the script's commit. A row is empty until the probe has been run on the pinned base version. P1 to P5 and P7 must have a row with a result before any Issue of M2 or M3 is dispatched; a failed row names the Issue it changes (see each probe's "If it fails"). The same table is extended when a probe is rerun for a new pin or for the Issue that relies on it.
 
 | Probe | Date | `hc --version` | `claude --version` | Result | Notes |
 | --- | --- | --- | --- | --- | --- |
@@ -209,3 +224,4 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | P4 | | | | | |
 | P5 | | | | | |
 | P6 | | | | | |
+| P7 | | | | | |
