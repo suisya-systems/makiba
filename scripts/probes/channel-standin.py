@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Minimal stand-in for makibad, for the channel probes (python3 standard library only).
 
-  channel-standin.py serve   --port N --state DIR --token T --cred C --admin A
+  channel-standin.py serve   --port N --state DIR --secrets FILE   (FILE: {"token":..,"cred":..,"admin":..})
       HTTP on 127.0.0.1 with:
         POST /mcp    (Authorization: Bearer T)  MCP over plain JSON POST: initialize, tools/list,
                      tools/call send_request{text} -> appended to DIR/requests.jsonl
@@ -190,8 +190,9 @@ if __name__ == "__main__":
     p.add_argument("mode", choices=["serve", "channel"])
     p.add_argument("--port", type=int, default=0)
     p.add_argument("--state", default=".")
-    p.add_argument("--token", default="")
-    p.add_argument("--cred", default="")
-    p.add_argument("--admin", default="")
+    p.add_argument("--secrets", default="", help="JSON file {token,cred,admin}: secrets stay out of argv and environ")
     a = p.parse_args()
+    if a.mode == "serve":
+        for k, v in json.load(open(a.secrets)).items():
+            setattr(a, k, v)
     serve(a) if a.mode == "serve" else channel()

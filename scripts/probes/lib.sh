@@ -198,7 +198,9 @@ standin_start() { # standin_start: starts channel-standin.py on a free loopback 
   STATE=$WORK/standin; mkdir -p "$STATE"
   TOKEN=DECOYTOKEN$(python3 -c 'import secrets;print(secrets.token_hex(8))'); CRED=DECOYCRED$$; ADMIN=DECOYADMIN$$
   PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
-  python3 "$HERE/channel-standin.py" serve --port "$PORT" --state "$STATE" --token "$TOKEN" --cred "$CRED" --admin "$ADMIN" &
+  # secrets go through a private file, not argv or environ, so P9's scan sees only what the client side exposes
+  ( umask 077; printf '{"token":"%s","cred":"%s","admin":"%s"}' "$TOKEN" "$CRED" "$ADMIN" > "$WORK/standin-secrets.json" )
+  python3 "$HERE/channel-standin.py" serve --port "$PORT" --state "$STATE" --secrets "$WORK/standin-secrets.json" &
   STANDIN_PID=$!
   local i=0; while [ ! -s "$STATE/ready" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
   [ -s "$STATE/ready" ] || return 1

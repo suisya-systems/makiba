@@ -81,11 +81,17 @@ if grep -q "$A" "$STATE/requests.jsonl" 2>/dev/null; then record mcp-tool-reache
 else record mcp-tool-reaches FAIL "no send_request with $A reached the stand-in"; screen_dump "$T" mcp; fi
 
 lb=$(grep '^STEP b ' "$WT/report.txt" 2>/dev/null | head -n 1)
-if grep -q 'GET /ping.*Python-urllib' "$STATE/access.log" 2>/dev/null; then
+reached=""; grep -q 'GET /ping.*Python-urllib' "$STATE/access.log" 2>/dev/null && reached=1
+# control from outside the sandbox: the listener is up (distinct user agent, so it is not mistaken for the worker's request)
+outside=no; python3 -c 'import sys,urllib.request;r=urllib.request.Request(sys.argv[1],headers={"User-Agent":"probe-outside"});sys.exit(0 if urllib.request.urlopen(r,timeout=5).read()==b"pong" else 1)' "http://127.0.0.1:$PORT/ping" 2>/dev/null && outside=yes
+if [ -n "$reached" ]; then
   record bash-http-direct FAIL "Bash reached the port directly (the stand-in logged a urllib request): $lb. Then the bearer token is the only guard."
-elif [ -n "$lb" ] && [ "$(printf '%s' "$lb" | sed -n 's/^STEP b exit=\([0-9]*\) .*/\1/p')" != 0 ]; then
-  record bash-http-direct PASS "the connection failed and nothing reached the stand-in: $lb"
-else record bash-http-direct NEEDS-HUMAN "no usable STEP b line (${lb:-none}); read the screen"; screen_dump "$T" bash-http; fi
+elif [ "$outside" != yes ]; then
+  record bash-http-direct NEEDS-HUMAN "the stand-in did not answer from outside the sandbox either, so a block cannot be told from a dead listener: $lb"
+elif [ -n "$lb" ] && [ "$(printf '%s' "$lb" | sed -n 's/^STEP b exit=\([0-9]*\) .*/\1/p')" != 0 ] \
+     && printf '%s' "$lb" | grep -Eqi 'Connection refused|Network is unreachable|Operation not permitted|Permission denied|Forbidden|Proxy|Tunnel|timed out|Name or service|URLError|Errno'; then
+  record bash-http-direct PASS "the connection failed with a network-style error, nothing reached the stand-in, and it answers from outside: $lb"
+else record bash-http-direct NEEDS-HUMAN "no usable or attributable STEP b result (${lb:-none}); read the screen"; screen_dump "$T" bash-http; fi
 
 lc=$(grep '^STEP c ' "$WT/report.txt" 2>/dev/null | head -n 1)
 case "$lc" in
