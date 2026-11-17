@@ -1,0 +1,5 @@
+# Paths (prefixes) where non-English text is allowed. One per line, '#' comments.
+# Text the tests feed in:
+tests/fixtures/i18n/
+# The sentence that sets the conversation language:
+roles/locale/

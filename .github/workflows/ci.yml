@@ -19,6 +19,7 @@ jobs:
           python-version: "3.11"
       - run: python3 -m pip install ruff
       - run: python3 -m ruff check .
+      - run: python3 tools/check_language.py
   acceptance:
     # .github/acceptance-check names this job: claude-org-ja's landing gate takes it as the
     # test-first evidence. Rename the job and that file together. See docs/acceptance-check.md.
