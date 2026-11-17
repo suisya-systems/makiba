@@ -1,0 +1,1191 @@
+"""Unit tests for makiba.db.writer (M2 write switch, Issue #267)."""
+from __future__ import annotations
+
+import sqlite3
+import tempfile
+import unittest
+from pathlib import Path
+
+from makiba.db import apply_schema, connect
+from makiba.db.writer import StateWriter
+
+
+def _fresh_db():
+    td = tempfile.TemporaryDirectory()
+    db = Path(td.name) / "writer.db"
+    conn = connect(db)
+    apply_schema(conn)
+    return td, conn
+
+
+class TestDDLSync(unittest.TestCase):
+    """Cross-review n2: schema.sql and __init__._M2_ORG_SESSIONS_DDL must
+    stay in lockstep — they describe the same table from two paths
+    (fresh DB vs. forward migration). A drift would silently produce
+    two divergent schemas."""
+
+    def _columns(self, conn, table):
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        # (cid, name, type, notnull, dflt_value, pk) — keep the columns
+        # that actually matter for shape comparison.
+        return [
+            (r["name"], r["type"].upper(), bool(r["notnull"]), bool(r["pk"]))
+            for r in rows
+        ]
+
+    def _master_sql(self, conn) -> str:
+        """sqlite_master.sql is SQLite's preserved CREATE TABLE text.
+
+        Strip ``IF NOT EXISTS`` (only the M2 DDL has it), strip ``--``
+        SQL comments (only schema.sql has them), and collapse whitespace
+        so the assertion compares semantic shape (columns, types, CHECK,
+        DEFAULT) rather than formatting drift."""
+        import re
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = 'org_sessions'"
+        ).fetchone()
+        sql = row["sql"] if row else ""
+        # Drop trailing line comments before whitespace collapse.
+        sql = re.sub(r"--[^\n]*", "", sql)
+        sql = re.sub(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS",
+                      "CREATE TABLE", sql, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", sql).strip()
+
+    def test_schema_sql_and_m2_ddl_produce_identical_columns(self):
+        from makiba.db import _M2_ORG_SESSIONS_DDL
+        td = tempfile.TemporaryDirectory()
+        try:
+            db_a = Path(td.name) / "a.db"
+            conn_a = connect(db_a)
+            apply_schema(conn_a)
+            cols_a = self._columns(conn_a, "org_sessions")
+            sql_a = self._master_sql(conn_a)
+            conn_a.close()
+            db_b = Path(td.name) / "b.db"
+            conn_b = connect(db_b)
+            conn_b.executescript(_M2_ORG_SESSIONS_DDL)
+            cols_b = self._columns(conn_b, "org_sessions")
+            sql_b = self._master_sql(conn_b)
+            conn_b.close()
+            self.assertEqual(cols_a, cols_b)
+            # Cross-review m-r3-3: PRAGMA table_info doesn't surface
+            # CHECK / DEFAULT clauses, so also assert the preserved
+            # CREATE TABLE text matches (whitespace-normalised).
+            self.assertEqual(sql_a, sql_b)
+        finally:
+            td.cleanup()
+
+
+class TestPreM2Migration(unittest.TestCase):
+    """Codex round-3 Blocker fix: an existing M0/M1 DB without
+    org_sessions must be migrated forward in place when read or written
+    by the M2 code paths."""
+
+    _M1_SCHEMA = """
+    CREATE TABLE projects (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+                            display_name TEXT NOT NULL);
+    CREATE TABLE workstreams (id INTEGER PRIMARY KEY, project_id INTEGER,
+                                slug TEXT, display_name TEXT,
+                                UNIQUE (id, project_id));
+    CREATE TABLE worker_dirs (id INTEGER PRIMARY KEY, abs_path TEXT UNIQUE,
+                                layout TEXT, lifecycle TEXT,
+                                last_seen_at TEXT,
+                                archived INTEGER GENERATED ALWAYS AS
+                                  (CASE WHEN lifecycle IN ('archived','delete_pending')
+                                        THEN 1 ELSE 0 END) STORED);
+    CREATE TABLE runs (id INTEGER PRIMARY KEY, task_id TEXT UNIQUE,
+                        project_id INTEGER, pattern TEXT, title TEXT,
+                        status TEXT, dispatched_at TEXT,
+                        worker_dir_id INTEGER);
+    CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                          occurred_at TEXT, actor TEXT, kind TEXT,
+                          run_id INTEGER, project_id INTEGER,
+                          workstream_id INTEGER,
+                          payload_json TEXT NOT NULL DEFAULT '{}');
+    CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY,
+                                      applied_at TEXT, description TEXT);
+    INSERT INTO schema_migrations (version, applied_at, description)
+      VALUES (1, '2026-01-01T00:00:00.000Z', 'M0 initial');
+    """
+
+    def test_writer_init_migrates_pre_m2_db(self):
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "m1.db"
+            conn = connect(db)
+            conn.executescript(self._M1_SCHEMA)
+            conn.commit()
+            # Sanity: org_sessions absent before the writer touches it.
+            self.assertIsNone(conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='org_sessions'"
+            ).fetchone())
+            StateWriter(conn)
+            # After writer init the table exists and the singleton row is seeded.
+            row = conn.execute(
+                "SELECT id, status FROM org_sessions WHERE id = 1"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["id"], 1)
+            # And v2 migration row is recorded.
+            v2 = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 2"
+            ).fetchone()
+            self.assertIsNotNone(v2)
+            conn.close()
+        finally:
+            td.cleanup()
+
+    def test_migration_raises_when_called_in_open_tx(self):
+        """Cross-review N1: an open transaction means a downstream
+        executescript() would implicit-COMMIT the caller's pending
+        writes. We must fail fast so the caller doesn't silently lose
+        rollback semantics."""
+        from makiba.db import ensure_m2_schema
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "m1.db"
+            conn = connect(db)
+            conn.executescript(self._M1_SCHEMA)
+            conn.commit()
+            # Stage uncommitted work, then attempt migration.
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO projects (slug, display_name) "
+                "VALUES ('uncommitted', 'should-disappear')"
+            )
+            with self.assertRaises(RuntimeError) as ctx:
+                ensure_m2_schema(conn)
+            self.assertIn("active transaction", str(ctx.exception))
+            # Caller can still ROLLBACK and the staged INSERT must vanish.
+            conn.execute("ROLLBACK")
+            row = conn.execute(
+                "SELECT 1 FROM projects WHERE slug = 'uncommitted'"
+            ).fetchone()
+            self.assertIsNone(row)
+            conn.close()
+        finally:
+            td.cleanup()
+
+    def test_writer_construction_in_open_tx_does_not_silently_commit(self):
+        """Cross-review N1 (Codex check shape): constructing StateWriter
+        on a pre-M2 DB while the caller has uncommitted writes must
+        either fail fast or never silently commit those writes."""
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "m1.db"
+            conn = connect(db)
+            conn.executescript(self._M1_SCHEMA)
+            conn.commit()
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO projects (slug, display_name) "
+                "VALUES ('uncommitted', 'should-disappear')"
+            )
+            with self.assertRaises(RuntimeError):
+                StateWriter(conn)
+            conn.execute("ROLLBACK")
+            row = conn.execute(
+                "SELECT 1 FROM projects WHERE slug = 'uncommitted'"
+            ).fetchone()
+            self.assertIsNone(row)
+            conn.close()
+        finally:
+            td.cleanup()
+
+    def test_get_session_in_open_tx_returns_none_without_committing(self):
+        """Cross-review M-r3-1: get_session must not silently commit a
+        caller-controlled transaction just to satisfy a read on a
+        pre-M2 DB. It returns None and lets the caller see "session
+        unknown" instead."""
+        from makiba.db.queries import get_session
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "m1.db"
+            conn = connect(db)
+            conn.executescript(self._M1_SCHEMA)
+            conn.commit()
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO projects (slug, display_name) "
+                "VALUES ('uncommitted', 'should-disappear')"
+            )
+            sess = get_session(conn)
+            self.assertIsNone(sess)
+            conn.execute("ROLLBACK")
+            row = conn.execute(
+                "SELECT 1 FROM projects WHERE slug = 'uncommitted'"
+            ).fetchone()
+            self.assertIsNone(row)
+            conn.close()
+        finally:
+            td.cleanup()
+
+    def test_get_session_migrates_pre_m2_db(self):
+        from makiba.db.queries import get_session
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "m1.db"
+            conn = connect(db)
+            conn.executescript(self._M1_SCHEMA)
+            conn.commit()
+            sess = get_session(conn)
+            # Before round-3 fix get_session returned None on a pre-M2 DB,
+            # which dashboard read paths interpreted as "DB usable but
+            # empty session" → status went to IDLE. Now we forward-migrate
+            # and return the freshly-seeded singleton row.
+            self.assertIsNotNone(sess)
+            self.assertEqual(sess["id"], 1)
+            conn.close()
+        finally:
+            td.cleanup()
+
+
+class TestSessionSingleton(unittest.TestCase):
+    def test_writer_seeds_singleton_on_init(self):
+        td, conn = _fresh_db()
+        try:
+            StateWriter(conn)
+            row = conn.execute(
+                "SELECT id, status FROM org_sessions WHERE id = 1"
+            ).fetchone()
+            self.assertIsNotNone(row)
+            self.assertEqual(row["status"], "IDLE")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_update_session_patches_listed_fields_only(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.update_session(status="ACTIVE", objective="ship M2",
+                             dispatcher_pane_id="2",
+                             dispatcher_peer_id="2")
+            sess = w.get_session()
+            self.assertEqual(sess["status"], "ACTIVE")
+            self.assertEqual(sess["objective"], "ship M2")
+            self.assertEqual(sess["dispatcher_pane_id"], "2")
+            self.assertIsNone(sess["curator_pane_id"])
+            # Second call mutates only what's passed.
+            w.update_session(status="SUSPENDED", suspended_at="2026-05-04")
+            sess = w.get_session()
+            self.assertEqual(sess["status"], "SUSPENDED")
+            self.assertEqual(sess["objective"], "ship M2")  # untouched
+            self.assertEqual(sess["suspended_at"], "2026-05-04")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_update_session_skips_implicit_none(self):
+        """Cross-review m2: passing status=None (default-arg propagation)
+        must NOT clear status. Only explicit StateWriter.CLEAR does."""
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.update_session(status="ACTIVE", objective="ship")
+            # All-None update — the wire-form many callers will accidentally
+            # produce when they propagate Optional[str] kwargs without a
+            # sentinel. Pre-fix this NULLed every column.
+            w.update_session(status=None, objective=None,
+                             dispatcher_pane_id=None)
+            sess = w.get_session()
+            self.assertEqual(sess["status"], "ACTIVE")
+            self.assertEqual(sess["objective"], "ship")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_update_session_clear_sentinel_nulls_column(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.update_session(status="ACTIVE", objective="ship")
+            w.update_session(objective=StateWriter.CLEAR)
+            sess = w.get_session()
+            self.assertEqual(sess["status"], "ACTIVE")
+            self.assertIsNone(sess["objective"])
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_update_session_rejects_unknown_field(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            with self.assertRaises(ValueError):
+                w.update_session(status="ACTIVE", bogus="x")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_singleton_check_blocks_second_row(self):
+        td, conn = _fresh_db()
+        try:
+            StateWriter(conn)
+            with self.assertRaises(sqlite3.IntegrityError):
+                conn.execute(
+                    "INSERT INTO org_sessions (id, status) VALUES (2, 'ACTIVE')"
+                )
+        finally:
+            conn.close()
+            td.cleanup()
+
+
+class TestWorkerDirs(unittest.TestCase):
+    def test_register_is_idempotent(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            id1 = w.register_worker_dir(abs_path="/x/dir-a", layout="flat")
+            id2 = w.register_worker_dir(abs_path="/x/dir-a", layout="flat",
+                                         current_branch="main")
+            self.assertEqual(id1, id2)
+            row = conn.execute(
+                "SELECT current_branch, lifecycle FROM worker_dirs "
+                "WHERE abs_path = '/x/dir-a'"
+            ).fetchone()
+            self.assertEqual(row["current_branch"], "main")
+            self.assertEqual(row["lifecycle"], "active")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_register_preserves_unspecified_attributes(self):
+        """Codex round-3: re-register with only current_branch must not
+        clobber previously-set is_git_repo / is_worktree / origin_url."""
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.register_worker_dir(
+                abs_path="/x/preserve", is_git_repo=True, is_worktree=True,
+                origin_url="https://example.invalid/x.git",
+                current_branch="main",
+            )
+            # Status ping with only current_branch.
+            w.register_worker_dir(abs_path="/x/preserve",
+                                   current_branch="feature/x")
+            row = conn.execute(
+                "SELECT is_git_repo, is_worktree, origin_url, current_branch "
+                "FROM worker_dirs WHERE abs_path = '/x/preserve'"
+            ).fetchone()
+            self.assertEqual(row["is_git_repo"], 1)
+            self.assertEqual(row["is_worktree"], 1)
+            self.assertEqual(row["origin_url"], "https://example.invalid/x.git")
+            self.assertEqual(row["current_branch"], "feature/x")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_update_lifecycle_and_remove(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.register_worker_dir(abs_path="/x/dir-b", layout="flat")
+            w.update_worker_dir_lifecycle("/x/dir-b", "archived")
+            row = conn.execute(
+                "SELECT lifecycle, archived FROM worker_dirs "
+                "WHERE abs_path = '/x/dir-b'"
+            ).fetchone()
+            self.assertEqual(row["lifecycle"], "archived")
+            self.assertEqual(row["archived"], 1)
+            w.remove_worker_dir("/x/dir-b")
+            row = conn.execute(
+                "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/dir-b'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+            td.cleanup()
+
+
+class TestRuns(unittest.TestCase):
+    def test_upsert_run_creates_then_updates(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.register_worker_dir(abs_path="/x/wd1")
+            run_id = w.upsert_run(
+                task_id="t1", project_slug="proj-a", pattern="B",
+                title="task one", status="in_use",
+                worker_dir_abs_path="/x/wd1",
+                issue_refs=["#100", "#101"],
+            )
+            self.assertGreater(run_id, 0)
+            row = conn.execute(
+                "SELECT status, title, issue_refs, worker_dir_id "
+                "FROM runs WHERE task_id = 't1'"
+            ).fetchone()
+            self.assertEqual(row["status"], "in_use")
+            self.assertEqual(row["title"], "task one")
+            self.assertIn("#100", row["issue_refs"])
+
+            # Update path: status change shouldn't null pr_url.
+            w.upsert_run(task_id="t1", project_slug="proj-a", pattern="B",
+                          status="review", pr_url="https://x/pr/1")
+            row = conn.execute(
+                "SELECT status, pr_url FROM runs WHERE task_id = 't1'"
+            ).fetchone()
+            self.assertEqual(row["status"], "review")
+            self.assertEqual(row["pr_url"], "https://x/pr/1")
+
+            # Subsequent update with no pr_url must not null the existing one.
+            w.upsert_run(task_id="t1", project_slug="proj-a", pattern="B",
+                          status="completed")
+            row = conn.execute(
+                "SELECT status, pr_url FROM runs WHERE task_id = 't1'"
+            ).fetchone()
+            self.assertEqual(row["status"], "completed")
+            self.assertEqual(row["pr_url"], "https://x/pr/1")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_upsert_preserves_unspecified_fields(self):
+        """Codex round-2: omitted kwargs must NOT clobber existing values
+        (title, verification, workstream_id were silently reset before)."""
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.upsert_run(task_id="t-keep", project_slug="proj-k",
+                          pattern="B", title="original title",
+                          verification="deep")
+            # Subsequent status-only update should leave title /
+            # verification / pattern intact.
+            w.upsert_run(task_id="t-keep", project_slug="proj-k",
+                          status="review")
+            row = conn.execute(
+                "SELECT title, verification, pattern, status FROM runs "
+                "WHERE task_id = 't-keep'"
+            ).fetchone()
+            self.assertEqual(row["title"], "original title")
+            self.assertEqual(row["verification"], "deep")
+            self.assertEqual(row["pattern"], "B")
+            self.assertEqual(row["status"], "review")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_update_run_status(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.upsert_run(task_id="t2", project_slug="proj-b", pattern="C")
+            w.update_run_status("t2", "completed",
+                                 completed_at="2026-05-04T00:00:00.000Z",
+                                 outcome_note="ok")
+            row = conn.execute(
+                "SELECT status, completed_at, outcome_note FROM runs "
+                "WHERE task_id = 't2'"
+            ).fetchone()
+            self.assertEqual(row["status"], "completed")
+            self.assertEqual(row["completed_at"], "2026-05-04T00:00:00.000Z")
+            self.assertEqual(row["outcome_note"], "ok")
+        finally:
+            conn.close()
+            td.cleanup()
+
+
+class TestEvents(unittest.TestCase):
+    def test_append_event_resolves_run_fk(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.upsert_run(task_id="t3", project_slug="proj-c", pattern="A")
+            evt_id = w.append_event(
+                kind="dispatch", actor="dispatcher",
+                payload={"task": "t3", "n": 1},
+                run_task_id="t3",
+            )
+            self.assertGreater(evt_id, 0)
+            row = conn.execute(
+                "SELECT kind, actor, run_id, project_id, payload_json "
+                "FROM events WHERE id = ?", (evt_id,)
+            ).fetchone()
+            self.assertEqual(row["kind"], "dispatch")
+            self.assertEqual(row["actor"], "dispatcher")
+            self.assertIsNotNone(row["run_id"])
+            self.assertIsNotNone(row["project_id"])
+            self.assertIn("\"n\": 1", row["payload_json"])
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_append_event_payload_check(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            # Empty payload defaults to '{}' which is valid JSON.
+            w.append_event(kind="ping", payload=None)
+            row = conn.execute(
+                "SELECT payload_json FROM events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row["payload_json"], "{}")
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_append_event_with_explicit_occurred_at(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.append_event(kind="x", occurred_at="2026-05-04T00:00:00.000Z")
+            row = conn.execute(
+                "SELECT occurred_at FROM events ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+            self.assertEqual(row["occurred_at"], "2026-05-04T00:00:00.000Z")
+        finally:
+            conn.close()
+            td.cleanup()
+
+
+class TestTransactionBoundary(unittest.TestCase):
+    def test_rollback_undoes_uncommitted_writes(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.commit()  # flush the auto-seeded singleton
+            w.begin()
+            w.register_worker_dir(abs_path="/x/uncommitted")
+            w.rollback()
+            row = conn.execute(
+                "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/uncommitted'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_commit_persists(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            w.register_worker_dir(abs_path="/x/persist")
+            w.commit()
+            # Re-open to verify on-disk state.
+            db_path = Path(next(iter(conn.execute(
+                "PRAGMA database_list").fetchall()))["file"])
+            conn.close()
+            conn2 = connect(db_path)
+            try:
+                row = conn2.execute(
+                    "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/persist'"
+                ).fetchone()
+                self.assertIsNotNone(row)
+            finally:
+                conn2.close()
+        finally:
+            td.cleanup()
+
+
+class TestTransactionContextManager(unittest.TestCase):
+    """M4 (Issue #267): ``transaction()`` is the canonical write entry
+    point for skill-side callers. It must commit on normal exit, roll
+    back on exception, and best-effort regenerate ``.state/org-state.md``
+    after commit when ``claude_org_root`` is known. The pre-M4 jsonl
+    side-output has been decommissioned."""
+
+    def _root_with_state_db(self):
+        td = tempfile.TemporaryDirectory()
+        root = Path(td.name)
+        (root / ".state").mkdir()
+        db = root / ".state" / "state.db"
+        conn = connect(db)
+        apply_schema(conn)
+        return td, root, db, conn
+
+    def test_commits_on_normal_exit(self):
+        td, root, db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            with w.transaction() as tx:
+                tx.register_worker_dir(abs_path="/x/in-tx")
+            conn.close()
+            conn2 = connect(db)
+            try:
+                row = conn2.execute(
+                    "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/in-tx'"
+                ).fetchone()
+                self.assertIsNotNone(row)
+            finally:
+                conn2.close()
+        finally:
+            td.cleanup()
+
+    def test_rolls_back_on_exception(self):
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            with self.assertRaises(RuntimeError), w.transaction() as tx:
+                tx.register_worker_dir(abs_path="/x/should-rollback")
+                raise RuntimeError("boom")
+            row = conn.execute(
+                "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/should-rollback'"
+            ).fetchone()
+            self.assertIsNone(row)
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_post_commit_regenerates_markdown_only(self):
+        # M4 (Issue #267): jsonl side-output is decommissioned; the
+        # post-commit hook now writes only `.state/org-state.md`.
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            with w.transaction() as tx:
+                tx.update_session(status="ACTIVE", objective="ship M4")
+                tx.append_event(kind="dispatch", actor="dispatcher",
+                                 payload={"task": "t-x"})
+            md = (root / ".state" / "org-state.md").read_text(encoding="utf-8")
+            self.assertIn("Status: ACTIVE", md)
+            self.assertFalse((root / ".state" / "journal.jsonl").exists())
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_post_commit_regen_failure_does_not_rollback(self):
+        """DB is SoT; markdown/jsonl regen is best-effort. A regen
+        failure must NOT roll back the already-committed write and must
+        NOT escape the ``with`` block."""
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            from makiba.db import snapshotter as _snap
+            orig = _snap.post_commit_regenerate
+            calls = {"n": 0}
+
+            def boom(*a, **kw):
+                calls["n"] += 1
+                raise RuntimeError("simulated regen failure")
+
+            _snap.post_commit_regenerate = boom
+            try:
+                with w.transaction() as tx:
+                    tx.register_worker_dir(abs_path="/x/regen-failed")
+            finally:
+                _snap.post_commit_regenerate = orig
+            self.assertEqual(calls["n"], 1)
+            row = conn.execute(
+                "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/regen-failed'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_no_root_skips_post_commit_silently(self):
+        """In-tempdir tests (no ``.state/`` ancestor) must not attempt
+        regenerate. Auto-detection returns None and ``transaction()``
+        becomes a plain BEGIN/COMMIT pair."""
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            self.assertIsNone(w._claude_org_root)
+            with w.transaction() as tx:
+                tx.register_worker_dir(abs_path="/x/no-root")
+            row = conn.execute(
+                "SELECT 1 FROM worker_dirs WHERE abs_path = '/x/no-root'"
+            ).fetchone()
+            self.assertIsNotNone(row)
+        finally:
+            conn.close()
+            td.cleanup()
+
+
+class TestRootAutoDetect(unittest.TestCase):
+    def test_detects_root_from_state_db_path(self):
+        """The conventional layout (``<root>/.state/state.db``) should
+        let StateWriter auto-detect ``claude_org_root``."""
+        td = tempfile.TemporaryDirectory()
+        try:
+            root = Path(td.name)
+            (root / ".state").mkdir()
+            db = root / ".state" / "state.db"
+            conn = connect(db)
+            try:
+                apply_schema(conn)
+                w = StateWriter(conn)
+                self.assertIsNotNone(w._claude_org_root)
+                self.assertEqual(
+                    w._claude_org_root.resolve(), root.resolve()
+                )
+            finally:
+                conn.close()
+        finally:
+            td.cleanup()
+
+    def test_no_root_for_memory_db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.row_factory = sqlite3.Row
+        try:
+            apply_schema(conn)
+            w = StateWriter(conn)
+            self.assertIsNone(w._claude_org_root)
+        finally:
+            conn.close()
+
+    def test_writer_handles_bare_connection_without_row_factory(self):
+        """Cross-review M2.1 Minor 1: callers that pass a bare
+        ``sqlite3.connect()`` handle (no row_factory) must still get a
+        working StateWriter. The auto-detect helper addresses
+        ``row["file"]`` which would raise on a tuple-row connection;
+        StateWriter forces row_factory = Row defensively."""
+        td = tempfile.TemporaryDirectory()
+        try:
+            root = Path(td.name)
+            (root / ".state").mkdir()
+            db = root / ".state" / "state.db"
+            # Bare connect — explicitly NOT going through makiba.db.connect.
+            conn = sqlite3.connect(str(db))
+            try:
+                apply_schema(conn)
+                w = StateWriter(conn)
+                self.assertIs(conn.row_factory, sqlite3.Row)
+                self.assertIsNotNone(w._claude_org_root)
+                with w.transaction() as tx:
+                    tx.register_worker_dir(abs_path="/x/bare-conn-ok")
+            finally:
+                conn.close()
+        finally:
+            td.cleanup()
+
+
+# TestPostCommitJsonSnapshot is not carried: it needs claude-org-ja's dashboard converter.
+
+
+class TestPostCommitWorkerArchive(unittest.TestCase):
+    """Issue #284: completing a run via ``update_run_status(..., 'completed')``
+    must atomically move ``.state/workers/worker-<task>.md`` into
+    ``.state/workers/archive/``, lazily creating the archive directory.
+    Idempotent on re-completion; rollback voids the move."""
+
+    def _root_with_state_db(self):
+        td = tempfile.TemporaryDirectory()
+        root = Path(td.name)
+        (root / ".state" / "workers").mkdir(parents=True)
+        db = root / ".state" / "state.db"
+        conn = connect(db)
+        apply_schema(conn)
+        return td, root, db, conn
+
+    def _seed_worker_file(self, root: Path, task_id: str) -> Path:
+        f = root / ".state" / "workers" / f"worker-{task_id}.md"
+        f.write_text(f"# Worker: worker-{task_id}\n", encoding="utf-8")
+        return f
+
+    def test_completion_moves_worker_file_to_archive(self):
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            src = self._seed_worker_file(root, "ta")
+            with w.transaction() as tx:
+                tx.upsert_run(task_id="ta", project_slug="p", pattern="B")
+            # Pre-condition: archive dir absent before completion.
+            archive = root / ".state" / "workers" / "archive"
+            self.assertFalse(archive.exists())
+            with w.transaction() as tx:
+                tx.update_run_status("ta", "completed")
+            self.assertFalse(src.exists(), "source file should have moved")
+            dst = archive / "worker-ta.md"
+            self.assertTrue(dst.exists(), "worker file should land in archive/")
+            self.assertIn("worker-ta", dst.read_text(encoding="utf-8"))
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_completion_is_idempotent(self):
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            self._seed_worker_file(root, "tb")
+            with w.transaction() as tx:
+                tx.upsert_run(task_id="tb", project_slug="p", pattern="B")
+                tx.update_run_status("tb", "completed")
+            archive = root / ".state" / "workers" / "archive" / "worker-tb.md"
+            self.assertTrue(archive.exists())
+            # Second completion: no source file present, should no-op
+            # without raising.
+            with w.transaction() as tx:
+                tx.update_run_status("tb", "completed")
+            self.assertTrue(archive.exists())
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_completion_no_worker_file_is_noop(self):
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            with w.transaction() as tx:
+                tx.upsert_run(task_id="tc", project_slug="p", pattern="B")
+                tx.update_run_status("tc", "completed")
+            archive = root / ".state" / "workers" / "archive"
+            # Archive dir must not be created for a completion with no
+            # worker-state file to move.
+            self.assertFalse(archive.exists())
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_toggle_completed_then_reopened_does_not_archive(self):
+        """Codex round-2: same-transaction toggle 'completed' → 'in_use'
+        must not move the worker file. The committed status is the
+        source of truth for archival, not the queue history."""
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            src = self._seed_worker_file(root, "ttoggle")
+            with w.transaction() as tx:
+                tx.upsert_run(task_id="ttoggle", project_slug="p", pattern="B")
+            with w.transaction() as tx:
+                tx.update_run_status("ttoggle", "completed")
+                tx.update_run_status("ttoggle", "in_use")
+            self.assertTrue(src.exists(),
+                "worker file must stay live when final status is in_use")
+            archive = root / ".state" / "workers" / "archive"
+            self.assertFalse(archive.exists())
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_completion_unknown_task_does_not_queue(self):
+        """Codex review: an UPDATE that matches 0 rows (typo'd task_id
+        or run never registered) must not enqueue an archive move —
+        otherwise we'd silently move a worker file with no completed
+        DB row to back it up."""
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            stray = self._seed_worker_file(root, "stray")
+            with w.transaction() as tx:
+                tx.update_run_status("stray", "completed")
+            archive = root / ".state" / "workers" / "archive"
+            self.assertFalse(archive.exists())
+            self.assertTrue(stray.exists())
+            self.assertEqual(w._pending_worker_archives, [])
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_explicit_begin_commit_fires_hooks(self):
+        """Codex review: post-commit hooks live on commit() (not the
+        context manager) so begin()/commit() callers also get JSON
+        regen + archive move."""
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            src = self._seed_worker_file(root, "tmanual")
+            w.begin()
+            w.upsert_run(task_id="tmanual", project_slug="p", pattern="B")
+            w.update_run_status("tmanual", "completed")
+            w.commit()
+            self.assertFalse(src.exists())
+            archive = root / ".state" / "workers" / "archive" / "worker-tmanual.md"
+            self.assertTrue(archive.exists())
+        finally:
+            conn.close()
+            td.cleanup()
+
+    def test_rollback_voids_pending_archive(self):
+        td, root, _db, conn = self._root_with_state_db()
+        try:
+            w = StateWriter(conn, claude_org_root=root)
+            src = self._seed_worker_file(root, "td")
+            with w.transaction() as tx:
+                tx.upsert_run(task_id="td", project_slug="p", pattern="B")
+            with self.assertRaises(RuntimeError), w.transaction() as tx:
+                tx.update_run_status("td", "completed")
+                raise RuntimeError("boom")
+            # File must remain in place; archive must not be created.
+            self.assertTrue(src.exists())
+            archive = root / ".state" / "workers" / "archive"
+            self.assertFalse(archive.exists())
+            # Subsequent unrelated commit must NOT drain a stale queue.
+            with w.transaction() as tx:
+                tx.register_worker_dir(abs_path="/x/unrelated")
+            self.assertTrue(src.exists())
+            self.assertFalse(archive.exists())
+        finally:
+            conn.close()
+            td.cleanup()
+
+
+class TestEventDeliveriesDDLSync(unittest.TestCase):
+    """event_deliveries: schema.sql and __init__._M3_EVENT_DELIVERIES_DDL
+    must stay in lockstep (fresh DB vs. forward migration), mirroring the
+    org_sessions lockstep test. Refs #653 #658."""
+
+    def _columns(self, conn, table):
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return [
+            (r["name"], r["type"].upper(), bool(r["notnull"]), bool(r["pk"]))
+            for r in rows
+        ]
+
+    def _master_sql(self, conn, name):
+        import re
+        row = conn.execute(
+            "SELECT sql FROM sqlite_master WHERE name = ?", (name,)
+        ).fetchone()
+        sql = row["sql"] if row else ""
+        sql = re.sub(r"--[^\n]*", "", sql)
+        sql = re.sub(r"CREATE\s+TABLE\s+IF\s+NOT\s+EXISTS",
+                     "CREATE TABLE", sql, flags=re.IGNORECASE)
+        return re.sub(r"\s+", " ", sql).strip()
+
+    def test_schema_sql_and_m3_ddl_produce_identical_columns(self):
+        from makiba.db import _M3_EVENT_DELIVERIES_DDL
+        td = tempfile.TemporaryDirectory()
+        try:
+            db_a = Path(td.name) / "a.db"
+            conn_a = connect(db_a)
+            apply_schema(conn_a)
+            cols_a = self._columns(conn_a, "event_deliveries")
+            sql_a = self._master_sql(conn_a, "event_deliveries")
+            conn_a.close()
+            db_b = Path(td.name) / "b.db"
+            conn_b = connect(db_b)
+            # event_deliveries FKs events(id); create a minimal events
+            # table first so the standalone DDL applies in isolation.
+            conn_b.executescript(
+                "CREATE TABLE events (id INTEGER PRIMARY KEY AUTOINCREMENT);"
+            )
+            conn_b.executescript(_M3_EVENT_DELIVERIES_DDL)
+            cols_b = self._columns(conn_b, "event_deliveries")
+            sql_b = self._master_sql(conn_b, "event_deliveries")
+            conn_b.close()
+            self.assertEqual(cols_a, cols_b)
+            self.assertEqual(sql_a, sql_b)
+        finally:
+            td.cleanup()
+
+
+class TestPreEventDeliveriesMigration(unittest.TestCase):
+    """A DB created before the event_deliveries ledger must be migrated
+    forward in place when a StateWriter attaches to it. Refs #653 #658."""
+
+    _PRE_LEDGER_SCHEMA = TestPreM2Migration._M1_SCHEMA + """
+    CREATE TABLE org_sessions (id INTEGER PRIMARY KEY CHECK (id = 1),
+                                status TEXT NOT NULL DEFAULT 'IDLE',
+                                last_writer_at TEXT NOT NULL DEFAULT '');
+    INSERT OR IGNORE INTO org_sessions (id, status, last_writer_at)
+      VALUES (1, 'IDLE', '');
+    INSERT INTO schema_migrations (version, applied_at, description)
+      VALUES (2, '2026-01-01T00:00:00.000Z', 'M2');
+    """
+
+    def test_writer_init_migrates_pre_ledger_db(self):
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "pre.db"
+            conn = connect(db)
+            conn.executescript(self._PRE_LEDGER_SCHEMA)
+            conn.commit()
+            self.assertIsNone(conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='event_deliveries'"
+            ).fetchone())
+            StateWriter(conn)
+            self.assertIsNotNone(conn.execute(
+                "SELECT 1 FROM sqlite_master "
+                "WHERE type='table' AND name='event_deliveries'"
+            ).fetchone())
+            v3 = conn.execute(
+                "SELECT 1 FROM schema_migrations WHERE version = 3"
+            ).fetchone()
+            self.assertIsNotNone(v3)
+            conn.close()
+        finally:
+            td.cleanup()
+
+    def test_ensure_ledger_raises_when_called_in_open_tx(self):
+        from makiba.db import ensure_event_deliveries_schema
+        td = tempfile.TemporaryDirectory()
+        try:
+            db = Path(td.name) / "pre.db"
+            conn = connect(db)
+            conn.executescript(self._PRE_LEDGER_SCHEMA)
+            conn.commit()
+            conn.execute("BEGIN")
+            conn.execute(
+                "INSERT INTO projects (slug, display_name) VALUES ('p', 'P')"
+            )
+            with self.assertRaises(RuntimeError):
+                ensure_event_deliveries_schema(conn)
+            conn.close()
+        finally:
+            td.cleanup()
+
+
+class TestEventDeliveriesLedger(unittest.TestCase):
+    """Behaviour of the outbox ledger API: idempotency key, at-least-once
+    relay, retryable failed state. Refs #653 #658."""
+
+    def _seed_event(self, conn, kind="ci_completed", payload='{"pr": 1}'):
+        cur = conn.execute(
+            "INSERT INTO events (kind, payload_json) VALUES (?, ?)",
+            (kind, payload),
+        )
+        return cur.lastrowid
+
+    def test_pending_then_delivered_is_excluded(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            eid = self._seed_event(conn)
+            pend = w.pending_deliveries(
+                recipient="secretary", kinds=["ci_completed"])
+            self.assertEqual([r["id"] for r in pend], [eid])
+            self.assertEqual(pend[0]["attempt"], 0)
+            # Attempt then deliver.
+            self.assertEqual(
+                w.begin_delivery_attempt(source_event_id=eid,
+                                         recipient="secretary"), 1)
+            w.mark_delivered(source_event_id=eid, recipient="secretary")
+            # Now excluded for this recipient.
+            self.assertEqual(
+                w.pending_deliveries(recipient="secretary",
+                                     kinds=["ci_completed"]), [])
+            # But NOT for a different recipient (per-recipient ledger).
+            self.assertEqual(
+                [r["id"] for r in w.pending_deliveries(
+                    recipient="human", kinds=["ci_completed"])],
+                [eid])
+        finally:
+            conn.close(); td.cleanup()
+
+    def test_idempotency_key_no_duplicate_rows(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            eid = self._seed_event(conn)
+            w.begin_delivery_attempt(source_event_id=eid, recipient="secretary")
+            a2 = w.begin_delivery_attempt(source_event_id=eid,
+                                          recipient="secretary")
+            self.assertEqual(a2, 2)  # attempt incremented, not a new row
+            n = conn.execute(
+                "SELECT COUNT(*) AS n FROM event_deliveries "
+                "WHERE source_event_id = ? AND recipient = ?",
+                (eid, "secretary")).fetchone()["n"]
+            self.assertEqual(n, 1)
+        finally:
+            conn.close(); td.cleanup()
+
+    def test_failed_is_retryable_delivered_is_terminal(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            eid = self._seed_event(conn)
+            w.begin_delivery_attempt(source_event_id=eid, recipient="secretary")
+            w.mark_delivery_failed(source_event_id=eid, recipient="secretary",
+                                   error="broker unreachable")
+            # failed does NOT exclude — still surfaced for retry.
+            self.assertEqual(
+                [r["id"] for r in w.pending_deliveries(
+                    recipient="secretary", kinds=["ci_completed"])],
+                [eid])
+            row = conn.execute(
+                "SELECT status, last_error FROM event_deliveries "
+                "WHERE source_event_id = ?", (eid,)).fetchone()
+            self.assertEqual(row["status"], "failed")
+            self.assertEqual(row["last_error"], "broker unreachable")
+            # A later confirmed delivery makes it terminal...
+            w.mark_delivered(source_event_id=eid, recipient="secretary")
+            self.assertEqual(
+                w.pending_deliveries(recipient="secretary",
+                                     kinds=["ci_completed"]), [])
+            # ...and a late failure report must NOT undo a delivered row.
+            w.mark_delivery_failed(source_event_id=eid, recipient="secretary",
+                                   error="late error")
+            self.assertEqual(
+                conn.execute("SELECT status FROM event_deliveries "
+                             "WHERE source_event_id = ?",
+                             (eid,)).fetchone()["status"],
+                "delivered")
+        finally:
+            conn.close(); td.cleanup()
+
+    def test_since_bound_and_kind_filter(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            old = conn.execute(
+                "INSERT INTO events (kind, occurred_at, payload_json) "
+                "VALUES ('ci_completed', '2020-01-01T00:00:00.000Z', '{}')"
+            ).lastrowid
+            new = conn.execute(
+                "INSERT INTO events (kind, occurred_at, payload_json) "
+                "VALUES ('ci_completed', '2030-01-01T00:00:00.000Z', '{}')"
+            ).lastrowid
+            other = self._seed_event(conn, kind="worker_reported")
+            # since bound excludes the ancient row.
+            pend = w.pending_deliveries(
+                recipient="secretary", kinds=["ci_completed"],
+                since="2025-01-01T00:00:00.000Z")
+            self.assertEqual([r["id"] for r in pend], [new])
+            # kind filter excludes non-terminal kinds.
+            allk = w.pending_deliveries(
+                recipient="secretary", kinds=["ci_completed"])
+            self.assertNotIn(other, [r["id"] for r in allk])
+            self.assertEqual({r["id"] for r in allk}, {old, new})
+        finally:
+            conn.close(); td.cleanup()
+
+    def test_since_bound_does_not_abandon_attempted_undelivered(self):
+        """Cross-review: an event already attempted (has a ledger row) but
+        never delivered must keep being surfaced even after it ages past
+        the since bound — otherwise a stuck delivery is silently dropped,
+        breaking the zero-miss guarantee."""
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            # Ancient undelivered event that we DID attempt (failed).
+            old = conn.execute(
+                "INSERT INTO events (kind, occurred_at, payload_json) "
+                "VALUES ('ci_completed','2000-01-01T00:00:00.000Z','{\"pr\":1}')"
+            ).lastrowid
+            w.begin_delivery_attempt(source_event_id=old, recipient="secretary")
+            w.mark_delivery_failed(source_event_id=old, recipient="secretary",
+                                   error="down")
+            # Ancient event we NEVER attempted (no ledger row).
+            never = conn.execute(
+                "INSERT INTO events (kind, occurred_at, payload_json) "
+                "VALUES ('ci_completed','2000-01-01T00:00:00.000Z','{\"pr\":2}')"
+            ).lastrowid
+            # With a since bound well after both events: the attempted-but-
+            # -undelivered one survives (retried indefinitely); the never-
+            # attempted ancient one stays excluded (anti-flood preserved).
+            pend = w.pending_deliveries(
+                recipient="secretary", kinds=["ci_completed"],
+                since="2025-01-01T00:00:00.000Z")
+            ids = [r["id"] for r in pend]
+            self.assertIn(old, ids)
+            self.assertNotIn(never, ids)
+            # Once delivered, it drops out for good.
+            w.mark_delivered(source_event_id=old, recipient="secretary")
+            pend = w.pending_deliveries(
+                recipient="secretary", kinds=["ci_completed"],
+                since="2025-01-01T00:00:00.000Z")
+            self.assertNotIn(old, [r["id"] for r in pend])
+        finally:
+            conn.close(); td.cleanup()
+
+    def test_mark_delivered_without_prior_attempt(self):
+        td, conn = _fresh_db()
+        try:
+            w = StateWriter(conn)
+            eid = self._seed_event(conn)
+            # Fast path: a confirmed send may mark delivered directly.
+            w.mark_delivered(source_event_id=eid, recipient="secretary")
+            row = conn.execute(
+                "SELECT status, delivered_at FROM event_deliveries "
+                "WHERE source_event_id = ?", (eid,)).fetchone()
+            self.assertEqual(row["status"], "delivered")
+            self.assertIsNotNone(row["delivered_at"])
+        finally:
+            conn.close(); td.cleanup()
+
+
+if __name__ == "__main__":
+    unittest.main()
