@@ -16,6 +16,9 @@ dev = ["pytest", "ruff"]
 [tool.setuptools.packages.find]
 include = ["makiba*"]
 
+[tool.setuptools.package-data]
+"*" = ["*.sql"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 

@@ -18,7 +18,7 @@ class UnsupportedClaudeVersion(Exception):
 
 def check_claude_version(text: str) -> tuple[int, int, int]:
     """`text` is what `claude --version` prints, e.g. '2.1.326 (Claude Code)'."""
-    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)\b", text)
+    m = re.match(r"\s*(\d+)\.(\d+)\.(\d+)(?=\s|$)", text)
     found = tuple(map(int, m.groups())) if m else None
     if found is None or not LOW <= found <= HIGH:
         raise UnsupportedClaudeVersion(
