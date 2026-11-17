@@ -13,8 +13,8 @@ dependencies = []
 [project.optional-dependencies]
 dev = ["pytest", "ruff"]
 
-[tool.setuptools]
-packages = ["makiba"]
+[tool.setuptools.packages.find]
+include = ["makiba*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
