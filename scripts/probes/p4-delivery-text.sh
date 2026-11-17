@@ -44,7 +44,9 @@ wrap() { printf '<makiba from="probe" kind="message" id="%s">\n%s\n</makiba>' "$
 run_case() { # run_case <name> <mode: one|two|quick> <id:body> ...
   local name=$1 mode=$2; shift 2
   rm -f "$REPO"/echo-*.txt
-  hc send --wait --timeout 90 "$T" "$SETUP" >/dev/null 2>&1; wait_idle "$T" 60
+  hc send --wait --timeout 90 "$T" "$SETUP" >/dev/null 2>&1
+  wait_idle "$T" 60 || say "note: $name: the agent was not idle before the case"
+  local p0; p0=$(count_prompts "$T" '<makiba')
   case $mode in
     one) hc send --wait --timeout 150 "$T" "$(wrap "${1%%:*}" "${1#*:}")" >/dev/null 2>&1 ;;
     two) hc send --wait --timeout 150 "$T" "$(wrap "${1%%:*}" "${1#*:}")
@@ -59,7 +61,9 @@ $(wrap "${2%%:*}" "${2#*:}")" >/dev/null 2>&1 ;;
     [ -z "$bad" ] && break
     i=$((i + 3)); sleep 3
   done
-  sleep 3; wait_idle "$T" 90
+  sleep 3; wait_idle "$T" 90 || say "note: $name: the turn did not end within 90s"
+  local want=1 got; [ "$mode" = quick ] && want=2
+  got=$(( $(count_prompts "$T" '<makiba') - p0 ))
   bad=""
   for spec in "$@"; do
     id=${spec%%:*}; body=${spec#*:}; f=$REPO/echo-$id.txt
@@ -72,7 +76,9 @@ sys.exit(0 if a == b else 1)
 PY
     then bad="$bad id$id:differs"; fi
   done
-  if [ -z "$bad" ]; then record "$name" PASS "echo file(s) equal what was sent"
+  if [ -z "$bad" ] && [ "$got" -eq "$want" ]; then record "$name" PASS "echo file(s) equal what was sent; $got prompt(s) started with the wrapper"
+  elif [ -z "$bad" ] && [ "$got" -gt "$want" ]; then record "$name" FAIL "echo ok but the wrapper started $got prompts, expected $want (split delivery)"; screen_dump "$T" "$name"
+  elif [ -z "$bad" ]; then record "$name" NEEDS-HUMAN "echo ok but only $got of $want expected wrapper prompts found on screen (scrolled off or marker differs); read the screen"; screen_dump "$T" "$name"
   else record "$name" FAIL "echo problems:$bad"; screen_dump "$T" "$name"; fi
 }
 

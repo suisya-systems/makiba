@@ -123,7 +123,7 @@ answer_dialog() { # the folder-trust policy: move the cursor onto a "Yes" line, 
 
 is_ready() { # empty prompt, no dialog
   has_dialog "$1" && return 1
-  [ "$(state_of "$1")" = idle ] && return 0
+  case "$(state_of "$1")" in idle|done) return 0 ;; esac
   hc read "$1" 2>/dev/null | grep -Eq 'for shortcuts|\? for'
 }
 
@@ -140,8 +140,12 @@ wait_ready() { # wait_ready <terminal> <seconds>: answers the trust dialog on th
 wait_idle() { # wait_idle <terminal> <seconds>
   local i=0
   while [ "$i" -lt "$2" ]; do
-    [ "$(state_of "$1")" = idle ] && return 0
+    case "$(state_of "$1")" in idle|done) return 0 ;; esac   # done = a finished turn (OSC 7501)
     i=$((i + 2)); sleep 2
   done
   return 1
+}
+
+count_prompts() { # count_prompts <terminal> <regex>: prompt lines (composer marker first) in the history
+  hc read --lines 3000 "$1" 2>/dev/null | grep -cE "^[[:space:]]*[❯>] *$2"   # TODO(confirm): marker is "❯"
 }

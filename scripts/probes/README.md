@@ -29,7 +29,7 @@ Pass: `send-held-20s` PASS and `order-after-enter` PASS.
 
 ## P4 `p4-delivery-text.sh <dir>`
 
-Eight cases to one idle Claude Code (acceptEdits mode, in a scratch repository): a 12-line body, a 4000-character body, first lines `/clear`, `!ls`, `#note`, a body with the closing tag (escaped as in spec section 8), two wrapped messages in one send, two sends back to back. The agent is told to write each body to `echo-<id>.txt`; the script compares the file with what was sent. "One prompt" and "no line acts as a command" are inferred from that file coming out whole.
+Eight cases to one idle Claude Code (acceptEdits mode, in a scratch repository): a 12-line body, a 4000-character body, first lines `/clear`, `!ls`, `#note`, a body with the closing tag (escaped as in spec section 8), two wrapped messages in one send, two sends back to back. The agent is told to write each body to `echo-<id>.txt`; the script compares the file with what was sent. "No line acts as a command" is inferred from that file coming out whole; "one prompt" is checked by counting prompt lines that start with the wrapper in the screen history (more than expected is a FAIL, fewer is NEEDS-HUMAN).
 
 Pass: all eight PASS. A failing case is a shape that must never be typed (M2-4). The "terminal read as `done` that starts a turn in the same second" case is approximated by the two quick sends.
 
@@ -41,7 +41,7 @@ Fresh git repository nobody trusted; `claude` launched through the base with the
 
 Lines that use an `hc` or Claude Code feature not shown in paddock's measured scripts or `hc --help`, each marked `TODO(confirm)` in the source:
 
-- The composer's prompt marker `❯` (P3 order check; without it the result is NEEDS-HUMAN, never PASS).
+- The composer's prompt marker `❯` (P3 order check and P4 prompt count; without it the result is NEEDS-HUMAN, never PASS).
 - `hc keys` key name `space` (P3 draft typing).
 - A second `hc send` while the first turn is starting is queued and not lost (P4 quick case).
 - Settings key `sandbox.network.allowUnixSockets` for letting a sandboxed command connect to one socket, and `filesystem.allowWrite` for the socket's folder (P1).
