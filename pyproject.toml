@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "makiba"
+version = "0.0.0"
+description = "An organization where the person talks to one secretary, built on herdr-core."
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest", "ruff"]
+
+[tool.setuptools]
+packages = ["makiba"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+# Probe scripts and the Issue tools predate the lint job and are left as they are.
+extend-exclude = ["scripts/probes", "tools"]
