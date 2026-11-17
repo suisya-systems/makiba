@@ -16,7 +16,12 @@ curl -fsSL "${url_template//@VERSION@/$version}" -o "$prefix/bin/hc"
 chmod +x "$prefix/bin/hc"
 
 got=$("$prefix/bin/hc" --version)
-case $got in
-  *"$version"*) echo "installed hc $version in $prefix/bin" ;;
-  *) echo "wanted $version, got: $got" >&2; exit 1 ;;
-esac
+# Same exact-version rule as the check at runtime (0.1.210 or 0.1.21-rc1 do not pass).
+python3 - "$here" "$got" <<'PY'
+import re, sys
+sys.path.insert(0, sys.argv[1])
+from makiba.base import version as v
+m = re.search(r"\d+\.\d+\.\d+\S*", sys.argv[2])
+v.check_version(m.group(0) if m else sys.argv[2])
+PY
+echo "installed hc $version in $prefix/bin"
