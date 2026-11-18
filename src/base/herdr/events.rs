@@ -11,13 +11,12 @@
 //! The field names below are makiba's reading of the base's own descriptions of the method; they
 //! are checked on the real base by `scripts/check-events-wire.sh`.
 
-use super::Herdr;
+use super::{Herdr, TAG_ORG, terminal_of};
 use crate::base::{
-    BaseError, BaseEvent, BlockKind, Detail, EventStream, State, Status, Terminal, TerminalEvent,
-    TerminalRef,
+    BaseError, BaseEvent, Detail, EventStream, Terminal, TerminalEvent, TerminalRef,
 };
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -113,7 +112,13 @@ impl Iterator for Events {
                 continue;
             };
             match read_message(conn) {
-                Some(message) => handle(conn, &message, self.timing.gap, &mut self.queue),
+                Some(message) => handle(
+                    conn,
+                    &message,
+                    self.timing.gap,
+                    self.base.org.as_deref(),
+                    &mut self.queue,
+                ),
                 None => self.conn = None,
             }
         }
@@ -138,7 +143,13 @@ fn exchange(
     ] {
         set.map_err(|e| base.unavailable("socket", "cannot set a timeout on", &e))?;
     }
-    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": {}});
+    // With an organization the base is asked for its terminals only; the answer is checked too.
+    let params = base
+        .org
+        .as_deref()
+        .map_or(json!({}), |org| json!({"labels": {TAG_ORG: org}}));
+    let request =
+        json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": params});
     let mut writer = &stream;
     writeln!(writer, "{request}").map_err(|e| base.unavailable("write", "cannot write to", &e))?;
     let mut reader = BufReader::new(stream);
@@ -167,7 +178,7 @@ fn exchange(
         watermark: result.get("seq").and_then(Value::as_u64).unwrap_or(0),
         deadline: Instant::now() + gap,
     };
-    Ok((conn, terminals_of(result)))
+    Ok((conn, terminals_of(result, base.org.as_deref())))
 }
 
 fn other(message: &str) -> BaseError {
@@ -214,40 +225,57 @@ fn read_message(conn: &mut Conn) -> Option<Value> {
     }
 }
 
-fn handle(conn: &mut Conn, message: &Value, gap: Duration, out: &mut VecDeque<BaseEvent>) {
+fn handle(
+    conn: &mut Conn,
+    message: &Value,
+    gap: Duration,
+    org: Option<&str>,
+    out: &mut VecDeque<BaseEvent>,
+) {
     let params = message.get("params").unwrap_or(&Value::Null);
     let seq = params.get("seq").and_then(Value::as_u64);
     match message.get("method").and_then(Value::as_str) {
         Some("heartbeat") => conn.deadline = Instant::now() + gap,
         Some("missed") => {
             conn.watermark = seq.unwrap_or(conn.watermark);
-            out.push_back(BaseEvent::Resync(terminals_of(params)));
+            out.push_back(BaseEvent::Resync(terminals_of(params, org)));
         }
         Some("event") => {
             if seq.is_some_and(|s| s <= conn.watermark) {
                 return; // older than the snapshot taken on this connection
             }
             conn.watermark = seq.unwrap_or(conn.watermark);
-            out.extend(event_of(params).map(BaseEvent::Event));
+            out.extend(event_of(params, org).map(BaseEvent::Event));
         }
         _ => {}
     }
 }
 
-fn terminals_of(v: &Value) -> Vec<Terminal> {
+/// Only this organization's terminals, when the base has one.
+fn mine(t: &Terminal, org: Option<&str>) -> bool {
+    org.is_none_or(|o| t.tags.get(TAG_ORG).map(String::as_str) == Some(o))
+}
+
+fn terminals_of(v: &Value, org: Option<&str>) -> Vec<Terminal> {
     v.get("terminals")
         .and_then(Value::as_array)
-        .map(|a| a.iter().filter_map(terminal_of).collect())
+        .map(|a| {
+            a.iter()
+                .filter_map(|t| terminal_of(t).ok())
+                .filter(|t| mine(t, org))
+                .collect()
+        })
         .unwrap_or_default()
 }
 
 /// What a notice means for one terminal; `None` for facts makiba does not follow (size, doc).
-fn event_of(params: &Value) -> Option<TerminalEvent> {
+fn event_of(params: &Value, org: Option<&str>) -> Option<TerminalEvent> {
     let wire = params.get("terminal").unwrap_or(&Value::Null);
+    let wire_terminal = || terminal_of(wire).ok().filter(|t| mine(t, org));
     match params.get("type").and_then(Value::as_str)? {
-        "created" => terminal_of(wire).map(TerminalEvent::Created),
+        "created" => wire_terminal().map(TerminalEvent::Created),
         // A lost terminal is one that is not running any more, as far as the dispatcher can tell.
-        "finished" | "lost" => terminal_of(wire).map(|mut t| {
+        "finished" | "lost" => wire_terminal().map(|mut t| {
             t.alive = false;
             TerminalEvent::Exited(t)
         }),
@@ -257,59 +285,17 @@ fn event_of(params: &Value) -> Option<TerminalEvent> {
             .and_then(Value::as_str)
             .map(|id| TerminalEvent::Removed(TerminalRef(id.into()))),
         "status" | "turn" | "title" | "labels" | "restarted" | "keep" => {
-            terminal_of(wire).map(TerminalEvent::StatusChanged)
+            wire_terminal().map(TerminalEvent::StatusChanged)
         }
         _ => None,
     }
 }
 
-fn terminal_of(v: &Value) -> Option<Terminal> {
-    let id = v.get("id")?.as_str()?;
-    let text = |p: &str| v.pointer(p).and_then(Value::as_str);
-    let tags: BTreeMap<String, String> = v
-        .get("labels")
-        .and_then(Value::as_object)
-        .map(|m| {
-            m.iter()
-                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
-                .collect()
-        })
-        .unwrap_or_default();
-    let status = v.get("status").and_then(|s| {
-        let state = match s.get("state")?.as_str()? {
-            "idle" => State::Idle,
-            "working" => State::Working,
-            "blocked" => State::Blocked,
-            "done" => State::Done,
-            "error" => State::Error,
-            _ => return None,
-        };
-        let kind = match s.get("kind").and_then(Value::as_str) {
-            Some("permission") => Some(BlockKind::Permission),
-            Some("question") => Some(BlockKind::Question),
-            Some("auth") => Some(BlockKind::Auth),
-            _ => None,
-        };
-        let msg = s.get("msg").and_then(Value::as_str).map(String::from);
-        Some(Status { state, kind, msg })
-    });
-    Some(Terminal {
-        id: TerminalRef(id.into()),
-        name: text("/name").unwrap_or(id).into(),
-        tags,
-        status,
-        turn: v.get("turn").and_then(Value::as_u64),
-        alive: v.get("exit").is_none_or(Value::is_null),
-        exit_code: v
-            .pointer("/exit/code")
-            .and_then(Value::as_i64)
-            .and_then(|c| i32::try_from(c).ok()),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::base::BlockKind;
+    use std::collections::BTreeMap;
 
     #[test]
     fn the_backoff_doubles_from_one_second_to_thirty() {
@@ -328,14 +314,14 @@ mod tests {
         assert_eq!(t.tags, BTreeMap::from([("a".to_string(), "b".to_string())]));
         assert_eq!(t.status.unwrap().kind, Some(BlockKind::Permission));
         assert_eq!((t.turn, t.alive, t.exit_code), (Some(4), false, Some(2)));
-        assert!(terminal_of(&json!({"name": "no id"})).is_none());
+        assert!(terminal_of(&json!({"name": "no id"})).is_err());
     }
 
     #[test]
     fn facts_makiba_does_not_follow_are_skipped() {
-        assert!(event_of(&json!({"type": "size", "terminal": {"id": "t1"}})).is_none());
-        assert!(event_of(&json!({"type": "doc"})).is_none());
-        let lost = event_of(&json!({"type": "lost", "terminal": {"id": "t1"}}));
+        assert!(event_of(&json!({"type": "size", "terminal": {"id": "t1"}}), None).is_none());
+        assert!(event_of(&json!({"type": "doc"}), None).is_none());
+        let lost = event_of(&json!({"type": "lost", "terminal": {"id": "t1"}}), None);
         assert!(matches!(lost, Some(TerminalEvent::Exited(t)) if !t.alive));
     }
 
@@ -419,7 +405,7 @@ mod tests {
         assert_eq!(snapshot.len(), 1);
         let mut out = VecDeque::new();
         while let Some(m) = read_message(&mut conn) {
-            handle(&mut conn, &m, Duration::from_secs(5), &mut out);
+            handle(&mut conn, &m, Duration::from_secs(5), None, &mut out);
             if out.len() == 3 {
                 break;
             }
@@ -429,5 +415,16 @@ mod tests {
         assert!(shown[0].contains("StatusChanged") && shown[0].contains("Working"));
         assert!(shown[1].starts_with("Resync") && shown[1].contains("Done"));
         assert!(shown[2].contains("Removed"), "{shown:?}");
+    }
+
+    #[test]
+    fn with_an_organization_only_its_terminals_are_followed() {
+        let mine = json!({"id": "a", "labels": {"makiba.org": "o"}});
+        let theirs = json!({"id": "b", "labels": {"makiba.org": "x"}});
+        let snapshot = json!({"terminals": [mine, theirs, {"id": "c"}]});
+        assert_eq!(terminals_of(&snapshot, Some("o")).len(), 1);
+        assert_eq!(terminals_of(&snapshot, None).len(), 3);
+        let created = |t: &Value| event_of(&json!({"type": "created", "terminal": t}), Some("o"));
+        assert!(created(&mine).is_some() && created(&theirs).is_none());
     }
 }
