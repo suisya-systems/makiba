@@ -40,6 +40,12 @@ pub struct Monitor {
     retry: Option<Vec<Terminal>>,
 }
 
+/// The identity of a terminal in the records: its `makiba.spawn` tag as it is, `None` without one.
+/// Never made up here (spec section 10).
+pub(super) fn spawn_of(tags: &BTreeMap<String, String>) -> Option<String> {
+    tags.get(crate::spec::TAG_SPAWN).cloned()
+}
+
 pub(super) fn mine(org: &str, tags: &BTreeMap<String, String>) -> bool {
     tags.get("makiba.org").map(String::as_str) == Some(org)
 }
@@ -149,6 +155,16 @@ impl Memory {
         self.turn.remove(id);
     }
 
+    /// A terminal address now carries another identity than the one remembered for it: nothing
+    /// remembered under that address belongs to the new terminal.
+    pub(super) fn retag(&mut self, t: &Terminal) {
+        if let Some(old) = self.tracked.get(&t.id)
+            && spawn_of(&old.tags) != spawn_of(&t.tags)
+        {
+            self.forget(&t.id);
+        }
+    }
+
     /// What was recorded for a terminal before this process started.
     pub(super) fn restore(&mut self, id: &TerminalRef, status: Option<Written>, turn: Option<u64>) {
         if let Some(s) = status {
@@ -169,6 +185,7 @@ impl Memory {
         if !mine(org, &t.tags) {
             return Ok(());
         }
+        self.retag(t);
         let tracked = self.tracked.entry(t.id.clone()).or_insert(Tracked {
             tags: t.tags.clone(),
             exited: false,
@@ -176,13 +193,14 @@ impl Memory {
         tracked.tags = t.tags.clone();
         let task = t.tags.get("makiba.task_id").cloned();
         let role = t.tags.get("makiba.role").cloned();
+        let spawn = spawn_of(&t.tags);
         // An absent status does not erase the last one written.
         if let Some(s) = &t.status {
             let now: Written = (s.state, s.kind, s.msg.clone());
             if self.status.get(&t.id) != Some(&now) {
                 let payload = json!({
-                    "task_id": task, "role": role, "state": state_name(s.state),
-                    "kind": s.kind.map(kind_name), "msg": s.msg,
+                    "task_id": task, "role": role, "spawn_id": spawn,
+                    "state": state_name(s.state), "kind": s.kind.map(kind_name), "msg": s.msg,
                 });
                 append(w, "terminal_status", task.as_deref(), &payload)?;
                 self.status.insert(t.id.clone(), now);
@@ -192,7 +210,9 @@ impl Memory {
         if let Some(turn) = t.turn
             && turn > self.turn.get(&t.id).copied().unwrap_or(0)
         {
-            let payload = json!({"task_id": task, "role": role, "turn": turn});
+            let payload = json!({
+                "task_id": task, "role": role, "spawn_id": spawn, "turn": turn,
+            });
             append(w, "terminal_turn", task.as_deref(), &payload)?;
             self.turn.insert(t.id.clone(), turn);
         }
@@ -216,8 +236,10 @@ impl Memory {
         }
         let task = tracked.tags.get("makiba.task_id").cloned();
         let role = tracked.tags.get("makiba.role").cloned();
+        let spawn = spawn_of(&tracked.tags);
         let payload = json!({
-            "task_id": task, "role": role, "reason": reason, "exit_code": exit_code.flatten(),
+            "task_id": task, "role": role, "spawn_id": spawn, "reason": reason,
+            "exit_code": exit_code.flatten(),
         });
         append(w, "terminal_gone", task.as_deref(), &payload)?;
         tracked.exited = true;
@@ -353,5 +375,33 @@ mod tests {
             TerminalEvent::Removed(id),
         ]);
         assert!(foreign.is_empty());
+    }
+
+    /// An address that comes back with another `makiba.spawn` inherits nothing of the old one.
+    #[test]
+    fn a_reused_address_with_another_identity_starts_clean() {
+        let with = |spawn: &str, state| {
+            let mut t = term(Some(state), Some(1), "me");
+            t.tags.insert("makiba.spawn".into(), spawn.into());
+            TerminalEvent::StatusChanged(t)
+        };
+        let got = run(vec![
+            with("a", State::Working),
+            with("b", State::Working),
+            with("b", State::Working),
+        ]);
+        let spawns: Vec<_> = got
+            .iter()
+            .map(|(k, p)| format!("{k}:{}", p["spawn_id"].as_str().unwrap()))
+            .collect();
+        assert_eq!(
+            spawns,
+            [
+                "terminal_status:a",
+                "terminal_turn:a",
+                "terminal_status:b",
+                "terminal_turn:b"
+            ]
+        );
     }
 }

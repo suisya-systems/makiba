@@ -3,17 +3,19 @@
 //! one of a daemon included, inside one transaction:
 //!
 //! 1. a terminal the monitor knew and the list no longer has is gone (`removed`);
-//! 2. the last written status and turn of each of our terminals are read back from `events`, so
+//! 2. the last written status and turn of each of our terminals are read back from `events` by
+//!    task, role and `spawn_id` (a terminal never reads another identity's history), so
 //!    what was recorded before the restart is not written again;
 //! 3. each terminal goes through the monitor's own write path, so a `done` reported while the
 //!    daemon was down is recorded, and a retained dead terminal's exit is recorded once;
-//! 4. an `in_use` run with no terminal of ours gets one `terminal_gone` (`lost`), unless the last
-//!    thing recorded for its task is already a `terminal_gone`. Failing the run is Issue 18's;
+//! 4. an `in_use` run with no terminal of ours gets one `terminal_gone` (`lost`), carrying the
+//!    `spawn_id` of its latest `run_launch` row, unless the last thing recorded for that task and
+//!    identity is already a `terminal_gone`. Failing the run is Issue 18's;
 //! 5. an unknown terminal (ours by `makiba.org`, not the secretary or the curator, with no run) is
 //!    reported once to the secretary as an anomaly and a `notice`, and left alone;
 //! 6. `base_resynced`, last.
 
-use super::monitor::{Memory, append, mine, parse_kind, parse_state};
+use super::monitor::{Memory, append, mine, parse_kind, parse_state, spawn_of};
 use crate::base::{Terminal, TerminalRef};
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
@@ -22,20 +24,25 @@ use serde_json::{Value, json};
 use std::collections::HashSet;
 
 /// What `terminal_status`, `terminal_turn` and `terminal_gone` of a terminal are matched by: its
-/// task id (or none) and its role (or none), the way the monitor wrote them.
-fn key(t: &Terminal) -> (Option<String>, Option<String>) {
+/// task id, role and `makiba.spawn` (each or none), the way the monitor wrote them. A record
+/// without `spawn_id` is an earlier generation: only an untagged terminal matches it (`IS`).
+type Key = (Option<String>, Option<String>, Option<String>);
+
+fn key(t: &Terminal) -> Key {
     (
         t.tags.get("makiba.task_id").cloned(),
         t.tags.get("makiba.role").cloned(),
+        spawn_of(&t.tags),
     )
 }
 
-/// Whether the last `terminal_status` or `terminal_gone` of this task and role is a gone.
-/// `role` of `None` matches any role: a lost run's terminal is no longer there to ask.
+/// Whether the last `terminal_status` or `terminal_gone` of this task, role and identity is a
+/// gone. `role` of `None` matches any role: a lost run's terminal is no longer there to ask.
 fn gone_recorded(
     w: &StateWriter,
     task: &Option<String>,
     role: Option<&Option<String>>,
+    spawn: &Option<String>,
 ) -> Result<bool> {
     let last: Option<String> = w
         .conn()
@@ -44,8 +51,9 @@ fn gone_recorded(
              WHERE kind IN ('terminal_status', 'terminal_gone')
                AND json_extract(payload_json, '$.task_id') IS ?1
                AND (?2 = 0 OR json_extract(payload_json, '$.role') IS ?3)
+               AND json_extract(payload_json, '$.spawn_id') IS ?4
              ORDER BY id DESC LIMIT 1",
-            params![task, role.is_some(), role.and_then(Clone::clone)],
+            params![task, role.is_some(), role.and_then(Clone::clone), spawn],
             |r| r.get(0),
         )
         .optional()?;
@@ -53,15 +61,16 @@ fn gone_recorded(
 }
 
 fn restore(w: &StateWriter, mem: &mut Memory, t: &Terminal) -> Result<()> {
-    let (task, role) = key(t);
+    let (task, role, spawn) = key(t);
     let status: Option<String> = w
         .conn()
         .query_row(
             "SELECT payload_json FROM events WHERE kind = 'terminal_status'
                AND json_extract(payload_json, '$.task_id') IS ?1
                AND json_extract(payload_json, '$.role') IS ?2
+               AND json_extract(payload_json, '$.spawn_id') IS ?3
              ORDER BY id DESC LIMIT 1",
-            params![task, role],
+            params![task, role, spawn],
             |r| r.get(0),
         )
         .optional()?;
@@ -77,8 +86,9 @@ fn restore(w: &StateWriter, mem: &mut Memory, t: &Terminal) -> Result<()> {
     let turn: Option<i64> = w.conn().query_row(
         "SELECT max(json_extract(payload_json, '$.turn')) FROM events WHERE kind = 'terminal_turn'
            AND json_extract(payload_json, '$.task_id') IS ?1
-           AND json_extract(payload_json, '$.role') IS ?2",
-        params![task, role],
+           AND json_extract(payload_json, '$.role') IS ?2
+           AND json_extract(payload_json, '$.spawn_id') IS ?3",
+        params![task, role, spawn],
         |r| r.get(0),
     )?;
     mem.restore(&t.id, status, turn.map(|n| n as u64));
@@ -107,12 +117,13 @@ pub(super) fn rebuild(
     }
 
     for t in &ours {
+        mem.retag(t);
         restore(w, mem, t)?;
         mem.observe(org, w, t)?;
-        let (task, role) = key(t);
+        let (task, role, spawn) = key(t);
         // What was recorded decides, not what this process remembers: a stale `exited` must not
         // hide a new exit, and a loss the live monitor wrote before the restart must not repeat.
-        let recorded = !t.alive && gone_recorded(w, &task, Some(&role))?;
+        let recorded = !t.alive && gone_recorded(w, &task, Some(&role), &spawn)?;
         if let Some(tr) = mem.tracked.get_mut(&t.id) {
             tr.exited = recorded;
         }
@@ -133,7 +144,17 @@ pub(super) fn rebuild(
         .collect::<std::result::Result<_, _>>()?;
     for task in in_use.into_iter().filter(|t| !with_terminal.contains(t)) {
         let task = Some(task);
-        if gone_recorded(w, &task, None)? {
+        // The identity of the loss is the run's latest launch (spec section 6.3), none without one.
+        let spawn: Option<String> = w
+            .conn()
+            .query_row(
+                "SELECT l.spawn_id FROM run_launch l JOIN runs r ON r.id = l.run_id
+                 WHERE r.task_id = ?1 ORDER BY l.id DESC LIMIT 1",
+                [&task],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if gone_recorded(w, &task, None, &spawn)? {
             continue;
         }
         let role: Option<String> = w
@@ -148,7 +169,7 @@ pub(super) fn rebuild(
             .optional()?
             .flatten();
         let payload = json!({
-            "task_id": task, "role": role, "reason": "lost", "exit_code": null,
+            "task_id": task, "role": role, "spawn_id": spawn, "reason": "lost", "exit_code": null,
         });
         append(w, "terminal_gone", task.as_deref(), &payload)?;
     }
@@ -171,7 +192,7 @@ pub(super) fn rebuild(
 /// the message, its event and its delivery row are written together; "once" is by the terminal's
 /// id, looked up in `events`, so it holds across resyncs and restarts.
 fn report_unknown(w: &StateWriter, t: &Terminal) -> Result<()> {
-    let (task, role) = key(t);
+    let (task, role, _) = key(t);
     if matches!(role.as_deref(), Some("secretary" | "curator")) {
         return Ok(());
     }
@@ -312,5 +333,54 @@ mod tests {
             kinds(&w).iter().filter(|k| *k == "terminal_gone").count(),
             1
         );
+    }
+
+    /// A loss carries the identity of the run's latest launch, and an earlier launch's loss does
+    /// not hide a later one's.
+    #[test]
+    fn a_loss_is_recorded_per_launch_of_the_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let run = w
+            .upsert_run(&crate::db::writer::RunUpsert {
+                task_id: "k",
+                project_slug: "p",
+                status: Some("in_use"),
+                ..Default::default()
+            })
+            .unwrap();
+        let launch = |spawn: &str| {
+            w.conn()
+                .execute(
+                    "INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree)
+                     VALUES (?1, ?2, 'fake', 'b', 'w')",
+                    params![run, spawn],
+                )
+                .unwrap();
+        };
+        let resync = || {
+            Monitor::new("me")
+                .handle(&w, BaseEvent::Resync(vec![]))
+                .unwrap()
+        };
+        let lost = || -> Vec<Value> {
+            let mut q = w
+                .conn()
+                .prepare("SELECT payload_json FROM events WHERE kind = 'terminal_gone' ORDER BY id")
+                .unwrap();
+            q.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|p| serde_json::from_str(&p.unwrap()).unwrap())
+                .collect()
+        };
+        resync(); // no launch row: null
+        resync();
+        launch("s1");
+        resync();
+        resync();
+        launch("s2");
+        resync();
+        let ids: Vec<Value> = lost().iter().map(|p| p["spawn_id"].clone()).collect();
+        assert_eq!(ids, [Value::Null, "s1".into(), "s2".into()]);
     }
 }

@@ -333,7 +333,7 @@ Tags are the only record of which terminal belongs to which run. `state.db` hold
 | --- | --- | --- |
 | `makiba.role` | `secretary`, `worker`, `curator` | every terminal `makibad` launches |
 | `makiba.task_id` | the run's `task_id` | workers |
-| `makiba.spawn` | `run_launch.spawn_id` | workers, the curator |
+| `makiba.spawn` | an id made at each launch: `run_launch.spawn_id` for a worker and the curator, a fresh one for each secretary launch | every terminal `makibad` launches |
 | `makiba.org` | the state folder's absolute path | every terminal, so two organizations on one base do not adopt each other's terminals |
 
 On start and after every `Resync`, `makibad` lists terminals with `makiba.org=<its own>` and rebuilds its view from the tags.
@@ -446,9 +446,9 @@ New:
 | --- | --- | --- |
 | `dispatcher_started` / `dispatcher_stopped` | `makibad` starts, stops cleanly | `pid`, `base`, `base_version` |
 | `base_resynced` | A `Resync` was handled | `reason`, `terminals` |
-| `terminal_status` | A terminal's status record changes | `task_id`, `role`, `state`, `kind`, `msg` |
-| `terminal_turn` | The base reports a turn end | `task_id`, `role`, `turn` |
-| `terminal_gone` | A terminal finished, was lost or was removed without a close | `task_id`, `role`, `reason`, `exit_code` |
+| `terminal_status` | A terminal's status record changes | `task_id`, `role`, `spawn_id`, `state`, `kind`, `msg` |
+| `terminal_turn` | The base reports a turn end | `task_id`, `role`, `spawn_id`, `turn` |
+| `terminal_gone` | A terminal finished, was lost or was removed without a close | `task_id`, `role`, `spawn_id`, `reason`, `exit_code` |
 | `worker_spawn_failed` | A launch could not be verified | `spawn_id`, `stage`, `reason`, `screen` |
 | `anomaly_raised` / `anomaly_cleared` | Section 11 | `task_id`, `rule` |
 | `message_sent` | Section 5.4 | `message_id` |
@@ -463,6 +463,8 @@ New:
 In `base_resynced`, `reason` is `start` for the first `Resync` of a `makibad` process and `resync` for every later one (a `Resync` carries no cause of its own), and `terminals` is the number of terminals of this organization in the list. It is written last, after the view is rebuilt, so a reader that waits for it sees the result.
 
 In `terminal_status`, `terminal_turn` and `terminal_gone`, `role` is the value of the terminal's `makiba.role` tag (`secretary`, `worker` or `curator`), or null when the terminal has no such tag; for a removal it comes from the tags the monitor kept.
+
+In the same three kinds, `spawn_id` identifies the terminal across a restart of `makibad` (the base's terminal id is not stored, section 6.3). It is the value of the terminal's `makiba.spawn` tag as it is, or null when the terminal has no such tag; `makibad` never makes one up while observing or resyncing. The recovery of a restart reads the last status, the highest turn and whether a `terminal_gone` is recorded by task, role and `spawn_id` together, so two terminals of one role (the secretary before and after a renewal) never share a history. A record without `spawn_id` (null or absent) belongs to an earlier generation: only a terminal without the tag is matched against such records, and a terminal that has the tag never falls back to them. There is no migration. A run that is `in_use` and has no terminal gets a `terminal_gone` with reason `lost`, whose `spawn_id` is that of the run's latest `run_launch` row (null if there is none); whether a loss is recorded is asked for that identity, so an earlier launch's loss does not hide a later one's. Whoever launches a terminal must set the tag; no launcher does yet (M3, M6).
 
 Dropped, because the thing they recorded no longer exists: `pr_watch_pane_started`, `context_handover_watch`, every kind the LLM dispatcher's loop wrote about itself.
 
