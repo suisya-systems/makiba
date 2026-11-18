@@ -2,8 +2,9 @@
 # Installs the pinned herdr-core release (PINNED in src/base/version.rs) into PREFIX/bin/hc.
 #   bash scripts/install-base.sh PREFIX
 # Reads <HERDR_RELEASES_URL or https://releases.herdr.dev>/core/<version>/manifest.json, picks this
-# machine's target, downloads its url with curl, and installs nothing unless the file's SHA-256
-# equals the manifest's. Exit 0 installed, 1 refused or failed, 2 usage.
+# machine's target, downloads its url (a tar.gz) with curl, and installs nothing unless the archive's
+# SHA-256 equals the manifest's; then installs the archive's herdr-core as PREFIX/bin/hc.
+# Exit 0 installed, 1 refused or failed, 2 usage.
 set -eu
 [ $# -eq 1 ] || { echo "usage: install-base.sh PREFIX" >&2; exit 2; }
 prefix=$1
@@ -35,13 +36,17 @@ print(t["url"]); print(t["sha256"])' "$work/manifest.json" "$target") \
 url=$(printf '%s\n' "$fields" | sed -n 1p)
 want=$(printf '%s\n' "$fields" | sed -n 2p | tr 'A-F' 'a-f')
 
-curl -fsSL "$url" -o "$work/hc" || { echo "install-base: cannot fetch $url" >&2; exit 1; }
-got=$(sha "$work/hc")
+curl -fsSL "$url" -o "$work/archive" || { echo "install-base: cannot fetch $url" >&2; exit 1; }
+got=$(sha "$work/archive")
 if [ "$got" != "$want" ]; then
   echo "install-base: SHA-256 of $url is $got, the manifest says $want; nothing installed" >&2
   exit 1
 fi
+# The archive (tar.gz on Unix) holds herdr-core, LICENSE and THIRD-PARTY-NOTICES at its root.
+mkdir "$work/x"
+tar -xzf "$work/archive" -C "$work/x" herdr-core 2>/dev/null && [ -f "$work/x/herdr-core" ] && [ ! -L "$work/x/herdr-core" ] \
+  || { echo "install-base: $url has no herdr-core executable; nothing installed" >&2; exit 1; }
 mkdir -p "$prefix/bin"
-chmod 755 "$work/hc"
-mv -f "$work/hc" "$prefix/bin/hc"
+chmod 755 "$work/x/herdr-core"
+mv -f "$work/x/herdr-core" "$prefix/bin/hc"
 echo "install-base: herdr-core $version ($target) installed at $prefix/bin/hc"
