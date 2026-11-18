@@ -349,8 +349,9 @@ fn overlay(kind: &str, data: &Value, t: &mut Terminal) {
         "status" => {
             let status = data.get("status").unwrap_or(data);
             let read = terminal_of(&json!({"id": t.id.0, "status": status}));
-            if let Some(s) = read.ok().and_then(|x| x.status) {
-                t.status = Some(s);
+            // `status: null` is the program's report being gone, not a change to ignore.
+            if status.is_null() || read.as_ref().is_ok_and(|x| x.status.is_some()) {
+                t.status = read.ok().and_then(|x| x.status);
             }
         }
         "turn" => {
@@ -542,6 +543,21 @@ mod tests {
         );
         let foreground = json!({"type": "foreground", "terminal": "t1", "data": {"pid": 1}});
         assert!(notice(foreground).is_none());
+        // What the owner's run showed for a program that reports a status.
+        let blocked = json!({"type": "status", "terminal": "t1", "data": {"records": {},
+            "reported": true, "status": {"app": "a", "kind": "permission", "state": "blocked"}}});
+        assert!(
+            matches!(notice(blocked), Some(TerminalEvent::StatusChanged(t))
+            if t.status.as_ref().and_then(|s| s.kind) == Some(BlockKind::Permission))
+        );
+        let turn =
+            json!({"type": "turn", "terminal": "t1", "data": {"state": "blocked", "turn": 2}});
+        assert!(matches!(notice(turn), Some(TerminalEvent::StatusChanged(t)) if t.turn == Some(2)));
+        let gone = json!({"type": "status", "terminal": "t1",
+            "data": {"records": {}, "reported": true, "status": null}});
+        assert!(
+            matches!(notice(gone), Some(TerminalEvent::StatusChanged(t)) if t.status.is_none())
+        );
         let finished = json!({"type": "finished", "terminal": "t1",
             "data": {"exit_code": 0, "reason": "exited", "signal": null}});
         assert!(matches!(notice(finished), Some(TerminalEvent::Exited(t))
