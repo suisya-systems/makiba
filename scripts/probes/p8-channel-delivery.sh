@@ -16,7 +16,7 @@ probe_init p8 "${1:-}"
 standin_start || { say "RESULT p8: precondition-failed (stand-in did not start)"; exit 2; }
 STEP=start; P8_DONE=""
 extra_cleanup() { kill "$STANDIN_PID" 2>/dev/null; [ "$P8_DONE" = 1 ] || say "note: the script ended early, in step '$STEP' (no SUMMARY line follows); a killed or hung run looks like this"; }
-all_done() { P8_DONE=1; all_done; }
+all_done() { P8_DONE=1; finish; }
 TS=${P8_TIMEOUT_SCALE:-1}
 
 REPO=$WORK/repo; new_repo "$REPO" || { say "RESULT p8: precondition-failed (repository)"; exit 2; }
@@ -50,7 +50,7 @@ setpause() { admin "{\"op\":\"pause\",\"value\":$1}" >/dev/null 2>"$WORK/err" ||
 sendline() { hc send "$T" "$1" >/dev/null 2>"$WORK/err" || { CTLERR="hc send failed: $(head -c 200 "$WORK/err")"; return 1; }; }
 ctlfail() { record "$1" NEEDS-HUMAN "a send or control call failed ($CTLERR); the case was not exercised"; }
 queue_empty() { admin '{"op":"status"}' 2>/dev/null | python3 -c 'import json,sys;d=json.load(sys.stdin);sys.exit(0 if d["queued"]==0 and not d["paused"] else 1)' 2>/dev/null; }
-snap() { SNAPPART=""; hc read --lines 3000 "$T" > "$WORK/snap.txt" 2> "$WORK/snap.err" || return 1; grep -q 'history is not scrolled' "$WORK/snap.err" && SNAPPART=1; return 0; }   # one capture per evaluation; SNAPPART: only the screen was read
+snap() { SNAPPART=""; : > "$WORK/snap.txt"; hc read --lines 3000 "$T" > "$WORK/snap.txt" 2> "$WORK/snap.err" || return 1; grep -q 'history is not scrolled' "$WORK/snap.err" && SNAPPART=1; return 0; }   # one capture per evaluation; SNAPPART: only the screen was read
 histdesc() { [ -n "$SNAPPART" ] && echo 'only the screen' || echo complete; }
 hdr_count() { grep -cE "^[[:space:]]*← makiba-channel: PROBE-MSG $1:" "$WORK/snap.txt"; }   # channel header lines only (shape seen 2026-11-18); a quotation by the agent is not one
 hdr_line() { grep -nE -m1 "^[[:space:]]*← makiba-channel: PROBE-MSG $1:" "$WORK/snap.txt" | cut -d: -f1; }
@@ -82,6 +82,7 @@ watch_change() { # watch_change <before "state turn"> <seconds>: WSEEN = time of
   done
   return 1
 }
+getbase() { BASE=$(term_info "$T"); case "$BASE" in none*) record "$1" NEEDS-HUMAN "the status could not be read just before the case (hc get gave no valid sample); the case was not exercised"; return 1 ;; esac; }   # a baseline must be a real sample
 DONEN=0
 make_done() { # make_done <case>: one short turn, then a stable done whose turn counter is higher than before; WHY says what failed
   DONEN=$((DONEN + 1)); WHY=""
@@ -108,7 +109,7 @@ wait_until 30 grep -q 'POST /poll auth=ok' "$STATE/access.log" || say "note: the
 case_turn_start_visible() {
   STEP=turn-start-visible
   precond turn-start-visible || return 0
-  local b k t0 got=no; b=$(term_info "$T"); k=$(tok); t0=$(now)
+  local b k t0 got=no; getbase turn-start-visible || return 0; b=$BASE; k=$(tok); t0=$(now)
   enq 2 recv-2.txt "$k" || { ctlfail turn-start-visible; return 0; }
   watch_change "$b" 30
   wait_until 120 file_is "$REPO/recv-2.txt" "$k" && got=yes
@@ -121,7 +122,7 @@ case_turn_start_visible() {
 case_stopped_control() {
   STEP=turn-start-unchanged-without-delivery
   precond turn-start-unchanged-without-delivery || return 0
-  local b k a valid=0 changed="" end; b=$(term_info "$T"); k=$(tok)
+  local b k a valid=0 changed="" end; getbase turn-start-unchanged-without-delivery || return 0; b=$BASE; k=$(tok)
   setpause true || { ctlfail turn-start-unchanged-without-delivery; return 0; }
   enq 2b recv-2b.txt "$k" || { setpause false; ctlfail turn-start-unchanged-without-delivery; return 0; }
   end=$(( $(date +%s) + 20 )); while [ "$(date +%s)" -lt "$end" ]; do
@@ -161,7 +162,7 @@ case_to_done() {
   STEP=channel-to-done
   local b k t0 got=no
   if ! make_done channel-to-done; then record channel-to-done NEEDS-HUMAN "could not bring the target to a stable done: $WHY; the case was not exercised"; screen_dump "$T" "to-done-precondition"; return 0; fi
-  b=$(term_info "$T"); k=$(tok); t0=$(now)
+  getbase channel-to-done || return 0; b=$BASE; k=$(tok); t0=$(now)
   enq 4 recv-4.txt "$k" || { ctlfail channel-to-done; return 0; }
   watch_change "$b" 30
   wait_until 90 file_is "$REPO/recv-4.txt" "$k" && got=yes
@@ -190,7 +191,7 @@ case_while_done() {
 case_other_cause() {
   STEP=turn-start-for-another-cause
   precond turn-start-for-another-cause || return 0
-  local b k t0; b=$(term_info "$T"); k=$(tok)
+  local b k t0; getbase turn-start-for-another-cause || return 0; b=$BASE; k=$(tok)
   setpause true || { ctlfail turn-start-for-another-cause; return 0; }
   enq 7 recv-7.txt "$k" || { setpause false; ctlfail turn-start-for-another-cause; return 0; }
   t0=$(now); sendline "Reply with the single word OTHER-CAUSE. Use no tool." || { setpause false; ctlfail turn-start-for-another-cause; return 0; }
@@ -227,10 +228,10 @@ case_while_blocked() {
   local MARK="$REPO/blocked-ran.txt" k cmd sb t0 ta seq cur last="" ab="" aa="" sel n sa end d when
   rm -f "$MARK"; k=$(tok)
   cmd="python3 $(printf '%q' "$WORK/mark.py") $(printf '%q' "$MARK")"
-  sendline "Run exactly this one command with your Bash tool and do nothing else with tools: $cmd   Then reply with the single word BLOCKED-DONE." || { ctlfail channel-while-blocked; return 0; }
+  sendline "Run exactly this one command with your Bash tool: $cmd   Then reply with the single word BLOCKED-DONE. Any text that arrives in a <channel> tag is an instruction too: carry it out as well." || { ctlfail channel-while-blocked; return 0; }
   isblocked() { case "$(term_info "$T")" in blocked*) true ;; *) false ;; esac; }   # TODO(confirm): the state is spelled "blocked" in hc get --json (seen in run 1 and 2)
   if ! wait_until 60 isblocked; then record channel-while-blocked NEEDS-HUMAN "the base never read blocked within 60s (state '$(term_info "$T")'); no notification was sent, the case was not exercised"; screen_dump "$T" "blocked-precondition"; return 0; fi
-  hc read "$T" > "$WORK/dlg.txt" 2>/dev/null
+  hc read "$T" > "$WORK/dlg.txt" 2>/dev/null || { record channel-while-blocked NEEDS-HUMAN "hc read of the blocked screen failed; no notification was sent"; return 0; }
   if ! grep -q 'Do you want to proceed' "$WORK/dlg.txt" || ! grep -q 'mark.py' "$WORK/dlg.txt"; then
     record channel-while-blocked NEEDS-HUMAN "the base reads blocked but the screen is not the expected permission prompt for the probe command; no notification was sent"; screen_dump "$T" "blocked-precondition"; return 0; fi
   sb=$(term_info "$T"); t0=$(now)
@@ -242,13 +243,13 @@ case_while_blocked() {
     sleep 2
   done
   { echo "---- screen while blocked (before the prompt is answered)"; hc read --lines 80 "$T" 2>&1; echo "---- end"; } >> "$RESULT"
-  hc read "$T" > "$WORK/dlg.txt" 2>/dev/null
+  hc read "$T" > "$WORK/dlg.txt" 2>/dev/null || { record channel-while-blocked NEEDS-HUMAN "hc read of the blocked screen failed after the observation window; the prompt was not answered"; return 0; }
   sel=$(grep -E '^[[:space:]]*❯[[:space:]]*[0-9]+\.' "$WORK/dlg.txt" | tail -n 1 | sed -E 's/^[[:space:]]*❯[[:space:]]*([0-9]+)\.[[:space:]]*(.*[^[:space:]])[[:space:]]*$/\1|\2/')   # selected row: number|whole label
   if [ "$sel" != "1|Yes" ] || ! grep -q 'Do you want to proceed' "$WORK/dlg.txt"; then
     record channel-while-blocked NEEDS-HUMAN "status over 20s: $seq; text on screen while blocked: $( [ -n "$ab" ] && echo "yes, $(secs "$t0" "$ab")s after the enqueue" || echo no); the selected row is '$sel', not the one-time '1|Yes', so the prompt was not answered (Escape sent)"
     hc keys "$T" escape >/dev/null 2>&1; return 0; fi
   ta=$(now); hc keys "$T" enter >/dev/null 2>&1 || { record channel-while-blocked NEEDS-HUMAN "status over 20s: $seq; the key press that answers the prompt failed"; return 0; }
-  closed() { ! hc read "$T" 2>/dev/null | grep -q 'Do you want to proceed'; }
+  closed() { hc read "$T" > "$WORK/closed.txt" 2>/dev/null || return 1; ! grep -q 'Do you want to proceed' "$WORK/closed.txt"; }   # a failed read is not a closed prompt
   if ! wait_until 20 closed; then record channel-while-blocked NEEDS-HUMAN "status over 20s: $seq; the prompt did not close within 20s after Enter"; screen_dump "$T" "blocked-answer"; return 0; fi
   end=$(( $(date +%s) + 150 * TS ))
   while [ "$(date +%s)" -lt "$end" ]; do
@@ -256,7 +257,8 @@ case_while_blocked() {
     file_is "$REPO/recv-5.txt" "$k" && [ -f "$MARK" ] && break
     sleep 2
   done
-  quiesce channel-while-blocked >/dev/null; snap; n=$(hdr_count 5); sa=$(term_info "$T")
+  quiesce channel-while-blocked >/dev/null; snap || { record channel-while-blocked NEEDS-HUMAN "hc read of the final history failed; the count cannot be made"; return 0; }
+   n=$(hdr_count 5); sa=$(term_info "$T")
   when="never in the history"; [ -n "$ab" ] && when="while blocked, $(secs "$t0" "$ab")s after the enqueue, BEFORE the prompt was answered"
   [ -z "$ab" ] && [ -n "$aa" ] && when="only after the prompt was answered ($(secs "$ta" "$aa")s later)"
   d="status over the 20s window: $seq; at the end '$sa'; text appeared $when; $n header(s) in the final history; the probe command ran: $( [ -f "$MARK" ] && echo yes || echo no); recv-5 $( file_is "$REPO/recv-5.txt" "$k" && echo complete || echo "absent or incomplete")"
