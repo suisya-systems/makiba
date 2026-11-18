@@ -282,7 +282,8 @@ fn events_subscribe_sends_a_snapshot_then_notices_and_heartbeats() {
             };
             let plain = run("wire-plain", vec!["sh", "-c", "echo hi; sleep 3"]);
             std::thread::sleep(Duration::from_secs(6));
-            call("terminal.kill", json!({"terminal": plain}));
+            // It ended by itself after 3 s: a kill may answer `finished`.
+            let _ = rpc(&sock, "terminal.kill", json!({"terminal": plain}));
             call("terminal.rm", json!({"terminal": plain}));
             let agent = run(
                 "wire-agent",
@@ -310,18 +311,19 @@ fn events_subscribe_sends_a_snapshot_then_notices_and_heartbeats() {
         })
     };
 
+    let mut line = String::new(); // kept across read timeouts: a line may arrive in pieces
     let mut types = std::collections::BTreeSet::new();
     let (mut heartbeat, mut removed, mut last_seq) = (false, 0, result["seq"].as_u64().unwrap());
     let (mut blocked_permission, mut status_null, mut finished_code) = (false, false, false);
     let until = Instant::now() + Duration::from_secs(45);
     while Instant::now() < until && !(heartbeat && removed >= 2) {
-        let mut line = String::new();
         match reader.read_line(&mut line) {
             Ok(0) => panic!("the base closed the subscription"),
             Ok(_) => {}
             Err(_) => continue, // the 1 s read timeout: look again
         }
         let m: Value = serde_json::from_str(&line).unwrap();
+        line.clear();
         match m["method"].as_str() {
             Some("heartbeat") => heartbeat = true,
             Some("event") => {
