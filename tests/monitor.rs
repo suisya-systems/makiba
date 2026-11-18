@@ -99,8 +99,8 @@ fn script(last: &'static str) -> Vec<&'static str> {
     vec!["working", "blocked:question", "working", "done", last]
 }
 
-fn status(task: &str, state: &str, kind: Value) -> Value {
-    json!({"task_id": task, "state": state, "kind": kind, "msg": null})
+fn status(task: &str, role: Value, state: &str, kind: Value) -> Value {
+    json!({"task_id": task, "role": role, "state": state, "kind": kind, "msg": null})
 }
 
 #[test]
@@ -204,32 +204,32 @@ fn the_daemon_records_the_status_and_exit_of_its_own_terminals_only() {
         (
             "terminal_status",
             Some(run_id),
-            status("t-worker", "working", Value::Null),
+            status("t-worker", json!("worker"), "working", Value::Null),
         ),
         (
             "terminal_status",
             Some(run_id),
-            status("t-worker", "blocked", json!("question")),
+            status("t-worker", json!("worker"), "blocked", json!("question")),
         ),
         (
             "terminal_status",
             Some(run_id),
-            status("t-worker", "working", Value::Null),
+            status("t-worker", json!("worker"), "working", Value::Null),
         ),
         (
             "terminal_status",
             Some(run_id),
-            status("t-worker", "done", Value::Null),
+            status("t-worker", json!("worker"), "done", Value::Null),
         ),
         (
             "terminal_gone",
             Some(run_id),
-            json!({"task_id": "t-worker", "reason": "exited", "exit_code": 7}),
+            json!({"task_id": "t-worker", "role": "worker", "reason": "exited", "exit_code": 7}),
         ),
         (
             "terminal_status",
             None,
-            status("t-barrier", "working", Value::Null),
+            status("t-barrier", Value::Null, "working", Value::Null),
         ),
     ]
     .into_iter()
