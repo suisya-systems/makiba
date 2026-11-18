@@ -69,12 +69,14 @@ pub fn issue_key(
     role: Role,
     agent_id: &str,
     run_id: Option<i64>,
+    spawn_id: Option<&str>,
 ) -> Result<String, String> {
     let key = random_key().map_err(|e| format!("cannot make a key: {e}"))?;
     w.conn()
         .execute(
-            "INSERT INTO agents (agent_id, role, run_id, key_sha256) VALUES (?1, ?2, ?3, ?4)",
-            params![agent_id, role.as_str(), run_id, sha256_hex(&key)],
+            "INSERT INTO agents (agent_id, role, run_id, key_sha256, spawn_id)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![agent_id, role.as_str(), run_id, sha256_hex(&key), spawn_id],
         )
         .map_err(|e| format!("cannot store the key's hash: {e}"))?;
     Ok(key)

@@ -15,6 +15,11 @@
 //! waiting for its confirmation, is never confirmed here. The waiting is kept in memory only, so
 //! after a restart a pushed message stays `pending` for the box.
 //!
+//! A push remembers the launch identity of the connection it went to (`agents.spawn_id` of the
+//! row of that connection's token) and only a `working` of a terminal with that `spawn_id` confirms
+//! it, so a replacement terminal cannot confirm a push made to its predecessor. Messages stay
+//! addressed to the logical recipient: mail waiting for the secretary survives its replacement.
+//!
 //! Who a terminal is comes from the record's `role` (`secretary`, `curator`, `worker`) and, for a
 //! worker, its `task_id`; a record with no role and a task id is taken as that worker's.
 
@@ -51,6 +56,12 @@ pub trait Channel {
     /// Hand `text` to the recipient's channel server. `Ok` means the server accepted it. Must
     /// give up after a bounded time, so one recipient cannot stall the daemon.
     fn push(&self, recipient: &str, text: &str) -> Result<(), String>;
+    /// `push`, and the hash of the token (`agents.key_sha256`) of the connection the text went to,
+    /// taken from the same connection that took it; `None` when the channel does not know.
+    /// Delivery then takes the recipient's newest key that is not revoked.
+    fn push_keyed(&self, recipient: &str, text: &str) -> Result<Option<String>, String> {
+        self.push(recipient, text).map(|()| None)
+    }
 }
 
 /// No channel server is connected to anything.
@@ -71,6 +82,9 @@ struct InFlight {
     /// The newest event at the time of the push: only later records count.
     cursor: i64,
     pushed: Instant,
+    /// The launch identity (`agents.spawn_id`) of the connection the push went to: only a turn
+    /// start of a terminal with this `spawn_id` (null: with none) confirms it.
+    spawn: Option<String>,
 }
 
 pub struct Delivery {
@@ -169,28 +183,37 @@ impl Delivery {
                         r.get(0)
                     })?;
             let text = wrap(m.id, &m.sender, &m.kind, &body);
-            let result = self.channel.push(&m.recipient, &text).and_then(|()| {
-                w.record_push(m.event_id, &m.recipient)
-                    .map_err(|e| e.to_string())
-            });
-            if let Err(e) = result {
-                // A failed push is not recorded; a failed record means the push is repeated.
-                self.retry_at
-                    .insert(m.recipient.clone(), Instant::now() + RETRY_AFTER);
-                eprintln!(
-                    "makibad: cannot deliver message {} to {}: {e}",
-                    m.id, m.recipient
-                );
-                continue;
-            }
+            let result = self
+                .channel
+                .push_keyed(&m.recipient, &text)
+                .and_then(|key| {
+                    w.record_push(m.event_id, &m.recipient)
+                        .map(|()| key)
+                        .map_err(|e| e.to_string())
+                });
+            let key = match result {
+                Ok(key) => key,
+                Err(e) => {
+                    // A failed push is not recorded; a failed record means the push is repeated.
+                    self.retry_at
+                        .insert(m.recipient.clone(), Instant::now() + RETRY_AFTER);
+                    eprintln!(
+                        "makibad: cannot deliver message {} to {}: {e}",
+                        m.id, m.recipient
+                    );
+                    continue;
+                }
+            };
             let pushed = Instant::now(); // the push is accepted: the window runs from here
             if eligible && !self.waiting.contains_key(&m.recipient) {
+                let spawn = launch_identity(w, key, &m.recipient)?;
                 self.waiting.insert(
                     m.recipient,
                     InFlight {
                         event_id: m.event_id,
                         cursor,
                         pushed,
+                        spawn,
                     },
                 );
             }
@@ -367,6 +390,34 @@ fn snapshot(w: &StateWriter, recipient: &str) -> crate::db::Result<(i64, bool)> 
     Ok((cursor, eligible))
 }
 
+/// The `spawn_id` of the agents row a push to `recipient` is bound to: the row of the connection
+/// the push went to, else the recipient's newest key that is not revoked. `None` when there is no
+/// row or its `spawn_id` is null (a terminal launched before tags).
+fn launch_identity(
+    w: &StateWriter,
+    key: Option<String>,
+    recipient: &str,
+) -> crate::db::Result<Option<String>> {
+    let row = match key {
+        Some(key) => w.conn().query_row(
+            "SELECT spawn_id FROM agents WHERE key_sha256 = ?1",
+            [key],
+            |r| r.get(0),
+        ),
+        None => w.conn().query_row(
+            "SELECT spawn_id FROM agents WHERE agent_id = ?1 AND revoked_at IS NULL
+             ORDER BY id DESC LIMIT 1",
+            [recipient],
+            |r| r.get(0),
+        ),
+    };
+    match row {
+        Ok(spawn) => Ok(spawn),
+        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
+        Err(e) => Err(e.into()),
+    }
+}
+
 /// Did the recipient report `working`, after the push and within the window of it?
 fn turn_started(
     w: &StateWriter,
@@ -383,6 +434,7 @@ fn turn_started(
              WHERE d.source_event_id = ?3 AND d.recipient = ?5
                AND e.id > ?4 AND e.kind = 'terminal_status'
                AND json_extract(e.payload_json, '$.state') = 'working'
+               AND json_extract(e.payload_json, '$.spawn_id') IS ?7
                AND (julianday(e.occurred_at) - julianday(d.last_attempt_at)) * 86400.0 <= ?6
                AND {}",
             ABOUT.replace("payload_json", "e.payload_json")
@@ -393,7 +445,8 @@ fn turn_started(
             f.event_id,
             f.cursor,
             recipient,
-            window.as_secs_f64()
+            window.as_secs_f64(),
+            f.spawn
         ],
         |r| r.get(0),
     )?;
@@ -605,6 +658,7 @@ mod tests {
             event_id: 1,
             cursor: 0,
             pushed: Instant::now(),
+            spawn: None,
         };
         assert!(!turn_started(&w, "w-t1", &f, CONFIRM_WINDOW).unwrap());
         status("worker".into(), "t1", "working");
