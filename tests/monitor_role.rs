@@ -105,6 +105,8 @@ fn records_carry_the_role_of_their_terminal() {
         w.upsert_run(&RunUpsert {
             task_id: "t-worker",
             project_slug: "p",
+            // Not `in_use`: the daemon would record an `in_use` run with no terminal as lost (M2-5).
+            status: Some("queued"),
             ..Default::default()
         })
         .unwrap();

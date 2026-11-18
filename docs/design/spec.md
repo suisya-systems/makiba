@@ -460,6 +460,8 @@ New:
 | `secretary_renewed` | The secretary's terminal was replaced | `old`, `new` |
 | `curator_started` | The curator was launched | `spawn_id` |
 
+In `base_resynced`, `reason` is `start` for the first `Resync` of a `makibad` process and `resync` for every later one (a `Resync` carries no cause of its own), and `terminals` is the number of terminals of this organization in the list. It is written last, after the view is rebuilt, so a reader that waits for it sees the result.
+
 In `terminal_status`, `terminal_turn` and `terminal_gone`, `role` is the value of the terminal's `makiba.role` tag (`secretary`, `worker` or `curator`), or null when the terminal has no such tag; for a removal it comes from the tags the monitor kept.
 
 Dropped, because the thing they recorded no longer exists: `pr_watch_pane_started`, `context_handover_watch`, every kind the LLM dispatcher's loop wrote about itself.

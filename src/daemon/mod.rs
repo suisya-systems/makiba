@@ -3,6 +3,7 @@
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
 mod monitor;
+mod recover;
 
 use self::monitor::Monitor;
 use crate::base::stub::Stub;

@@ -6,8 +6,8 @@
 //! keeps, per terminal, the tags and whether it exited (a removal carries only an id), the last
 //! status that was written and the last turn that was written. A status identical to the last
 //! written one is not written again; the record is updated only after the write succeeded, so a
-//! failed write is tried again by the next event. Rebuilding that memory after a restart, and the
-//! reconciliation a `Resync` calls for (`base_resynced`, runs whose terminal is missing), are M2-5.
+//! failed write is tried again by the next event. A `Resync` rebuilds that memory from what is
+//! recorded and reconciles it with the base's list (`recover.rs`, M2-5).
 
 use crate::base::{BaseEvent, BlockKind, State, Terminal, TerminalEvent, TerminalRef};
 use crate::db::writer::{NewEvent, StateWriter};
@@ -15,21 +15,32 @@ use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
 
 /// The last status written for a terminal: what is compared, nothing else.
-type Written = (State, Option<BlockKind>, Option<String>);
+pub(super) type Written = (State, Option<BlockKind>, Option<String>);
 
-struct Tracked {
-    tags: BTreeMap<String, String>,
-    exited: bool,
+#[derive(Clone)]
+pub(super) struct Tracked {
+    pub(super) tags: BTreeMap<String, String>,
+    pub(super) exited: bool,
 }
 
-pub struct Monitor {
-    org: String,
-    tracked: HashMap<TerminalRef, Tracked>,
+/// What the monitor remembers. Cloned for a resync, so a rolled-back one leaves it as it was.
+#[derive(Clone, Default)]
+pub(super) struct Memory {
+    pub(super) tracked: HashMap<TerminalRef, Tracked>,
     status: HashMap<TerminalRef, Written>,
     turn: HashMap<TerminalRef, u64>,
 }
 
-fn mine(org: &str, tags: &BTreeMap<String, String>) -> bool {
+pub struct Monitor {
+    org: String,
+    mem: Memory,
+    /// A `Resync` has been handled: the next is not the start.
+    started: bool,
+    /// A `Resync` whose handling failed: tried again before the next event.
+    retry: Option<Vec<Terminal>>,
+}
+
+pub(super) fn mine(org: &str, tags: &BTreeMap<String, String>) -> bool {
     tags.get("makiba.org").map(String::as_str) == Some(org)
 }
 
@@ -43,6 +54,18 @@ fn state_name(s: State) -> &'static str {
     }
 }
 
+pub(super) fn parse_state(s: &str) -> Option<State> {
+    [
+        State::Idle,
+        State::Working,
+        State::Blocked,
+        State::Done,
+        State::Error,
+    ]
+    .into_iter()
+    .find(|&x| state_name(x) == s)
+}
+
 fn kind_name(k: BlockKind) -> &'static str {
     match k {
         BlockKind::Permission => "permission",
@@ -51,52 +74,94 @@ fn kind_name(k: BlockKind) -> &'static str {
     }
 }
 
+pub(super) fn parse_kind(s: &str) -> Option<BlockKind> {
+    [BlockKind::Permission, BlockKind::Question, BlockKind::Auth]
+        .into_iter()
+        .find(|&x| kind_name(x) == s)
+}
+
 impl Monitor {
     /// `org` is the value of `makiba.org` of this daemon's own organization.
     pub fn new(org: &str) -> Monitor {
         Monitor {
             org: org.into(),
-            tracked: HashMap::new(),
-            status: HashMap::new(),
-            turn: HashMap::new(),
+            mem: Memory::default(),
+            started: false,
+            retry: None,
         }
     }
 
     pub fn handle(&mut self, w: &StateWriter, event: BaseEvent) -> crate::db::Result<()> {
+        // A newer Resync replaces one that failed; any other event goes after it.
+        if let Some(list) = self.retry.take()
+            && !matches!(event, BaseEvent::Resync(_))
+            && let Err(e) = self.resync(w, list)
+        {
+            eprintln!("makibad: cannot rebuild the view: {e}");
+        }
         match event {
-            // ponytail: M2-5 reconciles here (`base_resynced`, runs without a terminal). Until
-            // then a Resync only teaches the monitor which terminals are ours.
-            BaseEvent::Resync(list) => {
-                for t in list.iter().filter(|t| mine(&self.org, &t.tags)) {
-                    self.tracked.entry(t.id.clone()).or_insert(Tracked {
-                        tags: t.tags.clone(),
-                        exited: !t.alive,
-                    });
-                }
-                Ok(())
-            }
+            BaseEvent::Resync(list) => self.resync(w, list),
             BaseEvent::Event(TerminalEvent::Created(t) | TerminalEvent::StatusChanged(t)) => {
-                self.observe(w, &t)
+                self.mem.observe(&self.org, w, &t)
             }
             BaseEvent::Event(TerminalEvent::Exited(t)) => {
-                self.observe(w, &t)?;
-                self.gone(w, &t.id, Some(t.exit_code), "exited")
+                self.mem.observe(&self.org, w, &t)?;
+                self.mem.gone(w, &t.id, Some(t.exit_code), "exited")
             }
             BaseEvent::Event(TerminalEvent::Removed(id)) => {
-                let result = self.gone(w, &id, None, "removed");
+                let result = self.mem.gone(w, &id, None, "removed");
                 if result.is_ok() {
-                    self.tracked.remove(&id);
-                    self.status.remove(&id);
-                    self.turn.remove(&id);
+                    self.mem.forget(&id);
                 }
                 result
             }
         }
     }
 
+    /// Rebuild the view from `list` in one transaction (`recover.rs`). The memory changes only
+    /// when it commits; on a failure the list is kept and tried again before the next event.
+    fn resync(&mut self, w: &StateWriter, list: Vec<Terminal>) -> crate::db::Result<()> {
+        let reason = if self.started { "resync" } else { "start" };
+        let mut mem = self.mem.clone();
+        match w.transaction(|w| super::recover::rebuild(w, &self.org, &mut mem, &list, reason)) {
+            Ok(()) => {
+                self.mem = mem;
+                self.started = true;
+                Ok(())
+            }
+            Err(e) => {
+                self.retry = Some(list);
+                Err(e)
+            }
+        }
+    }
+}
+
+impl Memory {
+    pub(super) fn forget(&mut self, id: &TerminalRef) {
+        self.tracked.remove(id);
+        self.status.remove(id);
+        self.turn.remove(id);
+    }
+
+    /// What was recorded for a terminal before this process started.
+    pub(super) fn restore(&mut self, id: &TerminalRef, status: Option<Written>, turn: Option<u64>) {
+        if let Some(s) = status {
+            self.status.insert(id.clone(), s);
+        }
+        if let Some(t) = turn {
+            self.turn.insert(id.clone(), t);
+        }
+    }
+
     /// The status and turn of a terminal of ours, each written if it differs from the last written.
-    fn observe(&mut self, w: &StateWriter, t: &Terminal) -> crate::db::Result<()> {
-        if !mine(&self.org, &t.tags) {
+    pub(super) fn observe(
+        &mut self,
+        org: &str,
+        w: &StateWriter,
+        t: &Terminal,
+    ) -> crate::db::Result<()> {
+        if !mine(org, &t.tags) {
             return Ok(());
         }
         let tracked = self.tracked.entry(t.id.clone()).or_insert(Tracked {
@@ -131,7 +196,7 @@ impl Monitor {
 
     /// One `terminal_gone` per terminal: an exit is followed by a removal that adds nothing.
     /// `exit_code` is `Some` when the base reported an exit.
-    fn gone(
+    pub(super) fn gone(
         &mut self,
         w: &StateWriter,
         id: &TerminalRef,
@@ -155,7 +220,7 @@ impl Monitor {
     }
 }
 
-fn append(
+pub(super) fn append(
     w: &StateWriter,
     kind: &str,
     task: Option<&str>,
