@@ -304,7 +304,7 @@ pass_dialogs_settled() { # the policy once, then once more after 6 s: a dialog t
   k1=$DLG_KEYS; a1=$DLG_ACCEPTED; sleep 6; pass_dialogs "$1" 60; rc=$?
   DLG_KEYS=$((k1 + DLG_KEYS)); DLG_ACCEPTED="$a1$DLG_ACCEPTED"; return "$rc"
 }
-ready_now() { is_ready "$1"; }   # not wait_ready: that one answers a trust dialog on its own, outside the counted policy
+ready_now() { has_dialog "$1" && return 1; case "$(term_info "$1")" in idle*|done*) return 0 ;; *) return 1 ;; esac; }   # a readable resting state and no dialog; not wait_ready (it answers a trust dialog outside the counted policy) and not is_ready (its footer fallback also passes a working agent)
 relaunch() { # relaunch <resume|renewal> <terminal> <claude args before the channel flags...>: the two cases of one launch
   local p=$1 t=$2 rc hist="" late="" accepted dsc end dverd=NEEDS-HUMAN; shift 2; STEP=$p
   if ! launch "$t" "$REPO" -- "$@" "${CHARGS[@]}"; then
