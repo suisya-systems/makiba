@@ -51,7 +51,7 @@ fn command(dir: &Path, args: &[&str], delay_ms: u64) -> Command {
     c.args(args)
         .env("MAKIBA_STATE_DIR", dir)
         // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
-        .env("MAKIBA_DOOR", dir.join("door.sock"))
+        .env("MAKIBA_DOOR", "none")
         .env("MAKIBA_PORT", "0")
         .env("MAKIBA_PERSON_KEY", dir.join("key/person.key"))
         .env("MAKIBA_BASE", "stub")
