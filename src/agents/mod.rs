@@ -68,6 +68,12 @@ pub enum Composer {
     Unknown,
 }
 
+/// The module named `name` (a `run_launch.agent`). `claude_code` is added in M4.
+pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
+    // ponytail: the test agent's program and record are not needed to write settings.
+    (name == "fake").then(|| Box::new(fake::Fake::new(Path::new(""), Path::new(""), &[])) as _)
+}
+
 pub trait Agent: Send + Sync {
     /// `"claude_code"` or `"fake"`.
     fn name(&self) -> &'static str;
