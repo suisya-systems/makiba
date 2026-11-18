@@ -21,6 +21,7 @@
 
 use std::fs::OpenOptions;
 use std::io::{Read, Write};
+use std::time::Duration;
 
 enum Input {
     Line(String),
@@ -29,7 +30,7 @@ enum Input {
 
 struct Agent {
     record: String,
-    stdin: std::io::Stdin,
+    bytes: std::sync::mpsc::Receiver<u8>,
     pushed_back: Option<u8>,
 }
 
@@ -49,11 +50,12 @@ impl Agent {
         if let Some(b) = self.pushed_back.take() {
             return Some(b);
         }
-        let mut b = [0u8; 1];
-        match self.stdin.lock().read(&mut b) {
-            Ok(1) => Some(b[0]),
-            _ => None,
-        }
+        self.bytes.recv().ok()
+    }
+
+    /// The next byte, or `None` if none comes within a short time (or at the end of input).
+    fn byte_soon(&mut self) -> Option<u8> {
+        self.bytes.recv_timeout(Duration::from_millis(50)).ok()
     }
 
     /// The next line or key. `None` at the end of input.
@@ -66,8 +68,10 @@ impl Agent {
                 b'\r' | b'\n' => {
                     Input::Line(String::from_utf8_lossy(&std::mem::take(&mut text)).into_owned())
                 }
-                0x1b => match self.byte() {
-                    Some(b'[') => match self.byte() {
+                0x1b => match self.byte_soon() {
+                    // ponytail: a lone Esc is told by 50 ms of quiet; a real key sequence
+                    // arrives in one write, so the gap never shows inside one.
+                    Some(b'[') => match self.byte_soon() {
                         Some(b'A') => Input::Key("up"),
                         Some(b'B') => Input::Key("down"),
                         Some(b'C') => Input::Key("right"),
@@ -136,6 +140,7 @@ impl Agent {
                 Some(Input::Key("down")) => at = (at + 1).min(options.len() - 1),
                 Some(Input::Key("up")) => at = at.saturating_sub(1),
                 Some(Input::Key("enter")) => return at,
+                Some(Input::Key("esc")) => return options.len() - 1,
                 Some(_) => continue,
                 None => std::process::exit(0),
             }
@@ -189,9 +194,18 @@ fn main() {
         eprintln!("usage: makiba-fake-agent --record FILE STEP...");
         std::process::exit(2);
     };
+    // One thread owns stdin so a read can be waited on with a timeout.
+    let (tx, bytes) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        for b in std::io::stdin().lock().bytes().map_while(Result::ok) {
+            if tx.send(b).is_err() {
+                break;
+            }
+        }
+    });
     let mut agent = Agent {
         record,
-        stdin: std::io::stdin(),
+        bytes,
         pushed_back: None,
     };
     for step in args {
