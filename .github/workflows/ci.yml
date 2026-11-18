@@ -15,11 +15,10 @@ jobs:
       - run: python3 -m pytest -q tests
   real-base:
     # The whole suite again on the real base (M0-3, #5): `tests/common/mod.rs` starts `hc` in a place of
-    # its own when MAKIBA_TEST_REAL_BASE=1. continue-on-error until probe P2 (docs/design/probes.md)
-    # has been run and passed three times in a row on ubuntu-latest; then remove it. One test thread:
+    # its own when MAKIBA_TEST_REAL_BASE=1. A required check (#81): `tests/real_base_wire.rs` holds the
+    # wire checks that scripts/check-*-wire.sh made by hand. One test thread:
     # the fixtures share one session per process, so concurrent tests would stop each other's base.
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
       - name: Install the pinned herdr-core
