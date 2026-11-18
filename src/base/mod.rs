@@ -1,6 +1,6 @@
 //! The base: the only code that talks to herdr-core (spec section 6). This holds the `Base` trait
 //! (spec section 6.1), its types, the error type and the version check. `stub` is the in-process
-//! stand-in the tests use; the real implementation (`herdr.rs`) is built in M1.
+//! stand-in the tests use; the real implementation is `herdr.rs`.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -15,6 +15,22 @@ pub mod version;
 /// The real base, reached at `socket`; every call has `timeout` as its read and write timeout.
 pub fn connect(socket: &Path, timeout: Duration) -> Box<dyn Base> {
     Box::new(herdr::Herdr::new(socket.to_path_buf(), timeout))
+}
+
+/// As `connect`, acting for the organization `org`: `launch` tags every terminal with it and
+/// `list` returns only the terminals that carry it.
+pub fn connect_as(socket: &Path, timeout: Duration, org: &str) -> Box<dyn Base> {
+    Box::new(herdr::Herdr::new(socket.to_path_buf(), timeout).for_organization(org))
+}
+
+/// As `connect_as`, for the real base of `session`.
+pub fn connect_session_as(session: &str, timeout: Duration, org: &str) -> Box<dyn Base> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    connect_as(
+        &herdr::socket_path(runtime.as_deref(), session),
+        timeout,
+        org,
+    )
 }
 
 /// The real base of `session`, at `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`.

@@ -1,11 +1,12 @@
 //! The real base: herdr-core over its Unix socket, one JSON-RPC 2.0 message per line.
 //! Private to `base`; nothing else names it (spec section 6.1, `tests/base_seam.rs`).
-//! M1-1 builds `hello()`. Each call opens its own connection, has a read and write timeout, and is
+//! M1-1 builds `hello()`, M1-2 the terminal operations. Each call opens its own connection, has a read and write timeout, and is
 //! never retried here.
 
 use super::version::checked_hello;
 use super::{
-    Base, BaseDenies, BaseError, BaseInfo, Detail, EventStream, LaunchSpec, Terminal, TerminalRef,
+    Base, BaseDenies, BaseError, BaseInfo, BlockKind, Detail, EventStream, LaunchSpec, State,
+    Status, Terminal, TerminalRef,
 };
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -16,9 +17,14 @@ use std::time::Duration;
 /// The protocol generation makiba speaks. A core of another generation refuses the hello.
 const GENERATION: u64 = 1;
 
+/// The tag every terminal of an organization carries (`spec::TAG_ORG`): its state folder.
+const TAG_ORG: &str = crate::spec::TAG_ORG;
+
 pub struct Herdr {
     socket: PathBuf,
     timeout: Duration,
+    /// The organization this base acts for. Without one, `launch` and `list` refuse.
+    org: Option<String>,
 }
 
 /// `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`; `/tmp` when the variable is not set, as the base does.
@@ -31,7 +37,25 @@ pub fn socket_path(runtime_dir: Option<&Path>, session: &str) -> PathBuf {
 
 impl Herdr {
     pub fn new(socket: PathBuf, timeout: Duration) -> Herdr {
-        Herdr { socket, timeout }
+        Herdr {
+            socket,
+            timeout,
+            org: None,
+        }
+    }
+
+    pub fn for_organization(mut self, org: &str) -> Herdr {
+        self.org = Some(org.to_string());
+        self
+    }
+
+    fn org(&self) -> Result<&str, BaseError> {
+        self.org.as_deref().ok_or_else(|| {
+            other(
+                "organization",
+                "this connection has no organization; connect with connect_as",
+            )
+        })
     }
 
     fn unavailable(&self, kind: &str, what: &str, e: &dyn std::fmt::Display) -> BaseError {
@@ -68,8 +92,17 @@ impl Herdr {
         if let Some(err) = reply.get("error") {
             // The base's shape: {"code", "message", "data": {"kind", "hint"}}.
             let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
-            return Err(BaseError::Other(Detail {
-                kind: text(err.pointer("/data/kind")).unwrap_or_else(|| "rpc".into()),
+            let kind = text(err.pointer("/data/kind")).unwrap_or_else(|| "rpc".into());
+            let variant = match kind.as_str() {
+                "not_found" => BaseError::NotFound,
+                "status_mismatch" => BaseError::StatusMismatch,
+                "unavailable" => BaseError::Unavailable,
+                "refused" | "blocked" => BaseError::Blocked,
+                "finished" => BaseError::Finished,
+                _ => BaseError::Other,
+            };
+            return Err(variant(Detail {
+                kind,
                 message: text(err.get("message")).unwrap_or_else(|| err.to_string()),
                 hint: text(err.pointer("/data/hint")),
             }));
@@ -113,6 +146,73 @@ fn check_generation(result: &Value) -> Result<(), BaseError> {
     }
 }
 
+fn text_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
+    v.get(key).and_then(Value::as_str)
+}
+
+/// A terminal's address in a reply: the base's `{"address": "t7"}` (hc 0.1.21, seen on the wire),
+/// or `{"id"}`, `{"terminal": {"id"}}`, `{"terminal": "t7"}`.
+fn id_of(v: &Value) -> Option<&str> {
+    text_of(v, "address")
+        .or_else(|| text_of(v, "id"))
+        .or_else(|| v.pointer("/terminal/id").and_then(Value::as_str))
+        .or_else(|| text_of(v, "terminal"))
+}
+
+/// The base's terminal object. The shape is read from the binary's schema text, not yet seen on
+/// the wire (scripts/check-terminals-wire.sh shows it), so the readings are generous.
+fn terminal_of(v: &Value) -> Result<Terminal, BaseError> {
+    let v = v.get("terminal").filter(|t| t.is_object()).unwrap_or(v);
+    let id = id_of(v).ok_or_else(|| other("reply", "a terminal without an id"))?;
+    let tags = v
+        .get("labels")
+        .and_then(Value::as_object)
+        .map(|o| {
+            o.iter()
+                .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                .collect()
+        })
+        .unwrap_or_default();
+    let status = v.get("status");
+    let word = status
+        .and_then(Value::as_str)
+        .or_else(|| status.and_then(|s| text_of(s, "state")));
+    let status = word.and_then(|w| {
+        let state = match w {
+            "idle" => State::Idle,
+            "working" => State::Working,
+            "blocked" => State::Blocked,
+            "done" => State::Done,
+            "error" => State::Error,
+            _ => return None,
+        };
+        let kind = match status.and_then(|s| text_of(s, "kind")) {
+            Some("permission") => Some(BlockKind::Permission),
+            Some("question") => Some(BlockKind::Question),
+            Some("auth") => Some(BlockKind::Auth),
+            _ => None,
+        };
+        Some(Status {
+            state,
+            kind,
+            msg: status.and_then(|s| text_of(s, "msg")).map(String::from),
+        })
+    });
+    let exit_code = v.get("exit_code").and_then(Value::as_i64).map(|c| c as i32);
+    let alive = v.get("alive").and_then(Value::as_bool).unwrap_or(
+        exit_code.is_none() && !matches!(text_of(v, "state"), Some("finished" | "exited")),
+    );
+    Ok(Terminal {
+        id: TerminalRef(id.into()),
+        name: text_of(v, "name").unwrap_or(id).into(),
+        tags,
+        status,
+        turn: v.get("turn").and_then(Value::as_u64),
+        alive,
+        exit_code,
+    })
+}
+
 impl Base for Herdr {
     fn name(&self) -> &'static str {
         "herdr-core"
@@ -131,26 +231,90 @@ impl Base for Herdr {
         })
     }
 
-    fn launch(&self, _spec: &LaunchSpec) -> Result<TerminalRef, BaseError> {
-        Err(not_built("launch"))
+    fn launch(&self, spec: &LaunchSpec) -> Result<TerminalRef, BaseError> {
+        // The organization's tag is the base's own: a spec cannot omit it or name another.
+        let mut labels = spec.tags.clone();
+        labels.insert(TAG_ORG.into(), self.org()?.into());
+        // Unset variables go through `env -u` in front of the agent's argv (spec section 6.2).
+        let mut argv: Vec<&str> = Vec::new();
+        if !spec.unset.is_empty() {
+            argv.push("env");
+            for v in &spec.unset {
+                argv.extend(["-u", v]);
+            }
+        }
+        argv.extend(spec.argv.iter().map(String::as_str));
+        let result = self.call(
+            "terminal.run",
+            json!({
+                "argv": argv,
+                "cwd": spec.cwd,
+                "name": spec.name,
+                "labels": labels,
+                "env": spec.env,
+                "keep": true,
+                "no_parent": true,
+                "no_notify": true,
+            }),
+        )?;
+        id_of(&result)
+            .map(|id| TerminalRef(id.into()))
+            .ok_or_else(|| other("reply", "terminal.run answered without a terminal id"))
     }
+
     fn list(&self) -> Result<Vec<Terminal>, BaseError> {
-        Err(not_built("list"))
+        let org = self.org()?;
+        let result = self.call(
+            "terminal.list",
+            json!({"labels": {TAG_ORG: org}, "all": true}),
+        )?;
+        let items = result
+            .as_array()
+            .or_else(|| result.get("terminals").and_then(Value::as_array))
+            .ok_or_else(|| other("reply", "terminal.list answered without a list"))?;
+        // The base is asked to filter, and the answer is checked: only this organization's.
+        let mut mine = Vec::new();
+        for item in items {
+            let t = terminal_of(item)?;
+            if t.tags.get(TAG_ORG).map(String::as_str) == Some(org) {
+                mine.push(t);
+            }
+        }
+        Ok(mine)
     }
-    fn get(&self, _t: &TerminalRef) -> Result<Terminal, BaseError> {
-        Err(not_built("get"))
+
+    fn get(&self, t: &TerminalRef) -> Result<Terminal, BaseError> {
+        terminal_of(&self.call("terminal.get", json!({"terminal": t.0}))?)
     }
-    fn read(&self, _t: &TerminalRef, _lines: usize) -> Result<Vec<String>, BaseError> {
-        Err(not_built("read"))
+
+    fn read(&self, t: &TerminalRef, lines: usize) -> Result<Vec<String>, BaseError> {
+        let result = self.call("terminal.read", json!({"terminal": t.0, "lines": lines}))?;
+        let text = result
+            .as_str()
+            .or_else(|| text_of(&result, "text"))
+            .ok_or_else(|| other("reply", "terminal.read answered without text"))?;
+        Ok(text.lines().map(String::from).collect())
     }
-    fn keys(&self, _t: &TerminalRef, _keys: &[&str]) -> Result<(), BaseError> {
-        Err(not_built("keys"))
+
+    fn keys(&self, t: &TerminalRef, keys: &[&str]) -> Result<(), BaseError> {
+        self.call("terminal.keys", json!({"terminal": t.0, "keys": keys}))
+            .map(drop)
     }
-    fn send(&self, _t: &TerminalRef, _text: &str, _only_if_idle: bool) -> Result<(), BaseError> {
-        Err(not_built("send"))
+
+    fn send(&self, t: &TerminalRef, text: &str, only_if_idle: bool) -> Result<(), BaseError> {
+        let mut params = json!({"terminal": t.0, "text": text});
+        if only_if_idle {
+            params["if"] = json!("idle");
+        }
+        self.call("terminal.send", params).map(drop)
     }
-    fn end(&self, _t: &TerminalRef) -> Result<(), BaseError> {
-        Err(not_built("end"))
+
+    fn end(&self, t: &TerminalRef) -> Result<(), BaseError> {
+        match self.call("terminal.kill", json!({"terminal": t.0})) {
+            Ok(_) | Err(BaseError::Finished(_)) => {}
+            Err(e) => return Err(e),
+        }
+        self.call("terminal.rm", json!({"terminal": t.0})).map(drop)
     }
     fn events(&self) -> Result<EventStream, BaseError> {
         Err(not_built("events"))
@@ -186,5 +350,39 @@ mod wire_tests {
             "methods": ["hello"], "version": "0.1.20"});
         assert_eq!(version_of(&ok), Some("0.1.20"));
         assert!(check_generation(&ok).is_ok());
+    }
+
+    #[test]
+    fn a_terminal_is_read_in_the_shapes_the_base_may_use() {
+        let t = terminal_of(
+            &json!({"id": "t7", "name": "w", "labels": {"makiba.org": "o"},
+            "status": {"state": "blocked", "kind": "permission", "msg": "ok?"}, "turn": 3}),
+        )
+        .unwrap();
+        assert_eq!(t.id, TerminalRef("t7".into()));
+        assert_eq!(t.tags["makiba.org"], "o");
+        let status = t.status.unwrap();
+        assert_eq!(status.state, State::Blocked);
+        assert_eq!(status.kind, Some(BlockKind::Permission));
+        assert!(t.alive);
+        let t = terminal_of(&json!({"terminal": {"id": "t8", "status": "idle", "exit_code": 1}}))
+            .unwrap();
+        assert_eq!(t.status.map(|s| s.state), Some(State::Idle));
+        assert!(!t.alive && t.exit_code == Some(1));
+        assert!(terminal_of(&json!({"name": "no id"})).is_err());
+    }
+
+    /// A terminal as hc 0.1.21 returned it for `terminal.kill` (owner's run of
+    /// scripts/check-terminals-wire.sh): `address`, `state`, a null `status` and `exit_code`.
+    #[test]
+    fn a_terminal_as_the_real_base_returns_it() {
+        let live = json!({"address": "t1", "name": "wire-check", "state": "live", "status": null,
+            "exit_code": null, "turn": 0, "labels": {"makiba.org": "o"}});
+        let t = terminal_of(&live).unwrap();
+        assert_eq!(t.id, TerminalRef("t1".into()));
+        assert!(t.alive && t.status.is_none() && t.tags["makiba.org"] == "o");
+        let killed = json!({"address": "t1", "state": "finished", "reason": "killed",
+            "exit_code": null, "status": null});
+        assert!(!terminal_of(&killed).unwrap().alive);
     }
 }
