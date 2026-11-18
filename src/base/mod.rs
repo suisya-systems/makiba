@@ -9,6 +9,7 @@ use std::time::Duration;
 
 mod herdr;
 pub mod stub;
+pub mod uses;
 pub mod version;
 
 /// The real base, reached at `socket`; every call has `timeout` as its read and write timeout.
