@@ -145,7 +145,7 @@ import json, sys
 out, mcpout, marks, mcpcfg = sys.argv[1:5]
 hooks = {}
 for ev in ("UserPromptSubmit", "Stop", "Notification", "InstructionsLoaded"):   # TODO(confirm): InstructionsLoaded is a hook event of this Claude Code version (its binary names it)
-    cmd = "printf '%%s %%s\\n' \"$(date -u +%%FT%%TZ)\" \"$(head -c 400 | tr -d '\\n')\" >> '%s/role-hook-%s'" % (marks, ev)
+    cmd = "printf '%%s %%s\\n' \"$(date -u +%%FT%%TZ)\" \"$(head -c 6000 | tr -d '\\n')\" >> '%s/role-hook-%s'" % (marks, ev)
     hooks[ev] = [{"hooks": [{"type": "command", "command": cmd}]}]
 json.dump({"hooks": hooks, "permissions": {"allow": ["mcp__makiba__send_request"], "ask": ["Bash(python3:*)"]}}, open(out, "w"), indent=2)
 srv = json.load(open(mcpcfg))["mcpServers"]["makiba"]
@@ -239,14 +239,15 @@ run_one() { # run_one <run> <role> <option> <events yes|no>: RO_OK=1 when the li
   wait_idle "$T" 150 || { RO_WHY="the listing turn did not end in 150s"; screen_dump "$T" "$run-listing"; return 1; }
   hc read --lines 300 "$T" > "$WORK/screen-$run.txt" 2>/dev/null
   { echo "---- listing answer of $run"; cat "$WORK/screen-$run.txt"; echo "----"; } >> "$RESULT"
+  local n0 u0 sn
+  n0=$(nlines "$marks/role-hook-Notification"); u0=$(nlines "$marks/user-hook-Notification")   # before the turn that ends: a notification at its end is counted
   if hc send "$T" "Call the MCP tool send_request (server makiba) with the text P7-$run, then reply with the single word SENT." >/dev/null 2>&1; then
     sleep 6; wait_idle "$T" 120 || say "note: run $run: the connector turn did not end in 120s"
   fi
   RO_OK=1
   if [ "$ev" = yes ]; then
     # the turn above is the turn end: confirmed at rest, then nothing is typed while the stop notification may be on its way
-    local n0 u0 sn
-    n0=$(nlines "$marks/role-hook-Notification"); u0=$(nlines "$marks/user-hook-Notification"); sn=$(term_info "$T")
+    sn=$(term_info "$T")
     case "$sn" in
       idle*|done*) hold "$run" "turn-end"
                    EV_RES="turn-end=ok (state '$sn' at the start; role Notification hook +$(( $(nlines "$marks/role-hook-Notification") - n0 )), user Notification hook +$(( $(nlines "$marks/user-hook-Notification") - u0 )))" ;;
