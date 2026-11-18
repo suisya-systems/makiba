@@ -16,7 +16,7 @@ use crate::base::{
     BaseError, BaseEvent, Detail, EventStream, Terminal, TerminalEvent, TerminalRef,
 };
 use serde_json::{Value, json};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, ErrorKind, Write};
 use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
@@ -56,6 +56,8 @@ struct Conn {
     watermark: u64,
     /// Without a heartbeat by then the connection is given up.
     deadline: Instant,
+    /// This organization's terminals as of the latest notice: most notices carry only what changed.
+    known: BTreeMap<String, Terminal>,
 }
 
 pub struct Events {
@@ -143,13 +145,7 @@ fn exchange(
     ] {
         set.map_err(|e| base.unavailable("socket", "cannot set a timeout on", &e))?;
     }
-    // With an organization the base is asked for its terminals only; the answer is checked too.
-    let params = base
-        .org
-        .as_deref()
-        .map_or(json!({}), |org| json!({"labels": {TAG_ORG: org}}));
-    let request =
-        json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": params});
+    let request = json!({"jsonrpc": "2.0", "id": 1, "method": "events.subscribe", "params": {}});
     let mut writer = &stream;
     writeln!(writer, "{request}").map_err(|e| base.unavailable("write", "cannot write to", &e))?;
     let mut reader = BufReader::new(stream);
@@ -172,13 +168,15 @@ fn exchange(
     let result = reply
         .get("result")
         .ok_or_else(|| other("no result in the reply"))?;
+    let terminals = terminals_of(result, base.org.as_deref());
     let conn = Conn {
         reader,
         buf: Vec::new(),
         watermark: result.get("seq").and_then(Value::as_u64).unwrap_or(0),
         deadline: Instant::now() + gap,
+        known: known_of(&terminals),
     };
-    Ok((conn, terminals_of(result, base.org.as_deref())))
+    Ok((conn, terminals))
 }
 
 fn other(message: &str) -> BaseError {
@@ -238,14 +236,16 @@ fn handle(
         Some("heartbeat") => conn.deadline = Instant::now() + gap,
         Some("missed") => {
             conn.watermark = seq.unwrap_or(conn.watermark);
-            out.push_back(BaseEvent::Resync(terminals_of(params, org)));
+            let terminals = terminals_of(params, org);
+            conn.known = known_of(&terminals);
+            out.push_back(BaseEvent::Resync(terminals));
         }
         Some("event") => {
             if seq.is_some_and(|s| s <= conn.watermark) {
                 return; // older than the snapshot taken on this connection
             }
             conn.watermark = seq.unwrap_or(conn.watermark);
-            out.extend(event_of(params, org).map(BaseEvent::Event));
+            out.extend(event_of(params, org, &mut conn.known).map(BaseEvent::Event));
         }
         _ => {}
     }
@@ -268,33 +268,115 @@ fn terminals_of(v: &Value, org: Option<&str>) -> Vec<Terminal> {
         .unwrap_or_default()
 }
 
-/// What a notice means for one terminal; `None` for facts makiba does not follow (size, doc).
-fn event_of(params: &Value, org: Option<&str>) -> Option<TerminalEvent> {
-    let wire = params.get("terminal").unwrap_or(&Value::Null);
-    let wire_terminal = || terminal_of(wire).ok().filter(|t| mine(t, org));
-    match params.get("type").and_then(Value::as_str)? {
-        "created" => wire_terminal().map(TerminalEvent::Created),
-        // A lost terminal is one that is not running any more, as far as the dispatcher can tell.
-        "finished" | "lost" => wire_terminal().map(|mut t| {
-            t.alive = false;
-            TerminalEvent::Exited(t)
-        }),
-        "removed" => wire
+fn known_of(terminals: &[Terminal]) -> BTreeMap<String, Terminal> {
+    terminals
+        .iter()
+        .map(|t| (t.id.0.clone(), t.clone()))
+        .collect()
+}
+
+/// What a notice means for one terminal; `None` for facts makiba does not follow (size, doc,
+/// foreground, title, keep) and for terminals of another organization.
+///
+/// The base's notice is `{type, terminal: "<address>", seq, data}`, and `data` is the whole terminal
+/// only for `created`; otherwise it is what changed (`exit_code` for `finished`, and so on). A
+/// notice that carries a whole terminal (an object in `terminal`) is read as one.
+fn event_of(
+    params: &Value,
+    org: Option<&str>,
+    known: &mut BTreeMap<String, Terminal>,
+) -> Option<TerminalEvent> {
+    let kind = params.get("type")?.as_str()?;
+    let data = params.get("data").unwrap_or(&Value::Null);
+    let named = params.get("terminal").unwrap_or(&Value::Null);
+    let id = match named {
+        Value::String(s) => s.as_str(),
+        v => v
             .get("id")
-            .or_else(|| params.get("id"))
-            .and_then(Value::as_str)
-            .map(|id| TerminalEvent::Removed(TerminalRef(id.into()))),
-        "status" | "turn" | "title" | "labels" | "restarted" | "keep" => {
-            wire_terminal().map(TerminalEvent::StatusChanged)
+            .or_else(|| v.get("address"))
+            .and_then(Value::as_str)?,
+    };
+    let whole = [named, data]
+        .into_iter()
+        .filter(|v| {
+            v.is_object()
+                && ["labels", "status", "state", "name"]
+                    .iter()
+                    .any(|k| v.get(k).is_some())
+        })
+        .find_map(|v| terminal_of(v).ok());
+    match kind {
+        "removed" => {
+            let was_known = known.remove(id).is_some();
+            (was_known || org.is_none()).then(|| TerminalEvent::Removed(TerminalRef(id.into())))
+        }
+        "created" => {
+            let t = whole.filter(|t| mine(t, org))?;
+            known.insert(id.into(), t.clone());
+            Some(TerminalEvent::Created(t))
+        }
+        // A lost terminal is one that is not running any more, as far as the dispatcher can tell.
+        "finished" | "lost" | "status" | "turn" | "labels" | "restarted" => {
+            let patch = whole.is_none();
+            let mut t = whole.or_else(|| known.get(id).cloned())?;
+            if patch {
+                overlay(kind, data, &mut t);
+            }
+            match kind {
+                "finished" | "lost" => t.alive = false,
+                "restarted" => (t.alive, t.exit_code) = (true, None),
+                _ => {}
+            }
+            if !mine(&t, org) {
+                known.remove(id);
+                return None;
+            }
+            known.insert(id.into(), t.clone());
+            Some(if matches!(kind, "finished" | "lost") {
+                TerminalEvent::Exited(t)
+            } else {
+                TerminalEvent::StatusChanged(t)
+            })
         }
         _ => None,
+    }
+}
+
+/// Apply what changed (`data`) to the terminal as it was.
+fn overlay(kind: &str, data: &Value, t: &mut Terminal) {
+    match kind {
+        "status" => {
+            let status = data.get("status").unwrap_or(data);
+            let read = terminal_of(&json!({"id": t.id.0, "status": status}));
+            if let Some(s) = read.ok().and_then(|x| x.status) {
+                t.status = Some(s);
+            }
+        }
+        "turn" => {
+            let turn = data.get("turn").unwrap_or(data).as_u64();
+            t.turn = turn.or(t.turn);
+        }
+        "labels" => {
+            let labels = data.get("labels").unwrap_or(data).as_object();
+            if let Some(m) = labels {
+                t.tags = m
+                    .iter()
+                    .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
+                    .collect();
+            }
+        }
+        "finished" | "lost" => {
+            let code = data.get("exit_code").and_then(Value::as_i64);
+            t.exit_code = code.and_then(|c| i32::try_from(c).ok()).or(t.exit_code);
+        }
+        _ => {}
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::base::BlockKind;
+    use crate::base::{BlockKind, State};
     use std::collections::BTreeMap;
 
     #[test]
@@ -319,9 +401,17 @@ mod tests {
 
     #[test]
     fn facts_makiba_does_not_follow_are_skipped() {
-        assert!(event_of(&json!({"type": "size", "terminal": {"id": "t1"}}), None).is_none());
-        assert!(event_of(&json!({"type": "doc"}), None).is_none());
-        let lost = event_of(&json!({"type": "lost", "terminal": {"id": "t1"}}), None);
+        assert!(
+            event_of(
+                &json!({"type": "size", "terminal": {"id": "t1"}}),
+                None,
+                &mut BTreeMap::new()
+            )
+            .is_none()
+        );
+        assert!(event_of(&json!({"type": "doc"}), None, &mut BTreeMap::new()).is_none());
+        let mut known = known_of(&[terminal_of(&json!({"id": "t1"})).unwrap()]);
+        let lost = event_of(&json!({"type": "lost", "terminal": "t1"}), None, &mut known);
         assert!(matches!(lost, Some(TerminalEvent::Exited(t)) if !t.alive));
     }
 
@@ -333,6 +423,7 @@ mod tests {
             buf: Vec::new(),
             watermark: 0,
             deadline: Instant::now() + Duration::from_millis(300),
+            known: BTreeMap::new(),
         };
         let writer = std::thread::spawn(move || {
             let mut w = &theirs;
@@ -358,6 +449,7 @@ mod tests {
             buf: Vec::new(),
             watermark: 0,
             deadline: Instant::now() + Duration::from_millis(300),
+            known: BTreeMap::new(),
         };
         let writer = std::thread::spawn(move || {
             let mut w = &theirs;
@@ -424,7 +516,36 @@ mod tests {
         let snapshot = json!({"terminals": [mine, theirs, {"id": "c"}]});
         assert_eq!(terminals_of(&snapshot, Some("o")).len(), 1);
         assert_eq!(terminals_of(&snapshot, None).len(), 3);
-        let created = |t: &Value| event_of(&json!({"type": "created", "terminal": t}), Some("o"));
+        let created = |t: &Value| {
+            event_of(
+                &json!({"type": "created", "terminal": t}),
+                Some("o"),
+                &mut BTreeMap::new(),
+            )
+        };
         assert!(created(&mine).is_some() && created(&theirs).is_none());
+    }
+
+    /// The notices of hc 0.1.21 as the owner's run of scripts/check-events-wire.sh showed them.
+    #[test]
+    fn the_real_notices_are_read() {
+        let mut known = BTreeMap::new();
+        let mut notice = |v: Value| event_of(&v, None, &mut known);
+        let created = json!({"type": "created", "seq": 1, "terminal": "t1",
+            "data": {"address": "t1", "name": "n", "state": "live", "labels": {}, "status": null}});
+        assert!(matches!(notice(created), Some(TerminalEvent::Created(t)) if t.alive));
+        let working = json!({"type": "status", "terminal": "t1", "data": {"state": "working"}});
+        assert!(
+            matches!(notice(working), Some(TerminalEvent::StatusChanged(t))
+            if t.status.as_ref().map(|s| s.state) == Some(State::Working))
+        );
+        let foreground = json!({"type": "foreground", "terminal": "t1", "data": {"pid": 1}});
+        assert!(notice(foreground).is_none());
+        let finished = json!({"type": "finished", "terminal": "t1",
+            "data": {"exit_code": 0, "reason": "exited", "signal": null}});
+        assert!(matches!(notice(finished), Some(TerminalEvent::Exited(t))
+            if !t.alive && t.exit_code == Some(0) && t.name == "n"));
+        let removed = json!({"type": "removed", "terminal": "t1", "data": {}});
+        assert!(matches!(notice(removed), Some(TerminalEvent::Removed(r)) if r.0 == "t1"));
     }
 }
