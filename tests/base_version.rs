@@ -157,15 +157,29 @@ fn sha256(file: &Path) -> String {
         .to_string()
 }
 
-/// A release folder holding a manifest for every target and one file, with `sha` as the
-/// manifest's hash of it. Returns (releases url, prefix).
-fn release(name: &str, sha: Option<&str>) -> (String, PathBuf) {
+/// A release folder holding a manifest for every target and one tar.gz built here, with `sha` as
+/// the manifest's hash of it (the real hash when None). The archive holds the files named in
+/// `entries` at its root, each containing its own name. Returns (releases url, prefix).
+fn release(name: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf) {
     let dir = std::env::temp_dir().join(format!("makiba-m0-2-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
     let version_dir = dir.join("releases/core").join(base_version::PINNED);
+    let src = dir.join("src");
     fs::create_dir_all(&version_dir).unwrap();
-    let file = version_dir.join("hc-download");
-    fs::write(&file, "#!/bin/sh\necho fake hc\n").unwrap();
+    fs::create_dir_all(&src).unwrap();
+    for e in entries {
+        fs::write(src.join(e), format!("#!/bin/sh\necho {e}\n")).unwrap();
+    }
+    let file = version_dir.join("herdr-core-test.tar.gz");
+    let status = Command::new("tar")
+        .arg("czf")
+        .arg(&file)
+        .arg("-C")
+        .arg(&src)
+        .args(entries)
+        .status()
+        .expect("tar runs");
+    assert!(status.success());
     let sha = sha.map(str::to_string).unwrap_or_else(|| sha256(&file));
     let targets = [
         "linux-x86_64",
@@ -192,6 +206,8 @@ fn release(name: &str, sha: Option<&str>) -> (String, PathBuf) {
     )
 }
 
+const FULL: [&str; 3] = ["herdr-core", "LICENSE", "THIRD-PARTY-NOTICES"];
+
 fn install(url: &str, prefix: &Path) -> std::process::Output {
     Command::new("bash")
         .arg(root().join("scripts/install-base.sh"))
@@ -202,8 +218,8 @@ fn install(url: &str, prefix: &Path) -> std::process::Output {
 }
 
 #[test]
-fn install_base_installs_the_file_when_the_hash_matches() {
-    let (url, prefix) = release("match", None);
+fn install_base_installs_herdr_core_from_the_archive_as_hc() {
+    let (url, prefix) = release("match", &FULL, None);
     let out = install(&url, &prefix);
     assert!(
         out.status.success(),
@@ -211,12 +227,29 @@ fn install_base_installs_the_file_when_the_hash_matches() {
         String::from_utf8_lossy(&out.stderr)
     );
     let hc = prefix.join("bin/hc");
-    assert_eq!(fs::read_to_string(hc).unwrap(), "#!/bin/sh\necho fake hc\n");
+    assert_eq!(
+        fs::read_to_string(&hc).unwrap(),
+        "#!/bin/sh\necho herdr-core\n"
+    );
+    use std::os::unix::fs::PermissionsExt;
+    assert_eq!(
+        fs::metadata(&hc).unwrap().permissions().mode() & 0o777,
+        0o755
+    );
+    assert!(!prefix.join("bin/LICENSE").exists());
 }
 
 #[test]
 fn install_base_installs_nothing_and_fails_when_the_hash_differs() {
-    let (url, prefix) = release("mismatch", Some(&"0".repeat(64)));
+    let (url, prefix) = release("mismatch", &FULL, Some(&"0".repeat(64)));
+    let out = install(&url, &prefix);
+    assert!(!out.status.success());
+    assert!(!prefix.join("bin/hc").exists());
+}
+
+#[test]
+fn install_base_installs_nothing_and_fails_when_the_archive_lacks_herdr_core() {
+    let (url, prefix) = release("no-binary", &["LICENSE", "THIRD-PARTY-NOTICES"], None);
     let out = install(&url, &prefix);
     assert!(!out.status.success());
     assert!(!prefix.join("bin/hc").exists());
