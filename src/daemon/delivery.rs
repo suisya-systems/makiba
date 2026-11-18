@@ -28,6 +28,9 @@ use std::time::{Duration, Instant};
 pub const CONFIRM_WINDOW: Duration = Duration::from_secs(10);
 /// How long a recipient whose push failed is left alone.
 const RETRY_AFTER: Duration = Duration::from_secs(1);
+/// How long one pass may spend pushing before it hands control back to the daemon loop, so the
+/// monitor, the heartbeat and a stop are not held up by a backlog. What is left waits for the next pass.
+const PASS_BUDGET: Duration = Duration::from_millis(200);
 /// How long past the window a push is still looked at, for a monitor that is a little behind.
 const SETTLE_GRACE: Duration = Duration::from_secs(1);
 
@@ -117,6 +120,9 @@ impl Delivery {
         drop(q);
         let now = Instant::now();
         for m in due {
+            if now.elapsed() > PASS_BUDGET {
+                break;
+            }
             if !self.channel.reaches(&m.recipient)
                 || self.retry_at.get(&m.recipient).is_some_and(|t| now < *t)
             {
