@@ -30,6 +30,31 @@ T=p8-agent
 
 
 # ---- dev-channel-dialog
+# record-only: the base's status (state, kind, msg, turn) just before each key press at a startup dialog and right after it; never read by a verdict
+DLGRUN=first
+dialog_hook() { # dialog_hook <before|after> <terminal> <key> <dialog>
+  local l; l=$(hc get --json "$2" 2>/dev/null | python3 -c '
+import json, sys
+try: d = json.load(sys.stdin)
+except Exception: d = None
+st = d.get("status") if isinstance(d, dict) else None
+if not isinstance(st, dict): print("state=none kind=none msg=none turn=none")
+else:
+    def g(k): return st.get(k) if isinstance(st.get(k), (str, int)) and not isinstance(st.get(k), bool) else "none"
+    def find(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("turn"), int): return o["turn"]
+            for v in o.values():
+                r = find(v)
+                if r is not None: return r
+        elif isinstance(o, list):
+            for v in o:
+                r = find(v)
+                if r is not None: return r
+    t = find(d)
+    print("state=%s kind=%s msg=%s turn=%s" % (g("state"), g("kind"), str(g("msg")).replace("\n", " ")[:80], "none" if t is None else t))' 2>/dev/null)
+  say "DIALOG-STATUS run=$DLGRUN dialog=$4 key=$3 when=$1-key ${l:-state=none kind=none msg=none turn=none (hc get gave nothing)}"
+}
 # the flags of every launch in this script (first launch, resume, renewal) are one array, so they cannot drift apart
 CHARGS=(--permission-mode acceptEdits --settings "$WORK/agent-settings.json" --append-system-prompt-file "$WORK/rules.txt" \
   --mcp-config "$MCPCFG" --dangerously-load-development-channels server:makiba-channel)
@@ -310,7 +335,7 @@ ready_now() { # a readable screen that dialog-step.py reads as "composer, no dia
   case "$(term_info "$1")" in idle*|done*) return 0 ;; *) return 1 ;; esac
 }
 relaunch() { # relaunch <resume|renewal> <terminal> <claude args before the channel flags...>: the two cases of one launch
-  local p=$1 t=$2 rc hist="" late="" accepted dsc end dverd=NEEDS-HUMAN; shift 2; STEP=$p
+  local p=$1 t=$2 rc hist="" late="" accepted dsc end dverd=NEEDS-HUMAN; shift 2; STEP=$p; DLGRUN=$p
   if ! launch "$t" "$REPO" -- "$@" "${CHARGS[@]}"; then
     record "$p-dialogs" NEEDS-HUMAN "hc run failed; the case was not exercised"; record "$p-ready" NEEDS-HUMAN "hc run failed; the case was not exercised"; return 0; fi
   pass_dialogs_settled "$t" 150; rc=$?
