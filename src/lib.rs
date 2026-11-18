@@ -1,4 +1,4 @@
-//! makiba: an organization where the person talks to one secretary, built on herdr-core.
+//! makiba: an organization where the person talks to one secretary, built on its base.
 //! The library holds the code; `src/main.rs` only parses arguments and calls it (spec section 14).
 
 /// The usage the binary prints until its subcommands exist.
