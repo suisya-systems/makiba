@@ -34,7 +34,7 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 | Secretary folder | `<state>/secretary/` | The secretary's working folder, as in paddock. |
 | Role files | `$MAKIBA_SHARE_DIR`, default `${XDG_DATA_HOME:-~/.local/share}/makiba` | Role rules, role settings, the `makiba` entry point. Agents may read, not write. |
 | The person's door | `$MAKIBA_DOOR`, default `${XDG_RUNTIME_DIR}/makiba/door.sock` | Unix socket, for the person's `makiba`. A sandboxed agent cannot create a Unix socket on Linux (section 3). |
-| The agents' door | `$MAKIBA_PORT`, a fixed port on 127.0.0.1 (the default is chosen in M3-3) | An MCP server over HTTP in `makibad`. The port is fixed because a running agent's configuration holds it and outlives a restart of `makibad`. |
+| The agents' door | `$MAKIBA_PORT`, a fixed port on 127.0.0.1, default 47317 | An MCP server over HTTP in `makibad`. The port is fixed because a running agent's configuration holds it and outlives a restart of `makibad`. |
 | The person key | `$MAKIBA_PERSON_KEY`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/person.key` | Mode 0600, in a folder of mode 0700. Created by `makiba up` when absent. Every agent role's settings deny reading it (section 3). |
 | Worktrees (code) | `$MAKIBA_WORKERS_DIR`, default `~/makiba-workers/<project>/<task_id>` | Created with `git worktree add` from the project's own repository, which a person trusts once (paddock #216). |
 | Working folders (document) | `$MAKIBA_DOCS_DIR`, default `~/makiba-docs/<task_id>/` | A plain folder under a parent a person trusts once. `out/` holds what is handed over and is kept after close. |

@@ -46,7 +46,7 @@ const BODY_MAX: usize = 64 * 1024;
 
 /// Read from `r` until the end of an HTTP head; returns the bytes read (the head and maybe the
 /// start of the body) and the head's length. Bounded by `HEAD_MAX`.
-fn read_head(r: &mut impl Read) -> std::io::Result<(Vec<u8>, usize)> {
+pub(crate) fn read_head(r: &mut impl Read) -> std::io::Result<(Vec<u8>, usize)> {
     let mut buf = Vec::new();
     let mut chunk = [0u8; 1024];
     loop {

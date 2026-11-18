@@ -1,0 +1,932 @@
+//! The door (spec section 3): one request handler and its two entrances. The person's `makiba`
+//! uses a Unix socket, one JSON line in and one out. Agents call the tools of an MCP server on
+//! 127.0.0.1, one tool per verb, with their token as the key. The same port also carries the
+//! channel servers' held requests (`GET /channel/next`, `crate::channel::Hub`).
+//!
+//! The key is the only thing that says who calls. A request with no key, an empty one, or one
+//! that is unknown or revoked is `denied`, whatever process sent it; nothing here takes the
+//! absence of a key to mean the person. Peer credentials on the socket are used only to refuse a
+//! connection from another user id, before anything is read.
+//!
+//! Every request with a verb is recorded in `commands` (spec section 5.2) except a `usage` error,
+//! and `(actor, idem)` returns the first answer again. The requests are handled one at a time
+//! (one lock around the door's own connection to `state.db`).
+
+use crate::base::Base;
+use crate::channel::Hub;
+use crate::cli::LINE_MAX;
+use crate::db::writer::{NewEvent, StateWriter};
+use crate::spec::{DoorError, ErrorKind, Role, Verb, worker_agent_id};
+use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
+use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
+use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::fd::AsRawFd;
+use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
+use std::os::unix::net::{UnixListener, UnixStream};
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
+use std::time::{Duration, Instant};
+
+/// The MCP server's one path.
+pub const MCP_PATH: &str = "/mcp";
+/// The `actor` of a request that carries no valid key.
+pub const UNKNOWN_ACTOR: &str = "unknown";
+/// Every blocking read and write of a connection gives up after this.
+const IO_LIMIT: Duration = Duration::from_secs(5);
+/// MCP protocol versions answered as asked; any other gets the first.
+const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+/// The settings `config` knows (spec section 12).
+const CONFIG_KEYS: [&str; 4] = [
+    "max_concurrent_workers",
+    "merge_approval_mode",
+    "conversation_language",
+    "artifact_language",
+];
+
+/// What a request comes to: the response's `result`, or its `error`.
+pub type Response = Result<Value, DoorError>;
+
+pub fn sha256_hex(text: &str) -> String {
+    Sha256::digest(text.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// A new key: 32 random bytes, hex (spec section 4).
+pub fn random_key() -> std::io::Result<String> {
+    let mut bytes = [0u8; 32];
+    std::fs::File::open("/dev/urandom")?.read_exact(&mut bytes)?;
+    Ok(bytes.iter().map(|b| format!("{b:02x}")).collect())
+}
+
+/// Make a key for an agent and store only its hash. The key goes into the agent's launch
+/// arguments (M3-4), never into its environment.
+pub fn issue_key(
+    w: &StateWriter,
+    role: Role,
+    agent_id: &str,
+    run_id: Option<i64>,
+) -> Result<String, String> {
+    let key = random_key().map_err(|e| format!("cannot make a key: {e}"))?;
+    w.conn()
+        .execute(
+            "INSERT INTO agents (agent_id, role, run_id, key_sha256) VALUES (?1, ?2, ?3, ?4)",
+            params![agent_id, role.as_str(), run_id, sha256_hex(&key)],
+        )
+        .map_err(|e| format!("cannot store the key's hash: {e}"))?;
+    Ok(key)
+}
+
+fn caller(conn: &Connection, key: &str) -> rusqlite::Result<Option<(String, Role)>> {
+    if key.is_empty() {
+        return Ok(None);
+    }
+    let row: Option<(String, String)> = conn
+        .query_row(
+            "SELECT agent_id, role FROM agents WHERE key_sha256 = ?1 AND revoked_at IS NULL",
+            [sha256_hex(key)],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    Ok(row.and_then(|(id, role)| {
+        let role = Role::ALL.iter().copied().find(|r| r.as_str() == role)?;
+        Some((id, role))
+    }))
+}
+
+/// The agent a token is bound to, for the channel servers' requests (`Hub::new`).
+pub fn agent_of(db: &Path, token: &str) -> Option<String> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(IO_LIMIT).ok()?;
+    caller(&conn, token).ok().flatten().map(|(id, _)| id)
+}
+
+fn refuse(kind: ErrorKind, message: impl Into<String>, hint: impl Into<String>) -> DoorError {
+    DoorError {
+        kind,
+        message: message.into(),
+        hint: hint.into(),
+    }
+}
+
+fn internal(e: impl std::fmt::Display) -> DoorError {
+    refuse(
+        ErrorKind::Internal,
+        e.to_string(),
+        "makibad's log has the detail",
+    )
+}
+
+fn usage(message: impl Into<String>) -> DoorError {
+    refuse(ErrorKind::Usage, message, "")
+}
+
+/// The response line of spec section 3.
+pub fn line(r: &Response) -> Value {
+    match r {
+        Ok(v) => json!({"ok": true, "result": v}),
+        Err(e) => json!({"ok": false, "error": error_json(e)}),
+    }
+}
+
+fn error_json(e: &DoorError) -> Value {
+    json!({"kind": e.kind.as_str(), "message": e.message, "hint": e.hint})
+}
+
+fn from_line(v: &Value) -> Response {
+    if v["ok"] == json!(true) {
+        return Ok(v["result"].clone());
+    }
+    let e = &v["error"];
+    let kind = ErrorKind::ALL
+        .iter()
+        .copied()
+        .find(|k| Some(k.as_str()) == e["kind"].as_str())
+        .unwrap_or(ErrorKind::Internal);
+    let text = |k: &str| e[k].as_str().unwrap_or_default().to_string();
+    Err(refuse(kind, text("message"), text("hint")))
+}
+
+/// The status a response is recorded with; `None`: not recorded (spec section 3, `usage`).
+fn status_of(r: &Response) -> Option<&'static str> {
+    match r {
+        Ok(_) => Some("done"),
+        Err(e) => match e.kind {
+            ErrorKind::Usage => None,
+            ErrorKind::Denied | ErrorKind::Conflict | ErrorKind::NotFound | ErrorKind::Stale => {
+                Some("rejected")
+            }
+            ErrorKind::Unavailable | ErrorKind::Internal => Some("failed"),
+        },
+    }
+}
+
+/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`).
+pub fn has_tool(v: Verb) -> bool {
+    !matches!(v, Verb::Up | Verb::Down | Verb::Config)
+}
+
+/// The tools a role is listed: its verbs (spec section 4) that have a tool.
+pub fn tools_of(role: Role) -> Vec<Verb> {
+    role.verbs()
+        .iter()
+        .copied()
+        .filter(|v| has_tool(*v))
+        .collect()
+}
+
+fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, DoorError> {
+    args.get(name)
+        .and_then(Value::as_str)
+        .ok_or_else(|| usage(format!("the argument {name} (text) is missing")))
+}
+
+/// The door's state: its own connection to `state.db`, and the base for typed sends.
+pub struct Door {
+    w: Mutex<StateWriter>,
+    base: Arc<dyn Base>,
+}
+
+impl Door {
+    pub fn new(w: StateWriter, base: Arc<dyn Base>) -> Door {
+        Door {
+            w: Mutex::new(w),
+            base,
+        }
+    }
+
+    fn writer(&self) -> std::sync::MutexGuard<'_, StateWriter> {
+        self.w.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Who holds `key`, if anyone.
+    pub fn caller(&self, key: Option<&str>) -> Option<(String, Role)> {
+        let w = self.writer();
+        key.and_then(|k| caller(w.conn(), k).ok().flatten())
+    }
+
+    /// One request. `tool` is true on the MCP server, where a verb without a tool is refused.
+    pub fn handle(
+        &self,
+        key: Option<&str>,
+        verb: &str,
+        args: Value,
+        idem: Option<&str>,
+        tool: bool,
+    ) -> Response {
+        let w = self.writer();
+        let who = match key {
+            Some(k) => caller(w.conn(), k).map_err(internal)?,
+            None => None,
+        };
+        let Some((actor, role)) = who else {
+            // No replay for a caller nobody knows: its `idem` is not kept.
+            let r = Err(refuse(
+                ErrorKind::Denied,
+                "no valid key: the request carries no key, or one this door does not know",
+                "an agent's key is in its MCP configuration; the person's is the person key file",
+            ));
+            record(&w, UNKNOWN_ACTOR, verb, &args, None, &r);
+            return r;
+        };
+        if let Some(idem) = idem
+            && let Some(first) = replay(&w, &actor, idem).map_err(internal)?
+        {
+            return first;
+        }
+        let Some(v) = Verb::ALL.iter().copied().find(|v| v.as_str() == verb) else {
+            return Err(usage(format!("no verb {verb:?}")));
+        };
+        if !role.verbs().contains(&v) || (tool && !has_tool(v)) {
+            let r = Err(refuse(
+                ErrorKind::Denied,
+                format!("{} may not use {verb}", role.as_str()),
+                "",
+            ));
+            record(&w, &actor, verb, &args, idem, &r);
+            return r;
+        }
+        if v == Verb::Send && args.get("typed") == Some(&json!(true)) {
+            return self.typed(&w, &actor, role, &args, idem);
+        }
+        // The verb's writes and its record are one transaction (a verb's own transaction joins it).
+        // IMMEDIATE takes the write lock first: a deferred one that reads, then writes after
+        // makibad's loop has written, fails at once with `database is locked` (WAL snapshot).
+        let begin = || w.conn().execute_batch("BEGIN IMMEDIATE");
+        if let Err(e) = begin() {
+            return Err(internal(e));
+        }
+        let r = run(&w, &actor, role, v, &args);
+        if r.is_err() && w.rollback().is_ok() {
+            let _ = begin();
+        }
+        record(&w, &actor, verb, &args, idem, &r);
+        if let Err(e) = w.commit() {
+            let _ = w.rollback();
+            return Err(internal(e));
+        }
+        r
+    }
+
+    /// `send` with `typed` (spec section 7). The command is recorded before anything is typed, as
+    /// not finished, so a retry of the same `idem` after a crash answers that the outcome is not
+    /// known instead of typing again. `send_typed` records the message before it types.
+    fn typed(
+        &self,
+        w: &StateWriter,
+        actor: &str,
+        role: Role,
+        args: &Value,
+        idem: Option<&str>,
+    ) -> Response {
+        let (to, text) = match (str_arg(args, "to"), str_arg(args, "text")) {
+            (Ok(to), Ok(text)) => (to, text),
+            (Err(e), _) | (_, Err(e)) => return Err(e),
+        };
+        if let Err(e) = recipient(w, role, to) {
+            let r = Err(e);
+            record(w, actor, "send", args, idem, &r);
+            return r;
+        }
+        let unknown: Response = Err(internal(
+            "the outcome of an earlier typed send with this idem is not known; it is not sent again",
+        ));
+        let Some(id) = insert_command(w, actor, "send", args, idem, "accepted", &unknown) else {
+            return Err(internal("cannot record the request"));
+        };
+        let r = super::delivery::send_typed(w, &*self.base, actor, to, "message", text)
+            .map(|id| json!({"id": id}))
+            .map_err(|e| match e {
+                super::delivery::TypedError::Usage(m) => usage(m),
+                super::delivery::TypedError::Conflict(m) => refuse(
+                    ErrorKind::Conflict,
+                    m,
+                    "nothing was typed or stored; send again later or without typed",
+                ),
+                super::delivery::TypedError::Failed(m) => internal(m),
+            });
+        let done = match status_of(&r) {
+            None => w
+                .conn()
+                .execute("DELETE FROM commands WHERE id = ?1", [id])
+                .map(|_| ()),
+            Some(status) => w
+                .conn()
+                .execute(
+                    "UPDATE commands SET status = ?1, result_json = ?2, error_kind = ?3,
+                       finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?4",
+                    params![
+                        status,
+                        line(&r).to_string(),
+                        r.as_ref().err().map(|e| e.kind.as_str()),
+                        id
+                    ],
+                )
+                .map(|_| ()),
+        };
+        if let Err(e) = done {
+            eprintln!("makibad: cannot finish command {id}: {e}");
+        }
+        r
+    }
+}
+
+fn replay(w: &StateWriter, actor: &str, idem: &str) -> rusqlite::Result<Option<Response>> {
+    let first: Option<Option<String>> = w
+        .conn()
+        .query_row(
+            "SELECT result_json FROM commands WHERE actor = ?1 AND idem = ?2",
+            params![actor, idem],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(first.map(|j| {
+        j.and_then(|j| serde_json::from_str::<Value>(&j).ok())
+            .map_or_else(
+                || Err(internal("the first answer was not kept")),
+                |v| from_line(&v),
+            )
+    }))
+}
+
+/// One `commands` row and its `command_received` event. Returns the row's id.
+fn insert_command(
+    w: &StateWriter,
+    actor: &str,
+    verb: &str,
+    args: &Value,
+    idem: Option<&str>,
+    status: &str,
+    r: &Response,
+) -> Option<i64> {
+    let run = || -> crate::db::Result<i64> {
+        let finished = status != "accepted";
+        w.conn().execute(
+            "INSERT INTO commands (actor, verb, args_json, idem, status, result_json, error_kind, finished_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7,
+                     CASE WHEN ?8 THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END)",
+            params![
+                actor,
+                verb,
+                args.to_string(),
+                idem,
+                status,
+                line(r).to_string(),
+                r.as_ref().err().map(|e| e.kind.as_str()),
+                finished
+            ],
+        )?;
+        let id = w.conn().last_insert_rowid();
+        let payload = json!({"command_id": id});
+        w.append_event(&NewEvent {
+            kind: "command_received",
+            actor: Some(actor),
+            payload: Some(&payload),
+            ..Default::default()
+        })?;
+        Ok(id)
+    };
+    run()
+        .map_err(|e| eprintln!("makibad: cannot record a {verb} request of {actor}: {e}"))
+        .ok()
+}
+
+fn record(
+    w: &StateWriter,
+    actor: &str,
+    verb: &str,
+    args: &Value,
+    idem: Option<&str>,
+    r: &Response,
+) {
+    if let Some(status) = status_of(r) {
+        insert_command(w, actor, verb, args, idem, status, r);
+    }
+}
+
+fn run(w: &StateWriter, actor: &str, role: Role, v: Verb, args: &Value) -> Response {
+    match v {
+        Verb::Send => {
+            let to = str_arg(args, "to")?;
+            let text = str_arg(args, "text")?;
+            recipient(w, role, to)?;
+            let id = store_message(w, actor, to, "message", None, text)?;
+            Ok(json!({"id": id}))
+        }
+        Verb::Report => report(w, actor, role, args),
+        Verb::Show => show(w, actor, args),
+        Verb::Inbox => {
+            let b = super::inbox::inbox(w, actor).map_err(internal)?;
+            let messages: Vec<Value> = b
+                .messages
+                .iter()
+                .map(|m| json!({"id": m.id, "text": m.text}))
+                .collect();
+            Ok(json!({"messages": messages, "more": b.more}))
+        }
+        Verb::Config => config(args),
+        other => Err(internal(format!("{} is not built yet", other.as_str()))),
+    }
+}
+
+/// May `role` send to `to`, and is there such a recipient?
+fn recipient(w: &StateWriter, role: Role, to: &str) -> Result<(), DoorError> {
+    if let Some(only) = role.send_only_to()
+        && !only.contains(&to)
+    {
+        return Err(refuse(
+            ErrorKind::Denied,
+            format!("a {} sends to {} only", role.as_str(), only.join(", ")),
+            "",
+        ));
+    }
+    let known = match to.strip_prefix(crate::spec::WORKER_AGENT_PREFIX) {
+        _ if to == crate::spec::AGENT_SECRETARY || to == crate::spec::AGENT_CURATOR => true,
+        Some(task) => run_exists(w, task)?,
+        None => false,
+    };
+    if known {
+        Ok(())
+    } else {
+        Err(refuse(
+            ErrorKind::NotFound,
+            format!("no recipient {to:?}"),
+            "",
+        ))
+    }
+}
+
+fn run_exists(w: &StateWriter, task: &str) -> Result<bool, DoorError> {
+    w.conn()
+        .query_row("SELECT 1 FROM runs WHERE task_id = ?1", [task], |_| Ok(()))
+        .optional()
+        .map(|r| r.is_some())
+        .map_err(internal)
+}
+
+/// A message, its `message_sent` event and its delivery row, as `delivery::pass` takes them.
+fn store_message(
+    w: &StateWriter,
+    sender: &str,
+    recipient: &str,
+    kind: &str,
+    task: Option<&str>,
+    body: &str,
+) -> Result<i64, DoorError> {
+    let store = || -> crate::db::Result<i64> {
+        let event = w.append_event(&NewEvent {
+            kind: "message_sent",
+            actor: Some(sender),
+            run_task_id: task,
+            ..Default::default()
+        })?;
+        w.conn().execute(
+            "INSERT INTO messages (event_id, sender, recipient, kind, run_id, body)
+             VALUES (?1, ?2, ?3, ?4, (SELECT id FROM runs WHERE task_id = ?5), ?6)",
+            params![event, sender, recipient, kind, task, body],
+        )?;
+        let id = w.conn().last_insert_rowid();
+        w.conn().execute(
+            "UPDATE events SET payload_json = json_object('message_id', ?1) WHERE id = ?2",
+            params![id, event],
+        )?;
+        w.conn().execute(
+            "INSERT INTO event_deliveries (source_event_id, recipient, status, attempt)
+             VALUES (?1, ?2, 'pending', 0)",
+            params![event, recipient],
+        )?;
+        Ok(id)
+    };
+    store().map_err(internal)
+}
+
+fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
+    let state = str_arg(args, "state")?;
+    if !["start", "done", "blocked"].contains(&state) {
+        return Err(usage(format!(
+            "state is start, done or blocked, not {state:?}"
+        )));
+    }
+    let task = str_arg(args, "task")?;
+    let text = str_arg(args, "text")?;
+    if role == Role::Worker && actor != worker_agent_id(task) {
+        return Err(refuse(
+            ErrorKind::Denied,
+            format!("{actor} reports on its own task only, not on {task}"),
+            "",
+        ));
+    }
+    if !run_exists(w, task)? {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    let kind = format!("report_{state}");
+    let id = store_message(
+        w,
+        actor,
+        crate::spec::AGENT_SECRETARY,
+        &kind,
+        Some(task),
+        text,
+    )?;
+    if state == "done" {
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'review' WHERE task_id = ?1 AND status IN ('queued','in_use')",
+                [task],
+            )
+            .map_err(internal)?;
+    }
+    Ok(json!({"id": id}))
+}
+
+fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let id = args
+        .get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| usage("the argument id (a message id) is missing"))?;
+    let row: Option<(String, String, String, String)> = w
+        .conn()
+        .query_row(
+            "SELECT sender, recipient, kind, body FROM messages WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((from, to, kind, body)) = row else {
+        return Err(refuse(ErrorKind::NotFound, format!("no message {id}"), ""));
+    };
+    if actor != from && actor != to {
+        return Err(refuse(
+            ErrorKind::Denied,
+            format!("only the sender and the recipient of message {id} may read it"),
+            "",
+        ));
+    }
+    Ok(json!({"id": id, "from": from, "to": to, "kind": kind, "body": body}))
+}
+
+fn config(args: &Value) -> Response {
+    let key = str_arg(args, "key")?;
+    if !CONFIG_KEYS.contains(&key) {
+        return Err(usage(format!(
+            "no setting {key:?}; the settings are {}",
+            CONFIG_KEYS.join(", ")
+        )));
+    }
+    // ponytail: no store yet; M6-7 builds it and fills `value`.
+    match str_arg(args, "action")? {
+        "get" => Ok(json!({"key": key, "value": null})),
+        "set" => Err(internal("config set is not built yet (M6-7)")),
+        other => Err(usage(format!("action is get or set, not {other:?}"))),
+    }
+}
+
+// ---- the entrances ----------------------------------------------------------------------------
+
+/// Where the door listens (spec section 2).
+pub struct Config {
+    pub socket: PathBuf,
+    pub port: u16,
+    pub person_key: PathBuf,
+}
+
+impl Config {
+    pub fn from_env() -> Result<Config, String> {
+        Ok(Config {
+            socket: crate::cli::door_path()
+                .ok_or("neither MAKIBA_DOOR nor XDG_RUNTIME_DIR is set: no place for the door")?,
+            port: crate::cli::port()?,
+            person_key: crate::cli::person_key_path(),
+        })
+    }
+}
+
+/// A door that listens. Dropping it removes the socket file; the listening threads end with the
+/// process.
+pub struct Running {
+    pub socket: PathBuf,
+    pub addr: SocketAddr,
+}
+
+impl Drop for Running {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.socket);
+    }
+}
+
+fn euid() -> u32 {
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    unsafe { libc::geteuid() }
+}
+
+/// Bind the socket. A file already there is removed only when it is a socket of this user that
+/// nothing answers on; anything else stops the start.
+fn bind_socket(path: &Path) -> Result<UnixListener, String> {
+    let shown = path.display();
+    if let Some(dir) = path.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+            .map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
+    }
+    match std::fs::symlink_metadata(path) {
+        Ok(m) => {
+            if !m.file_type().is_socket() || m.uid() != euid() {
+                return Err(format!("{shown} exists and is not this user's socket"));
+            }
+            match UnixStream::connect(path) {
+                Ok(_) => return Err(format!("something already answers on {shown}")),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => {
+                    std::fs::remove_file(path)
+                        .map_err(|e| format!("cannot remove the stale {shown}: {e}"))?;
+                }
+                Err(e) => return Err(format!("cannot tell whether {shown} is in use: {e}")),
+            }
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => return Err(format!("cannot look at {shown}: {e}")),
+    }
+    let l = UnixListener::bind(path).map_err(|e| format!("cannot bind {shown}: {e}"))?;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("cannot chmod {shown}: {e}"))?;
+    Ok(l)
+}
+
+/// Start both entrances, after the person key exists (spec section 2).
+pub fn start(cfg: &Config, db: &Path, base: Arc<dyn Base>, hub: Hub) -> Result<Running, String> {
+    let w = StateWriter::open(db).map_err(|e| format!("cannot open {}: {e}", db.display()))?;
+    super::person_key::ensure(&w, &cfg.person_key)?;
+    let tcp = TcpListener::bind(("127.0.0.1", cfg.port))
+        .map_err(|e| format!("cannot listen on 127.0.0.1:{}: {e}", cfg.port))?;
+    let addr = tcp.local_addr().map_err(|e| e.to_string())?;
+    let unix = bind_socket(&cfg.socket)?;
+    let running = Running {
+        socket: cfg.socket.clone(),
+        addr,
+    };
+    let door = Arc::new(Door::new(w, base));
+    let d = Arc::clone(&door);
+    std::thread::spawn(move || {
+        for s in unix.incoming().flatten() {
+            let d = Arc::clone(&d);
+            std::thread::spawn(move || serve_socket(&d, s));
+        }
+    });
+    std::thread::spawn(move || {
+        for s in tcp.incoming().flatten() {
+            let (d, hub) = (Arc::clone(&door), hub.clone());
+            std::thread::spawn(move || serve_http(&d, &hub, s));
+        }
+    });
+    Ok(running)
+}
+
+#[cfg(target_os = "linux")]
+fn peer_uid(s: &UnixStream) -> Option<u32> {
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the buffer is a ucred of the length given, owned by this frame.
+    let rc = unsafe {
+        libc::getsockopt(
+            s.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    (rc == 0).then_some(cred.uid)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn peer_uid(s: &UnixStream) -> Option<u32> {
+    let (mut uid, mut gid) = (0, 0);
+    // SAFETY: both out-parameters are owned by this frame.
+    let rc = unsafe { libc::getpeereid(s.as_raw_fd(), &mut uid, &mut gid) };
+    (rc == 0).then_some(uid)
+}
+
+/// The person's socket: refuse another user id before reading, then one line in, one out.
+fn serve_socket(door: &Door, mut s: UnixStream) {
+    if peer_uid(&s) != Some(euid()) {
+        return;
+    }
+    let _ = s.set_read_timeout(Some(IO_LIMIT));
+    let _ = s.set_write_timeout(Some(IO_LIMIT));
+    let mut buf = Vec::new();
+    let read = BufReader::new(&s)
+        .take(LINE_MAX as u64 + 1)
+        .read_until(b'\n', &mut buf);
+    let r = match read {
+        Err(e) => Err(usage(format!("cannot read the request: {e}"))),
+        Ok(_) if buf.len() > LINE_MAX => Err(usage("the request is longer than 1 MiB")),
+        Ok(_) => match serde_json::from_slice::<Value>(&buf) {
+            Err(e) => Err(usage(format!("the request is not JSON: {e}"))),
+            Ok(req) if req["v"] != json!(1) => Err(usage("the request's v is not 1")),
+            Ok(req) => door.handle(
+                req["key"].as_str(),
+                req["verb"].as_str().unwrap_or_default(),
+                req.get("args").cloned().unwrap_or_else(|| json!({})),
+                req["idem"].as_str(),
+                false,
+            ),
+        },
+    };
+    let _ = writeln!(s, "{}", line(&r));
+}
+
+/// Does the connection ask for the channel path? Looks at its first bytes without taking them.
+fn asks_channel(s: &TcpStream) -> bool {
+    let want = format!("GET {} ", crate::channel::PATH);
+    let want = want.as_bytes();
+    let mut b = [0u8; 64];
+    let until = Instant::now() + IO_LIMIT;
+    loop {
+        let n = match s.peek(&mut b) {
+            Ok(0) | Err(_) => return false,
+            Ok(n) => n,
+        };
+        if n >= want.len() || !want.starts_with(&b[..n]) {
+            return b[..n].starts_with(want);
+        }
+        if Instant::now() > until {
+            return false;
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
+fn respond(s: &mut TcpStream, status: &str, body: &str) {
+    let kind = if body.is_empty() {
+        ""
+    } else {
+        "Content-Type: application/json\r\n"
+    };
+    let _ = write!(
+        s,
+        "HTTP/1.1 {status}\r\n{kind}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    );
+    let _ = s.flush();
+}
+
+fn rpc_error(id: &Value, code: i64, message: &str) -> Value {
+    json!({"jsonrpc": "2.0", "id": id, "error": {"code": code, "message": message}})
+}
+
+/// The agents' entrance: one HTTP request per connection, `POST /mcp` with one JSON-RPC message.
+fn serve_http(door: &Door, hub: &Hub, mut s: TcpStream) {
+    let _ = s.set_read_timeout(Some(IO_LIMIT));
+    let _ = s.set_write_timeout(Some(IO_LIMIT));
+    if asks_channel(&s) {
+        hub.serve(s);
+        return;
+    }
+    let Ok((mut buf, n)) = crate::channel::read_head(&mut s) else {
+        return;
+    };
+    let mut headers = [httparse::EMPTY_HEADER; 32];
+    let mut req = httparse::Request::new(&mut headers);
+    if !matches!(req.parse(&buf[..n]), Ok(httparse::Status::Complete(_))) {
+        return respond(&mut s, "400 Bad Request", "");
+    }
+    if req.path != Some(MCP_PATH) {
+        return respond(&mut s, "404 Not Found", "");
+    }
+    if req.method != Some("POST") {
+        return respond(&mut s, "405 Method Not Allowed", "");
+    }
+    let header = |name: &str| {
+        req.headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(name))
+            .and_then(|h| std::str::from_utf8(h.value).ok())
+    };
+    let Some(len) = header("content-length").and_then(|v| v.trim().parse::<usize>().ok()) else {
+        return respond(&mut s, "411 Length Required", "");
+    };
+    if len > LINE_MAX {
+        return respond(&mut s, "413 Content Too Large", "");
+    }
+    let token = header("authorization")
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::to_string);
+    let mut body = buf.split_off(n);
+    while body.len() < len {
+        let mut chunk = [0u8; 8192];
+        match s.read(&mut chunk) {
+            Ok(0) | Err(_) => return,
+            Ok(k) => body.extend_from_slice(&chunk[..k]),
+        }
+    }
+    body.truncate(len);
+    let Ok(msg) = serde_json::from_slice::<Value>(&body) else {
+        let e = rpc_error(&Value::Null, -32700, "parse error");
+        return respond(&mut s, "200 OK", &e.to_string());
+    };
+    let Some(id) = msg.get("id").cloned() else {
+        // A notification or a response: nothing to answer.
+        return respond(&mut s, "202 Accepted", "");
+    };
+    let answer = mcp(door, token.as_deref(), &id, &msg);
+    respond(&mut s, "200 OK", &answer.to_string());
+}
+
+fn mcp(door: &Door, token: Option<&str>, id: &Value, msg: &Value) -> Value {
+    let method = msg["method"].as_str().unwrap_or_default();
+    let params = &msg["params"];
+    let ok = |result: Value| json!({"jsonrpc": "2.0", "id": id, "result": result});
+    if method == "tools/call" {
+        let name = params["name"].as_str().unwrap_or_default();
+        let mut args = params["arguments"].as_object().cloned().unwrap_or_default();
+        let idem = args
+            .remove("idem")
+            .and_then(|v| v.as_str().map(str::to_string));
+        let r = door.handle(token, name, Value::Object(args), idem.as_deref(), true);
+        let (text, is_error) = match &r {
+            Ok(v) => (v.to_string(), false),
+            Err(e) => (error_json(e).to_string(), true),
+        };
+        return ok(json!({"content": [{"type": "text", "text": text}], "isError": is_error}));
+    }
+    let Some((_, role)) = door.caller(token) else {
+        return rpc_error(id, -32001, "denied: no valid token");
+    };
+    match method {
+        "initialize" => {
+            let want = params["protocolVersion"].as_str().unwrap_or_default();
+            let version = PROTOCOLS
+                .iter()
+                .find(|p| **p == want)
+                .unwrap_or(&PROTOCOLS[0]);
+            ok(json!({
+                "protocolVersion": version,
+                "capabilities": {"tools": {}},
+                "serverInfo": {"name": "makiba", "version": env!("CARGO_PKG_VERSION")},
+            }))
+        }
+        "ping" => ok(json!({})),
+        "tools/list" => {
+            let tools: Vec<Value> = tools_of(role).into_iter().map(tool).collect();
+            ok(json!({"tools": tools}))
+        }
+        _ => rpc_error(id, -32601, "method not found"),
+    }
+}
+
+/// A tool's definition: its name, what it does, and its arguments.
+fn tool(v: Verb) -> Value {
+    let text = json!({"type": "string"});
+    let (description, mut props, required): (&str, Map<String, Value>, &[&str]) = match v {
+        Verb::Send => (
+            "Send a message to another agent. typed: type it into a worker's or the curator's terminal instead of the channel.",
+            Map::from_iter([
+                ("to".into(), text.clone()),
+                ("text".into(), text.clone()),
+                ("typed".into(), json!({"type": "boolean"})),
+            ]),
+            &["to", "text"],
+        ),
+        Verb::Report => (
+            "Report on a task to the secretary: start, done or blocked, with text.",
+            Map::from_iter([
+                (
+                    "state".into(),
+                    json!({"type": "string", "enum": ["start", "done", "blocked"]}),
+                ),
+                ("task".into(), text.clone()),
+                ("text".into(), text.clone()),
+            ]),
+            &["state", "task", "text"],
+        ),
+        Verb::Show => (
+            "The full body of a message you sent or received, by its id.",
+            Map::from_iter([("id".into(), json!({"type": "integer"}))]),
+            &["id"],
+        ),
+        Verb::Inbox => (
+            "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",
+            Map::new(),
+            &[],
+        ),
+        _ => ("Not built yet.", Map::new(), &[]),
+    };
+    props.insert(
+        "idem".into(),
+        json!({"type": "string", "description": "A token of your own: the same idem twice returns the first answer again."}),
+    );
+    json!({
+        "name": v.as_str(),
+        "description": description,
+        "inputSchema": {"type": "object", "properties": props, "required": required},
+    })
+}
