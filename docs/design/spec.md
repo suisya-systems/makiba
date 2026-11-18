@@ -1,6 +1,8 @@
 # Shared specification
 
-Status: draft for Issue M0-8. This document fixes the names and shapes that more than one Issue touches, so that work done in parallel meets in the middle. Where a value is a first proposal that a measurement may change, it says so.
+Status: checked against the code by `tests/spec_matches_code.rs` (Issue M0-8). This document fixes the names and shapes that more than one Issue touches, so that work done in parallel meets in the middle. Where a value is a first proposal that a measurement may change, it says so.
+
+The tables of sections 3, 4, 6.3, 10 and 12, the wrapper's two sentences and limits (section 8), the wake line (section 7) and the SQL of section 5 are compared with `src/spec.rs` and `src/db/schema_v4.sql` in both directions. A change to one of those names is a change to this document and to `src/spec.rs` in the same commit.
 
 The plan and its reasons are in [plan.md](plan.md). This document does not repeat them.
 
