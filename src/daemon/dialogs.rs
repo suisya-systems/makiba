@@ -93,18 +93,24 @@ fn has_cursor(n: &str) -> bool {
     unbox(n).starts_with(CURSORS)
 }
 
+/// A normalized row without its border and one cursor glyph.
+fn after_cursor(n: &str) -> &str {
+    let s = unbox(n);
+    s.strip_prefix(CURSORS).map_or(s, str::trim_start)
+}
+
+/// The rest of `s` after an `N.` or `N)` number, if it starts with one.
+fn after_number(s: &str) -> Option<&str> {
+    let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+    (digits > 0 && matches!(s.as_bytes().get(digits), Some(b'.' | b')')))
+        .then(|| s[digits + 1..].trim_start())
+}
+
 /// The option text of a normalized row, spaceless: border, one cursor glyph and an `N.` or `N)`
 /// number taken off. Spaceless because a base's grid can drop the spaces between words.
 fn label(n: &str) -> String {
-    let mut s = unbox(n);
-    if let Some(rest) = s.strip_prefix(CURSORS) {
-        s = rest.trim_start();
-    }
-    let digits = s.len() - s.trim_start_matches(|c: char| c.is_ascii_digit()).len();
-    if digits > 0 && matches!(s.as_bytes().get(digits), Some(b'.' | b')')) {
-        s = s[digits + 1..].trim_start();
-    }
-    s.replace(' ', "")
+    let s = after_cursor(n);
+    after_number(s).unwrap_or(s).replace(' ', "")
 }
 
 /// A policy line as `label` gives a row.
@@ -169,6 +175,14 @@ pub fn decide(policies: &[DialogPolicy], screen: &[String]) -> Decision {
     }
     if !(start..=end).contains(&cursor) {
         return Decision::Wait("the cursor is not on the dialog's options yet");
+    }
+    // A numbered option further down, past a blank row, is part of the menu too (Codex review).
+    // (ponytail: an unnumbered one there reads as text; folder-trust's options are unnumbered.)
+    if (end + 1..norm.len()).any(|i| after_number(after_cursor(&norm[i])).is_some()) {
+        return Decision::Unknown(format!(
+            "an option line below the option lines of {}",
+            policy.name
+        ));
     }
     // The option lines still match whole: the menu is exactly the entry's lines, each once.
     let mut menu: Vec<&str> = labels[start..=end].iter().map(String::as_str).collect();
@@ -470,6 +484,11 @@ mod tests {
             lines.insert(extra, "   Allow everything".into());
             assert!(unknown(&lines), "extra option at {extra}");
         }
+        // A numbered option past a blank row below the entry's lines (Codex review).
+        let mut lines = channel(0, one, "Exit");
+        let at = lines.len() - 2;
+        lines.splice(at..at, ["".to_string(), "    3. Allow everything".into()]);
+        assert!(unknown(&lines), "{lines:?}");
         // A missing line.
         assert!(unknown(&screen(&[
             " \u{276f} No, exit",
