@@ -41,9 +41,13 @@ real_manifest() { # hashes of the real folder's files the probe must never chang
 build_hostcopy() { # read-only use of the real folder: files into $HC_DIR/.claude and $HC_DIR/.claude.json (symlinks followed, so nothing points back out)
   local f d
   mkdir -p "$HC_DIR/.claude" || return 1
-  for f in settings.json CLAUDE.md .credentials.json; do [ -f "$SRC/$f" ] && command cp -L "$SRC/$f" "$HC_DIR/.claude/$f"; done
-  for d in skills commands agents hooks; do [ -d "$SRC/$d" ] && command cp -RL "$SRC/$d" "$HC_DIR/.claude/$d"; done
-  [ -f "$SRCJSON" ] && command cp -L "$SRCJSON" "$HC_DIR/.claude.json"
+  for f in settings.json CLAUDE.md .credentials.json; do   # a copy that fails stops the probe: it must not measure an altered baseline
+    if [ -f "$SRC/$f" ]; then command cp -L "$SRC/$f" "$HC_DIR/.claude/$f" || return 1; fi
+  done
+  for d in skills commands agents hooks; do
+    if [ -d "$SRC/$d" ]; then command cp -RL "$SRC/$d" "$HC_DIR/.claude/$d" || return 1; fi
+  done
+  if [ -f "$SRCJSON" ]; then command cp -L "$SRCJSON" "$HC_DIR/.claude.json" || return 1; fi
   chmod -R go-rwx "$HC_DIR"
   return 0
 }
@@ -183,6 +187,14 @@ do_event() { # do_event <T> <run> <label> <prompt> <screen-regex> <regex-that-mu
   return 1
 }
 
+dump_marks() { # dump_marks <run>: the hook marker files into the result file (the scratch folder is removed at exit)
+  local f
+  for f in "$WORK/marks-$1"/*; do
+    [ -f "$f" ] && { echo "---- marker $1/$(basename "$f")"; cat "$f"; echo "----"; } >> "$RESULT"
+  done
+  return 0
+}
+
 judge_run() { # judge_run <run>: J_RULE J_SKILL J_HOOK J_CONN (1 = reaches the agent), J_APPLIED (names), J_ROLE_MISSING (names)
   local s=$WORK/screen-$1.txt m=$WORK/marks-$1
   J_RULE=0; J_SKILL=0; J_HOOK=0; J_CONN=0; J_APPLIED=""; J_ROLE_MISSING=""
@@ -232,11 +244,20 @@ run_one() { # run_one <run> <role> <option> <events yes|no>: RO_OK=1 when the li
   fi
   RO_OK=1
   if [ "$ev" = yes ]; then
-    hold "$run" "turn-end"   # the turn above is the turn end: nothing is typed while the stop notification may be on its way
+    # the turn above is the turn end: confirmed at rest, then nothing is typed while the stop notification may be on its way
+    local n0 u0 sn
+    n0=$(nlines "$marks/role-hook-Notification"); u0=$(nlines "$marks/user-hook-Notification"); sn=$(term_info "$T")
+    case "$sn" in
+      idle*|done*) hold "$run" "turn-end"
+                   EV_RES="turn-end=ok (state '$sn' at the start; role Notification hook +$(( $(nlines "$marks/role-hook-Notification") - n0 )), user Notification hook +$(( $(nlines "$marks/user-hook-Notification") - u0 )))" ;;
+      *) EV_RES="turn-end=not-at-rest (state '$sn' after the connector turn: this observation is unreliable)" ;;
+    esac
+    say "EVENT run=$run $EV_RES"; RO_EVENTS="$RO_EVENTS $EV_RES;"
     do_event "$T" "$run" question "Use the AskUserQuestion tool to ask me exactly one question, with the text PROBE-QUESTION: red or blue?, and the two options red and blue. Do nothing else until I answer." '^[[:space:]]*❯[[:space:]]*1\.' 'Do you want to proceed'; RO_EVENTS="$RO_EVENTS $EV_RES;"
     cmd="python3 $WORK/mark.py $WORK/ran-$run.txt"
     do_event "$T" "$run" permission "Run exactly this one command with your Bash tool: $cmd   Then reply with the single word RAN." 'Do you want to proceed' 'ZZZ-never-matches'; RO_EVENTS="$RO_EVENTS $EV_RES;"
   fi
+  dump_marks "$run"
   return 0
 }
 
