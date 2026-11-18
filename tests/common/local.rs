@@ -134,6 +134,14 @@ impl Local {
         f(p)
     }
 
+    /// Queue a `Resync` with a fresh `list` for every open stream, as a base does after a
+    /// reconnect (M2-5). The subscribers stay locked across the list, so no event falls between.
+    pub fn resync(&self) {
+        let mut subscribers = self.subscribers.lock().unwrap();
+        let event = BaseEvent::Resync(self.list().expect("list"));
+        subscribers.retain(|s| s.send(event.clone()).is_ok());
+    }
+
     fn write(&self, t: &TerminalRef, bytes: &[u8]) -> Result<(), BaseError> {
         self.with(t, |p| {
             p.stdin
