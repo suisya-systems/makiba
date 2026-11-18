@@ -1,7 +1,7 @@
 //! The `Agent` for the test agent, `makiba-fake-agent` (source: tests/common/fake_agent.rs). The
 //! program follows the script given on its command line; see that file for the steps.
 
-use super::{Agent, AgentLaunch, DialogPolicy, PromptView, TaskSettings};
+use super::{Agent, AgentLaunch, Composer, DialogPolicy, PromptView, TaskSettings};
 use std::io;
 use std::path::{Path, PathBuf};
 
@@ -65,6 +65,15 @@ impl Agent for Fake {
             yes_key: "enter",
             no_key: "esc",
         })
+    }
+
+    /// The last line that begins with `>` is the prompt; a no-break space after it is nothing.
+    fn composer(&self, screen: &[String]) -> Composer {
+        match screen.iter().rev().find_map(|l| l.strip_prefix('>')) {
+            None => Composer::Unknown,
+            Some(rest) if rest.replace('\u{a0}', " ").trim().is_empty() => Composer::Empty,
+            Some(_) => Composer::Input,
+        }
     }
 
     fn write_task_settings(&self, path: &Path, _task: &TaskSettings) -> io::Result<()> {
