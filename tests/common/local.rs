@@ -2,17 +2,25 @@
 //! program to behave (the stand-in `Stub` does not run argv). Output is read through a pipe, so
 //! OSC 7501 records in it become the terminal's status and every other line the screen. Input
 //! goes to the child's stdin. Tests use it when no real base is wanted.
+//!
+//! `events()` (M2-2) queues one event per observed change: `Created` at launch, `StatusChanged` for
+//! every OSC 7501 record the program prints (a repeat of the same state included, so none is lost
+//! to polling the latest status), `Exited` when the program is gone and `Removed` by `end`. A
+//! `Local` is `Clone`: the clones share the terminals, so a test can hand one to the daemon and
+//! keep one to script with. The terminals are killed when the last clone is dropped.
 #![allow(dead_code)]
 
 use makiba::base::version::PINNED;
 use makiba::base::{
-    Base, BaseDenies, BaseError, BaseInfo, BlockKind, Detail, EventStream, LaunchSpec, State,
-    Status, Terminal, TerminalRef,
+    Base, BaseDenies, BaseError, BaseEvent, BaseInfo, BlockKind, Detail, EventStream, LaunchSpec,
+    State, Status, Terminal, TerminalEvent, TerminalRef,
 };
 use std::collections::BTreeMap;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::{Sender, channel};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 #[derive(Default)]
 struct Seen {
@@ -27,9 +35,21 @@ struct Proc {
     tags: BTreeMap<String, String>,
 }
 
-#[derive(Default)]
+type Subscribers = Arc<Mutex<Vec<Sender<BaseEvent>>>>;
+
+#[derive(Default, Clone)]
 pub struct Local {
-    procs: Mutex<BTreeMap<String, Proc>>,
+    procs: Arc<Mutex<BTreeMap<String, Proc>>>,
+    subscribers: Subscribers,
+}
+
+/// Queue `event` for every open stream. Never called with the `procs` lock held.
+fn emit(subscribers: &Subscribers, event: TerminalEvent) {
+    let event = BaseEvent::Event(event);
+    subscribers
+        .lock()
+        .unwrap()
+        .retain(|s| s.send(event.clone()).is_ok());
 }
 
 fn err(variant: fn(Detail) -> BaseError, kind: &str, message: String) -> BaseError {
@@ -126,6 +146,9 @@ impl Local {
 
 impl Drop for Local {
     fn drop(&mut self) {
+        if Arc::strong_count(&self.procs) > 1 {
+            return; // another clone still uses the terminals
+        }
         for p in self.procs.lock().unwrap().values_mut() {
             let _ = p.child.kill();
             let _ = p.child.wait();
@@ -165,37 +188,86 @@ impl Base for Local {
         let stdin = child.stdin.take().expect("piped");
         let stdout = child.stdout.take().expect("piped");
         let seen = Arc::new(Mutex::new(Seen::default()));
-        let sink = Arc::clone(&seen);
+        {
+            let mut procs = self.procs.lock().unwrap();
+            if procs.contains_key(&spec.name) {
+                let _ = child.kill();
+                return Err(err(
+                    BaseError::Other,
+                    "duplicate",
+                    format!("a terminal named {:?} exists", spec.name),
+                ));
+            }
+            procs.insert(
+                spec.name.clone(),
+                Proc {
+                    child,
+                    stdin,
+                    seen: Arc::clone(&seen),
+                    tags: spec.tags.clone(),
+                },
+            );
+        }
+        let id = TerminalRef(spec.name.clone());
+        let snapshot = {
+            let (id, name, tags) = (id.clone(), spec.name.clone(), spec.tags.clone());
+            move |status: Option<Status>, alive: bool, exit_code: Option<i32>| Terminal {
+                id: id.clone(),
+                name: name.clone(),
+                tags: tags.clone(),
+                status,
+                turn: None,
+                alive,
+                exit_code,
+            }
+        };
+        emit(
+            &self.subscribers,
+            TerminalEvent::Created(snapshot(None, true, None)),
+        );
+        let (procs, subscribers, name) = (
+            Arc::clone(&self.procs),
+            Arc::clone(&self.subscribers),
+            spec.name.clone(),
+        );
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).split(b'\n').flatten() {
                 let (status, rest) = take_record(&String::from_utf8_lossy(&line));
-                let mut s = sink.lock().unwrap();
+                let mut s = seen.lock().unwrap();
                 if status.is_some() {
-                    s.status = status;
+                    s.status = status.clone();
                 }
                 if !rest.is_empty() {
                     s.screen.push(rest);
                 }
+                drop(s);
+                if let Some(status) = status {
+                    emit(
+                        &subscribers,
+                        TerminalEvent::StatusChanged(snapshot(Some(status), true, None)),
+                    );
+                }
             }
+            // The output ended: wait for the exit code, unless `end` took the terminal first.
+            let code = loop {
+                let mut procs = procs.lock().unwrap();
+                let Some(p) = procs.get_mut(&name) else {
+                    return;
+                };
+                match p.child.try_wait() {
+                    Ok(Some(exit)) => break exit.code(),
+                    Ok(None) => {}
+                    Err(_) => return,
+                }
+                drop(procs);
+                std::thread::sleep(Duration::from_millis(10));
+            };
+            let status = seen.lock().unwrap().status.clone();
+            emit(
+                &subscribers,
+                TerminalEvent::Exited(snapshot(status, false, code)),
+            );
         });
-        let mut procs = self.procs.lock().unwrap();
-        if procs.contains_key(&spec.name) {
-            let _ = child.kill();
-            return Err(err(
-                BaseError::Other,
-                "duplicate",
-                format!("a terminal named {:?} exists", spec.name),
-            ));
-        }
-        procs.insert(
-            spec.name.clone(),
-            Proc {
-                child,
-                stdin,
-                seen,
-                tags: spec.tags.clone(),
-            },
-        );
         Ok(TerminalRef(spec.name.clone()))
     }
 
@@ -265,11 +337,18 @@ impl Base for Local {
         })?;
         let _ = p.child.kill();
         let _ = p.child.wait();
+        emit(&self.subscribers, TerminalEvent::Removed(t.clone()));
         Ok(())
     }
 
     fn events(&self) -> Result<EventStream, BaseError> {
-        Err(err(BaseError::Other, "unsupported", "events".into()))
+        let (tx, rx) = channel();
+        // The lock is held across the list and the registration, so no event falls between them.
+        let mut subscribers = self.subscribers.lock().unwrap();
+        tx.send(BaseEvent::Resync(self.list()?))
+            .expect("the receiver is held here");
+        subscribers.push(tx);
+        Ok(Box::new(rx.into_iter()))
     }
 
     fn start(&self) -> Result<(), BaseError> {
