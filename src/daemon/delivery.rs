@@ -18,11 +18,13 @@
 //! Who a terminal is comes from the record's `role` (`secretary`, `curator`, `worker`) and, for a
 //! worker, its `task_id`; a record with no role and a task id is taken as that worker's.
 
-use crate::db::writer::StateWriter;
-use crate::spec::{BODY_LIMIT, CUT_AT};
+use crate::agents::{Agent, Composer};
+use crate::base::{Base, BaseError, State, Terminal};
+use crate::db::writer::{NewEvent, StateWriter};
+use crate::spec::{BODY_LIMIT, CUT_AT, WAKE_LINE};
 use rusqlite::params;
 use std::collections::HashMap;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long after a push a turn start confirms it (a first proposal, spec section 8, probes P8).
 pub const CONFIRM_WINDOW: Duration = Duration::from_secs(10);
@@ -31,6 +33,13 @@ const RETRY_AFTER: Duration = Duration::from_secs(1);
 /// How long one pass may spend pushing before it hands control back to the daemon loop, so the
 /// monitor, the heartbeat and a stop are not held up by a backlog. What is left waits for the next pass.
 const PASS_BUDGET: Duration = Duration::from_millis(200);
+/// A push to a recipient this recent is still waiting for its turn start: no wake line yet.
+const WAKE_AFTER_PUSH: f64 = 10.0;
+/// At most one wake line per recipient in this time. Kept in memory only: after a restart a
+/// recipient may be woken once more than this allows (owner, 2026-11-18).
+const WAKE_EVERY: f64 = 60.0;
+/// How many lines of the screen are read to find the prompt line.
+const SCREEN_LINES: usize = 12;
 /// How long past the window a push is still looked at, for a monitor that is a little behind.
 const SETTLE_GRACE: Duration = Duration::from_secs(1);
 
@@ -69,6 +78,10 @@ pub struct Delivery {
     window: Duration,
     waiting: HashMap<String, InFlight>,
     retry_at: HashMap<String, Instant>,
+    clock: Box<dyn Fn() -> SystemTime + Send>,
+    agent: Option<Box<dyn Agent>>,
+    /// When each recipient was last sent the wake line, by `clock`, in seconds.
+    woken: HashMap<String, f64>,
 }
 
 struct Due {
@@ -86,7 +99,23 @@ impl Delivery {
             window: CONFIRM_WINDOW,
             waiting: HashMap::new(),
             retry_at: HashMap::new(),
+            clock: Box::new(SystemTime::now),
+            agent: None,
+            woken: HashMap::new(),
         }
+    }
+
+    /// The clock the wake rules (10 s, 60 s) read; a test sets its own.
+    pub fn with_clock(mut self, clock: Box<dyn Fn() -> SystemTime + Send>) -> Delivery {
+        self.clock = clock;
+        self
+    }
+
+    /// The agent program that reads the prompt line. With none (before M4 supplies
+    /// `claude_code`) no wake line is typed: a screen that is not understood gets nothing.
+    pub fn with_agent(mut self, agent: Box<dyn Agent>) -> Delivery {
+        self.agent = Some(agent);
+        self
     }
 
     pub fn with_window(mut self, window: Duration) -> Delivery {
@@ -102,7 +131,10 @@ impl Delivery {
             "SELECT m.id, m.event_id, m.sender, m.recipient, m.kind
              FROM messages m JOIN event_deliveries d
                ON d.source_event_id = m.event_id AND d.recipient = m.recipient
-             WHERE d.status = 'pending' AND d.attempt = 0 ORDER BY m.id",
+             JOIN events e ON e.id = m.event_id
+             WHERE d.status = 'pending' AND d.attempt = 0
+               AND COALESCE(json_extract(e.payload_json, '$.typed'), 0) = 0
+             ORDER BY m.id",
         )?;
         let due = q
             .query_map([], |r| {
@@ -159,6 +191,86 @@ impl Delivery {
                     },
                 );
             }
+        }
+        Ok(())
+    }
+
+    /// The wake line (spec section 7): for each recipient with an unconfirmed message that is
+    /// `idle` or `done` now, no push to it in the last 10 s and no wake line to it in the last
+    /// 60 s, type `WAKE_LINE` if the prompt line is empty. At most one terminal is written to per
+    /// pass, so a backlog cannot hold up the daemon; the rest wait for the next pass.
+    pub fn wake_pass(&mut self, w: &StateWriter, base: &dyn Base) -> crate::db::Result<()> {
+        let Some(agent) = self.agent.as_ref() else {
+            return Ok(());
+        };
+        let now = unix(&(self.clock)());
+        // Pending, not typed: pushed (`attempt` > 0), or never pushed because there is no channel.
+        let mut q = w.conn().prepare(
+            "SELECT DISTINCT d.recipient, d.attempt FROM event_deliveries d
+             JOIN messages m ON m.event_id = d.source_event_id AND m.recipient = d.recipient
+             JOIN events e ON e.id = m.event_id
+             WHERE d.status = 'pending' AND COALESCE(json_extract(e.payload_json, '$.typed'), 0) = 0
+             ORDER BY d.recipient",
+        )?;
+        let rows = q
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(q);
+        let mut candidates: Vec<String> = Vec::new();
+        for (recipient, attempt) in rows {
+            if (attempt > 0 || !self.channel.reaches(&recipient))
+                && !candidates.contains(&recipient)
+            {
+                candidates.push(recipient);
+            }
+        }
+        for recipient in candidates {
+            if self
+                .woken
+                .get(&recipient)
+                .is_some_and(|t| now - t < WAKE_EVERY)
+                || self
+                    .retry_at
+                    .get(&recipient)
+                    .is_some_and(|t| Instant::now() < *t)
+            {
+                continue;
+            }
+            // The latest push of any message to it, delivered ones too.
+            let last_push: Option<f64> = w.conn().query_row(
+                "SELECT MAX((julianday(last_attempt_at) - 2440587.5) * 86400.0)
+                 FROM event_deliveries WHERE recipient = ?1 AND attempt > 0",
+                [&recipient],
+                |r| r.get(0),
+            )?;
+            if last_push.is_some_and(|t| now - t < WAKE_AFTER_PUSH) {
+                continue;
+            }
+            let Ok(Some(t)) = find_terminal(base, &recipient) else {
+                continue;
+            };
+            // The status now, not the last record: the wake goes to an idle or done terminal only.
+            let idle = match base.get(&t.id).ok().and_then(|t| t.status).map(|s| s.state) {
+                Some(State::Idle) => true,
+                Some(State::Done) => false,
+                _ => continue,
+            };
+            let screen = base.read(&t.id, SCREEN_LINES).unwrap_or_default();
+            if agent.composer(&screen) != Composer::Empty {
+                continue;
+            }
+            match base.send(&t.id, WAKE_LINE, idle) {
+                Ok(()) => {
+                    self.woken.insert(recipient, now);
+                }
+                // Not counted against the 60 s: tried again after a short pause.
+                Err(e) => {
+                    self.retry_at
+                        .insert(recipient.clone(), Instant::now() + RETRY_AFTER);
+                    eprintln!("makibad: cannot type the wake line to {recipient}: {e}");
+                }
+            }
+            break;
         }
         Ok(())
     }
@@ -258,6 +370,120 @@ fn turn_started(
         |r| r.get(0),
     )?;
     Ok(n > 0)
+}
+
+fn unix(t: &SystemTime) -> f64 {
+    t.duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs_f64())
+        .unwrap_or(0.0)
+}
+
+/// The one live terminal of this organization that is `recipient`'s (by its tags). `None` when
+/// there is none or more than one.
+fn find_terminal(base: &dyn Base, recipient: &str) -> Result<Option<Terminal>, BaseError> {
+    let Some((role, task)) = identity(recipient) else {
+        return Ok(None);
+    };
+    let mut found = base.list()?.into_iter().filter(|t| {
+        t.alive
+            && t.tags.get("makiba.role").map(String::as_str) == Some(role)
+            && task.is_none_or(|k| t.tags.get("makiba.task_id").map(String::as_str) == Some(k))
+    });
+    let one = found.next();
+    Ok(if found.next().is_some() { None } else { one })
+}
+
+/// Why a typed request did not go out.
+#[derive(Debug)]
+pub enum TypedError {
+    /// The request itself is wrong (the secretary, or an agent that is not a worker or the curator).
+    Usage(String),
+    /// The recipient cannot take typed text now. Nothing is stored and nothing is typed.
+    Conflict(String),
+    /// The record or the send failed with an outcome that is not known. A message stored before
+    /// the send stays `pending` and is never sent again by `makibad`.
+    Failed(String),
+}
+
+/// `send` or `answer` with `typed` (spec sections 7 and 8): record the message as a typed one,
+/// type its wrapped text once, and mark it `delivered` when `Base::send` returns. Returns the
+/// message id. The record comes first, so a crash in between leaves a row that is `pending`, is
+/// not eligible for a push, the wake line or the box, and is never sent again.
+pub fn send_typed(
+    w: &StateWriter,
+    base: &dyn Base,
+    sender: &str,
+    recipient: &str,
+    kind: &str,
+    body: &str,
+) -> Result<i64, TypedError> {
+    if recipient != "curator" && !recipient.starts_with(crate::spec::WORKER_AGENT_PREFIX) {
+        return Err(TypedError::Usage(format!(
+            "typed goes to a worker or the curator, not to {recipient}"
+        )));
+    }
+    let failed = |e: &dyn std::fmt::Display| TypedError::Failed(e.to_string());
+    let t = find_terminal(base, recipient)
+        .map_err(|e| failed(&e))?
+        .ok_or_else(|| TypedError::Conflict(format!("{recipient} has no single live terminal")))?;
+    let state = base
+        .get(&t.id)
+        .map_err(|e| failed(&e))?
+        .status
+        .map(|s| s.state);
+    let only_if_idle = match state {
+        Some(State::Idle) => true,
+        Some(State::Done) => false,
+        other => {
+            return Err(TypedError::Conflict(format!(
+                "{recipient} is {other:?}, not idle or done"
+            )));
+        }
+    };
+    let payload = serde_json::json!({"typed": true});
+    let (id, event) = w
+        .transaction(|w| {
+            let event = w.append_event(&NewEvent {
+                kind: "message_sent",
+                actor: Some(sender),
+                payload: Some(&payload),
+                ..Default::default()
+            })?;
+            w.conn().execute(
+                "INSERT INTO messages (event_id, sender, recipient, kind, body) VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![event, sender, recipient, kind, body],
+            )?;
+            let id = w.conn().last_insert_rowid();
+            w.conn().execute(
+                "INSERT INTO event_deliveries (source_event_id, recipient, status, attempt, first_attempt_at, last_attempt_at)
+                 VALUES (?1, ?2, 'pending', 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                params![event, recipient],
+            )?;
+            Ok((id, event))
+        })
+        .map_err(|e| failed(&e))?;
+    match base.send(&t.id, &wrap(id, sender, kind, body), only_if_idle) {
+        Ok(()) => {
+            w.confirm_push(event, recipient).map_err(|e| failed(&e))?;
+            Ok(id)
+        }
+        // The base refused: nothing was typed, so nothing stays stored.
+        Err(
+            e @ (BaseError::StatusMismatch(_)
+            | BaseError::Blocked(_)
+            | BaseError::Finished(_)
+            | BaseError::NotFound(_)),
+        ) => {
+            w.conn()
+                .execute("DELETE FROM events WHERE id = ?1", [event])
+                .map_err(|e| failed(&e))?;
+            Err(TypedError::Conflict(e.to_string()))
+        }
+        // A timeout or the like: it may have been typed. Kept `pending`, never sent again.
+        Err(e) => Err(TypedError::Failed(format!(
+            "message {id}: the outcome of the send is not known: {e}"
+        ))),
+    }
 }
 
 /// A header value that cannot leave its quotes or its line.

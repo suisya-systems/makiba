@@ -57,6 +57,17 @@ pub struct TaskSettings {
     pub write_dirs: Vec<PathBuf>,
 }
 
+/// What the prompt line of an agent's screen shows (spec section 7, the wake line).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Composer {
+    /// The prompt line is there and nothing is typed on it.
+    Empty,
+    /// Something is typed on it, possibly over several lines.
+    Input,
+    /// The screen is not understood: nothing is typed into it.
+    Unknown,
+}
+
 pub trait Agent: Send + Sync {
     /// `"claude_code"` or `"fake"`.
     fn name(&self) -> &'static str;
@@ -67,6 +78,11 @@ pub trait Agent: Send + Sync {
     fn startup_dialogs(&self) -> &[DialogPolicy];
     /// For a blocked terminal: the prompt's text, normalized, and its two keys.
     fn recognize_prompt(&self, screen: &[String]) -> Option<PromptView>;
+    /// The prompt line of `screen` (the last lines of the terminal). Anything not understood is
+    /// `Unknown`, and nothing is typed into it.
+    fn composer(&self, _screen: &[String]) -> Composer {
+        Composer::Unknown
+    }
     /// The per-task settings file: sandbox write surface, the door, denies.
     fn write_task_settings(&self, path: &Path, task: &TaskSettings) -> io::Result<()>;
     /// The id to pass back as `resume`, read after the first turn.
