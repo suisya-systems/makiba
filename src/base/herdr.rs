@@ -1,7 +1,10 @@
 //! The real base: herdr-core over its Unix socket, one JSON-RPC 2.0 message per line.
 //! Private to `base`; nothing else names it (spec section 6.1, `tests/base_seam.rs`).
-//! M1-1 builds `hello()`, M1-2 the terminal operations. Each call opens its own connection, has a read and write timeout, and is
+//! M1-1 builds `hello()`, M1-2 the terminal operations, M1-3 `events()` (`herdr/events.rs`). Each call
+//! opens its own connection, has a read and write timeout, and is
 //! never retried here.
+
+mod events;
 
 use super::version::checked_hello;
 use super::{
@@ -20,6 +23,7 @@ const GENERATION: u64 = 1;
 /// The tag every terminal of an organization carries (`spec::TAG_ORG`): its state folder.
 const TAG_ORG: &str = crate::spec::TAG_ORG;
 
+#[derive(Clone)]
 pub struct Herdr {
     socket: PathBuf,
     timeout: Duration,
@@ -198,9 +202,17 @@ fn terminal_of(v: &Value) -> Result<Terminal, BaseError> {
             msg: status.and_then(|s| text_of(s, "msg")).map(String::from),
         })
     });
-    let exit_code = v.get("exit_code").and_then(Value::as_i64).map(|c| c as i32);
+    // The exit code is `exit_code`, or under `exit` in the notices of `events.subscribe`.
+    let exit_code = v
+        .get("exit_code")
+        .or_else(|| v.pointer("/exit/code"))
+        .and_then(Value::as_i64)
+        .map(|c| c as i32);
+    let exited = v.get("exit").is_some_and(|e| !e.is_null());
     let alive = v.get("alive").and_then(Value::as_bool).unwrap_or(
-        exit_code.is_none() && !matches!(text_of(v, "state"), Some("finished" | "exited")),
+        !exited
+            && exit_code.is_none()
+            && !matches!(text_of(v, "state"), Some("finished" | "exited")),
     );
     Ok(Terminal {
         id: TerminalRef(id.into()),
@@ -317,7 +329,7 @@ impl Base for Herdr {
         self.call("terminal.rm", json!({"terminal": t.0})).map(drop)
     }
     fn events(&self) -> Result<EventStream, BaseError> {
-        Err(not_built("events"))
+        self.events_stream()
     }
     fn start(&self) -> Result<(), BaseError> {
         Err(not_built("start"))
