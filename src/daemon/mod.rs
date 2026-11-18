@@ -4,6 +4,7 @@
 
 pub mod anomalies;
 pub mod delivery;
+pub mod dispatch;
 pub mod door;
 pub mod inbox;
 mod monitor;
@@ -13,6 +14,7 @@ mod recover;
 
 use self::anomalies::Anomalies;
 use self::delivery::Delivery;
+use self::dispatch::Dispatch;
 use self::monitor::Monitor;
 use crate::base::stub::Stub;
 use crate::base::{Base, BaseEvent};
@@ -240,6 +242,7 @@ fn serve(
     let org = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut monitor = Monitor::new(&org.to_string_lossy());
     let mut anomalies = Anomalies::new();
+    let dispatch = Dispatch::new(dispatch::capacity_from_env());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
@@ -276,6 +279,9 @@ fn serve(
         if monitor.reconciled() {
             if let Err(e) = anomalies.pass(&w) {
                 eprintln!("makibad: anomaly pass failed: {e}");
+            }
+            if let Err(e) = dispatch.pass(&w) {
+                eprintln!("makibad: dispatch: {e}");
             }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");
