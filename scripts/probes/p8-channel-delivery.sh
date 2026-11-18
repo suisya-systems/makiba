@@ -89,11 +89,17 @@ wait_file() { local j=0; while [ ! -f "$1" ] && [ "$j" -lt "$2" ]; do j=$((j + 1
 watch_change() { # watch_change <before "state turn"> <seconds>: sets WSEEN (time) and WLAST; WSEEN empty if no state or turn change
   WSEEN=""; WLAST=$1; local i=0 a
   while [ "$i" -lt "$(( $2 * 10 / 3 ))" ]; do   # one look per 0.3 s
-    a=$(term_info "$T"); WLAST=$a
+    a=$(term_info "$T")
+    case "$a" in none*) i=$((i + 1)); sleep 0.3; continue ;; esac   # status unreadable: not a change
+    WLAST=$a
     if [ "${a%% *}" = working ] || [ "${a#* }" != "${1#* }" ]; then WSEEN=$(now); return 0; fi
     i=$((i + 1)); sleep 0.3
   done
   return 1
+}
+idle_or() { # idle_or <case>: records NEEDS-HUMAN and fails when the target is not idle/done, so nothing is sent into a busy or blocked agent
+  wait_idle "$T" 60 && case "$(term_info "$T")" in none*) false ;; esac && return 0
+  record "$1" NEEDS-HUMAN "the target was not idle (state '$(term_info "$T")') after 60s, so the case was not exercised"; screen_dump "$T" "$1-precondition"; return 1
 }
 DONEN=0
 make_done() { # a short turn, then the base reads done: needs the file AND the state, so a stale done is not taken for the end of this turn
@@ -130,7 +136,7 @@ else record channel-while-done NEEDS-HUMAN "could not bring the target to a fini
 wait_idle "$T" 60
 
 # ---- turn-start-for-another-cause (P8 step 3): the stand-in holds its message, a typed line starts the turn
-wait_idle "$T" 60
+if idle_or turn-start-for-another-cause; then
 b=$(term_info "$T"); k=$(tok)
 admin '{"op":"pause","value":true}' >/dev/null; enqueue "$(msg 7 recv-7.txt "$k")" >/dev/null
 t0=$(now); hc send "$T" "Reply with the single word OTHER-CAUSE. Use no tool." >/dev/null 2>&1
@@ -141,9 +147,10 @@ else record turn-start-for-another-cause NEEDS-HUMAN "no state or turn change wi
 wait_idle "$T" 60
 admin '{"op":"pause","value":false}' >/dev/null
 wait_file "$REPO/recv-7.txt" 30; wait_idle "$T" 60   # the held message is let through, so it cannot disturb the next case
+fi
 
 # ---- two-in-a-row (P9): two notifications back to back to an idle target
-wait_idle "$T" 60
+if idle_or two-in-a-row; then
 k1=$(tok); k2=$(tok)
 enqueue "$(msg 8a recv-8a.txt "$k1")" >/dev/null; enqueue "$(msg 8b recv-8b.txt "$k2")" >/dev/null
 wait_file "$REPO/recv-8a.txt" 60; wait_file "$REPO/recv-8b.txt" 60; wait_idle "$T" 60; sleep 3
@@ -155,9 +162,10 @@ if [ "$na" = 1 ] && [ "$nb" = 1 ] && [ "$fa" = present ] && [ "$fb" = present ];
 elif [ "$na" -gt 1 ] || [ "$nb" -gt 1 ]; then record two-in-a-row FAIL "text counts 8a=$na 8b=$nb (a repeat); files 8a $fa, 8b $fb; order: $ord"; screen_dump "$T" "two-in-a-row"
 elif [ "$fa" = absent ] || [ "$fb" = absent ]; then record two-in-a-row FAIL "a notification produced no file (lost?): 8a $fa, 8b $fb; text counts 8a=$na 8b=$nb"; screen_dump "$T" "two-in-a-row"
 else record two-in-a-row NEEDS-HUMAN "both files written but text counts are 8a=$na 8b=$nb; order: $ord"; screen_dump "$T" "two-in-a-row"; fi
+fi
 
 # ---- channel-while-blocked (P9): a notification while a permission prompt is open; the prompt is answered only after the observation
-wait_idle "$T" 60
+if idle_or channel-while-blocked; then
 rm -f "$REPO/blocked-ran.txt"; k=$(tok)
 hc send "$T" "Run this with your Bash tool: python3 -c \"open('blocked-ran.txt','w').write('x')\" . Use no other tool. Then reply with the single word BLOCKED-DONE." >/dev/null 2>&1
 j=0; while [ "$j" -lt 60 ]; do case "$(term_info "$T")" in blocked*) break ;; esac; j=$((j + 1)); sleep 1; done   # TODO(confirm): the state is spelled "blocked" in hc get --json
@@ -189,5 +197,7 @@ else
     else record channel-while-blocked NEEDS-HUMAN "$d"; screen_dump "$T" "while-blocked"; fi
   fi
 fi
+fi
+
 wait_idle "$T" 60
 finish
