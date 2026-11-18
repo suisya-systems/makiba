@@ -13,6 +13,7 @@ name = "makiba-fake-agent"
 path = "tests/common/fake_agent.rs"
 
 [dependencies]
+httparse = "1.10.1"
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde_json = "1.0.154"
 signal-hook = "0.4.6"
