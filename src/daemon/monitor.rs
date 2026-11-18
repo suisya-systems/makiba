@@ -91,6 +91,11 @@ impl Monitor {
         }
     }
 
+    /// A `Resync` has been handled and none is waiting to be tried again: the view is built.
+    pub fn reconciled(&self) -> bool {
+        self.started && self.retry.is_none()
+    }
+
     pub fn handle(&mut self, w: &StateWriter, event: BaseEvent) -> crate::db::Result<()> {
         // A newer Resync replaces one that failed; any other event goes after it.
         if let Some(list) = self.retry.take()
