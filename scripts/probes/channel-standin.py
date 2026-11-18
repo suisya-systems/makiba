@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
 """Minimal stand-in for makibad, for the channel probes (python3 standard library only).
 
-  channel-standin.py serve   --port N --state DIR --secrets FILE   (FILE: {"token":..,"cred":..,"admin":..})
+  channel-standin.py serve   --port N (0: a free port, written to DIR/ready) --state DIR --secrets FILE   (FILE: {"token":..,"cred":..,"admin":..})
       HTTP on 127.0.0.1 with:
         POST /mcp    (Authorization: Bearer T)  MCP over plain JSON POST: initialize, tools/list,
                      tools/call send_request{text} -> appended to DIR/requests.jsonl
         POST /poll   (Bearer C)  the channel server takes queued messages (at most once)
-        POST /admin  (Bearer A)  {"op":"enqueue","content":"..."} or {"op":"pause","value":true|false}
+        POST /admin  (Bearer A)  {"op":"enqueue","content":"..."}, {"op":"pause","value":true|false} or {"op":"status"};
+                     every answer carries queued (messages not yet taken) and paused
         GET  /ping   no auth, answers "pong"
       Every request is logged to DIR/access.log: time, method, path, auth ok|bad|none, user agent.
   channel-standin.py channel
@@ -93,14 +94,19 @@ def serve(a):
                         counter[0] += 1
                         queue.append({"id": counter[0], "content": req.get("content", "")})
                 elif req.get("op") == "pause":
-                    paused[0] = bool(req.get("value"))
-                return self._send(200, {"ok": True, "queued": len(queue), "paused": paused[0]})
+                    with lock:
+                        paused[0] = bool(req.get("value"))
+                with lock:   # any op, also "status": report the queue and the pause flag as one snapshot
+                    snap = {"ok": True, "queued": len(queue), "paused": paused[0]}
+                return self._send(200, snap)
             if path == "/poll":
                 if not self._auth(a.cred):
                     return self._send(401)
-                with lock:
-                    rows = [] if paused[0] else queue[:]
-                    if not paused[0]:
+                with lock:   # one decision under the lock: take and remove together, or neither
+                    if paused[0]:
+                        rows = []
+                    else:
+                        rows = queue[:]
                         del queue[:]
                 return self._send(200, {"rows": rows})
             if path != "/mcp":
@@ -136,6 +142,7 @@ def serve(a):
 
 
 def channel():
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))   # loopback only: ignore proxy variables
     url, cred = os.environ["STANDIN_URL"], os.environ["STANDIN_CRED"]
     name = os.environ.get("STANDIN_NAME", "makiba-channel")
     started, out_lock = threading.Event(), threading.Lock()
@@ -151,7 +158,7 @@ def channel():
             try:
                 req = urllib.request.Request(url + "/poll", data=b"{}", method="POST",
                                              headers={"Authorization": "Bearer " + cred, "Content-Type": "application/json"})
-                rows = json.loads(urllib.request.urlopen(req, timeout=5).read()).get("rows", [])
+                rows = json.loads(opener.open(req, timeout=5).read()).get("rows", [])
                 for r in rows:
                     write({"jsonrpc": "2.0", "method": "notifications/claude/channel", "params": {
                         "content": r["content"],
