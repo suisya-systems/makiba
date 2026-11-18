@@ -5,11 +5,21 @@
 //! usage: makiba-fake-agent --record FILE STEP...
 //!
 //! Steps, run in order:
-//!   idle | working | done | error | blocked[:permission|question|auth]
-//!                   report that state as an OSC 7501 record, then print a visible line
+//!   idle | working | done | error | none | blocked[:permission|question|auth[:MSG]]
+//!                   report that state (`none`: no status) as an OSC 7501 record, with MSG as
+//!                   its message, then print a visible line
 //!   wait-line       read input until a line arrives
 //!   wait-key        read input until a key arrives
 //!   dialog          print a startup dialog with a cursor line; up and down move it, enter ends it
+//!   menu:JSON       erase the screen (ESC [H ESC [2J) and draw one dialog frame from JSON
+//!                   `{"above": [ROW...], "options": [TEXT...], "at": N, "indent": S,
+//!                   "below": [ROW...]}`: the rows above, each option as INDENT + mark + space +
+//!                   TEXT (the mark U+276F on the cursor's option, starting at N, a space on the
+//!                   others), the rows below. Up and down move the cursor and draw the frame
+//!                   again; enter erases the screen, records `chose N` (from 1) and prints
+//!                   `[fake] dialog chose N`
+//!   steps:FILE      run the steps of the JSON array of strings in FILE (relative to the working
+//!                   folder, as the record file may be)
 //!   prompt          report `blocked:permission`, print a permission prompt, wait for enter or esc
 //!   sleep:MS        sleep
 //!   exit[:N]        exit with code N (default 0)
@@ -45,6 +55,9 @@ unsafe extern "C" {
     fn getsid(pid: i32) -> i32;
 }
 
+/// Cursor home, then erase the display: what a program prints to draw a new frame.
+const ERASE: &str = "\x1b[H\x1b[2J";
+
 enum Input {
     Line(String),
     Key(&'static str),
@@ -62,8 +75,13 @@ impl Agent {
         let _ = std::io::stdout().flush();
     }
 
+    /// `kind` is `KIND` or `KIND:MSG`; the message goes last, so it may hold a colon.
     fn report(&self, state: &str, kind: Option<&str>) {
-        let kind = kind.map(|k| format!(":kind={k}")).unwrap_or_default();
+        let kind = match kind.map(|k| k.split_once(':').unwrap_or((k, ""))) {
+            Some((k, "")) => format!(":kind={k}"),
+            Some((k, m)) => format!(":kind={k}:msg={m}"),
+            None => String::new(),
+        };
         print!("\x1b]7501;state={state}:app=makiba-fake{kind}\x07");
         self.say(&format!("[fake] {state}"));
     }
@@ -170,6 +188,49 @@ impl Agent {
         }
     }
 
+    /// The `menu` step.
+    fn menu(&mut self, spec: &str) {
+        let spec: serde_json::Value = serde_json::from_str(spec).expect("menu: JSON");
+        let rows = |k: &str| -> Vec<String> {
+            spec[k]
+                .as_array()
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|v| v.as_str())
+                        .map(String::from)
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let (above, options, below) = (rows("above"), rows("options"), rows("below"));
+        let indent = spec["indent"].as_str().unwrap_or(" ").to_string();
+        let last = options.len().saturating_sub(1);
+        let mut at = (spec["at"].as_u64().unwrap_or(0) as usize).min(last);
+        loop {
+            print!("{ERASE}");
+            for r in &above {
+                self.say(r);
+            }
+            for (i, o) in options.iter().enumerate() {
+                let mark = if i == at { "\u{276f}" } else { " " };
+                self.say(&format!("{indent}{mark} {o}"));
+            }
+            for r in &below {
+                self.say(r);
+            }
+            match self.next_input() {
+                Some(Input::Key("down")) => at = (at + 1).min(last),
+                Some(Input::Key("up")) => at = at.saturating_sub(1),
+                Some(Input::Key("enter")) => break,
+                Some(_) => {}
+                None => std::process::exit(0),
+            }
+        }
+        print!("{ERASE}");
+        self.append(&format!("chose {}", at + 1));
+        self.say(&format!("[fake] dialog chose {}", at + 1));
+    }
+
     fn append(&self, row: &str) {
         let mut f = OpenOptions::new()
             .create(true)
@@ -185,7 +246,7 @@ impl Agent {
             None => (step, None),
         };
         match name {
-            "idle" | "working" | "done" | "error" => self.report(name, None),
+            "idle" | "working" | "done" | "error" | "none" => self.report(name, None),
             "blocked" => self.report("blocked", arg),
             "wait-line" => self.wait_line(),
             "wait-key" => self.wait_key(),
@@ -195,6 +256,15 @@ impl Agent {
                     &["Yes, I trust this folder", "No, exit"],
                 );
                 self.say(&format!("[fake] dialog chose {}", at + 1));
+            }
+            "menu" => self.menu(arg.unwrap_or("{}")),
+            "steps" => {
+                let path = arg.unwrap_or("");
+                let text = std::fs::read_to_string(path).expect("read the steps file");
+                let steps: Vec<String> = serde_json::from_str(&text).expect("a JSON array");
+                for s in steps {
+                    self.step(&s);
+                }
             }
             "prompt" => {
                 self.report("blocked", Some("permission"));
