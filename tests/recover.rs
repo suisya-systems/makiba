@@ -129,21 +129,33 @@ fn resynced(dir: &Path, n: usize) -> Vec<Value> {
     })
 }
 
-/// What the person's secretary was told: `(kind, body)` of the notices, and how many
-/// `message_sent` events and pending deliveries to the secretary exist.
+/// What the secretary was told about unknown (ghost) terminals: the notice bodies, the
+/// `message_sent` events and the pending deliveries behind them. Notices of other origins (the
+/// anomaly pass reports a lost run's `gone`) are not counted: this test is about the ghost.
 fn told(dir: &Path) -> (Vec<String>, usize, usize) {
+    const GHOST: &str = "m.recipient = 'secretary' AND m.kind = 'notice' \
+                         AND m.body LIKE 'Unknown terminal:%'";
     let bodies = rows(
         dir,
-        "SELECT id, body FROM messages WHERE recipient = 'secretary' AND kind = 'notice' ORDER BY id",
+        &format!("SELECT m.id, m.body FROM messages m WHERE {GHOST} ORDER BY m.id"),
     )
     .into_iter()
     .map(|(_, b)| b)
     .collect();
-    let sent = events(dir, "message_sent").len();
+    let sent = rows(
+        dir,
+        &format!(
+            "SELECT e.id, 'x' FROM events e JOIN messages m ON m.event_id = e.id
+             WHERE e.kind = 'message_sent' AND {GHOST}"
+        ),
+    )
+    .len();
     let pending = rows(
         dir,
-        "SELECT count(*), 'x' FROM event_deliveries
-         WHERE recipient = 'secretary' AND status = 'pending'",
+        &format!(
+            "SELECT count(*), 'x' FROM event_deliveries d JOIN messages m ON m.event_id = d.source_event_id
+             WHERE d.recipient = 'secretary' AND d.status = 'pending' AND {GHOST}"
+        ),
     )[0]
     .0
     .unwrap() as usize;
