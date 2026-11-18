@@ -14,6 +14,8 @@
 //!   sleep:MS        sleep
 //!   exit[:N]        exit with code N (default 0)
 //!   hang            never return
+//!   env             record `env NAME=VALUE` for every variable of its environment and
+//!                   `arg VALUE` for every argument, then `env-end`
 //!   door:VERB:PATH  send VERB with no key to the door's Unix socket at PATH; record
 //!                   `door VERB <answer line>`
 //!   port:VERB:ADDR  call the tool VERB with no token on the door's MCP server at ADDR
@@ -24,6 +26,9 @@
 //!                   <STEP's record>`, where A is this process and H the hop. Neither the hop
 //!                   nor the grandchild holds this process's input or output, and the
 //!                   grandchild exits after 30 s at the latest
+//!
+//! `--mcp-config VALUE` among the steps is an argument the agent module adds (M3-4), not a step:
+//! it is skipped, and `env` records it.
 //!
 //! Every line and key received is appended to FILE, one per row: `line TEXT` or `key NAME`
 //! (`enter`, `up`, `down`, `left`, `right`, `esc`). The OSC 7501 record is
@@ -199,6 +204,19 @@ impl Agent {
                 arg.and_then(|a| a.parse().ok()).unwrap_or(0),
             )),
             "exit" => std::process::exit(arg.and_then(|a| a.parse().ok()).unwrap_or(0)),
+            "env" => {
+                for (k, v) in std::env::vars_os() {
+                    self.append(&format!(
+                        "env {}={}",
+                        k.to_string_lossy(),
+                        v.to_string_lossy()
+                    ));
+                }
+                for a in std::env::args() {
+                    self.append(&format!("arg {a}"));
+                }
+                self.append("env-end");
+            }
             "hang" => loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             },
@@ -362,7 +380,12 @@ fn main() {
         bytes,
         pushed_back: None,
     };
-    for step in rest {
+    let mut steps = rest.into_iter();
+    while let Some(step) = steps.next() {
+        if step == "--mcp-config" {
+            steps.next();
+            continue;
+        }
         agent.step(&step);
     }
 }
