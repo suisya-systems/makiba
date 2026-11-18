@@ -185,27 +185,26 @@ impl Hub {
             .and_then(|h| std::str::from_utf8(h.value).ok())
             .and_then(|v| v.split('-').next()?.parse::<u128>().ok())
             .unwrap_or(0);
-        {
-            let mut newest = self.0.newest.lock().unwrap();
-            let seen = newest.entry(agent.clone()).or_insert(start);
-            if start < *seen {
-                let _ = respond(&mut s, "409 Conflict", "");
-                return;
-            }
-            *seen = start;
-        }
         let (tx, rx) = channel::<Offer>();
         let serial = self.0.next_gen.fetch_add(1, Ordering::SeqCst);
         if self.0.closed.load(Ordering::SeqCst) {
             return;
         }
-        // A request already held for this agent is dropped from the map here: its receiver
-        // disconnects and it answers 409.
-        self.0
-            .slots
-            .lock()
-            .unwrap()
-            .insert(agent.clone(), Slot { serial, tx });
+        {
+            // One critical section: the check of the session and the replacement of the slot,
+            // so an older session cannot overwrite a newer registration. The slot that is
+            // replaced is dropped: its receiver disconnects and that request answers 409.
+            let mut slots = self.0.slots.lock().unwrap();
+            let mut newest = self.0.newest.lock().unwrap();
+            let seen = newest.entry(agent.clone()).or_insert(start);
+            if start < *seen {
+                drop((slots, newest));
+                let _ = respond(&mut s, "409 Conflict", "");
+                return;
+            }
+            *seen = start;
+            slots.insert(agent.clone(), Slot { serial, tx });
+        }
         let _reg = Registered {
             hub: &self.0,
             agent,
