@@ -203,9 +203,7 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
     }
 
     // A stop: say so, release the lock, leave no pid behind.
-    if subscribed {
-        event(&w, "dispatcher_stopped", &info.name, &info.version).map_err(|e| e.to_string())?;
-    }
+    event(&w, "dispatcher_stopped", &info.name, &info.version).map_err(|e| e.to_string())?;
     w.conn()
         .execute("UPDATE dispatcher SET subscribed = 0 WHERE id = 1", [])
         .map_err(|e| e.to_string())?;
