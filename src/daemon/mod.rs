@@ -2,10 +2,12 @@
 //! a heartbeat, a clean stop. It says it is subscribed only once the base's event stream has
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
+pub mod anomalies;
 pub mod delivery;
 mod monitor;
 mod recover;
 
+use self::anomalies::Anomalies;
 use self::delivery::Delivery;
 use self::monitor::Monitor;
 use crate::base::stub::Stub;
@@ -203,6 +205,7 @@ pub fn run_with(
 
     let org = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut monitor = Monitor::new(&org.to_string_lossy());
+    let mut anomalies = Anomalies::new();
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
@@ -234,8 +237,15 @@ pub fn run_with(
             }
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
         }
-        if subscribed && let Err(e) = delivery.pass(&w) {
-            eprintln!("makibad: delivery: {e}");
+        // The rules and the delivery read what is committed: not before the first Resync is
+        // reconciled. Order: recover, monitor, then anomalies and delivery.
+        if monitor.reconciled() {
+            if let Err(e) = anomalies.pass(&w) {
+                eprintln!("makibad: anomaly pass failed: {e}");
+            }
+            if let Err(e) = delivery.pass(&w) {
+                eprintln!("makibad: delivery: {e}");
+            }
         }
         if Instant::now() >= next_beat {
             beat(&w)?;
