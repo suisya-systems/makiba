@@ -316,7 +316,7 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | Probe | Date | `hc --version` | `claude --version` | Result | Notes |
 | --- | --- | --- | --- | --- | --- |
 | P1 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (door); base-side steps not shown | `socket()` refused for every Unix socket; plan.md 3.3 |
-| P2 | | | | | |
+| P2 | not run | | | none | M0-3 (#5) shipped the stand-in half and the real-base fixture (`MAKIBA_TEST_REAL_BASE=1`, `tests/common/mod.rs`) without P2's result. The CI job that runs the suite on the real base is added with `continue-on-error: true`, so a red run cannot block a merge until P2 is run (three green runs on `ubuntu-latest`) and the flag is removed. Nothing here says the real base can run in GitHub's CI. Real-base tests run on a person's machine until then. |
 | P3 | 2026-11-18 | 0.1.21 | 2.1.326 | FAIL (keys and human) | keys: joined, as expected. human: held 20 s with the draft intact, then draft and wrapper became one prompt (send rc 0 after 49 s); whether the wait ran out or the person's Enter caused the join is not separated |
 | P4 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS (8 of 8; 2 read by the secretary) | typed bodies arrive whole; not tested on a terminal a person types in |
 | P5 | 2026-11-18 | 0.1.21 | 2.1.326 | PASS | dialog answered once, first turn on the task in 3 s |
