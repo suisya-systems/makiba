@@ -69,3 +69,72 @@ pub fn ensure(w: &StateWriter, path: &Path) -> Result<(), String> {
     })
     .map_err(|e| format!("cannot store the person key's hash: {e}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn writer() -> StateWriter {
+        StateWriter::new(crate::db::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn mode(p: &Path) -> u32 {
+        std::fs::metadata(p).unwrap().permissions().mode() & 0o777
+    }
+
+    fn person_rows(w: &StateWriter) -> Vec<(String, bool)> {
+        let mut q = w
+            .conn()
+            .prepare("SELECT key_sha256, revoked_at IS NULL FROM agents WHERE role = 'person' ORDER BY id")
+            .unwrap();
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    #[test]
+    fn an_existing_key_file_is_made_private_and_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("makiba");
+        std::fs::create_dir(&dir).unwrap();
+        std::fs::set_permissions(&dir, Permissions::from_mode(0o755)).unwrap();
+        let file = dir.join("person.key");
+        std::fs::write(&file, "the-old-key\n").unwrap();
+        std::fs::set_permissions(&file, Permissions::from_mode(0o644)).unwrap();
+        let w = writer();
+        ensure(&w, &file).unwrap();
+        assert_eq!(mode(&file), 0o600);
+        assert_eq!(mode(&dir), 0o700);
+        assert_eq!(std::fs::read_to_string(&file).unwrap(), "the-old-key\n");
+        assert_eq!(person_rows(&w), vec![(sha256_hex("the-old-key"), true)]);
+    }
+
+    #[test]
+    fn a_new_key_file_revokes_the_old_hash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("cfg/makiba/person.key");
+        let w = writer();
+        ensure(&w, &file).unwrap();
+        let first = std::fs::read_to_string(&file).unwrap().trim().to_string();
+        assert_eq!(first.len(), 64);
+        std::fs::remove_file(&file).unwrap();
+        ensure(&w, &file).unwrap();
+        let second = std::fs::read_to_string(&file).unwrap().trim().to_string();
+        assert_ne!(first, second);
+        assert_eq!(
+            person_rows(&w),
+            vec![(sha256_hex(&first), false), (sha256_hex(&second), true)]
+        );
+    }
+
+    #[test]
+    fn an_empty_key_file_is_refused() {
+        let tmp = tempfile::tempdir().unwrap();
+        let file = tmp.path().join("person.key");
+        std::fs::write(&file, "\n").unwrap();
+        let w = writer();
+        assert!(ensure(&w, &file).is_err());
+        assert!(person_rows(&w).is_empty());
+    }
+}
