@@ -185,8 +185,13 @@ impl Launch {
             return Outcome::Down(format!("no agent module named {:?}", row.agent));
         };
         let agent_id = spec::worker_agent_id(&row.task);
-        let token = match super::door::issue_key(w, spec::Role::Worker, &agent_id, Some(row.run_id))
-        {
+        let token = match super::door::issue_key(
+            w,
+            spec::Role::Worker,
+            &agent_id,
+            Some(row.run_id),
+            Some(&row.spawn),
+        ) {
             Ok(t) => t,
             Err(why) => return Outcome::Down(why),
         };

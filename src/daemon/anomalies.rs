@@ -355,19 +355,20 @@ fn evaluate(w: &StateWriter, open: &HashSet<Subject>, now: i64) -> Result<Vec<Su
         }
     }
     let worker_anomaly = !out.is_empty();
-    let latest: Option<(i64, i64)> = w
+    let latest: Option<(i64, i64, Option<String>)> = w
         .conn()
         .query_row(
             &format!(
-                "SELECT id, {} FROM agents WHERE agent_id = ?1 ORDER BY id DESC LIMIT 1",
+                "SELECT id, {}, spawn_id FROM agents WHERE agent_id = ?1 ORDER BY id DESC LIMIT 1",
                 ms("created_at")
             ),
             [AGENT_SECRETARY],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((generation, launched)) = latest {
-        for rule in secretary_rules(&secretary_scene(w, launched)?, worker_anomaly, now) {
+    if let Some((generation, launched, spawn)) = latest {
+        let scene = secretary_scene(w, launched, spawn.as_deref())?;
+        for rule in secretary_rules(&scene, worker_anomaly, now) {
             out.push(Subject {
                 task: None,
                 rule,
@@ -451,22 +452,30 @@ fn run_scene(w: &StateWriter, run: i64) -> Result<RunScene> {
     })
 }
 
-fn secretary_scene(w: &StateWriter, launched: i64) -> Result<SecretaryScene> {
+/// The secretary's records of the generation launched at `launched`. With a launch identity
+/// (`spawn`, the `spawn_id` of its `agents` row) only the records of that terminal count; a
+/// generation without one (before tags) is told by role and time alone.
+fn secretary_scene(w: &StateWriter, launched: i64, spawn: Option<&str>) -> Result<SecretaryScene> {
     let c = w.conn();
     let at = ms("e.occurred_at");
+    let mine = if spawn.is_some() {
+        "AND json_extract(e.payload_json, '$.spawn_id') = ?2"
+    } else {
+        "AND ?2 IS NULL"
+    };
     let status_at: Option<i64> = c.query_row(
         &format!(
             "SELECT MAX({at}) FROM events e WHERE kind = 'terminal_status'
-             AND json_extract(payload_json, '$.role') = 'secretary' AND {at} >= ?1"
+             AND json_extract(payload_json, '$.role') = 'secretary' AND {at} >= ?1 {mine}"
         ),
-        [launched],
+        params![launched, spawn],
         |r| r.get(0),
     )?;
     // A gone inside a renewal (under way, or done and the gone came in while it took) is no gone.
     let gone: bool = c.query_row(
         &format!(
             "SELECT EXISTS (SELECT 1 FROM events e WHERE kind = 'terminal_gone'
-               AND json_extract(payload_json, '$.role') = 'secretary' AND {at} >= ?1
+               AND json_extract(payload_json, '$.role') = 'secretary' AND {at} >= ?1 {mine}
                AND NOT EXISTS (SELECT 1 FROM commands c
                  WHERE c.verb = 'renew' AND c.status IN ('accepted', 'done')
                    AND {} <= {at}
@@ -474,7 +483,7 @@ fn secretary_scene(w: &StateWriter, launched: i64) -> Result<SecretaryScene> {
             ms("c.received_at"),
             ms("c.finished_at")
         ),
-        [launched],
+        params![launched, spawn],
         |r| r.get(0),
     )?;
     Ok(SecretaryScene {

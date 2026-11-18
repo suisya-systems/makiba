@@ -364,7 +364,7 @@ fn statements(sql: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Section 5 repeats the DDL of migration v4; it is the same statements as `src/db/schema_v4.sql`.
+/// Section 5 repeats the DDL of migrations v4 and v5; it is the same statements as `src/db/schema_v4.sql` and `schema_v5.sql`.
 #[test]
 fn section_5_sql_is_migration_v4() {
     let s5 = section(SPEC, 5);
@@ -374,12 +374,14 @@ fn section_5_sql_is_migration_v4() {
         spec_sql.push_str(";\n");
     }
     let spec_stmts = statements(&spec_sql);
-    let file_stmts: BTreeSet<String> = statements(makiba::db::SCHEMA_V4)
-        .into_iter()
-        .filter(|s| {
-            !(s == "BEGIN" || s == "COMMIT" || s.starts_with("INSERT INTO schema_migrations"))
-        })
-        .collect();
+    let file_stmts: BTreeSet<String> = statements(&format!(
+        "{};{}",
+        makiba::db::SCHEMA_V4,
+        makiba::db::SCHEMA_V5
+    ))
+    .into_iter()
+    .filter(|s| !(s == "BEGIN" || s == "COMMIT" || s.starts_with("INSERT INTO schema_migrations")))
+    .collect();
     assert!(
         spec_stmts.len() >= 12,
         "read only {} statements from section 5",
@@ -389,6 +391,6 @@ fn section_5_sql_is_migration_v4() {
     let only_file: Vec<_> = file_stmts.difference(&spec_stmts).collect();
     assert!(
         only_spec.is_empty() && only_file.is_empty(),
-        "section 5 and schema_v4.sql differ.\nonly in spec.md: {only_spec:#?}\nonly in schema_v4.sql: {only_file:#?}"
+        "section 5 and schema_v4.sql differ.\nonly in spec.md: {only_spec:#?}\nonly in schema_v4.sql and schema_v5.sql: {only_file:#?}"
     );
 }

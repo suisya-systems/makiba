@@ -83,6 +83,8 @@ struct Offer {
 
 struct Slot {
     serial: u64,
+    /// The hash of the token this held request came with (`agents.key_sha256`).
+    key: String,
     tx: Sender<Offer>,
 }
 
@@ -173,7 +175,7 @@ impl Hub {
             .find(|h| h.name.eq_ignore_ascii_case("authorization"))
             .and_then(|h| std::str::from_utf8(h.value).ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        let Some(agent) = token.and_then(|t| (self.0.auth)(t)) else {
+        let Some((agent, token)) = token.and_then(|t| (self.0.auth)(t).map(|a| (a, t))) else {
             self.0.rejected.fetch_add(1, Ordering::SeqCst);
             let _ = respond(&mut s, "401 Unauthorized", "");
             return;
@@ -203,7 +205,14 @@ impl Hub {
                 return;
             }
             *seen = start;
-            slots.insert(agent.clone(), Slot { serial, tx });
+            slots.insert(
+                agent.clone(),
+                Slot {
+                    serial,
+                    key: crate::daemon::door::sha256_hex(token),
+                    tx,
+                },
+            );
         }
         let _reg = Registered {
             hub: &self.0,
@@ -270,6 +279,15 @@ fn hand_over(s: &mut TcpStream, text: &str) -> Result<(), String> {
 impl Channel for Hub {
     fn reaches(&self, recipient: &str) -> bool {
         self.connected(recipient)
+    }
+
+    fn key_of(&self, recipient: &str) -> Option<String> {
+        self.0
+            .slots
+            .lock()
+            .unwrap()
+            .get(recipient)
+            .map(|s| s.key.clone())
     }
 
     fn push(&self, recipient: &str, text: &str) -> Result<(), String> {
