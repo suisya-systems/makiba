@@ -30,7 +30,7 @@ def test_same_character_in_i18n_fixtures_passes(tmp_path):
 
 def test_katakana_and_ideograph_fail(tmp_path):
     put(tmp_path, "docs/a.md", chr(0x30A2))
-    put(tmp_path, "makiba/b.py", "# " + chr(0x4E00))
+    put(tmp_path, "src/b.rs", "// " + chr(0x4E00))
     assert len(cl.check(tmp_path, ALLOW)) == 2
 
 

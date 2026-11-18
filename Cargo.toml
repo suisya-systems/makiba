@@ -1,0 +1,7 @@
+[package]
+name = "makiba"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.89"
+description = "An organization where the person talks to one secretary, built on herdr-core."
+publish = false

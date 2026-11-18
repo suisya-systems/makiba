@@ -1,4 +1,4 @@
-"""Fail when a file under makiba/, roles/, skills/, docs/, tests/ or knowledge/ holds
+"""Fail when a file under src/, roles/, skills/, docs/, tests/ or knowledge/ holds
 Hiragana, Katakana or CJK Unified Ideographs, except under the paths in
 tools/language-allowlist.txt (M0-7, G7)."""
 import re
@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-DIRS = ("makiba", "roles", "skills", "docs", "tests", "knowledge")
+DIRS = ("src", "roles", "skills", "docs", "tests", "knowledge")
 CJK = re.compile("[぀-ゟ゠-ヿ一-鿿]")
 
 
