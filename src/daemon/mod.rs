@@ -196,7 +196,6 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
     let mut anomalies = Anomalies::new();
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
-    let mut resynced = false;
     while !stop.load(Ordering::SeqCst) {
         match rx.recv_timeout(TICK) {
             Ok(Msg::Subscribed(Ok(()))) => {
@@ -216,11 +215,8 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
             Ok(Msg::Event(e)) => {
                 // A failed write is reported and the daemon goes on: the monitor keeps its
                 // record of what was written, so the next event tries again.
-                let is_resync = matches!(e, BaseEvent::Resync(_));
                 if let Err(e) = monitor.handle(&w, e) {
                     eprintln!("makibad: cannot record a terminal event: {e}");
-                } else {
-                    resynced |= is_resync;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -230,7 +226,9 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
         }
         // The anomaly rules read what is committed: not before the first Resync is reconciled.
-        if resynced && let Err(e) = anomalies.pass(&w) {
+        if monitor.reconciled()
+            && let Err(e) = anomalies.pass(&w)
+        {
             eprintln!("makibad: anomaly pass failed: {e}");
         }
         if Instant::now() >= next_beat {
