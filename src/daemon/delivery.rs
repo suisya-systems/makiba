@@ -171,8 +171,9 @@ impl Delivery {
 }
 
 /// The SQL that says whether an event's payload is about `recipient` (`?1` role, `?2` task id).
-const ABOUT: &str = "(json_extract(payload_json, '$.role') = ?1 OR (?2 IS NOT NULL \
-    AND json_extract(payload_json, '$.task_id') = ?2 AND json_extract(payload_json, '$.role') IS NULL))";
+const ABOUT: &str = "((?2 IS NULL AND json_extract(payload_json, '$.role') = ?1) OR (?2 IS NOT NULL \
+    AND json_extract(payload_json, '$.task_id') = ?2 \
+    AND (json_extract(payload_json, '$.role') IS NULL OR json_extract(payload_json, '$.role') = 'worker')))";
 
 /// The role and task id of a recipient's terminal; `None` for an agent with no terminal of its own.
 fn identity(recipient: &str) -> Option<(&str, Option<&str>)> {
@@ -303,5 +304,46 @@ mod tests {
             BODY_LIMIT + 1 - CUT_AT
         )));
         assert!(t.contains("Call the show tool with id 1]"));
+    }
+
+    #[test]
+    fn a_workers_records_are_told_apart_by_task_id() {
+        use crate::db::writer::NewEvent;
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let status = |role: serde_json::Value, task: &str, state: &str| {
+            let p = serde_json::json!({"task_id": task, "role": role, "state": state});
+            w.append_event(&NewEvent {
+                kind: "terminal_status",
+                payload: Some(&p),
+                ..Default::default()
+            })
+            .unwrap();
+        };
+        status("worker".into(), "t1", "idle");
+        status("worker".into(), "t2", "working");
+        status(serde_json::Value::Null, "t3", "done");
+        assert!(snapshot(&w, "w-t1").unwrap().1);
+        assert!(!snapshot(&w, "w-t2").unwrap().1);
+        assert!(
+            snapshot(&w, "w-t3").unwrap().1,
+            "no role: the task id decides"
+        );
+        assert!(!snapshot(&w, "secretary").unwrap().1);
+        // t2 working is not a turn start of t1.
+        w.conn()
+            .execute(
+                "INSERT INTO event_deliveries (source_event_id, recipient, last_attempt_at) VALUES (1, 'w-t1', strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
+                [],
+            )
+            .unwrap();
+        let f = InFlight {
+            event_id: 1,
+            cursor: 0,
+            pushed: Instant::now(),
+        };
+        assert!(!turn_started(&w, "w-t1", &f, CONFIRM_WINDOW).unwrap());
+        status("worker".into(), "t1", "working");
+        assert!(turn_started(&w, "w-t1", &f, CONFIRM_WINDOW).unwrap());
     }
 }
