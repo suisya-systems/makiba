@@ -2,9 +2,11 @@
 //! a heartbeat, a clean stop. It says it is subscribed only once the base's event stream has
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
+pub mod anomalies;
 mod monitor;
 mod recover;
 
+use self::anomalies::Anomalies;
 use self::monitor::Monitor;
 use crate::base::stub::Stub;
 use crate::base::{Base, BaseEvent};
@@ -191,8 +193,10 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
 
     let org = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
     let mut monitor = Monitor::new(&org.to_string_lossy());
+    let mut anomalies = Anomalies::new();
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
+    let mut resynced = false;
     while !stop.load(Ordering::SeqCst) {
         match rx.recv_timeout(TICK) {
             Ok(Msg::Subscribed(Ok(()))) => {
@@ -212,8 +216,11 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
             Ok(Msg::Event(e)) => {
                 // A failed write is reported and the daemon goes on: the monitor keeps its
                 // record of what was written, so the next event tries again.
+                let is_resync = matches!(e, BaseEvent::Resync(_));
                 if let Err(e) = monitor.handle(&w, e) {
                     eprintln!("makibad: cannot record a terminal event: {e}");
+                } else {
+                    resynced |= is_resync;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
@@ -221,6 +228,10 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
                 return Err("the subscription thread ended before it subscribed".into());
             }
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
+        }
+        // The anomaly rules read what is committed: not before the first Resync is reconciled.
+        if resynced && let Err(e) = anomalies.pass(&w) {
+            eprintln!("makibad: anomaly pass failed: {e}");
         }
         if Instant::now() >= next_beat {
             beat(&w)?;
