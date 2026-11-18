@@ -1,7 +1,9 @@
 //! The real base: herdr-core over its Unix socket, one JSON-RPC 2.0 message per line.
 //! Private to `base`; nothing else names it (spec section 6.1, `tests/base_seam.rs`).
-//! M1-1 builds `hello()`. Each call opens its own connection, has a read and write timeout, and is
+//! M1-1 builds `hello()`, M1-3 `events()` (`herdr/events.rs`). Each call opens its own connection, has a read and write timeout, and is
 //! never retried here.
+
+mod events;
 
 use super::version::checked_hello;
 use super::{
@@ -16,6 +18,7 @@ use std::time::Duration;
 /// The protocol generation makiba speaks. A core of another generation refuses the hello.
 const GENERATION: u64 = 1;
 
+#[derive(Clone)]
 pub struct Herdr {
     socket: PathBuf,
     timeout: Duration,
@@ -153,7 +156,7 @@ impl Base for Herdr {
         Err(not_built("end"))
     }
     fn events(&self) -> Result<EventStream, BaseError> {
-        Err(not_built("events"))
+        self.events_stream()
     }
     fn start(&self) -> Result<(), BaseError> {
         Err(not_built("start"))
