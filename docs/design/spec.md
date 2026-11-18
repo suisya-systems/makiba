@@ -40,6 +40,8 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 | Working folders (document) | `$MAKIBA_DOCS_DIR`, default `~/makiba-docs/<task_id>/` | A plain folder under a parent a person trusts once. `out/` holds what is handed over and is kept after close. |
 | The base's own place | `HC_SESSION=makiba`. | Tests use their own (`makiba-test-<pid>`) with scratch folders. |
 
+Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-process stand-in, whose first `Resync` comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`; any other value uses the real base (session `$MAKIBA_BASE_SESSION`, default `makiba`).
+
 Nothing is written into a target repository: no rules file, no settings file (paddock Q10, Q12).
 
 ## 3. The door: how requests reach `makibad`

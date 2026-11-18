@@ -15,6 +15,7 @@ path = "tests/common/fake_agent.rs"
 [dependencies]
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde_json = "1.0.154"
+signal-hook = "0.4.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"

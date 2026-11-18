@@ -6,5 +6,7 @@ pub const USAGE: &str = "usage: makiba <command>\n\nNo command is implemented ye
 
 pub mod agents;
 pub mod base;
+pub mod daemon;
 pub mod db;
 pub mod spec;
+pub mod status_local;
