@@ -2,9 +2,11 @@
 //! a heartbeat, a clean stop. It says it is subscribed only once the base's event stream has
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
+pub mod delivery;
 mod monitor;
 mod recover;
 
+use self::delivery::Delivery;
 use self::monitor::Monitor;
 use crate::base::stub::Stub;
 use crate::base::{Base, BaseEvent};
@@ -131,7 +133,17 @@ fn event(w: &StateWriter, kind: &str, base: &str, version: &str) -> crate::db::R
 }
 
 /// Run until SIGTERM or SIGINT. `connect` makes the base once the lock and the database are held.
+/// No channel server is connected yet (M2-8), so nothing is pushed.
 pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String> {
+    run_with(dir, connect, Delivery::new(Box::new(delivery::NoChannel)))
+}
+
+/// As `run`, with the channel `delivery` pushes through.
+pub fn run_with(
+    dir: &Path,
+    connect: &dyn Fn() -> Box<dyn Base>,
+    mut delivery: Delivery,
+) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = take_lock(dir)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -221,6 +233,9 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
                 return Err("the subscription thread ended before it subscribed".into());
             }
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
+        }
+        if subscribed && let Err(e) = delivery.pass(&w) {
+            eprintln!("makibad: delivery: {e}");
         }
         if Instant::now() >= next_beat {
             beat(&w)?;
