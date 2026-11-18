@@ -13,7 +13,8 @@ TERMS=""        # terminals this probe created (killed on exit)
 FAILS=0
 DIALOGS=0       # trust dialogs answered
 
-hc() { "$HC_BIN" "$@"; }
+# Every hc call is bounded: a hung hc must show as a failed call (status 124), never as a silent stop of the probe.
+hc() { if [ -n "${HC_TIMEOUT_BIN:-}" ]; then "$HC_TIMEOUT_BIN" "${HC_CALL_TIMEOUT:-60}" "$HC_BIN" "$@"; else "$HC_BIN" "$@"; fi; }
 
 probe_usage() { # probe_usage <script> <what>
   printf 'usage: %s <result-dir>\n  %s\n  env: HC_BIN (default: hc), see scripts/probes/README.md\n' "$1" "$2"
@@ -30,6 +31,7 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   for c in "$HC_BIN" claude python3 git mktemp sort; do
     type -P "$c" >/dev/null 2>&1 || { echo "RESULT $PROBE: precondition-failed ($c not on PATH)"; exit 2; }
   done
+  HC_TIMEOUT_BIN=$(type -P timeout 2>/dev/null || true)   # coreutils; without it hc calls are unbounded
   HC_BIN=$(type -P "$HC_BIN")   # not command -v: that would find the hc function below
   mkdir -p "$OUTDIR" || exit 2
   RESULT="$OUTDIR/$PROBE-result.txt"
@@ -54,7 +56,7 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   # Own core: nothing of the person's default core is touched.
   SESSION=makiba-probe-$$
   export HC_SESSION=$SESSION
-  WORK=$(mktemp -d "${TMPDIR:-/tmp}/makiba-$PROBE.XXXXXX") || exit 2
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/makiba-$PROBE-XXXXXX") || exit 2
   export XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp}
   mkdir -p "$XDG_CONFIG_HOME/herdr-core" "$XDG_STATE_HOME/herdr-core" || exit 2
   printf 'notes = false\n' > "$XDG_CONFIG_HOME/herdr-core/config.toml"   # hc types nothing on its own (hc --help)
@@ -158,7 +160,8 @@ count_submitted() { # count_submitted <terminal>: every prompt line in the histo
 }
 
 # ---- channel probes (p8, p9) ----
-term_info() { # term_info <terminal>: "<state> <turn>" from hc get --json (key positions are TODO(confirm): searched anywhere)
+term_info() { # term_info <terminal>: "<state> <turn>" from hc get --json (status.state, and turn searched anywhere, TODO(confirm));
+  # "none none" when hc failed, the JSON is invalid or a field is missing or of the wrong kind: such a sample is never a state
   hc get --json "$1" 2>/dev/null | python3 -c '
 import json, sys
 def find(o, k):
@@ -174,7 +177,10 @@ def find(o, k):
 try: d = json.load(sys.stdin)
 except Exception: d = {}
 st = d.get("status") if isinstance(d, dict) else None
-print(find(st, "state") if st else "none", find(d, "turn"))'
+state = st.get("state") if isinstance(st, dict) else None
+turn = find(d, "turn")
+ok = isinstance(state, str) and state.isalpha() and isinstance(turn, int) and not isinstance(turn, bool)
+print("%s %s" % (state, turn) if ok else "none none")'
 }
 
 pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy; every new dialog screen goes to the result file
@@ -197,22 +203,23 @@ pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy;
 standin_start() { # standin_start: starts channel-standin.py on a free loopback port; sets PORT TOKEN CRED ADMIN STATE MCPCFG
   STATE=$WORK/standin; mkdir -p "$STATE"
   TOKEN=DECOYTOKEN$(python3 -c 'import secrets;print(secrets.token_hex(8))'); CRED=DECOYCRED$$; ADMIN=DECOYADMIN$$
-  PORT=$(python3 -c 'import socket;s=socket.socket();s.bind(("127.0.0.1",0));print(s.getsockname()[1])')
   # secrets go through a private file, not argv or environ, so P9's scan sees only what the client side exposes
   ( umask 077; printf '{"token":"%s","cred":"%s","admin":"%s"}' "$TOKEN" "$CRED" "$ADMIN" > "$WORK/standin-secrets.json" )
-  python3 "$HERE/channel-standin.py" serve --port "$PORT" --state "$STATE" --secrets "$WORK/standin-secrets.json" &
+  python3 "$HERE/channel-standin.py" serve --port 0 --state "$STATE" --secrets "$WORK/standin-secrets.json" &
   STANDIN_PID=$!
   local i=0; while [ ! -s "$STATE/ready" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
   [ -s "$STATE/ready" ] || return 1
+  PORT=$(cat "$STATE/ready")   # the server bound port 0 itself: no window between choosing a port and binding it
   MCPCFG=$WORK/mcp.json
   # Shape of claude-org-runtime tokens.py (http server with a bearer header) and channel_server_config (stdio server).
-  python3 - "$MCPCFG" <<PY
+  python3 - "$MCPCFG" "$PORT" "$TOKEN" "$HERE" "$(type -P python3)" "$CRED" <<'PY'
 import json, sys
+cfg, port, token, here, py, cred = sys.argv[1:7]
 json.dump({"mcpServers": {
-  "makiba": {"type": "http", "url": "http://127.0.0.1:$PORT/mcp", "headers": {"Authorization": "Bearer $TOKEN"}},
-  "makiba-channel": {"command": "$(type -P python3)", "args": ["$HERE/channel-standin.py", "channel"],
-                     "env": {"STANDIN_URL": "http://127.0.0.1:$PORT", "STANDIN_CRED": "$CRED", "STANDIN_NAME": "makiba-channel"}}}},
-  open(sys.argv[1], "w"), indent=2)
+  "makiba": {"type": "http", "url": "http://127.0.0.1:%s/mcp" % port, "headers": {"Authorization": "Bearer " + token}},
+  "makiba-channel": {"command": py, "args": [here + "/channel-standin.py", "channel"],
+                     "env": {"STANDIN_URL": "http://127.0.0.1:%s" % port, "STANDIN_CRED": cred, "STANDIN_NAME": "makiba-channel"}}}},
+  open(cfg, "w"), indent=2)
 PY
 }
 
@@ -220,7 +227,7 @@ admin() { # admin '<json>'
   python3 - "http://127.0.0.1:$PORT/admin" "$ADMIN" "$1" <<'PY'
 import sys, urllib.request
 r = urllib.request.Request(sys.argv[1], data=sys.argv[3].encode(), method="POST", headers={"Authorization": "Bearer " + sys.argv[2]})
-print(urllib.request.urlopen(r, timeout=5).read().decode())
+print(urllib.request.build_opener(urllib.request.ProxyHandler({})).open(r, timeout=5).read().decode())   # loopback only: no proxy from the environment
 PY
 }
 enqueue() { admin "$(python3 -c 'import json,sys;print(json.dumps({"op":"enqueue","content":sys.argv[1]}))' "$1")"; }
