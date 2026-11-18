@@ -3,3 +3,6 @@
 
 /// The usage the binary prints until its subcommands exist.
 pub const USAGE: &str = "usage: makiba <command>\n\nNo command is implemented yet.\n";
+
+pub mod agents;
+pub mod base;
