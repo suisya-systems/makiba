@@ -100,6 +100,18 @@ fn version_of(result: &Value) -> Option<&str> {
         .find_map(Value::as_str)
 }
 
+/// Refuse a reply whose `generation` is a number other than ours. A reply without one is accepted:
+/// the field name is read from the binary's strings, not yet seen on the wire (M1-1 report).
+fn check_generation(result: &Value) -> Result<(), BaseError> {
+    match result.get("generation").and_then(Value::as_u64) {
+        Some(g) if g != GENERATION => Err(other(
+            "generation",
+            &format!("the base speaks protocol generation {g}; makiba speaks {GENERATION}"),
+        )),
+        _ => Ok(()),
+    }
+}
+
 impl Base for Herdr {
     fn name(&self) -> &'static str {
         "herdr-core"
@@ -108,6 +120,7 @@ impl Base for Herdr {
     fn hello(&self) -> Result<BaseInfo, BaseError> {
         checked_hello(|| {
             let result = self.call("hello", json!({"generation": GENERATION}))?;
+            check_generation(&result)?;
             let version = version_of(&result)
                 .ok_or_else(|| other("hello", "the hello reply carries no version"))?;
             Ok(BaseInfo {
@@ -146,5 +159,17 @@ impl Base for Herdr {
     }
     fn worker_denies(&self) -> BaseDenies {
         BaseDenies::default()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_different_generation_is_refused() {
+        assert!(check_generation(&json!({"generation": GENERATION})).is_ok());
+        assert!(check_generation(&json!({})).is_ok());
+        assert!(check_generation(&json!({"generation": GENERATION + 1})).is_err());
     }
 }
