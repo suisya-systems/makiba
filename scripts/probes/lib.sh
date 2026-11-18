@@ -192,7 +192,9 @@ pass_dialogs() { # pass_dialogs <terminal> <seconds>: the startup-dialog policy;
     case "$out" in
       done) DLG_KEYS=$n; say "dialogs: finished after $n key(s)"; return 0 ;;
       key*) { echo "---- dialog screen seen by $t ($out)"; cat "$cur"; echo "----"; } >> "$RESULT"
-            set -- $out; hc keys "$t" "$2" >/dev/null 2>&1; [ "$2" = enter ] && DLG_ACCEPTED="$DLG_ACCEPTED $3"; n=$((n + 1)); DLG_KEYS=$n; : > "$prev"; sleep 1.5; i=$((i + 2)); continue ;;
+            set -- $out; declare -F dialog_hook >/dev/null && { dialog_hook before "$t" "$2" "$3" || true; }   # optional, record-only: a probe may define dialog_hook <before|after> <terminal> <key> <dialog>
+            hc keys "$t" "$2" >/dev/null 2>&1; declare -F dialog_hook >/dev/null && { dialog_hook after "$t" "$2" "$3" || true; }
+            [ "$2" = enter ] && DLG_ACCEPTED="$DLG_ACCEPTED $3"; n=$((n + 1)); DLG_KEYS=$n; : > "$prev"; sleep 1.5; i=$((i + 2)); continue ;;
       unknown*) say "dialogs: $out"; { echo "---- unknown dialog screen of $t"; cat "$cur"; echo "----"; } >> "$RESULT"; return 2 ;;
     esac
     cp -f "$cur" "$prev"; i=$((i + 2)); sleep 2

@@ -3,7 +3,9 @@
 # Claude Code channel (notifications/claude/channel), typing nothing into the terminal.
 # Cases: dev-channel-dialog, turn-start-visible and turn-start-unchanged-without-delivery (stopped-channel control),
 # channel-while-working, channel-to-done, channel-while-done, turn-start-for-another-cause, two-in-a-row,
-# channel-while-blocked. (channel-while-draft is not measured: the owner reports from claude-org-ja that channel
+# channel-while-blocked, then P10's open steps on the same agent folder: resume-dialogs, resume-ready, renewal-dialogs,
+# renewal-ready (do the startup dialogs come back on a resume, and on a fresh session in an already trusted folder).
+# (channel-while-draft is not measured: the owner reports from claude-org-ja that channel
 # text never mixed into a person's draft.) The stand-in is scripts/probes/channel-standin.py (stdlib only).
 # Rules of every case: it starts only from a verified resting state (quiesce), it checks every send and control
 # call, it never reads an unreadable status sample as a state, and it ends in NEEDS-HUMAN with the screen text
@@ -11,7 +13,7 @@
 # Run from a login shell: bash scripts/probes/p8-channel-delivery.sh <result-dir>
 set -u
 . "$(dirname "$0")/lib.sh"
-case "${1:-}" in -h|--help) probe_usage "$0" "P8/P9: channel delivery - dialog, turn start, message while working / done / blocked, two in a row"; exit 0 ;; esac
+case "${1:-}" in -h|--help) probe_usage "$0" "P8/P9/P10: channel delivery - dialog, turn start, message while working / done / blocked, two in a row; dialogs on a resume and a renewal"; exit 0 ;; esac
 probe_init p8 "${1:-}"
 standin_start || { say "RESULT p8: precondition-failed (stand-in did not start)"; exit 2; }
 STEP=start; P8_DONE=""
@@ -28,8 +30,39 @@ T=p8-agent
 
 
 # ---- dev-channel-dialog
-launch "$T" "$REPO" -- --permission-mode acceptEdits --settings "$WORK/agent-settings.json" --append-system-prompt-file "$WORK/rules.txt" \
-  --mcp-config "$MCPCFG" --dangerously-load-development-channels server:makiba-channel || { record dev-channel-dialog FAIL "hc run failed"; all_done; }
+# record-only: the base's status (state, kind, msg, turn) just before each key press at a startup dialog and right after it; never read by a verdict
+DLGRUN=first
+dialog_hook() { # dialog_hook <before|after> <terminal> <key> <dialog>
+  local l; l=$(hc get --json "$2" 2>/dev/null | python3 -c '
+import json, sys
+try: d = json.load(sys.stdin)
+except Exception: d = None
+st = d.get("status") if isinstance(d, dict) else None
+if not isinstance(st, dict): print("state=none kind=none msg=none turn=none")
+else:
+    def g(k): return st.get(k) if isinstance(st.get(k), (str, int)) and not isinstance(st.get(k), bool) else "none"
+    def find(o):
+        if isinstance(o, dict):
+            if isinstance(o.get("turn"), int): return o["turn"]
+            for v in o.values():
+                r = find(v)
+                if r is not None: return r
+        elif isinstance(o, list):
+            for v in o:
+                r = find(v)
+                if r is not None: return r
+    t = find(d)
+    print("state=%s kind=%s msg=%s turn=%s" % (g("state"), g("kind"), str(g("msg")).replace("\n", " ")[:80], "none" if t is None else t))' 2>/dev/null)
+  say "DIALOG-STATUS run=$DLGRUN dialog=$4 key=$3 when=$1-key ${l:-state=none kind=none msg=none turn=none (hc get gave nothing)}"
+}
+# the flags of every launch in this script (first launch, resume, renewal) are one array, so they cannot drift apart
+CHARGS=(--permission-mode acceptEdits --settings "$WORK/agent-settings.json" --append-system-prompt-file "$WORK/rules.txt" \
+  --mcp-config "$MCPCFG" --dangerously-load-development-channels server:makiba-channel)
+# the resume cases need the id of the first session: it is chosen here, only if this Claude Code names --session-id in its help
+SID=$(python3 -c 'import uuid;print(uuid.uuid4())'); SIDARGS=()
+CLHELP=$(claude --help 2>&1 | grep -E -- '--resume|--session-id|--continue')
+case "$CLHELP" in *--session-id*) SIDARGS=(--session-id "$SID") ;; esac
+launch "$T" "$REPO" -- ${SIDARGS[@]+"${SIDARGS[@]}"} "${CHARGS[@]}" || { record dev-channel-dialog FAIL "hc run failed"; all_done; }
 pass_dialogs "$T" 150; rc=$?
 if [ "$rc" -eq 0 ] && case "$DLG_ACCEPTED" in *dev-channel*) true ;; *) false ;; esac; then record dev-channel-dialog PASS "dialog(s) accepted by the policy:$DLG_ACCEPTED ($DLG_KEYS key press(es) in all); dialog texts are in the result file"
 elif [ "$rc" -eq 0 ]; then record dev-channel-dialog NEEDS-HUMAN "composer reached but the development-channel dialog was never accepted (accepted:${DLG_ACCEPTED:- none}): the case was not exercised, or the screen was read too late"
@@ -288,4 +321,55 @@ case_two_in_a_row
 case_while_blocked
 STEP=end
 quiesce end >/dev/null || say "note: the target was not at rest at the end"
+
+# ---- P10 open steps: the startup dialogs on a resume and on a renewal, in the same folder (trusted by the first launch)
+end_agent() { hc kill "$1" >/dev/null 2>&1 || return 1; hc rm "$1" >/dev/null 2>&1; sleep 3; return 0; }   # TODO(confirm): kill then rm, as probe_cleanup does; only a failed kill stops the case
+pass_dialogs_settled() { # the policy once, then once more after 6 s: a dialog that draws late is not missed, "none appeared" is not a half-drawn screen
+  local k1 a1 rc; pass_dialogs "$1" "$2"; rc=$?; [ "$rc" -eq 0 ] || return "$rc"
+  k1=$DLG_KEYS; a1=$DLG_ACCEPTED; sleep 6; pass_dialogs "$1" 60; rc=$?
+  DLG_KEYS=$((k1 + DLG_KEYS)); DLG_ACCEPTED="$a1$DLG_ACCEPTED"; return "$rc"
+}
+ready_now() { # a readable screen that dialog-step.py reads as "composer, no dialog", and a readable resting status; not wait_ready (it answers a trust dialog outside the counted policy), not is_ready (its footer fallback passes a working agent)
+  hc read "$1" > "$WORK/rdy.txt" 2>/dev/null || return 1
+  [ "$(python3 "$HERE/dialog-step.py" < "$WORK/rdy.txt" 2>/dev/null)" = done ] || return 1
+  case "$(term_info "$1")" in idle*|done*) return 0 ;; *) return 1 ;; esac
+}
+relaunch() { # relaunch <resume|renewal> <terminal> <claude args before the channel flags...>: the two cases of one launch
+  local p=$1 t=$2 rc hist="" late="" accepted dsc end dverd=NEEDS-HUMAN; shift 2; STEP=$p; DLGRUN=$p
+  if ! launch "$t" "$REPO" -- "$@" "${CHARGS[@]}"; then
+    record "$p-dialogs" NEEDS-HUMAN "hc run failed; the case was not exercised"; record "$p-ready" NEEDS-HUMAN "hc run failed; the case was not exercised"; return 0; fi
+  pass_dialogs_settled "$t" 150; rc=$?
+  accepted=$DLG_ACCEPTED
+  case "$accepted" in *folder-trust*) late="$late folder-trust" ;; esac; case "$accepted" in *dev-channel*) late="$late dev-channel" ;; esac
+  dsc="came back:${late:- none}; order of the keys that accepted:${accepted:- none}; $DLG_KEYS key press(es) in all"
+  if [ "$rc" -eq 0 ] && [ "$DLG_KEYS" -eq 0 ]; then dverd=PASS; record "$p-dialogs" PASS "no dialog appeared (neither folder-trust nor development-channel came back); the composer was reached with no key pressed"
+  elif [ "$rc" -eq 0 ] && [ -n "$accepted" ]; then dverd=PASS; record "$p-dialogs" PASS "every dialog shown was one of the two and was passed by the policy; $dsc; dialog texts are in the result file"
+  elif [ "$rc" -eq 0 ]; then record "$p-dialogs" NEEDS-HUMAN "keys were pressed but none accepted a dialog ($dsc); cannot say what was passed"; screen_dump "$t" "$p-dialogs"
+  elif [ "$rc" -eq 2 ]; then record "$p-dialogs" NEEDS-HUMAN "a dialog that is not one of the two stopped the launch and was not answered; its screen is in the result file; $dsc"
+  else # rc 1: no composer in 150 s; is the last screen a known dialog that was not passed?
+    case "$(python3 "$HERE/dialog-step.py" < "$WORK/dlg.cur" 2>/dev/null)" in
+      key*|"wait folder-trust"*|"wait dev-channel"*) dverd=FAIL; record "$p-dialogs" FAIL "a known dialog was not passed within 150s ($dsc)" ;;
+      *) record "$p-dialogs" NEEDS-HUMAN "no composer within 150s and no usable dialog screen ($dsc)" ;;
+    esac; screen_dump "$t" "$p-dialogs"
+  fi
+  if [ "$dverd" != PASS ]; then record "$p-ready" "$dverd" "the prompt was not reached: the dialog case above ended $dverd"; return 0; fi
+  end=$(( $(date +%s) + 60 * TS )); until ready_now "$t"; do [ "$(date +%s)" -ge "$end" ] && break; sleep 2; done
+  if ! ready_now "$t"; then record "$p-ready" FAIL "dialogs passed but no empty prompt within 60s (state '$(term_info "$t")')"; screen_dump "$t" "$p-ready"; return 0; fi
+  hist=$(hc read --lines 3000 "$t" 2>/dev/null | grep -cE 'PROBE-MSG|done-[0-9]+\.txt')   # lines of the first session's conversation
+  if [ "$p" = resume ] && [ "${hist:-0}" -eq 0 ]; then record resume-ready NEEDS-HUMAN "a prompt was reached (state '$(term_info "$t")') but no line of the first session's conversation is on screen or in the history: cannot tell a resumed session from a fresh one"; screen_dump "$t" resume-ready
+  else record "$p-ready" PASS "the agent reached an empty prompt (state '$(term_info "$t")'); lines of the first session's conversation in the history: ${hist:-0} ($( [ "$p" = resume ] && echo "expected, a resume" || echo "informational, a new session"))"; fi
+}
+if [ "${#SIDARGS[@]}" -gt 0 ]; then say "P10 resume option: --resume $SID (the first session was started with --session-id $SID); claude --version: $CLVER"
+else say "P10 resume option: none (the help of this claude names no --session-id); claude --version: $CLVER"; fi
+say "P10 claude --help lines: $(printf '%s' "$CLHELP" | tr -s ' \n' ' ')"
+STEP=end-first-agent
+if ! end_agent "$T"; then
+  for c in resume-dialogs resume-ready renewal-dialogs renewal-ready; do record "$c" NEEDS-HUMAN "hc kill of the first agent failed; the case was not exercised"; done
+else
+  if [ "${#SIDARGS[@]}" -eq 0 ]; then
+    for c in resume-dialogs resume-ready; do record "$c" NEEDS-HUMAN "this claude --help names no --session-id, so the first session has no known id to resume; the case was not exercised"; done
+  else relaunch resume p8-resume --resume "$SID"; end_agent p8-resume || say "note: hc kill of the resumed agent failed; the renewal runs beside it"; fi
+  relaunch renewal p8-renew
+fi
+STEP=end
 all_done
