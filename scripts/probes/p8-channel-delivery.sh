@@ -151,7 +151,17 @@ case_while_working() {
   until file_is "$REPO/recv-3.txt" "$k"; do [ "$(secs "$t0" "$(now)" | cut -d. -f1)" -ge $((120 * TS)) ] && break; sleep 0.5; done
   if file_is "$REPO/recv-3.txt" "$k"; then n=$(busy_count); st=$(term_info "$T"); else n=""; fi
   wait_until 150 test -e "$REPO/busy-20.txt"
-  if [ -z "$n" ]; then record channel-while-working FAIL "the message sent in the middle of the busy turn never produced its file (lost?); busy files at the end: $(busy_count) of 20"; screen_dump "$T" "while-working"
+  if [ -z "$n" ]; then
+    # no file: lost, or shown and not acted on (the agent may decline a channel text, plan.md 3.3 point 4): count the header in the final history
+    quiesce channel-while-working >/dev/null
+    if ! snap; then record channel-while-working NEEDS-HUMAN "no file for the message sent in the middle of the busy turn, and hc read failed, so the header could not be counted; busy files: $(busy_count) of 20"
+    else
+      n=$(hdr_count 3)
+      if [ -n "$SNAPPART" ]; then record channel-while-working NEEDS-HUMAN "no file; only the screen could be read, header count $n is not conclusive; busy files: $(busy_count) of 20"; screen_dump "$T" "while-working"
+      elif [ "$n" = 0 ]; then record channel-while-working FAIL "the message sent in the middle of the busy turn never produced its file and its header never showed (lost); busy files at the end: $(busy_count) of 20"; screen_dump "$T" "while-working"
+      elif [ "$n" = 1 ]; then record channel-while-working PASS "delivered and shown once ($n header in the history), but NOT acted on: recv-3.txt was never written (the agent may have declined a channel text); state at the enqueue '$sb', busy files at the end: $(busy_count) of 20"; screen_dump "$T" "while-working"
+      else record channel-while-working FAIL "the header showed $n times and no file was written; busy files at the end: $(busy_count) of 20"; screen_dump "$T" "while-working"; fi
+    fi
   elif [ "$n" -lt 20 ] && case "$st" in working*) true ;; *) false ;; esac; then record channel-while-working PASS "delivered, and acted on BEFORE the busy turn finished: $(secs "$t0" "$(now)")s after the enqueue its file stood there while $n of 20 busy files existed and the state read '$st' (state at the enqueue '$sb'); busy-20 followed: $( [ -e "$REPO/busy-20.txt" ] && echo yes || echo no)"
   else record channel-while-working PASS "delivered, and acted on AFTER the busy turn's work ($n of 20 busy files, state '$st' when its file was first seen; state at the enqueue '$sb')"; fi
   say "note: channel-while-working PASS means delivered, not lost; the detail says when."
