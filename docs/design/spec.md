@@ -358,12 +358,12 @@ The base adds its own (measured in paddock, inventory L-N2): `HC_SESSION`, `HC_S
 
 | Case | When | What is typed | Guard |
 | --- | --- | --- | --- |
-| Startup dialog | The launched agent shows a dialog on the policy list before it reports a status. | Keys only (`Base::keys`). | The option lines are matched whole; the cursor is moved and the screen read again until it is on the expected line; then one key. A dialog not on the list is not answered: the launch fails with the screen text recorded. |
+| Startup dialog | The launched agent shows a dialog on the policy list, and it has reported no status or only the status that entry is shown with. | Keys only (`Base::keys`). | The option lines are matched whole; the cursor is moved and the screen read again until it is on the expected line; then one key. A key goes only to a terminal with no status, or with status `blocked`, kind `permission` and the entry's own message while that entry's dialog is matched whole; any other status means no key. A dialog not on the list is not answered: the launch fails with the screen text recorded. |
 | Permission prompt | A worker reports `blocked` with kind `permission` and `makiba answer` names the pending entry. | One key: the one-time yes, or escape. | The screen is read again and `prompt_sum` compared. If it differs, nothing is typed and the command is rejected `stale`. |
 | A typed message | A sender asked for `typed` on `send` or `answer` (section 8). | The wrapped text of section 8 (`Base::send`). | The recipient is a worker or the curator, never the secretary (typed text joins a person's draft: P3). Its status is `idle`, checked by the base itself (`only_if_idle`), or `done`, where the status is read immediately before the send and the race is accepted and measured (probes.md, P4). In any other status the request is `conflict`: nothing is typed and nothing is stored. `typed` for the secretary is `usage`. `makibad` never types a body on its own. |
 | The wake line | A pushed message is unconfirmed (section 8) and its recipient is `idle` or `done`. | One fixed line, the constant `WAKE_LINE` in `src/spec.rs`: `You have unread makiba messages. Call the inbox tool.` (a first proposal), with `Base::send`. It carries no message. | Status `idle` or `done` only. The prompt line of the screen is read just before, as paddock's watcher does (its record 0013), and if anything is typed on it nothing is typed this pass. At most one line per recipient in 60 s (a first proposal), and only while an unconfirmed message exists. |
 
-The policy list for startup dialogs of `claude_code` has two entries, and it is data in the agent module, changed only by a reviewed commit. `folder-trust`: the line "Yes, I trust this folder" is chosen. `dev-channel`: shown when the agent is launched with the channel flag; the screen begins "WARNING: Loading development channels", the options are "1. I am using this for local development" and "2. Exit", and the first is chosen. P10 recorded both screens on Claude Code 2.1.326, in this order.
+The policy list for startup dialogs of `claude_code` has two entries, and it is data in the agent module, changed only by a reviewed commit. `folder-trust`: the options are "No, exit" and "Yes, I trust this folder", and the second is chosen; while it is shown the base reports status `blocked`, kind `permission`, message "trust this folder", and no status once it is passed. `dev-channel`: shown when the agent is launched with the channel flag; the screen begins "WARNING: Loading development channels", the options are "1. I am using this for local development" and "2. Exit", and the first is chosen; it is shown with no status. P10 recorded both screens on Claude Code 2.1.326, in this order, and its second run the statuses on 2.1.327 (probes.md, P10). The exception for the folder-trust status is the owner's decision on Issue 28 (2026-11-19).
 
 ## 8. Message delivery and wrapper
 
@@ -410,7 +410,7 @@ pub trait Agent: Send + Sync {
     fn argv(&self, launch: &AgentLaunch) -> Vec<String>;
 
     /// The policy list of section 7. Each entry: how to recognize the dialog
-    /// (whole option lines) and which line to choose.
+    /// (whole option lines), which line to choose, and the status it is shown with.
     fn startup_dialogs(&self) -> &[DialogPolicy];
 
     /// For a blocked terminal: the prompt's text, normalized, and its two keys.
