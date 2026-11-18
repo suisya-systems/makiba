@@ -17,7 +17,7 @@ use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::{self, TAG_ORG, TAG_ROLE, TAG_SPAWN, TAG_TASK_ID};
 use serde_json::json;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -46,8 +46,24 @@ pub struct Launch {
     org: String,
     settings: PathBuf,
     door: String,
-    /// Launches this process started whose record is not written yet.
-    spawned: Mutex<BTreeSet<String>>,
+    /// Launches this process started whose record is not written yet, by spawn id.
+    pending: Mutex<BTreeMap<String, Pending>>,
+}
+
+/// A launch this process asked the base for and has not recorded.
+#[derive(Clone)]
+enum Pending {
+    /// The terminal exists; only the record is left.
+    Up,
+    /// The base refused and could not be asked whether the terminal exists after all: the key
+    /// (by its hash) is kept until a `list` answers.
+    Unsure { hash: String, refused: String },
+}
+
+enum Outcome {
+    Up,
+    Down(String),
+    Unsure { hash: String, refused: String },
 }
 
 struct Row {
@@ -70,7 +86,7 @@ impl Launch {
             org: org.to_string_lossy().into_owned(),
             settings: state.join("settings"),
             door,
-            spawned: Mutex::new(BTreeSet::new()),
+            pending: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -98,26 +114,35 @@ impl Launch {
         };
         let mut launched = Vec::new();
         for row in rows {
-            let spawned = self.lock().contains(&row.spawn);
-            if !spawned {
-                if !agents::launchable(&row.agent) {
-                    continue;
+            let pending = self.lock().get(&row.spawn).cloned();
+            let outcome = match pending {
+                Some(Pending::Up) => Outcome::Up,
+                Some(Pending::Unsure { hash, refused }) => settle(w, base, &row, hash, refused),
+                None if !agents::launchable(&row.agent) => continue,
+                None => self.start(w, base, &row),
+            };
+            match outcome {
+                Outcome::Up => {
+                    self.lock().insert(row.spawn.clone(), Pending::Up);
+                    record(w, &row)?;
+                    self.lock().remove(&row.spawn);
+                    launched.push(row.task);
                 }
-                if let Err(why) = self.start(w, base, &row) {
+                Outcome::Down(why) => {
+                    self.lock().remove(&row.spawn);
                     fail(w, row.id, &why)?;
-                    continue;
                 }
-                self.lock().insert(row.spawn.clone());
+                Outcome::Unsure { hash, refused } => {
+                    self.lock()
+                        .insert(row.spawn.clone(), Pending::Unsure { hash, refused });
+                }
             }
-            record(w, &row)?;
-            self.lock().remove(&row.spawn);
-            launched.push(row.task);
         }
         Ok(launched)
     }
 
-    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeSet<String>> {
-        self.spawned.lock().unwrap_or_else(|e| e.into_inner())
+    fn lock(&self) -> std::sync::MutexGuard<'_, BTreeMap<String, Pending>> {
+        self.pending.lock().unwrap_or_else(|e| e.into_inner())
     }
 
     /// The launch spec of `row` with `token` in its argv (spec sections 4, 6.3, 6.4).
@@ -154,35 +179,39 @@ impl Launch {
         }
     }
 
-    /// Issue the key and ask the base. On a refusal the key is revoked, unless a terminal with
-    /// this launch's `makiba.spawn` exists after all.
-    fn start(
-        &self,
-        w: &StateWriter,
-        base: &dyn Base,
-        row: &Row,
-    ) -> std::result::Result<(), String> {
-        let agent = agents::by_name(&row.agent)
-            .ok_or_else(|| format!("no agent module named {:?}", row.agent))?;
-        let agent_id = spec::worker_agent_id(&row.task);
-        let token = super::door::issue_key(w, spec::Role::Worker, &agent_id, Some(row.run_id))?;
-        let hash = super::door::sha256_hex(&token);
-        let refused = match base.launch(&self.spec(row, &*agent, token)) {
-            Ok(_) => return Ok(()),
-            Err(e) => e.to_string(),
+    /// Issue the key and ask the base; a refusal is settled by looking for the terminal.
+    fn start(&self, w: &StateWriter, base: &dyn Base, row: &Row) -> Outcome {
+        let Some(agent) = agents::by_name(&row.agent) else {
+            return Outcome::Down(format!("no agent module named {:?}", row.agent));
         };
-        let exists = base
-            .list()
-            .is_ok_and(|ts| ts.iter().any(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn)));
-        if exists {
-            return Ok(());
+        let agent_id = spec::worker_agent_id(&row.task);
+        let token = match super::door::issue_key(w, spec::Role::Worker, &agent_id, Some(row.run_id))
+        {
+            Ok(t) => t,
+            Err(why) => return Outcome::Down(why),
+        };
+        let hash = super::door::sha256_hex(&token);
+        match base.launch(&self.spec(row, &*agent, token)) {
+            Ok(_) => Outcome::Up,
+            Err(e) => settle(w, base, row, hash, e.to_string()),
         }
-        let _ = w.conn().execute(
-            "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE key_sha256 = ?1",
-            [hash],
-        );
-        Err(refused)
+    }
+}
+
+/// A refused launch: up when a terminal with its `makiba.spawn` exists; down, with its key
+/// revoked, when the base lists none; unsure while the base cannot list.
+fn settle(w: &StateWriter, base: &dyn Base, row: &Row, hash: String, refused: String) -> Outcome {
+    match base.list() {
+        Ok(ts) if ts.iter().any(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn)) => Outcome::Up,
+        Ok(_) => {
+            let _ = w.conn().execute(
+                "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE key_sha256 = ?1",
+                [hash],
+            );
+            Outcome::Down(refused)
+        }
+        Err(_) => Outcome::Unsure { hash, refused },
     }
 }
 
@@ -267,7 +296,7 @@ mod tests {
         let (dir, w, row) = org();
         let stub = Stub::new();
         let l = Launch::new(dir.path(), "127.0.0.1:1".into());
-        l.start(&w, &stub, &row).unwrap();
+        assert!(matches!(l.start(&w, &stub, &row), Outcome::Up));
         record(&w, &row).unwrap();
         let got = stub.get(&TerminalRef("w-t1".into())).unwrap();
         assert_eq!(got.tags["makiba.spawn"], "s1");
@@ -313,11 +342,42 @@ mod tests {
             stub
         };
         // The name is taken by another launch's terminal: refused.
-        assert!(l.start(&w, &taken("other"), &row).is_err());
+        assert!(matches!(
+            l.start(&w, &taken("other"), &row),
+            Outcome::Down(_)
+        ));
         assert_eq!(revoked(&w), [true]);
         // The name is taken by this launch's own terminal: it exists.
-        l.start(&w, &taken("s1"), &row).unwrap();
+        assert!(matches!(l.start(&w, &taken("s1"), &row), Outcome::Up));
         assert_eq!(revoked(&w), [true, false]);
+    }
+
+    /// A refusal from a base that cannot list either keeps the launch and its key: the next pass
+    /// asks again, and fails the launch only once the base lists no terminal for it.
+    #[test]
+    fn a_refusal_the_base_cannot_settle_waits_for_a_list() {
+        let (dir, w, row) = org();
+        let l = Launch::new(dir.path(), "127.0.0.1:1".into());
+        let gone = crate::base::connect_as(
+            &dir.path().join("none.sock"),
+            std::time::Duration::from_secs(1),
+            "org",
+        );
+        let Outcome::Unsure { hash, refused } = l.start(&w, &*gone, &row) else {
+            panic!("a base that cannot list settles nothing");
+        };
+        assert_eq!(revoked(&w), [false]);
+        l.lock()
+            .insert("s1".into(), Pending::Unsure { hash, refused });
+        assert!(l.pass(&w, &*gone).unwrap().is_empty());
+        assert_eq!(revoked(&w), [false], "still unsure: the key stays");
+        assert!(l.pass(&w, &Stub::new()).unwrap().is_empty());
+        assert_eq!(revoked(&w), [true]);
+        let stage: String = w
+            .conn()
+            .query_row("SELECT stage FROM run_launch", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(stage, "failed");
     }
 
     /// An unknown agent module fails the launch with a reason and issues no key.
