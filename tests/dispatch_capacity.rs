@@ -105,6 +105,10 @@ impl Org {
         let mut c = Command::new(MAKIBA);
         c.arg("daemon")
             .env("MAKIBA_STATE_DIR", self.dir.path())
+            // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
+            .env("MAKIBA_DOOR", self.dir.path().join("door.sock"))
+            .env("MAKIBA_PORT", "0")
+            .env("MAKIBA_PERSON_KEY", self.dir.path().join("key/person.key"))
             .env("MAKIBA_BASE", "stub")
             .env_remove("MAKIBA_MAX_CONCURRENT_WORKERS")
             .stdin(Stdio::null())
