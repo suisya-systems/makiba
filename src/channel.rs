@@ -6,7 +6,9 @@
 //! (25 s). Answers: `200` with the wrapped text as the body, `204` when the hold ran out (the
 //! server asks again at once), `401` for a token the door does not know (the server stops with a
 //! failure), `409` when a newer request of the same agent took the place (the older server
-//! stops, so two never take each other's place for ever).
+//! stops, so two never take each other's place for ever). A server names its session in
+//! `X-Makiba-Session: <start in nanoseconds>-<pid>`; the hub remembers the newest start it saw
+//! for an agent and answers 409 to any request of an older one, even between two of its requests.
 //!
 //! A push counts as accepted only when the server has taken the text: it writes the MCP
 //! notification to its standard output, and only then `ACK` back on the same connection. Until
@@ -89,6 +91,8 @@ type Auth = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
 struct Inner {
     auth: Auth,
     slots: Mutex<HashMap<String, Slot>>,
+    /// The newest session start seen for each agent.
+    newest: Mutex<HashMap<String, u128>>,
     rejected: AtomicU64,
     next_gen: AtomicU64,
     closed: AtomicBool,
@@ -123,6 +127,7 @@ impl Hub {
         Hub(Arc::new(Inner {
             auth: Box::new(auth),
             slots: Mutex::new(HashMap::new()),
+            newest: Mutex::new(HashMap::new()),
             rejected: AtomicU64::new(0),
             next_gen: AtomicU64::new(1),
             closed: AtomicBool::new(false),
@@ -173,6 +178,22 @@ impl Hub {
             let _ = respond(&mut s, "401 Unauthorized", "");
             return;
         };
+        let start = req
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case("x-makiba-session"))
+            .and_then(|h| std::str::from_utf8(h.value).ok())
+            .and_then(|v| v.split('-').next()?.parse::<u128>().ok())
+            .unwrap_or(0);
+        {
+            let mut newest = self.0.newest.lock().unwrap();
+            let seen = newest.entry(agent.clone()).or_insert(start);
+            if start < *seen {
+                let _ = respond(&mut s, "409 Conflict", "");
+                return;
+            }
+            *seen = start;
+        }
         let (tx, rx) = channel::<Offer>();
         let serial = self.0.next_gen.fetch_add(1, Ordering::SeqCst);
         if self.0.closed.load(Ordering::SeqCst) {
@@ -291,7 +312,7 @@ enum Ask {
     Failed(String),
 }
 
-fn ask(door: &str, token: &str, out: &Out) -> Ask {
+fn ask(door: &str, token: &str, session: &str, out: &Out) -> Ask {
     let run = || -> Result<Ask, String> {
         let addr = door
             .to_socket_addrs()
@@ -305,7 +326,7 @@ fn ask(door: &str, token: &str, out: &Out) -> Ask {
             .map_err(|e| e.to_string())?;
         write!(
             s,
-            "GET {PATH} HTTP/1.1\r\nHost: {door}\r\nAuthorization: Bearer {token}\r\nConnection: close\r\n\r\n"
+            "GET {PATH} HTTP/1.1\r\nHost: {door}\r\nAuthorization: Bearer {token}\r\nX-Makiba-Session: {session}\r\nConnection: close\r\n\r\n"
         )
         .map_err(|e| e.to_string())?;
         let (mut buf, n) = read_head(&mut s).map_err(|e| e.to_string())?;
@@ -375,11 +396,11 @@ impl Out {
     }
 }
 
-fn poll(door: String, token: String, out: Arc<Out>) {
+fn poll(door: String, token: String, session: String, out: Arc<Out>) {
     let mut wait = Duration::from_millis(200);
     let mut said = false;
     loop {
-        match ask(&door, &token, &out) {
+        match ask(&door, &token, &session, &out) {
             Ask::Text | Ask::Nothing => {
                 wait = Duration::from_millis(200);
                 said = false;
@@ -419,6 +440,13 @@ pub fn main(args: &[String]) -> ExitCode {
     };
     let out = Arc::new(Out(Mutex::new(std::io::stdout())));
     let started = AtomicBool::new(false);
+    let session = format!(
+        "{}-{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_nanos()),
+        std::process::id()
+    );
     let mut line = String::new();
     let stdin = std::io::stdin();
     // The messages come only after `notifications/initialized`, so the poller starts there.
@@ -449,7 +477,8 @@ pub fn main(args: &[String]) -> ExitCode {
             "notifications/initialized" => {
                 if !started.swap(true, Ordering::SeqCst) {
                     let (door, token, out) = (door.clone(), token.clone(), Arc::clone(&out));
-                    std::thread::spawn(move || poll(door, token, out));
+                    let session = session.clone();
+                    std::thread::spawn(move || poll(door, token, session, out));
                 }
             }
             "ping" => reply(json!({})),
@@ -465,4 +494,50 @@ pub fn main(args: &[String]) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::TcpListener;
+
+    fn status_of(addr: std::net::SocketAddr, session: &str) -> TcpStream {
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(
+            s,
+            "GET {PATH} HTTP/1.1\r\nAuthorization: Bearer t\r\nX-Makiba-Session: {session}\r\n\r\n"
+        )
+        .unwrap();
+        s
+    }
+
+    fn code(s: &mut TcpStream) -> String {
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let mut b = [0u8; 12];
+        s.read_exact(&mut b).unwrap();
+        String::from_utf8_lossy(&b[9..12]).into_owned()
+    }
+
+    #[test]
+    fn an_older_session_cannot_take_the_place_back() {
+        let hub = Hub::new(|t| (t == "t").then(|| "a".to_string()));
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = hub.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let h = h.clone();
+                std::thread::spawn(move || h.serve(s));
+            }
+        });
+        let mut old = status_of(addr, "100-1");
+        while !hub.connected("a") {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let _new = status_of(addr, "200-2");
+        assert_eq!(code(&mut old), "409", "the held request of the old session");
+        // Asking again, as the old server would after a 200, is refused at once.
+        assert_eq!(code(&mut status_of(addr, "100-1")), "409");
+        assert!(hub.connected("a"));
+    }
 }
