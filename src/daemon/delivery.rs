@@ -82,6 +82,8 @@ pub struct Delivery {
     agent: Option<Box<dyn Agent>>,
     /// When each recipient was last sent the wake line, by `clock`, in seconds.
     woken: HashMap<String, f64>,
+    /// The recipient the base was last asked about, for rotating through a backlog.
+    last_checked: Option<String>,
 }
 
 struct Due {
@@ -102,6 +104,7 @@ impl Delivery {
             clock: Box::new(SystemTime::now),
             agent: None,
             woken: HashMap::new(),
+            last_checked: None,
         }
     }
 
@@ -246,18 +249,28 @@ impl Delivery {
             if last_push.is_some_and(|t| now - t < WAKE_AFTER_PUSH) {
                 continue;
             }
-            let Ok(Some(t)) = find_terminal(base, &recipient) else {
+            // What the monitor last recorded rules out most recipients without asking the base.
+            let known = last_record(w, &recipient, i64::MAX)?;
+            if known.is_some_and(|(k, st)| {
+                k != "terminal_status" || !matches!(st.as_deref(), Some("idle" | "done"))
+            }) {
                 continue;
+            }
+            // From here the base is asked: for one recipient only per pass, whatever it answers,
+            // so a slow base costs one bounded call sequence and not one per recipient.
+            self.last_checked = Some(recipient.clone());
+            let Ok(Some(t)) = find_terminal(base, &recipient) else {
+                break;
             };
             // The status now, not the last record: the wake goes to an idle or done terminal only.
             let idle = match base.get(&t.id).ok().and_then(|t| t.status).map(|s| s.state) {
                 Some(State::Idle) => true,
                 Some(State::Done) => false,
-                _ => continue,
+                _ => break,
             };
             let screen = base.read(&t.id, SCREEN_LINES).unwrap_or_default();
             if agent.composer(&screen) != Composer::Empty {
-                continue;
+                break;
             }
             match base.send(&t.id, WAKE_LINE, idle) {
                 Ok(()) => {
@@ -308,32 +321,39 @@ fn identity(recipient: &str) -> Option<(&str, Option<&str>)> {
     }
 }
 
-/// The newest event now, and whether the recipient's last record says `idle` or `done`.
-fn snapshot(w: &StateWriter, recipient: &str) -> crate::db::Result<(i64, bool)> {
-    let cursor: i64 = w
-        .conn()
-        .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))?;
+/// The recipient's last record up to event `upto`: its kind and `state`; `None` when it has none.
+fn last_record(
+    w: &StateWriter,
+    recipient: &str,
+    upto: i64,
+) -> crate::db::Result<Option<(String, Option<String>)>> {
     let Some((role, task)) = identity(recipient) else {
-        return Ok((cursor, false));
+        return Ok(None);
     };
-    let last: Option<(String, Option<String>)> = w
-        .conn()
+    w.conn()
         .query_row(
             &format!(
                 "SELECT kind, json_extract(payload_json, '$.state') FROM events
                  WHERE kind IN ('terminal_status', 'terminal_gone') AND id <= ?3 AND {ABOUT}
                  ORDER BY id DESC LIMIT 1"
             ),
-            params![role, task, cursor],
+            params![role, task, upto],
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .map(Some)
         .or_else(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => Ok(None),
-            e => Err(e),
-        })?;
+            e => Err(e.into()),
+        })
+}
+
+/// The newest event now, and whether the recipient's last record says `idle` or `done`.
+fn snapshot(w: &StateWriter, recipient: &str) -> crate::db::Result<(i64, bool)> {
+    let cursor: i64 = w
+        .conn()
+        .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))?;
     let eligible = matches!(
-        last,
+        last_record(w, recipient, cursor)?,
         Some((k, Some(s))) if k == "terminal_status" && (s == "idle" || s == "done")
     );
     Ok((cursor, eligible))
