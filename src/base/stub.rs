@@ -32,7 +32,7 @@ impl Inner {
         self.terminals.get_mut(&t.0).ok_or_else(|| {
             error(
                 BaseError::NotFound,
-                "terminal",
+                "not_found",
                 &format!("no terminal {:?}", t.0),
             )
         })
@@ -220,10 +220,18 @@ impl Base for Stub {
             ));
         }
         let state = e.terminal.status.as_ref().map(|s| s.state);
+        // As hc: a blocked terminal takes no text, whatever the caller asked.
+        if state == Some(State::Blocked) {
+            return Err(error(
+                BaseError::Blocked,
+                "blocked",
+                "the terminal is blocked on a prompt",
+            ));
+        }
         if only_if_idle && state != Some(State::Idle) {
             return Err(error(
                 BaseError::StatusMismatch,
-                "status",
+                "status_mismatch",
                 &format!("the terminal is {state:?}, not idle"),
             ));
         }
