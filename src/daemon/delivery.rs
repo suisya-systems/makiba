@@ -227,6 +227,14 @@ impl Delivery {
                 candidates.push(recipient);
             }
         }
+        // Rotate, so that a recipient that is never ready cannot starve the others.
+        if let Some(i) = candidates
+            .iter()
+            .position(|c| Some(c) == self.last_checked.as_ref())
+        {
+            let n = candidates.len();
+            candidates.rotate_left((i + 1) % n);
+        }
         for recipient in candidates {
             if self
                 .woken
@@ -601,5 +609,56 @@ mod tests {
         assert!(!turn_started(&w, "w-t1", &f, CONFIRM_WINDOW).unwrap());
         status("worker".into(), "t1", "working");
         assert!(turn_started(&w, "w-t1", &f, CONFIRM_WINDOW).unwrap());
+    }
+
+    #[test]
+    fn a_recipient_that_cannot_be_woken_does_not_hold_back_the_next() {
+        use crate::agents::fake::Fake;
+        use crate::base::stub::Stub;
+        use crate::base::{Base, LaunchSpec};
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        for to in ["w-a", "w-b"] {
+            let e = w
+                .append_event(&crate::db::writer::NewEvent {
+                    kind: "message_sent",
+                    ..Default::default()
+                })
+                .unwrap();
+            w.conn()
+                .execute(
+                    "INSERT INTO messages (event_id, sender, recipient, kind, body) VALUES (?1, 's', ?2, 'message', 'x')",
+                    params![e, to],
+                )
+                .unwrap();
+            w.conn()
+                .execute(
+                    "INSERT INTO event_deliveries (source_event_id, recipient) VALUES (?1, ?2)",
+                    params![e, to],
+                )
+                .unwrap();
+        }
+        // `w-a` has no terminal; `w-b` has one with an empty prompt.
+        let base = Stub::scripted(&["> "]);
+        base.launch(&LaunchSpec {
+            argv: Vec::new(),
+            cwd: ".".into(),
+            name: "w-b".into(),
+            tags: [("makiba.role", "worker"), ("makiba.task_id", "b")]
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .into(),
+            env: Default::default(),
+            unset: Vec::new(),
+        })
+        .unwrap();
+        let mut d = Delivery::new(Box::new(NoChannel)).with_agent(Box::new(Fake::new(
+            std::path::Path::new("a"),
+            std::path::Path::new("r"),
+            &[],
+        )));
+        d.wake_pass(&w, &base).unwrap();
+        d.wake_pass(&w, &base).unwrap();
+        assert!(d.woken.contains_key("w-b"));
+        assert!(!d.woken.contains_key("w-a"));
     }
 }
