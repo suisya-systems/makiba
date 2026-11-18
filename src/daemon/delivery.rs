@@ -56,11 +56,11 @@ pub trait Channel {
     /// Hand `text` to the recipient's channel server. `Ok` means the server accepted it. Must
     /// give up after a bounded time, so one recipient cannot stall the daemon.
     fn push(&self, recipient: &str, text: &str) -> Result<(), String>;
-    /// The hash of the token (`agents.key_sha256`) of the connection a push to `recipient` would
-    /// go to now; `None` when the channel does not know. Delivery then takes the recipient's
-    /// newest key that is not revoked.
-    fn key_of(&self, _recipient: &str) -> Option<String> {
-        None
+    /// `push`, and the hash of the token (`agents.key_sha256`) of the connection the text went to,
+    /// taken from the same connection that took it; `None` when the channel does not know.
+    /// Delivery then takes the recipient's newest key that is not revoked.
+    fn push_keyed(&self, recipient: &str, text: &str) -> Result<Option<String>, String> {
+        self.push(recipient, text).map(|()| None)
     }
 }
 
@@ -176,8 +176,6 @@ impl Delivery {
                 continue;
             }
             let (cursor, eligible) = snapshot(w, &m.recipient)?;
-            // Before the push, so that a connection replaced after it can only fail to confirm.
-            let spawn = launch_identity(w, &*self.channel, &m.recipient)?;
             // The body is read only for a message that is going out, not for a backlog.
             let body: String =
                 w.conn()
@@ -185,22 +183,30 @@ impl Delivery {
                         r.get(0)
                     })?;
             let text = wrap(m.id, &m.sender, &m.kind, &body);
-            let result = self.channel.push(&m.recipient, &text).and_then(|()| {
-                w.record_push(m.event_id, &m.recipient)
-                    .map_err(|e| e.to_string())
-            });
-            if let Err(e) = result {
-                // A failed push is not recorded; a failed record means the push is repeated.
-                self.retry_at
-                    .insert(m.recipient.clone(), Instant::now() + RETRY_AFTER);
-                eprintln!(
-                    "makibad: cannot deliver message {} to {}: {e}",
-                    m.id, m.recipient
-                );
-                continue;
-            }
+            let result = self
+                .channel
+                .push_keyed(&m.recipient, &text)
+                .and_then(|key| {
+                    w.record_push(m.event_id, &m.recipient)
+                        .map(|()| key)
+                        .map_err(|e| e.to_string())
+                });
+            let key = match result {
+                Ok(key) => key,
+                Err(e) => {
+                    // A failed push is not recorded; a failed record means the push is repeated.
+                    self.retry_at
+                        .insert(m.recipient.clone(), Instant::now() + RETRY_AFTER);
+                    eprintln!(
+                        "makibad: cannot deliver message {} to {}: {e}",
+                        m.id, m.recipient
+                    );
+                    continue;
+                }
+            };
             let pushed = Instant::now(); // the push is accepted: the window runs from here
             if eligible && !self.waiting.contains_key(&m.recipient) {
+                let spawn = launch_identity(w, key, &m.recipient)?;
                 self.waiting.insert(
                     m.recipient,
                     InFlight {
@@ -385,14 +391,14 @@ fn snapshot(w: &StateWriter, recipient: &str) -> crate::db::Result<(i64, bool)> 
 }
 
 /// The `spawn_id` of the agents row a push to `recipient` is bound to: the row of the connection
-/// the channel names, else the recipient's newest key that is not revoked. `None` when there is no
+/// the push went to, else the recipient's newest key that is not revoked. `None` when there is no
 /// row or its `spawn_id` is null (a terminal launched before tags).
 fn launch_identity(
     w: &StateWriter,
-    channel: &dyn Channel,
+    key: Option<String>,
     recipient: &str,
 ) -> crate::db::Result<Option<String>> {
-    let row = match channel.key_of(recipient) {
+    let row = match key {
         Some(key) => w.conn().query_row(
             "SELECT spawn_id FROM agents WHERE key_sha256 = ?1",
             [key],

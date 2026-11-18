@@ -281,23 +281,19 @@ impl Channel for Hub {
         self.connected(recipient)
     }
 
-    fn key_of(&self, recipient: &str) -> Option<String> {
-        self.0
-            .slots
-            .lock()
-            .unwrap()
-            .get(recipient)
-            .map(|s| s.key.clone())
+    fn push(&self, recipient: &str, text: &str) -> Result<(), String> {
+        self.push_keyed(recipient, text).map(|_| ())
     }
 
-    fn push(&self, recipient: &str, text: &str) -> Result<(), String> {
-        let tx = self
+    fn push_keyed(&self, recipient: &str, text: &str) -> Result<Option<String>, String> {
+        // The sender and the key are read from the one slot, under one lock.
+        let (tx, key) = self
             .0
             .slots
             .lock()
             .unwrap()
             .get(recipient)
-            .map(|s| s.tx.clone())
+            .map(|s| (s.tx.clone(), s.key.clone()))
             .ok_or("no channel server is connected")?;
         let (reply, got) = channel();
         tx.send(Offer {
@@ -306,7 +302,7 @@ impl Channel for Hub {
         })
         .map_err(|_| "the channel server went away")?;
         match got.recv_timeout(ACK_WAIT + IO_LIMIT + Duration::from_secs(1)) {
-            Ok(r) => r,
+            Ok(r) => r.map(|()| Some(key)),
             Err(RecvTimeoutError::Timeout) => {
                 Err("the channel server did not answer in time".into())
             }
