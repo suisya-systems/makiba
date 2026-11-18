@@ -29,6 +29,16 @@ jobs:
           export HC_BIN="$HOME/.makiba-base/bin/hc"
           "$HC_BIN" --version
           MAKIBA_TEST_REAL_BASE=1 cargo test --locked -- --test-threads=1
+      - name: The real base is what ran (a missing hc must fail the fixture)
+        # A pass is read as success, so a green run cannot tell the stand-in from the real base.
+        # With HC_BIN pointing nowhere, only the real base can fail: the fixture's start-up
+        # (tests/common/mod.rs, Real::start) panics when `hc --version` cannot run. This step
+        # succeeds only when the run fails and shows that panic, not a build error.
+        run: |
+          if MAKIBA_TEST_REAL_BASE=1 HC_BIN=/nonexistent cargo test --locked --test base_fixture -- --test-threads=1 > "$RUNNER_TEMP/negative.log" 2>&1; then
+            echo "base_fixture passed with no hc: it did not run on the real base"; exit 1
+          fi
+          grep -q "the real base is the pinned release" "$RUNNER_TEMP/negative.log" || { cat "$RUNNER_TEMP/negative.log"; echo "it failed for another reason"; exit 1; }
   lint:
     runs-on: ubuntu-latest
     steps:
