@@ -26,6 +26,11 @@ fn env_path(name: &str) -> Option<PathBuf> {
         .map(PathBuf::from)
 }
 
+/// `MAKIBA_DOOR=none`: the test seam that leaves the socket off (spec section 2).
+pub fn door_off() -> bool {
+    std::env::var("MAKIBA_DOOR").as_deref() == Ok("none")
+}
+
 /// `$MAKIBA_DOOR`, default `${XDG_RUNTIME_DIR}/makiba/door.sock`; `None` when neither is set.
 pub fn door_path() -> Option<PathBuf> {
     env_path("MAKIBA_DOOR")
@@ -92,6 +97,11 @@ fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
 /// Send one request to the door and read its answer line.
 fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let unavailable = |e: String| (ErrorKind::Unavailable, e);
+    if door_off() {
+        return Err(unavailable(
+            "MAKIBA_DOOR=none: the door's socket is off, so there is nothing to call".into(),
+        ));
+    }
     let path = door_path().ok_or_else(|| {
         unavailable("neither MAKIBA_DOOR nor XDG_RUNTIME_DIR is set: no door to call".into())
     })?;

@@ -597,7 +597,8 @@ fn config(args: &Value) -> Response {
 
 /// Where the door listens (spec section 2).
 pub struct Config {
-    pub socket: PathBuf,
+    /// `None` with `MAKIBA_DOOR=none`: no socket is opened.
+    pub socket: Option<PathBuf>,
     pub port: u16,
     pub person_key: PathBuf,
 }
@@ -605,8 +606,13 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Result<Config, String> {
         Ok(Config {
-            socket: crate::cli::door_path()
-                .ok_or("neither MAKIBA_DOOR nor XDG_RUNTIME_DIR is set: no place for the door")?,
+            socket: if crate::cli::door_off() {
+                None
+            } else {
+                Some(crate::cli::door_path().ok_or(
+                    "neither MAKIBA_DOOR nor XDG_RUNTIME_DIR is set: no place for the door",
+                )?)
+            },
             port: crate::cli::port()?,
             person_key: crate::cli::person_key_path(),
         })
@@ -616,13 +622,15 @@ impl Config {
 /// A door that listens. Dropping it removes the socket file; the listening threads end with the
 /// process.
 pub struct Running {
-    pub socket: PathBuf,
+    pub socket: Option<PathBuf>,
     pub addr: SocketAddr,
 }
 
 impl Drop for Running {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.socket);
+        if let Some(socket) = &self.socket {
+            let _ = std::fs::remove_file(socket);
+        }
     }
 }
 
@@ -672,19 +680,27 @@ pub fn start(cfg: &Config, db: &Path, base: Arc<dyn Base>, hub: Hub) -> Result<R
     let tcp = TcpListener::bind(("127.0.0.1", cfg.port))
         .map_err(|e| format!("cannot listen on 127.0.0.1:{}: {e}", cfg.port))?;
     let addr = tcp.local_addr().map_err(|e| e.to_string())?;
-    let unix = bind_socket(&cfg.socket)?;
+    let unix = match &cfg.socket {
+        Some(path) => Some(bind_socket(path)?),
+        None => {
+            eprintln!("makibad: MAKIBA_DOOR=none: the door's socket is off");
+            None
+        }
+    };
     let running = Running {
         socket: cfg.socket.clone(),
         addr,
     };
     let door = Arc::new(Door::new(w, base));
     let d = Arc::clone(&door);
-    std::thread::spawn(move || {
-        for s in unix.incoming().flatten() {
-            let d = Arc::clone(&d);
-            std::thread::spawn(move || serve_socket(&d, s));
-        }
-    });
+    if let Some(unix) = unix {
+        std::thread::spawn(move || {
+            for s in unix.incoming().flatten() {
+                let d = Arc::clone(&d);
+                std::thread::spawn(move || serve_socket(&d, s));
+            }
+        });
+    }
     std::thread::spawn(move || {
         for s in tcp.incoming().flatten() {
             let (d, hub) = (Arc::clone(&door), hub.clone());
