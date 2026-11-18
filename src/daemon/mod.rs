@@ -2,6 +2,9 @@
 //! a heartbeat, a clean stop. It says it is subscribed only once the base's event stream has
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
+mod monitor;
+
+use self::monitor::Monitor;
 use crate::base::stub::Stub;
 use crate::base::{Base, BaseEvent};
 use crate::db::writer::{NewEvent, StateWriter};
@@ -152,49 +155,71 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
         .map_err(|e| format!("the base refused: {e:?}"))?;
     // The subscription is established on its own thread: `events()` may block, and a
     // real stream never ends, so that thread is left to die with the process.
+    // What the thread passes on: whether the subscription exists, then every event of it.
+    enum Msg {
+        Subscribed(Result<(), String>),
+        Event(BaseEvent),
+    }
     let (tx, rx) = channel();
     let events_base = Arc::<dyn Base>::from(base);
     let thread_base = Arc::clone(&events_base);
     std::thread::spawn(move || match thread_base.events() {
         Err(e) => {
-            let _ = tx.send(Err(format!("cannot subscribe to the base: {e:?}")));
+            let _ = tx.send(Msg::Subscribed(Err(format!(
+                "cannot subscribe to the base: {e:?}"
+            ))));
         }
         Ok(mut stream) => {
-            // ponytail: M2-2 takes over the stream; until then it is only drained.
             let first = stream.next();
-            let _ = tx.send(match first {
-                Some(BaseEvent::Resync(_)) => Ok(()),
-                other => Err(format!("the first event was not a Resync: {other:?}")),
-            });
-            for _ in stream {}
+            let ok = matches!(first, Some(BaseEvent::Resync(_)));
+            let _ = tx.send(Msg::Subscribed(if ok {
+                Ok(())
+            } else {
+                Err(format!("the first event was not a Resync: {first:?}"))
+            }));
+            if let (true, Some(first)) = (ok, first) {
+                // The blocking read stays on this thread; the monitor gets what it yields.
+                for event in std::iter::once(first).chain(stream) {
+                    if tx.send(Msg::Event(event)).is_err() {
+                        return;
+                    }
+                }
+            }
         }
     });
 
+    let org = std::fs::canonicalize(dir).unwrap_or_else(|_| dir.to_path_buf());
+    let mut monitor = Monitor::new(&org.to_string_lossy());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
-        if !subscribed {
-            match rx.recv_timeout(TICK) {
-                Ok(Ok(())) => {
-                    w.transaction(|w| {
-                        w.conn().execute(
+        match rx.recv_timeout(TICK) {
+            Ok(Msg::Subscribed(Ok(()))) => {
+                w.transaction(|w| {
+                    w.conn()
+                        .execute(
                             "UPDATE dispatcher SET subscribed = 1, base_version = ?1 WHERE id = 1",
                             [&info.version],
                         )
                         .map_err(crate::db::Error::from)?;
-                        event(w, "dispatcher_started", &info.name, &info.version)
-                    })
-                    .map_err(|e| e.to_string())?;
-                    subscribed = true;
-                }
-                Ok(Err(e)) => return Err(e),
-                Err(RecvTimeoutError::Timeout) => {}
-                Err(RecvTimeoutError::Disconnected) => {
-                    return Err("the subscription thread ended before it subscribed".into());
+                    event(w, "dispatcher_started", &info.name, &info.version)
+                })
+                .map_err(|e| e.to_string())?;
+                subscribed = true;
+            }
+            Ok(Msg::Subscribed(Err(e))) => return Err(e),
+            Ok(Msg::Event(e)) => {
+                // A failed write is reported and the daemon goes on: the monitor keeps its
+                // record of what was written, so the next event tries again.
+                if let Err(e) = monitor.handle(&w, e) {
+                    eprintln!("makibad: cannot record a terminal event: {e}");
                 }
             }
-        } else {
-            std::thread::sleep(TICK);
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) if !subscribed => {
+                return Err("the subscription thread ended before it subscribed".into());
+            }
+            Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
         }
         if Instant::now() >= next_beat {
             beat(&w)?;
