@@ -50,6 +50,10 @@ fn command(dir: &Path, args: &[&str], delay_ms: u64) -> Command {
     let mut c = Command::new(MAKIBA);
     c.args(args)
         .env("MAKIBA_STATE_DIR", dir)
+        // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
+        .env("MAKIBA_DOOR", dir.join("door.sock"))
+        .env("MAKIBA_PORT", "0")
+        .env("MAKIBA_PERSON_KEY", dir.join("key/person.key"))
         .env("MAKIBA_BASE", "stub")
         .env("MAKIBA_STUB_SUBSCRIBE_DELAY_MS", delay_ms.to_string())
         .stdin(Stdio::null());
