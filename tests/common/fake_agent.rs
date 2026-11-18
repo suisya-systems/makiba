@@ -194,6 +194,12 @@ fn main() {
         eprintln!("usage: makiba-fake-agent --record FILE STEP...");
         std::process::exit(2);
     };
+    // On a pty the line discipline holds a lone Esc until a newline; turn that off. On a pipe
+    // (the stand-in) stty fails, which is fine.
+    let _ = std::process::Command::new("stty")
+        .args(["-icanon", "min", "1", "-echo"])
+        .stderr(std::process::Stdio::null())
+        .status();
     // One thread owns stdin so a read can be waited on with a timeout.
     let (tx, bytes) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
