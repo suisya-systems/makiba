@@ -328,8 +328,9 @@ fn event_of(
                 _ => {}
             }
             if !mine(&t, org) {
-                known.remove(id);
-                return None;
+                // It left the organization: for the caller it is gone.
+                let was_known = known.remove(id).is_some();
+                return was_known.then(|| TerminalEvent::Removed(TerminalRef(id.into())));
             }
             known.insert(id.into(), t.clone());
             Some(if matches!(kind, "finished" | "lost") {
