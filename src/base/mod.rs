@@ -4,10 +4,23 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
+use std::time::Duration;
 
+mod herdr;
 pub mod stub;
 pub mod version;
+
+/// The real base, reached at `socket`; every call has `timeout` as its read and write timeout.
+pub fn connect(socket: &Path, timeout: Duration) -> Box<dyn Base> {
+    Box::new(herdr::Herdr::new(socket.to_path_buf(), timeout))
+}
+
+/// The real base of `session`, at `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`.
+pub fn connect_session(session: &str, timeout: Duration) -> Box<dyn Base> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    connect(&herdr::socket_path(runtime.as_deref(), session), timeout)
+}
 
 /// The base's own account of an error (spec section 6.1).
 #[derive(Debug, Clone, PartialEq, Eq)]
