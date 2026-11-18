@@ -2,7 +2,7 @@
 //!
 //! The SQL is carried from claude-org-ja and kept as SQL: `schema.sql` is v1 to v3, `schema_v4.sql`
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
-//! `open` opens a database with the project's pragmas and `migrate` brings it to v4.
+//! `schema_v5.sql` adds the launch identity to `agents`. `open` opens a database with the project's pragmas and `migrate` brings it to v5.
 
 use std::fmt;
 use std::path::Path;
@@ -20,6 +20,8 @@ pub use writer::StateWriter;
 pub const SCHEMA: &str = include_str!("schema.sql");
 /// v4: agents, commands, run_launch, messages, pending, pr_watches, dispatcher.
 pub const SCHEMA_V4: &str = include_str!("schema_v4.sql");
+/// v5: `agents.spawn_id`.
+pub const SCHEMA_V5: &str = include_str!("schema_v5.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -111,7 +113,7 @@ fn ddl_of(table: &str) -> String {
     ddl
 }
 
-/// Bring a database to v4: apply v3 to an empty one, upgrade an older one in place, then add v4.
+/// Bring a database to v5: apply v3 to an empty one, upgrade an older one in place, then add v4 and v5.
 /// Idempotent. Refuses to run inside a transaction, where it could not leave the caller's writes alone.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     if !conn.is_autocommit() {
@@ -153,6 +155,20 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
     )?;
     if done == 0
         && let Err(e) = conn.execute_batch(SCHEMA_V4)
+    {
+        if !conn.is_autocommit() {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        return Err(e.into());
+    }
+    // v5, the same way.
+    let done: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = 5",
+        [],
+        |r| r.get(0),
+    )?;
+    if done == 0
+        && let Err(e) = conn.execute_batch(SCHEMA_V5)
     {
         if !conn.is_autocommit() {
             let _ = conn.execute_batch("ROLLBACK");

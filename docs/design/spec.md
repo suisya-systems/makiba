@@ -2,7 +2,7 @@
 
 Status: checked against the code by `tests/spec_matches_code.rs` (Issue M0-8). This document fixes the names and shapes that more than one Issue touches, so that work done in parallel meets in the middle. Where a value is a first proposal that a measurement may change, it says so.
 
-The tables of sections 3, 4, 6.3, 10 and 12, the wrapper's two sentences and limits (section 8), the wake line (section 7) and the SQL of section 5 are compared with `src/spec.rs` and `src/db/schema_v4.sql` in both directions. A change to one of those names is a change to this document and to `src/spec.rs` in the same commit.
+The tables of sections 3, 4, 6.3, 10 and 12, the wrapper's two sentences and limits (section 8), the wake line (section 7) and the SQL of section 5 are compared with `src/spec.rs` and `src/db/schema_v4.sql` with `src/db/schema_v5.sql` in both directions. A change to one of those names is a change to this document and to `src/spec.rs` in the same commit.
 
 The plan and its reasons are in [plan.md](plan.md). This document does not repeat them.
 
@@ -109,7 +109,7 @@ An agent's key dies when its terminal is closed or replaced. The person key does
 
 ## 5. state.db
 
-The schema is carried from claude-org-ja at migration v3 (`projects`, `workstreams`, `worker_dirs`, `runs`, `events`, `event_deliveries`, `tags`, `tag_assignments`, `org_sessions`, `schema_migrations`). Migration v4 adds the tables below. Both are kept as SQL, `src/db/schema.sql` and `src/db/schema_v4.sql`, and embedded in the binary (M0-5); the Rust code does not restate them. `unparsed_legacy` and the `*_pane_id` / `*_peer_id` columns of `org_sessions` are carried unchanged and unused.
+The schema is carried from claude-org-ja at migration v3 (`projects`, `workstreams`, `worker_dirs`, `runs`, `events`, `event_deliveries`, `tags`, `tag_assignments`, `org_sessions`, `schema_migrations`). Migration v4 adds the tables below and migration v5 one column of `agents` (5.1). They are kept as SQL, `src/db/schema.sql`, `src/db/schema_v4.sql` and `src/db/schema_v5.sql`, and embedded in the binary (M0-5); the Rust code does not restate them. `unparsed_legacy` and the `*_pane_id` / `*_peer_id` columns of `org_sessions` are carried unchanged and unused.
 
 Times are UTC text, `strftime('%Y-%m-%dT%H:%M:%fZ','now')`, as in the carried schema.
 
@@ -127,6 +127,14 @@ CREATE TABLE agents (
 );
 CREATE INDEX idx_agents_agent ON agents(agent_id);
 ```
+
+Migration v5 adds the launch identity (`src/db/schema_v5.sql`):
+
+```sql
+ALTER TABLE agents ADD COLUMN spawn_id TEXT;
+```
+
+A key is issued for each launch, so one row is one terminal generation of its agent. `spawn_id` is the launch's identity: the value of the terminal's `makiba.spawn` tag (`run_launch.spawn_id` for a worker, the fresh id of a launch for the secretary and the curator), written when the key is issued. It is null for a row whose terminal was launched without the tag (an earlier generation) and for the person's key. The anomaly pass (section 11) and the confirmation of a push (section 8) match terminals to rows by it.
 
 ### 5.2 `commands`
 
@@ -373,7 +381,7 @@ A message is stored (section 5.4) and delivered by one of three routes. Whatever
 - Box. The recipient calls the tool `inbox`. It returns the caller's unconfirmed messages, each in its wrapper, oldest first, up to the limit below, and marks them `delivered`. The wake line (section 7) is what tells a recipient to do this.
 - Typed, on the sender's request: `typed` on `send` or `answer`, for a worker or the curator only (section 7). It is used when a message that came by channel was refused as not being from the person.
 
-Confirmation of a push. A message is pushed once, as soon as its recipient has a connected channel server; a push is made when the channel server has taken the message (`attempt` goes up by one). After that the row waits for confirmation or for the box. When the recipient was `idle` or `done` at the push and its status shows a turn start within 10 seconds (a first proposal; 0.4 s in P8), the row is `delivered`. In every other case the row stays `pending`: no turn started, or the recipient was working, `blocked` or in error at the push, when a turn start cannot be told from the turn already running. A `pending` row whose recipient is `idle` or `done`, with no push to it in the last 10 seconds, is woken by the wake line, and it is `delivered` when `inbox` returns it. Where there is no channel (the agent program has none, or its channel server is not connected) no push is made and the row is unconfirmed from the start.
+Confirmation of a push. A message is pushed once, as soon as its recipient has a connected channel server; a push is made when the channel server has taken the message (`attempt` goes up by one). After that the row waits for confirmation or for the box. When the recipient was `idle` or `done` at the push and its status shows a turn start within 10 seconds (a first proposal; 0.4 s in P8), the row is `delivered`. In every other case the row stays `pending`: no turn started, or the recipient was working, `blocked` or in error at the push, when a turn start cannot be told from the turn already running. The push remembers the launch identity of the connection it went to (the `spawn_id` of the `agents` row of that connection's key; when the channel cannot name the connection, of the recipient's newest key that is not revoked), and only a `terminal_status` `working` with the same `spawn_id` (null matches only null, as in the recovery of section 10) confirms it, so the first turn of a replacement terminal cannot confirm a push made to its predecessor. Messages stay addressed to the logical recipient (`secretary`, `w-<task>`, `curator`): mail waiting for the secretary survives its replacement. A `pending` row whose recipient is `idle` or `done`, with no push to it in the last 10 seconds, is woken by the wake line, and it is `delivered` when `inbox` returns it. Where there is no channel (the agent program has none, or its channel server is not connected) no push is made and the row is unconfirmed from the start.
 
 At-least-once. A message can reach the recipient twice: through the channel, then again from `inbox`. It carries the same `id` in the wrapper both times, which is how the recipient tells that it is one message. A body is typed only when the sender asks for it (section 7), and `makibad` does not retry it, so a message is not typed twice; the wake line carries no message and may be typed more than once.
 
@@ -475,7 +483,7 @@ Dropped, because the thing they recorded no longer exists: `pr_watch_pane_starte
 
 ## 11. Anomaly rules
 
-Pure functions of (the run, its latest status record, recorded events, now). Each raises at most once per run until it clears. The secretary has no run: `secretary_gone` is a function of its terminal record, and raises once per secretary terminal.
+Pure functions of (the run, its latest status record, recorded events, now). Each raises at most once per run until it clears. The secretary has no run: `secretary_gone` is a function of its terminal record, and raises once per secretary terminal. A secretary terminal is one `agents` row of `secretary` (the newest is the current one), and when that row has a `spawn_id` only the records with that `spawn_id` count for it, so a late record of the previous terminal is not the new one's; a row without `spawn_id` is told by role and time alone. The launch time stays the row's `created_at`.
 
 | Rule | Raised when | Told to |
 | --- | --- | --- |
@@ -549,7 +557,7 @@ src/lib.rs
 src/spec.rs            the names of this document as constants and enums (M0-8)
 src/base/              mod.rs (the Base trait), herdr.rs (private), stub.rs, version.rs, uses.rs
 src/agents/            mod.rs (the Agent trait), claude_code.rs, fake.rs, version.rs
-src/db/                mod.rs, schema.sql, schema_v4.sql, writer.rs, queries.rs
+src/db/                mod.rs, schema.sql, schema_v4.sql, schema_v5.sql, writer.rs, queries.rs
 src/daemon/            mod.rs (makibad's main loop) and one module per Issue: monitor, anomalies,
                        delivery, inbox, notify_gate, recover, dispatch, door, person_key, launch,
                        dialogs, close, prwatch, ...

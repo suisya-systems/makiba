@@ -83,6 +83,8 @@ struct Offer {
 
 struct Slot {
     serial: u64,
+    /// The hash of the token this held request came with (`agents.key_sha256`).
+    key: String,
     tx: Sender<Offer>,
 }
 
@@ -173,7 +175,7 @@ impl Hub {
             .find(|h| h.name.eq_ignore_ascii_case("authorization"))
             .and_then(|h| std::str::from_utf8(h.value).ok())
             .and_then(|v| v.strip_prefix("Bearer "));
-        let Some(agent) = token.and_then(|t| (self.0.auth)(t)) else {
+        let Some((agent, token)) = token.and_then(|t| (self.0.auth)(t).map(|a| (a, t))) else {
             self.0.rejected.fetch_add(1, Ordering::SeqCst);
             let _ = respond(&mut s, "401 Unauthorized", "");
             return;
@@ -203,7 +205,14 @@ impl Hub {
                 return;
             }
             *seen = start;
-            slots.insert(agent.clone(), Slot { serial, tx });
+            slots.insert(
+                agent.clone(),
+                Slot {
+                    serial,
+                    key: crate::daemon::door::sha256_hex(token),
+                    tx,
+                },
+            );
         }
         let _reg = Registered {
             hub: &self.0,
@@ -273,13 +282,18 @@ impl Channel for Hub {
     }
 
     fn push(&self, recipient: &str, text: &str) -> Result<(), String> {
-        let tx = self
+        self.push_keyed(recipient, text).map(|_| ())
+    }
+
+    fn push_keyed(&self, recipient: &str, text: &str) -> Result<Option<String>, String> {
+        // The sender and the key are read from the one slot, under one lock.
+        let (tx, key) = self
             .0
             .slots
             .lock()
             .unwrap()
             .get(recipient)
-            .map(|s| s.tx.clone())
+            .map(|s| (s.tx.clone(), s.key.clone()))
             .ok_or("no channel server is connected")?;
         let (reply, got) = channel();
         tx.send(Offer {
@@ -288,7 +302,7 @@ impl Channel for Hub {
         })
         .map_err(|_| "the channel server went away")?;
         match got.recv_timeout(ACK_WAIT + IO_LIMIT + Duration::from_secs(1)) {
-            Ok(r) => r,
+            Ok(r) => r.map(|()| Some(key)),
             Err(RecvTimeoutError::Timeout) => {
                 Err("the channel server did not answer in time".into())
             }

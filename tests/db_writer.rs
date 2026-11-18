@@ -80,7 +80,7 @@ fn writer_migrates_a_pre_m2_database() {
         1
     );
     assert!(has_table(c, "event_deliveries"));
-    assert_eq!(count(c, "SELECT MAX(version) FROM schema_migrations"), 4);
+    assert_eq!(count(c, "SELECT MAX(version) FROM schema_migrations"), 5);
 }
 
 #[test]
@@ -138,7 +138,7 @@ fn failed_v4_migration_is_rolled_back_and_can_be_retried() {
     conn.execute_batch(
         "DROP TABLE agents; DROP TABLE commands; DROP TABLE run_launch; DROP TABLE messages;
          DROP TABLE pending; DROP TABLE pr_watches; DROP TABLE dispatcher;
-         DELETE FROM schema_migrations WHERE version = 4;
+         DELETE FROM schema_migrations WHERE version IN (4, 5);
          CREATE TABLE commands (x INTEGER);",
     )
     .unwrap();
@@ -163,7 +163,7 @@ fn failed_v4_migration_is_rolled_back_and_can_be_retried() {
     assert!(has_table(&conn, "agents"));
     assert_eq!(
         count(&conn, "SELECT MAX(version) FROM schema_migrations"),
-        4
+        5
     );
 }
 
