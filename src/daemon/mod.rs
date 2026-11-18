@@ -7,6 +7,7 @@ pub mod delivery;
 pub mod dispatch;
 pub mod door;
 pub mod inbox;
+pub mod launch;
 mod monitor;
 pub mod notify_gate;
 pub mod person_key;
@@ -215,6 +216,16 @@ fn serve(
         )?),
         None => None,
     };
+    // Agents reach the door where it listens; without one (`run`), at the configured port.
+    let door_addr = _door.as_ref().map_or_else(
+        || {
+            format!(
+                "127.0.0.1:{}",
+                crate::cli::port().unwrap_or(crate::cli::DEFAULT_PORT)
+            )
+        },
+        |d| d.addr.to_string(),
+    );
     let thread_base = Arc::clone(&events_base);
     std::thread::spawn(move || match thread_base.events() {
         Err(e) => {
@@ -246,6 +257,7 @@ fn serve(
     let mut anomalies = Anomalies::new();
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
     let prepare = Prepare::new(Places::from_env(dir));
+    let launch = launch::Launch::new(dir, door_addr);
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
@@ -288,6 +300,9 @@ fn serve(
             }
             if let Err(e) = prepare.pass(&w) {
                 eprintln!("makibad: prepare: {e}");
+            }
+            if let Err(e) = launch.pass(&w, &*events_base) {
+                eprintln!("makibad: launch: {e}");
             }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");

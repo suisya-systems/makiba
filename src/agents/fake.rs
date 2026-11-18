@@ -42,11 +42,14 @@ impl Agent for Fake {
         "fake"
     }
 
-    fn argv(&self, _launch: &AgentLaunch) -> Vec<String> {
+    /// The program, its record file, the MCP configuration (the door and the token), the steps.
+    fn argv(&self, launch: &AgentLaunch) -> Vec<String> {
         let mut argv = vec![
             self.program.display().to_string(),
             "--record".into(),
             self.record.display().to_string(),
+            "--mcp-config".into(),
+            super::mcp_config(launch.door),
         ];
         argv.extend(self.script.iter().cloned());
         argv
