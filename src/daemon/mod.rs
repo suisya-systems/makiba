@@ -4,6 +4,7 @@
 
 pub mod anomalies;
 pub mod delivery;
+mod dialogs;
 pub mod dispatch;
 pub mod door;
 pub mod inbox;
@@ -258,6 +259,7 @@ fn serve(
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
     let prepare = Prepare::new(Places::from_env(dir));
     let launch = launch::Launch::new(dir, door_addr);
+    let mut dialogs = dialogs::Dialogs::new();
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
@@ -303,6 +305,9 @@ fn serve(
             }
             if let Err(e) = launch.pass(&w, &*events_base) {
                 eprintln!("makibad: launch: {e}");
+            }
+            if let Err(e) = dialogs.pass(&w, &*events_base) {
+                eprintln!("makibad: dialogs: {e}");
             }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");

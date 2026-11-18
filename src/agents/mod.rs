@@ -5,6 +5,7 @@
 use std::io;
 use std::path::{Path, PathBuf};
 
+pub mod claude_code;
 pub mod fake;
 pub mod version;
 
@@ -34,13 +35,16 @@ pub struct AgentLaunch<'a> {
     pub door: &'a DoorAccess,
 }
 
-/// A startup dialog the agent is allowed to answer (spec section 7): how to recognize it, and the
-/// whole option line to choose.
+/// A startup dialog the agent is allowed to answer (spec section 7): it is recognized by all of
+/// its option lines, each matched whole, and `choose` is the one of them to choose. `status` is
+/// the message of the blocked permission status the base reports while it is shown (`None`: it
+/// is shown with no status).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DialogPolicy {
     pub name: &'static str,
-    pub recognize: &'static str,
+    pub options: &'static [&'static str],
     pub choose: &'static str,
+    pub status: Option<&'static str>,
 }
 
 /// A permission prompt as `makiba answer` shows it: its text, and the keys that answer it.

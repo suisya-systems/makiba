@@ -5,12 +5,6 @@ use super::{Agent, AgentLaunch, Composer, DialogPolicy, PromptView, TaskSettings
 use std::io;
 use std::path::{Path, PathBuf};
 
-const DIALOGS: [DialogPolicy; 1] = [DialogPolicy {
-    name: "folder-trust",
-    recognize: "Do you trust the files in this folder?",
-    choose: "Yes, I trust this folder",
-}];
-
 pub struct Fake {
     program: PathBuf,
     record: PathBuf,
@@ -55,8 +49,9 @@ impl Agent for Fake {
         argv
     }
 
+    /// Claude Code's list: the test agent shows the dialogs Claude Code shows (M3-5).
     fn startup_dialogs(&self) -> &[DialogPolicy] {
-        &DIALOGS
+        &super::claude_code::DIALOGS
     }
 
     fn recognize_prompt(&self, screen: &[String]) -> Option<PromptView> {
