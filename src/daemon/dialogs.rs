@@ -289,7 +289,9 @@ impl Dialogs {
                 continue;
             };
             let decision = decide(&policies, &screen);
-            if matches!(decision, Decision::Wait(_)) || !self.settled(&row.spawn, &screen) {
+            // Every read counts toward settling, a waiting one too: a redraw starts the time again.
+            let settled = self.settled(&row.spawn, &screen);
+            if matches!(decision, Decision::Wait(_)) || !settled {
                 continue;
             }
             match decision {
@@ -528,7 +530,7 @@ mod tests {
     /// One terminal showing `screen`. `list` reports no status; `get` reports one when `late`
     /// (a status that came between the list and the key). Keys are recorded.
     struct Screen {
-        screen: Vec<String>,
+        screen: std::sync::Mutex<Vec<String>>,
         late: bool,
         keys: std::sync::Mutex<Vec<String>>,
     }
@@ -578,7 +580,7 @@ mod tests {
             _: &crate::base::TerminalRef,
             _: usize,
         ) -> std::result::Result<Vec<String>, crate::base::BaseError> {
-            Ok(self.screen.clone())
+            Ok(self.screen.lock().unwrap().clone())
         }
         fn keys(
             &self,
@@ -614,8 +616,9 @@ mod tests {
         }
     }
 
-    /// Two passes over a launch at `launched` whose terminal shows `screen`; the keys pressed.
-    fn two_passes(screen: Vec<String>, late: bool) -> Vec<String> {
+    /// One pass per screen over a launch at `launched` whose terminal shows that screen, each
+    /// `SETTLE` after the one before; the keys pressed.
+    fn passes(screens: &[Vec<String>], late: bool) -> Vec<String> {
         let dir = tempfile::tempdir().unwrap();
         let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
         w.upsert_run(&crate::db::writer::RunUpsert {
@@ -633,14 +636,18 @@ mod tests {
             )
             .unwrap();
         let base = Screen {
-            screen,
+            screen: Default::default(),
             late,
             keys: Default::default(),
         };
         let mut d = Dialogs::new();
-        d.pass(&w, &base).unwrap();
-        d.seen.get_mut("s1").unwrap().1 -= SETTLE;
-        d.pass(&w, &base).unwrap();
+        for screen in screens {
+            if let Some(seen) = d.seen.get_mut("s1") {
+                seen.1 -= SETTLE;
+            }
+            *base.screen.lock().unwrap() = screen.clone();
+            d.pass(&w, &base).unwrap();
+        }
         base.keys.into_inner().unwrap()
     }
 
@@ -648,8 +655,17 @@ mod tests {
     #[test]
     fn a_status_that_comes_before_the_key_stops_it() {
         let s = trust(1, "No, exit", "Yes, I trust this folder");
-        assert_eq!(two_passes(s.clone(), false), ["enter"]);
-        assert!(two_passes(s, true).is_empty());
+        assert_eq!(passes(&[s.clone(), s.clone()], false), ["enter"]);
+        assert!(passes(&[s.clone(), s], true).is_empty());
+    }
+
+    /// A read that shows no dialog starts the settling time again: the dialog that comes back
+    /// is not answered on the strength of the read before it went (Codex review).
+    #[test]
+    fn a_screen_without_the_dialog_between_two_reads_of_it_starts_the_time_again() {
+        let s = trust(1, "No, exit", "Yes, I trust this folder");
+        assert!(passes(&[s.clone(), vec![], s.clone()], false).is_empty());
+        assert_eq!(passes(&[s.clone(), vec![], s.clone(), s], false), ["enter"]);
     }
 
     /// The owner's rule: no status, or the status the dialog itself is shown with, whole.
