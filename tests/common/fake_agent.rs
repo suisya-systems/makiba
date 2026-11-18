@@ -14,14 +14,31 @@
 //!   sleep:MS        sleep
 //!   exit[:N]        exit with code N (default 0)
 //!   hang            never return
+//!   door:VERB:PATH  send VERB with no key to the door's Unix socket at PATH; record
+//!                   `door VERB <answer line>`
+//!   port:VERB:ADDR  call the tool VERB with no token on the door's MCP server at ADDR
+//!                   (`POST /mcp`); record `port VERB <answer body>`
+//!   detach:STEP     run STEP in a grandchild that has left this process: a hop process spawns it
+//!                   in a new session (`setsid`) and exits at once. The grandchild waits until it
+//!                   is re-parented, then records `detached ppid=P sid=S pid=Q agent=A hop=H
+//!                   <STEP's record>`, where A is this process and H the hop. Neither the hop
+//!                   nor the grandchild holds this process's input or output, and the
+//!                   grandchild exits after 30 s at the latest
 //!
 //! Every line and key received is appended to FILE, one per row: `line TEXT` or `key NAME`
 //! (`enter`, `up`, `down`, `left`, `right`, `esc`). The OSC 7501 record is
 //! `ESC ] 7501 ; state=S:app=makiba-fake[:kind=K] BEL`.
 
 use std::fs::OpenOptions;
-use std::io::{Read, Write};
-use std::time::Duration;
+use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::process::CommandExt;
+use std::time::{Duration, Instant};
+
+// libc symbols std already links; declared here so the test agent needs no crate of its own.
+unsafe extern "C" {
+    fn setsid() -> i32;
+    fn getsid(pid: i32) -> i32;
+}
 
 enum Input {
     Line(String),
@@ -148,6 +165,15 @@ impl Agent {
         }
     }
 
+    fn append(&self, row: &str) {
+        let mut f = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&self.record)
+            .expect("open the record file");
+        writeln!(f, "{row}").expect("write the record file");
+    }
+
     fn step(&mut self, step: &str) {
         let (name, arg) = match step.split_once(':') {
             Some((n, a)) => (n, Some(a)),
@@ -176,12 +202,125 @@ impl Agent {
             "hang" => loop {
                 std::thread::sleep(std::time::Duration::from_secs(3600));
             },
+            "door" | "port" => {
+                let row = call(step);
+                self.append(&row);
+            }
+            "detach" => {
+                let me = std::env::current_exe().expect("own path");
+                let hop = std::process::Command::new(me)
+                    .args(["--record", &self.record, "--hop"])
+                    .arg(std::process::id().to_string())
+                    .arg(arg.unwrap_or(""))
+                    .stdin(std::process::Stdio::null())
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .status()
+                    .expect("spawn the hop");
+                assert!(hop.success(), "the hop failed");
+            }
             _ => {
                 eprintln!("makiba-fake-agent: unknown step {step:?}");
                 std::process::exit(2);
             }
         }
     }
+}
+
+/// One call of a `door:` or `port:` step, with no key; returns the record row.
+fn call(step: &str) -> String {
+    let mut parts = step.splitn(3, ':');
+    let (how, verb, at) = (
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+        parts.next().unwrap_or(""),
+    );
+    let answer = if how == "door" {
+        door_call(verb, at)
+    } else {
+        port_call(verb, at)
+    };
+    let answer = answer.unwrap_or_else(|e| format!("error {e}"));
+    format!("{how} {verb} {}", answer.replace(['\r', '\n'], " "))
+}
+
+fn door_call(verb: &str, path: &str) -> std::io::Result<String> {
+    let mut s = std::os::unix::net::UnixStream::connect(path)?;
+    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+    writeln!(s, "{{\"v\":1,\"verb\":\"{verb}\",\"args\":{{}}}}")?;
+    let mut line = String::new();
+    BufReader::new(s).read_line(&mut line)?;
+    Ok(line.trim_end().to_string())
+}
+
+fn port_call(verb: &str, addr: &str) -> std::io::Result<String> {
+    let mut s = std::net::TcpStream::connect(addr)?;
+    s.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let body = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/call\",\"params\":{{\"name\":\"{verb}\",\"arguments\":{{}}}}}}"
+    );
+    write!(
+        s,
+        "POST /mcp HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\nAccept: application/json, text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )?;
+    let mut all = String::new();
+    s.read_to_string(&mut all)?;
+    Ok(all
+        .split_once("\r\n\r\n")
+        .map_or(all.as_str(), |(_, b)| b)
+        .to_string())
+}
+
+/// The hop of `detach`: start the grandchild in a new session and leave it at once.
+fn hop(record: &str, agent: &str, step: &str) -> ! {
+    let me = std::env::current_exe().expect("own path");
+    let mut cmd = std::process::Command::new(me);
+    cmd.args(["--record", record, "--orphan"])
+        .arg(std::process::id().to_string())
+        .args([agent, step])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    // SAFETY: setsid is async-signal-safe and touches no memory of the parent.
+    unsafe {
+        cmd.pre_exec(|| {
+            if setsid() < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+    cmd.spawn().expect("spawn the grandchild");
+    std::process::exit(0);
+}
+
+/// The grandchild of `detach`: wait to be re-parented away from the hop, then run the step.
+fn orphan(record: &str, hop: &str, agent: &str, step: &str) {
+    // Nobody waits for this process: it ends by itself whatever happens to the call.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(30));
+        std::process::exit(3);
+    });
+    let hop_pid: u32 = hop.parse().expect("hop pid");
+    let until = Instant::now() + Duration::from_secs(10);
+    while std::os::unix::process::parent_id() == hop_pid && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let pid = std::process::id();
+    // SAFETY: getsid reads the session id of a process; no memory is shared.
+    let sid = unsafe { getsid(0) };
+    let ppid = std::os::unix::process::parent_id();
+    let row = format!(
+        "detached ppid={ppid} sid={sid} pid={pid} agent={agent} hop={hop} {}",
+        call(step)
+    );
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(record)
+        .expect("open the record file");
+    writeln!(f, "{row}").expect("write the record file");
 }
 
 fn main() {
@@ -194,6 +333,15 @@ fn main() {
         eprintln!("usage: makiba-fake-agent --record FILE STEP...");
         std::process::exit(2);
     };
+    let rest: Vec<String> = args.collect();
+    match rest.first().map(String::as_str) {
+        Some("--hop") if rest.len() == 3 => hop(&record, &rest[1], &rest[2]),
+        Some("--orphan") if rest.len() == 4 => {
+            orphan(&record, &rest[1], &rest[2], &rest[3]);
+            return;
+        }
+        _ => {}
+    }
     // On a pty the line discipline holds a lone Esc until a newline; turn that off. On a pipe
     // (the stand-in) stty fails, which is fine.
     let _ = std::process::Command::new("stty")
@@ -214,7 +362,7 @@ fn main() {
         bytes,
         pushed_back: None,
     };
-    for step in args {
+    for step in rest {
         agent.step(&step);
     }
 }

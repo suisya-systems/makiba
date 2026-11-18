@@ -105,6 +105,10 @@ impl Org {
             Command::new(MAKIBA)
                 .arg("daemon")
                 .env("MAKIBA_STATE_DIR", self.root.join("state"))
+                // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
+                .env("MAKIBA_DOOR", self.root.join("door.sock"))
+                .env("MAKIBA_PORT", "0")
+                .env("MAKIBA_PERSON_KEY", self.root.join("key/person.key"))
                 .env("MAKIBA_BASE", "stub")
                 .env("MAKIBA_WORKERS_DIR", self.root.join("workers"))
                 .env("MAKIBA_REPOS_DIR", self.root.join("repos"))

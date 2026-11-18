@@ -182,7 +182,11 @@ impl StateWriter {
     }
 
     /// Run `f` in a transaction: commit if it returns `Ok`, roll back if it returns `Err` or panics.
+    /// Inside a transaction already open, `f` joins it and whoever opened it commits or rolls back.
     pub fn transaction<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
+        if !self.conn.is_autocommit() {
+            return f(self);
+        }
         self.begin()?;
         let _rollback = RollbackOnDrop(&self.conn);
         let out = f(self)?;

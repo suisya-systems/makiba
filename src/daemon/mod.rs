@@ -5,9 +5,11 @@
 pub mod anomalies;
 pub mod delivery;
 pub mod dispatch;
+pub mod door;
 pub mod inbox;
 mod monitor;
 pub mod notify_gate;
+pub mod person_key;
 pub mod prepare;
 mod recover;
 
@@ -64,7 +66,18 @@ fn connect_base(state: &Path) -> Box<dyn Base> {
 
 pub fn main() -> ExitCode {
     let dir = state_dir();
-    match run(&dir, &|| connect_base(&dir)) {
+    let door = match door::Config::from_env() {
+        Ok(d) => d,
+        Err(e) => {
+            eprintln!("makibad: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    // The channel servers reach the door's port; delivery pushes through their held requests.
+    let db = dir.join("state.db");
+    let hub = crate::channel::Hub::new(move |token| door::agent_of(&db, token));
+    let delivery = Delivery::new(Box::new(hub.clone()));
+    match serve(&dir, &|| connect_base(&dir), delivery, Some((door, hub))) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("makibad: {e}");
@@ -141,16 +154,26 @@ fn event(w: &StateWriter, kind: &str, base: &str, version: &str) -> crate::db::R
 }
 
 /// Run until SIGTERM or SIGINT. `connect` makes the base once the lock and the database are held.
-/// No channel server is connected yet (M2-8), so nothing is pushed.
+/// No door is opened and no channel server can connect, so nothing is pushed (`main` opens both).
 pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String> {
     run_with(dir, connect, Delivery::new(Box::new(delivery::NoChannel)))
 }
 
-/// As `run`, with the channel `delivery` pushes through.
+/// As `run`, with the channel `delivery` pushes through. No door is opened.
 pub fn run_with(
     dir: &Path,
     connect: &dyn Fn() -> Box<dyn Base>,
+    delivery: Delivery,
+) -> Result<(), String> {
+    serve(dir, connect, delivery, None)
+}
+
+/// As `run_with`, and with `door`, the door opened once the base has answered.
+fn serve(
+    dir: &Path,
+    connect: &dyn Fn() -> Box<dyn Base>,
     mut delivery: Delivery,
+    door: Option<(door::Config, crate::channel::Hub)>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = take_lock(dir)?;
@@ -183,6 +206,15 @@ pub fn run_with(
     }
     let (tx, rx) = channel();
     let events_base = Arc::<dyn Base>::from(base);
+    let _door = match door {
+        Some((cfg, hub)) => Some(door::start(
+            &cfg,
+            &dir.join("state.db"),
+            Arc::clone(&events_base),
+            hub,
+        )?),
+        None => None,
+    };
     let thread_base = Arc::clone(&events_base);
     std::thread::spawn(move || match thread_base.events() {
         Err(e) => {
