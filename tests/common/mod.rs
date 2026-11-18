@@ -3,11 +3,14 @@
 //! when the returned value is dropped.
 #![allow(dead_code)]
 
+pub mod local;
+
 use makiba::base::stub::Stub;
 use makiba::base::version::checked_hello;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, Detail, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
+use makiba::base::{BlockKind, State, Status};
 use std::collections::BTreeMap;
 use std::fs;
 use std::ops::Deref;
@@ -69,6 +72,49 @@ pub fn base() -> Fixture {
             base: Box::new(Stub::scripted(&[LINE])),
             place: None,
         }
+    }
+}
+
+/// A base that runs the argv it is given (the stand-in does not): the real base when wanted,
+/// otherwise `local::Local`. For tests that need a program to behave, such as the test agent.
+pub fn running_base() -> Fixture {
+    if real_wanted() {
+        return base();
+    }
+    Fixture {
+        base: Box::new(local::Local::new()),
+        place: None,
+    }
+}
+
+/// Read the `status` object of `hc get --json`, wherever it sits.
+fn find_status(v: &serde_json::Value) -> Option<Status> {
+    let status = find_status_value(v)?;
+    let state = match status.get("state")?.as_str()? {
+        "idle" => State::Idle,
+        "working" => State::Working,
+        "blocked" => State::Blocked,
+        "done" => State::Done,
+        "error" => State::Error,
+        _ => return None,
+    };
+    let kind = match status.get("kind").and_then(|k| k.as_str()) {
+        Some("permission") => Some(BlockKind::Permission),
+        Some("question") => Some(BlockKind::Question),
+        Some("auth") => Some(BlockKind::Auth),
+        _ => None,
+    };
+    let msg = status.get("msg").and_then(|m| m.as_str()).map(String::from);
+    Some(Status { state, kind, msg })
+}
+
+fn find_status_value(v: &serde_json::Value) -> Option<&serde_json::Value> {
+    match v {
+        serde_json::Value::Object(m) => m
+            .get("status")
+            .filter(|s| s.get("state").is_some())
+            .or_else(|| m.values().find_map(find_status_value)),
+        _ => None,
     }
 }
 
@@ -276,7 +322,9 @@ impl Base for Real {
             id: t.clone(),
             name: t.0.clone(),
             tags: BTreeMap::new(),
-            status: None,
+            status: serde_json::from_slice(&out.stdout)
+                .ok()
+                .and_then(|v| find_status(&v)),
             turn: None,
             alive: true,
             exit_code: None,
@@ -295,12 +343,24 @@ impl Base for Real {
             .collect())
     }
 
-    fn keys(&self, _t: &TerminalRef, _keys: &[&str]) -> Result<(), BaseError> {
-        Err(unsupported("keys"))
+    fn keys(&self, t: &TerminalRef, keys: &[&str]) -> Result<(), BaseError> {
+        let mut args = vec!["keys", t.0.as_str()];
+        args.extend(keys);
+        let out = self.run(&args)?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(Self::fail("keys", &out))
+        }
     }
 
-    fn send(&self, _t: &TerminalRef, _text: &str, _only_if_idle: bool) -> Result<(), BaseError> {
-        Err(unsupported("send"))
+    fn send(&self, t: &TerminalRef, text: &str, _only_if_idle: bool) -> Result<(), BaseError> {
+        let out = self.run(&["send", &t.0, text])?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(Self::fail("send", &out))
+        }
     }
 
     fn end(&self, t: &TerminalRef) -> Result<(), BaseError> {
