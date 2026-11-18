@@ -77,7 +77,6 @@ struct Due {
     sender: String,
     recipient: String,
     kind: String,
-    body: String,
 }
 
 impl Delivery {
@@ -100,7 +99,7 @@ impl Delivery {
         self.settle(w)?;
         // Only addressed messages with a ledger row that was never attempted.
         let mut q = w.conn().prepare(
-            "SELECT m.id, m.event_id, m.sender, m.recipient, m.kind, m.body
+            "SELECT m.id, m.event_id, m.sender, m.recipient, m.kind
              FROM messages m JOIN event_deliveries d
                ON d.source_event_id = m.event_id AND d.recipient = m.recipient
              WHERE d.status = 'pending' AND d.attempt = 0 ORDER BY m.id",
@@ -113,7 +112,6 @@ impl Delivery {
                     sender: r.get(2)?,
                     recipient: r.get(3)?,
                     kind: r.get(4)?,
-                    body: r.get(5)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -129,8 +127,13 @@ impl Delivery {
                 continue;
             }
             let (cursor, eligible) = snapshot(w, &m.recipient)?;
-            let text = wrap(m.id, &m.sender, &m.kind, &m.body);
-            let pushed = Instant::now();
+            // The body is read only for a message that is going out, not for a backlog.
+            let body: String =
+                w.conn()
+                    .query_row("SELECT body FROM messages WHERE id = ?1", [m.id], |r| {
+                        r.get(0)
+                    })?;
+            let text = wrap(m.id, &m.sender, &m.kind, &body);
             let result = self.channel.push(&m.recipient, &text).and_then(|()| {
                 w.record_push(m.event_id, &m.recipient)
                     .map_err(|e| e.to_string())
@@ -145,6 +148,7 @@ impl Delivery {
                 );
                 continue;
             }
+            let pushed = Instant::now(); // the push is accepted: the window runs from here
             if eligible && !self.waiting.contains_key(&m.recipient) {
                 self.waiting.insert(
                     m.recipient,
