@@ -262,7 +262,10 @@ impl Base for Herdr {
 
     fn list(&self) -> Result<Vec<Terminal>, BaseError> {
         let org = self.org()?;
-        let result = self.call("terminal.list", json!({"labels": {TAG_ORG: org}}))?;
+        let result = self.call(
+            "terminal.list",
+            json!({"labels": {TAG_ORG: org}, "all": true}),
+        )?;
         let items = result
             .as_array()
             .or_else(|| result.get("terminals").and_then(Value::as_array))

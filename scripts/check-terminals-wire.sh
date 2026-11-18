@@ -44,7 +44,7 @@ run = call("terminal.run", {
 })
 t = run.get("id") or (run.get("terminal") or {}).get("id") or run.get("terminal") or "wire-check"
 time.sleep(2)
-call("terminal.list", {"labels": {"makiba.org": "wire-check"}})
+call("terminal.list", {"labels": {"makiba.org": "wire-check"}, "all": True})
 call("terminal.list", {"labels": {"makiba.org": "someone-else"}})
 call("terminal.get", {"terminal": t})
 call("terminal.read", {"terminal": t, "lines": 20})
