@@ -18,14 +18,14 @@ Not on every release, and not more than about once a month.
 
 On the new release, before the pin is changed:
 
-1. M1-5's test, `tests/base_compat.rs`, against the new release's own definition (`hc schema`).
+1. M1-5's test, `tests/base_compat.rs`, against the new release's own definition: save `hc schema` of the new release to a file and run `MAKIBA_BASE_SCHEMA=<file> cargo test --test base_compat`. It names every method, parameter or result field of [`src/base/uses.rs`](../src/base/uses.rs) that the new definition lacks or has changed.
 2. The whole test suite, on the stand-in and on the real base (`MAKIBA_TEST_REAL_BASE=1`).
 3. Probes P1, P3, P4, P5 and P8 of `docs/design/probes.md`. They measure how the base is reached (P1), typed into (P3, P4), launched (P5) and how a turn start shows in its status (P8). A patch release has changed these before: 0.1.20 changed sends. Each takes a few hours of the owner's time.
 4. P2 reruns itself in CI.
 
 A probe may be skipped only when the changelog shows nothing touching its area, and the record in probes.md Results says so. P6 is not rerun.
 
-Then change `PINNED` and `SUPPORTED` together, extend the Results table of probes.md with the new rows, and update the version named in the rules at the top of probes.md.
+Then replace [`docs/base/hc.openrpc.json`](base/hc.openrpc.json) with that definition, change `PINNED` and `SUPPORTED` together, extend the Results table of probes.md with the new rows, and update the version named in the rules at the top of probes.md.
 
 ## The range stays one patch release
 
