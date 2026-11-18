@@ -6,8 +6,10 @@
 //! The tests run the real binary (`makiba daemon` on the stand-in base). Nothing here launches a
 //! terminal (M3-2 to M3-6 are other Issues): a run is taken when `makibad` records one
 //! `run_taken` event for it, whose payload names the `task_id` and the `spawn_id` of the
-//! `run_launch` row the later steps will carry on from. The seeded launch rows stay `planned`,
-//! so a taken run keeps counting as a launch that is not yet `verified` or `failed`.
+//! `run_launch` row the later steps will carry on from. The seeded launches are `document`
+//! ones, so M3-2's preparation succeeds (a `code` one for a project with no repository would
+//! `fail` and free its place); a prepared launch is `settings_ready`, so a taken run keeps
+//! counting as a launch that is not yet `verified` or `failed`.
 
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, params};
@@ -62,9 +64,14 @@ impl Org {
             .unwrap();
         self.conn
             .execute(
-                "INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage)
-                 VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?2, 'fake', 'b', '/w', ?3)",
-                params![task, format!("spawn-{task}"), stage],
+                "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage)
+                 VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?2, 'document', 'fake', 'b', ?4, ?3)",
+                params![
+                    task,
+                    format!("spawn-{task}"),
+                    stage,
+                    self.dir.path().join("w").join(task).to_string_lossy()
+                ],
             )
             .unwrap();
     }

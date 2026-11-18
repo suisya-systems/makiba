@@ -10,12 +10,14 @@ pub mod inbox;
 mod monitor;
 pub mod notify_gate;
 pub mod person_key;
+pub mod prepare;
 mod recover;
 
 use self::anomalies::Anomalies;
 use self::delivery::Delivery;
 use self::dispatch::Dispatch;
 use self::monitor::Monitor;
+use self::prepare::{Places, Prepare};
 use crate::base::stub::Stub;
 use crate::base::{Base, BaseEvent};
 use crate::db::writer::{NewEvent, StateWriter};
@@ -243,6 +245,7 @@ fn serve(
     let mut monitor = Monitor::new(&org.to_string_lossy());
     let mut anomalies = Anomalies::new();
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
+    let prepare = Prepare::new(Places::from_env(dir));
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
@@ -282,6 +285,9 @@ fn serve(
             }
             if let Err(e) = dispatch.pass(&w) {
                 eprintln!("makibad: dispatch: {e}");
+            }
+            if let Err(e) = prepare.pass(&w) {
+                eprintln!("makibad: prepare: {e}");
             }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");
