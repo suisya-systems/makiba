@@ -32,6 +32,7 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 | State folder | `$MAKIBA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/makiba` | Holds `state.db`, `makibad.lock`, `makibad.log`, `settings/`, `secretary/` |
 | Per-task settings | `<state>/settings/<task_id>.json` | Written by `makibad` before launch. Outside every worktree. |
 | Secretary folder | `<state>/secretary/` | The secretary's working folder, as in paddock. |
+| Capacity | `$MAKIBA_MAX_CONCURRENT_WORKERS`, default 4 | `max_concurrent_workers`, read by `makibad` at start. The way to set it until the `config` verb exists (M6). |
 | Role files | `$MAKIBA_SHARE_DIR`, default `${XDG_DATA_HOME:-~/.local/share}/makiba` | Role rules, role settings, the `makiba` entry point. Agents may read, not write. |
 | The person's door | `$MAKIBA_DOOR`, default `${XDG_RUNTIME_DIR}/makiba/door.sock` | Unix socket, for the person's `makiba`. A sandboxed agent cannot create a Unix socket on Linux (section 3). |
 | The agents' door | `$MAKIBA_PORT`, a fixed port on 127.0.0.1 (the default is chosen in M3-3) | An MCP server over HTTP in `makibad`. The port is fixed because a running agent's configuration holds it and outlives a restart of `makibad`. |
@@ -459,6 +460,7 @@ New:
 | `run_closed` | `makiba close` finished | `task_id` |
 | `secretary_renewed` | The secretary's terminal was replaced | `old`, `new` |
 | `curator_started` | The curator was launched | `spawn_id` |
+| `run_taken` | A pass of `makibad` took a `queued` run within `max_concurrent_workers` (counted: runs `in_use` plus launches not yet `verified` or `failed`; oldest `dispatched_at` first). The launch steps start from it | `task_id`, `spawn_id` (of the run's newest `run_launch` row) |
 
 In `base_resynced`, `reason` is `start` for the first `Resync` of a `makibad` process and `resync` for every later one (a `Resync` carries no cause of its own), and `terminals` is the number of terminals of this organization in the list. It is written last, after the view is rebuilt, so a reader that waits for it sees the result.
 

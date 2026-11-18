@@ -61,6 +61,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "run_closed",
     "secretary_renewed",
     "curator_started",
+    "run_taken",
 ];
 
 /// The exit code of a request that was done or accepted.
