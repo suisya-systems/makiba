@@ -5,6 +5,7 @@
 pub mod anomalies;
 pub mod delivery;
 mod monitor;
+pub mod notify_gate;
 mod recover;
 
 use self::anomalies::Anomalies;

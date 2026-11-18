@@ -484,19 +484,25 @@ fn secretary_scene(w: &StateWriter, launched: i64) -> Result<SecretaryScene> {
     })
 }
 
-/// Record a raise: the event, the notice if it is told to the secretary, the run's failure for
+/// Record a raise: the event, the notice if the gate sends it, the run's failure for
 /// `gone`. The caller wraps it in a transaction.
 fn raise(w: &StateWriter, s: &Subject, now: &str) -> Result<()> {
     use crate::db::writer::NewEvent;
+    // The gate decides whether the secretary is told; a suppressed raise is still an event.
+    let gate = super::notify_gate::decide(s.rule.name());
+    let mut payload = s.payload();
+    if !gate.send {
+        payload["suppressed"] = gate.reason.into();
+    }
     w.append_event(&NewEvent {
         kind: "anomaly_raised",
         actor: Some("makibad"),
-        payload: Some(&s.payload()),
+        payload: Some(&payload),
         occurred_at: Some(now),
         run_task_id: s.task.as_deref(),
         ..Default::default()
     })?;
-    let Some(task) = s.task.as_deref().filter(|_| !s.rule.about_secretary()) else {
+    let Some(task) = s.task.as_deref().filter(|_| gate.send) else {
         return Ok(());
     };
     if s.rule == Rule::Gone {

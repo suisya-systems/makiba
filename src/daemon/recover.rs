@@ -200,15 +200,22 @@ fn report_unknown(w: &StateWriter, t: &Terminal) -> Result<()> {
         return Ok(());
     }
     let actor = Some("makibad");
-    let payload = json!({
+    let gate = super::notify_gate::decide("unknown_terminal");
+    let mut payload = json!({
         "task_id": task, "rule": "unknown_terminal", "terminal": t.id.0, "name": t.name,
     });
+    if !gate.send {
+        payload["suppressed"] = gate.reason.into();
+    }
     w.append_event(&NewEvent {
         kind: "anomaly_raised",
         actor,
         payload: Some(&payload),
         ..Default::default()
     })?;
+    if !gate.send {
+        return Ok(());
+    }
     let sent = w.append_event(&NewEvent {
         kind: "message_sent",
         actor,
