@@ -95,8 +95,8 @@ PY
 
 make_home() { # make_home <home> <marks>: the person's folder (default place under a scratch HOME) with the four decoys
   mkdir -p "$1/.claude" "$2" || return 1
-  command cp -R "$HC_DIR/." "$1/" 2>/dev/null
-  chmod -R go-rwx "$1"
+  command cp -R "$HC_DIR/." "$1/" || return 1   # a partial baseline is never measured
+  chmod -R go-rwx "$1" || return 1
   python3 - "$1" "$2" <<'PY'
 import json, os, sys
 home, marks = sys.argv[1:3]
@@ -333,11 +333,12 @@ else
   else
     judge_run sec-iso; sec_applied=$J_APPLIED; sec_miss=$J_ROLE_MISSING
     m=$WORK/marks-$ISO_RUN; t0=$(term_info "$ISO_T"); n0=$(nlines "$m/role-hook-UserPromptSubmit")
-    hc send "$ISO_T" "Reply with the single word FRESH." >/dev/null 2>&1; sleep 6; wait_idle "$ISO_T" 90
+    fresh=no
+    if hc send "$ISO_T" "Reply with the single word FRESH." >/dev/null 2>&1; then sleep 6; wait_idle "$ISO_T" 90 && fresh=yes; fi
     t1=$(term_info "$ISO_T"); n1=$(nlines "$m/role-hook-UserPromptSubmit")
-    if [ "$n1" -gt "$n0" ] && [ ! -e "$m/user-hook-UserPromptSubmit" ] && [ ! -e "$m/user-conn" ] && [ -z "$sec_miss" ]; then
+    if [ "$fresh" = yes ] && [ "$n1" -gt "$n0" ] && [ ! -e "$m/user-hook-UserPromptSubmit" ] && [ ! -e "$m/user-conn" ] && [ -z "$sec_miss" ]; then
       record secretary-separate PASS "the secretary started under option $ISO_OPT with its own role rule, hook and connector applying; decoys still reaching it:${sec_applied:- none}; the isolated worker kept running beside it, took a fresh turn ('$t0' -> '$t1') and still shows no decoy marker"
-    else record secretary-separate NEEDS-HUMAN "secretary role items missing:${sec_miss:- none}; decoys reaching it:${sec_applied:- none}; fresh worker turn hook lines $n0 -> $n1; worker decoy markers: $(ls "$m" 2>/dev/null | grep -c '^user-') ; read the screens"; fi
+    else record secretary-separate NEEDS-HUMAN "fresh worker turn finished: $fresh; secretary role items missing:${sec_miss:- none}; decoys reaching it:${sec_applied:- none}; fresh worker turn hook lines $n0 -> $n1; worker decoy markers: $(ls "$m" 2>/dev/null | grep -c '^user-') ; read the screens"; fi
   fi
   retire "p7-sec-iso"
 fi
