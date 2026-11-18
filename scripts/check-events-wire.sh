@@ -2,12 +2,15 @@
 # Owner check for M1-3: print what the real base sends after `events.subscribe`, so that the field
 # names in src/base/herdr/events.rs (seq, terminals, event/type/terminal, heartbeat, missed, labels,
 # status, exit) can be compared with the wire. Starts a core in a place of its own, subscribes, runs
-# and ends one terminal, and prints every line for HC_WATCH_SECONDS (default 20, long enough for one
-# 15 s heartbeat). Needs `hc` (HC_BIN, default: hc on PATH) and python3. It cannot show `missed`
+# and ends one terminal, and prints every line for HC_WATCH_SECONDS (default 30, long enough for one
+# 15 s heartbeat and the test agent's run). Needs `hc` (HC_BIN, default: hc on PATH) and python3; run `cargo build --bin makiba-fake-agent`
+# first (FAKE_AGENT names another build). Also runs the test agent, to show status and turn notices. It cannot show `missed`
 # (the base sends it only to a subscriber that fell behind).
 set -euo pipefail
 
 HC_BIN="${HC_BIN:-hc}"
+# The test agent (tests/common/fake_agent.rs); FAKE_AGENT overrides the path.
+agent="${FAKE_AGENT:-$(cd "$(dirname "$0")/.." && pwd)/target/debug/makiba-fake-agent}"
 root="$(mktemp -d)"
 trap '"$HC_BIN" server stop >/dev/null 2>&1 || true; rm -r "$root"' EXIT
 export HC_SESSION="makiba-events-$$"
@@ -26,9 +29,21 @@ sock="$XDG_RUNTIME_DIR/herdr-core/$HC_SESSION.sock"
   sleep 6
   "$HC_BIN" kill wire-check >/dev/null 2>&1 || true
   "$HC_BIN" rm wire-check >/dev/null 2>&1 || true
+  # The test agent reports working, blocked (permission), idle and done as OSC 7501 records, so that
+  # the status and turn notices of a program that reports a status are in the output.
+  if [ -x "$agent" ]; then
+    "$HC_BIN" run --bg --no-parent --name wire-agent -- "$agent" --record "$root/agent.log" \
+      idle working sleep:1500 blocked:permission sleep:1500 idle sleep:1500 working sleep:1500 \
+      done sleep:2000 exit >/dev/null
+    sleep 10
+    "$HC_BIN" kill wire-agent >/dev/null 2>&1 || true
+    "$HC_BIN" rm wire-agent >/dev/null 2>&1 || true
+  else
+    echo "--- no test agent at $agent: build it with: cargo build --bin makiba-fake-agent" >&2
+  fi
 ) &
 
-python3 -I - "$sock" "${HC_WATCH_SECONDS:-20}" <<'PY'
+python3 -I - "$sock" "${HC_WATCH_SECONDS:-30}" <<'PY'
 import json, socket, sys, time
 s = socket.socket(socket.AF_UNIX)
 s.settimeout(1)
