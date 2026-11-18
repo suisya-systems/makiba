@@ -76,8 +76,17 @@ impl Agent for Fake {
         }
     }
 
-    fn write_task_settings(&self, path: &Path, _task: &TaskSettings) -> io::Result<()> {
-        std::fs::write(path, "{}\n")
+    /// Sandbox on, the write surface of `task`. No Unix socket path is allowed: it does nothing
+    /// on Linux (P1); agents reach `makibad` by the MCP configuration (M3-4).
+    fn write_task_settings(&self, path: &Path, task: &TaskSettings) -> io::Result<()> {
+        let dirs: Vec<_> = task
+            .write_dirs
+            .iter()
+            .map(|d| d.display().to_string())
+            .collect();
+        let settings =
+            serde_json::json!({"sandbox": {"enabled": true, "filesystem": {"allowWrite": dirs}}});
+        std::fs::write(path, format!("{settings}\n"))
     }
 
     fn conversation_id(&self, _worktree: &Path) -> Option<String> {
@@ -106,5 +115,25 @@ mod tests {
         let view = fake.recognize_prompt(&screen).unwrap();
         assert!(view.text.starts_with("Do you want to proceed?"));
         assert_eq!(fake.recognize_prompt(&screen[..1]), None);
+    }
+
+    #[test]
+    fn task_settings_turn_the_sandbox_on_and_allow_no_socket() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("t.json");
+        let task = TaskSettings {
+            write_dirs: vec!["/w".into(), "/tmp".into()],
+        };
+        Fake::new(Path::new("a"), Path::new("r"), &[])
+            .write_task_settings(&file, &task)
+            .unwrap();
+        let v: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(file).unwrap()).unwrap();
+        assert_eq!(v["sandbox"]["enabled"], true);
+        assert_eq!(
+            v["sandbox"]["filesystem"]["allowWrite"],
+            serde_json::json!(["/w", "/tmp"])
+        );
+        assert!(!v.to_string().contains("allowUnixSockets"));
     }
 }
