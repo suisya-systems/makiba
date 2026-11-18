@@ -1,7 +1,9 @@
 //! `Local`: a `Base` that really runs a terminal's argv in a child process, for tests that need a
 //! program to behave (the stand-in `Stub` does not run argv). Output is read through a pipe, so
-//! OSC 7501 records in it become the terminal's status and every other line the screen. Input
-//! goes to the child's stdin. Tests use it when no real base is wanted.
+//! OSC 7501 records in it become the terminal's status and every other line the screen. An erase
+//! of the display (ESC `[2J`) empties the screen, as on a terminal grid; `read` with 0 lines
+//! returns the whole screen (a real base's screen with no history), with N the last N lines.
+//! Input goes to the child's stdin. Tests use it when no real base is wanted.
 //!
 //! `events()` (M2-2) queues one event per observed change: `Created` at launch, `StatusChanged` for
 //! every OSC 7501 record the program prints (a repeat of the same state included, so none is lost
@@ -60,9 +62,9 @@ fn err(variant: fn(Detail) -> BaseError, kind: &str, message: String) -> BaseErr
     })
 }
 
-/// Read `ESC ] 7501 ; state=S:app=A[:kind=K] BEL` out of `line`, returning the status and the
-/// rest of the line.
-fn take_record(line: &str) -> (Option<Status>, String) {
+/// Read `ESC ] 7501 ; state=S:app=A[:kind=K[:msg=M]] BEL` out of `line`, returning the status
+/// and the rest of the line. `state=none` is a record of no status: `Some(None)`.
+fn take_record(line: &str) -> (Option<Option<Status>>, String) {
     const OPEN: &str = "\x1b]7501;";
     let Some(start) = line.find(OPEN) else {
         return (None, line.to_string());
@@ -82,6 +84,7 @@ fn take_record(line: &str) -> (Option<Status>, String) {
         Some("blocked") => State::Blocked,
         Some("done") => State::Done,
         Some("error") => State::Error,
+        Some("none") => return (Some(None), rest),
         _ => return (None, rest),
     };
     let kind = match field("kind") {
@@ -90,15 +93,12 @@ fn take_record(line: &str) -> (Option<Status>, String) {
         Some("auth") => Some(BlockKind::Auth),
         _ => None,
     };
-    (
-        Some(Status {
-            state,
-            kind,
-            msg: None,
-        }),
-        rest,
-    )
+    let msg = body.split_once(":msg=").map(|(_, m)| m.to_string());
+    (Some(Some(Status { state, kind, msg })), rest)
 }
+
+/// Erase in display, all of it.
+const ERASE: &str = "\x1b[2J";
 
 fn key_bytes(key: &str) -> Vec<u8> {
     match key {
@@ -240,19 +240,26 @@ impl Base for Local {
         );
         std::thread::spawn(move || {
             for line in BufReader::new(stdout).split(b'\n').flatten() {
-                let (status, rest) = take_record(&String::from_utf8_lossy(&line));
+                let (status, mut rest) = take_record(&String::from_utf8_lossy(&line));
+                let erased = rest
+                    .rfind(ERASE)
+                    .map(|at| rest = rest[at + ERASE.len()..].into());
                 let mut s = seen.lock().unwrap();
-                if status.is_some() {
+                if erased.is_some() {
+                    s.screen.clear();
+                }
+                if let Some(status) = &status {
                     s.status = status.clone();
                 }
-                if !rest.is_empty() {
+                // A blank line is a row of the screen; a line that held only a record is not.
+                if !rest.is_empty() || (status.is_none() && erased.is_none()) {
                     s.screen.push(rest);
                 }
                 drop(s);
                 if let Some(status) = status {
                     emit(
                         &subscribers,
-                        TerminalEvent::StatusChanged(snapshot(Some(status), true, None)),
+                        TerminalEvent::StatusChanged(snapshot(status, true, None)),
                     );
                 }
             }
@@ -308,7 +315,11 @@ impl Base for Local {
     fn read(&self, t: &TerminalRef, lines: usize) -> Result<Vec<String>, BaseError> {
         self.with(t, |p| {
             let s = p.seen.lock().unwrap();
-            Ok(s.screen[s.screen.len().saturating_sub(lines)..].to_vec())
+            let from = match lines {
+                0 => 0,
+                n => s.screen.len().saturating_sub(n),
+            };
+            Ok(s.screen[from..].to_vec())
         })
     }
 
