@@ -150,9 +150,11 @@ fn text_of<'a>(v: &'a Value, key: &str) -> Option<&'a str> {
     v.get(key).and_then(Value::as_str)
 }
 
-/// A terminal's address in a reply: `{"id"}`, `{"terminal": {"id"}}` or `{"terminal": "t7"}`.
+/// A terminal's address in a reply: the base's `{"address": "t7"}` (hc 0.1.21, seen on the wire),
+/// or `{"id"}`, `{"terminal": {"id"}}`, `{"terminal": "t7"}`.
 fn id_of(v: &Value) -> Option<&str> {
-    text_of(v, "id")
+    text_of(v, "address")
+        .or_else(|| text_of(v, "id"))
         .or_else(|| v.pointer("/terminal/id").and_then(Value::as_str))
         .or_else(|| text_of(v, "terminal"))
 }
@@ -368,5 +370,19 @@ mod wire_tests {
         assert_eq!(t.status.map(|s| s.state), Some(State::Idle));
         assert!(!t.alive && t.exit_code == Some(1));
         assert!(terminal_of(&json!({"name": "no id"})).is_err());
+    }
+
+    /// A terminal as hc 0.1.21 returned it for `terminal.kill` (owner's run of
+    /// scripts/check-terminals-wire.sh): `address`, `state`, a null `status` and `exit_code`.
+    #[test]
+    fn a_terminal_as_the_real_base_returns_it() {
+        let live = json!({"address": "t1", "name": "wire-check", "state": "live", "status": null,
+            "exit_code": null, "turn": 0, "labels": {"makiba.org": "o"}});
+        let t = terminal_of(&live).unwrap();
+        assert_eq!(t.id, TerminalRef("t1".into()));
+        assert!(t.alive && t.status.is_none() && t.tags["makiba.org"] == "o");
+        let killed = json!({"address": "t1", "state": "finished", "reason": "killed",
+            "exit_code": null, "status": null});
+        assert!(!terminal_of(&killed).unwrap().alive);
     }
 }
