@@ -229,7 +229,7 @@ impl Door {
                 "no valid key: the request carries no key, or one this door does not know",
                 "an agent's key is in its MCP configuration; the person's is the person key file",
             ));
-            record(&w, UNKNOWN_ACTOR, verb, &args, None, &r);
+            let _ = record(&w, UNKNOWN_ACTOR, verb, &args, None, &r);
             return r;
         };
         if let Some(idem) = idem
@@ -246,7 +246,7 @@ impl Door {
                 format!("{} may not use {verb}", role.as_str()),
                 "",
             ));
-            record(&w, &actor, verb, &args, idem, &r);
+            let _ = record(&w, &actor, verb, &args, idem, &r);
             return r;
         }
         if v == Verb::Send && args.get("typed") == Some(&json!(true)) {
@@ -263,7 +263,14 @@ impl Door {
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
         }
-        record(&w, &actor, verb, &args, idem, &r);
+        // A verb's writes stand only with their record: without it a retry would repeat them.
+        // A transaction SQLite rolled back by itself (a full disk) is gone: nothing was done.
+        if !record(&w, &actor, verb, &args, idem, &r) || w.conn().is_autocommit() {
+            let _ = w.rollback();
+            return Err(internal(
+                "the request could not be recorded; nothing was done",
+            ));
+        }
         if let Err(e) = w.commit() {
             let _ = w.rollback();
             return Err(internal(e));
@@ -288,7 +295,7 @@ impl Door {
         };
         if let Err(e) = recipient(w, role, to) {
             let r = Err(e);
-            record(w, actor, "send", args, idem, &r);
+            let _ = record(w, actor, "send", args, idem, &r);
             return r;
         }
         let unknown: Response = Err(internal(
@@ -401,9 +408,10 @@ fn record(
     args: &Value,
     idem: Option<&str>,
     r: &Response,
-) {
-    if let Some(status) = status_of(r) {
-        insert_command(w, actor, verb, args, idem, status, r);
+) -> bool {
+    match status_of(r) {
+        Some(status) => insert_command(w, actor, verb, args, idem, status, r).is_some(),
+        None => true,
     }
 }
 
