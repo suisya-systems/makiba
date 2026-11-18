@@ -576,4 +576,33 @@ impl StateWriter {
         )?;
         Ok(())
     }
+
+    /// Record that a push of the event to `recipient` was accepted, after the send: the attempt
+    /// goes up and `last_attempt_at` is now. A crash before this call leaves the row at its old
+    /// `attempt`, so the message is pushed again. The status is not touched.
+    pub fn record_push(&self, source_event_id: i64, recipient: &str) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "INSERT INTO event_deliveries (source_event_id, recipient, status, attempt, \
+                 first_attempt_at, last_attempt_at) VALUES (?1, ?2, 'pending', 1, {NOW}, {NOW}) \
+                 ON CONFLICT(source_event_id, recipient) DO UPDATE SET \
+                   attempt = attempt + 1, last_attempt_at = {NOW}, \
+                   first_attempt_at = COALESCE(first_attempt_at, {NOW})"
+            ),
+            params![source_event_id, recipient],
+        )?;
+        Ok(())
+    }
+
+    /// A `pending` row becomes `delivered` on a confirmation. `last_attempt_at` stays the push time.
+    pub fn confirm_push(&self, source_event_id: i64, recipient: &str) -> Result<()> {
+        self.conn.execute(
+            &format!(
+                "UPDATE event_deliveries SET status = 'delivered', delivered_at = {NOW} \
+                 WHERE source_event_id = ?1 AND recipient = ?2 AND status = 'pending'"
+            ),
+            params![source_event_id, recipient],
+        )?;
+        Ok(())
+    }
 }

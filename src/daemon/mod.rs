@@ -3,10 +3,12 @@
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
 pub mod anomalies;
+pub mod delivery;
 mod monitor;
 mod recover;
 
 use self::anomalies::Anomalies;
+use self::delivery::Delivery;
 use self::monitor::Monitor;
 use crate::base::stub::Stub;
 use crate::base::{Base, BaseEvent};
@@ -133,7 +135,17 @@ fn event(w: &StateWriter, kind: &str, base: &str, version: &str) -> crate::db::R
 }
 
 /// Run until SIGTERM or SIGINT. `connect` makes the base once the lock and the database are held.
+/// No channel server is connected yet (M2-8), so nothing is pushed.
 pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String> {
+    run_with(dir, connect, Delivery::new(Box::new(delivery::NoChannel)))
+}
+
+/// As `run`, with the channel `delivery` pushes through.
+pub fn run_with(
+    dir: &Path,
+    connect: &dyn Fn() -> Box<dyn Base>,
+    mut delivery: Delivery,
+) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = take_lock(dir)?;
     let stop = Arc::new(AtomicBool::new(false));
@@ -225,11 +237,15 @@ pub fn run(dir: &Path, connect: &dyn Fn() -> Box<dyn Base>) -> Result<(), String
             }
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
         }
-        // The anomaly rules read what is committed: not before the first Resync is reconciled.
-        if monitor.reconciled()
-            && let Err(e) = anomalies.pass(&w)
-        {
-            eprintln!("makibad: anomaly pass failed: {e}");
+        // The rules and the delivery read what is committed: not before the first Resync is
+        // reconciled. Order: recover, monitor, then anomalies and delivery.
+        if monitor.reconciled() {
+            if let Err(e) = anomalies.pass(&w) {
+                eprintln!("makibad: anomaly pass failed: {e}");
+            }
+            if let Err(e) = delivery.pass(&w) {
+                eprintln!("makibad: delivery: {e}");
+            }
         }
         if Instant::now() >= next_beat {
             beat(&w)?;
