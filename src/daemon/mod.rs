@@ -4,6 +4,7 @@
 
 pub mod anomalies;
 pub mod delivery;
+pub mod inbox;
 mod monitor;
 mod recover;
 
@@ -245,6 +246,9 @@ pub fn run_with(
             }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");
+            }
+            if let Err(e) = delivery.wake_pass(&w, &*events_base) {
+                eprintln!("makibad: wake: {e}");
             }
         }
         if Instant::now() >= next_beat {
