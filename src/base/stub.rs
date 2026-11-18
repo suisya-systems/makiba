@@ -9,6 +9,7 @@ use super::{
 use std::collections::BTreeMap;
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, MutexGuard};
+use std::time::Duration;
 
 struct Entry {
     terminal: Terminal,
@@ -52,6 +53,7 @@ pub struct Stub {
     script: Vec<String>,
     version: String,
     organization: Option<String>,
+    subscribe_delay: Duration,
     inner: Mutex<Inner>,
 }
 
@@ -73,6 +75,7 @@ impl Stub {
             script: lines.iter().map(|l| l.to_string()).collect(),
             version: PINNED.to_string(),
             organization: None,
+            subscribe_delay: Duration::ZERO,
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -86,6 +89,13 @@ impl Stub {
     /// `list` returns only terminals whose `makiba.org` tag is `org`.
     pub fn organization(mut self, org: &str) -> Stub {
         self.organization = Some(org.to_string());
+        self
+    }
+
+    /// `events()` yields its first item (the `Resync`) only after `delay`, as a base that is slow
+    /// to answer would.
+    pub fn with_subscribe_delay(mut self, delay: Duration) -> Stub {
+        self.subscribe_delay = delay;
         self
     }
 
@@ -260,7 +270,14 @@ impl Base for Stub {
             .expect("the receiver is held here");
         inner.subscribers.push(tx);
         // Blocks while empty; ends only when the stand-in is dropped.
-        Ok(Box::new(rx.into_iter()))
+        let mut delay = Some(self.subscribe_delay);
+        let mut items = rx.into_iter();
+        Ok(Box::new(std::iter::from_fn(move || {
+            if let Some(d) = delay.take() {
+                std::thread::sleep(d);
+            }
+            items.next()
+        })))
     }
 
     fn start(&self) -> Result<(), BaseError> {
