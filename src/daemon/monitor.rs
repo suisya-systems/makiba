@@ -105,12 +105,13 @@ impl Monitor {
         });
         tracked.tags = t.tags.clone();
         let task = t.tags.get("makiba.task_id").cloned();
+        let role = t.tags.get("makiba.role").cloned();
         // An absent status does not erase the last one written.
         if let Some(s) = &t.status {
             let now: Written = (s.state, s.kind, s.msg.clone());
             if self.status.get(&t.id) != Some(&now) {
                 let payload = json!({
-                    "task_id": task, "state": state_name(s.state),
+                    "task_id": task, "role": role, "state": state_name(s.state),
                     "kind": s.kind.map(kind_name), "msg": s.msg,
                 });
                 append(w, "terminal_status", task.as_deref(), &payload)?;
@@ -121,7 +122,7 @@ impl Monitor {
         if let Some(turn) = t.turn
             && turn > self.turn.get(&t.id).copied().unwrap_or(0)
         {
-            let payload = json!({"task_id": task, "turn": turn});
+            let payload = json!({"task_id": task, "role": role, "turn": turn});
             append(w, "terminal_turn", task.as_deref(), &payload)?;
             self.turn.insert(t.id.clone(), turn);
         }
@@ -144,8 +145,9 @@ impl Monitor {
             return Ok(());
         }
         let task = tracked.tags.get("makiba.task_id").cloned();
+        let role = tracked.tags.get("makiba.role").cloned();
         let payload = json!({
-            "task_id": task, "reason": reason, "exit_code": exit_code.flatten(),
+            "task_id": task, "role": role, "reason": reason, "exit_code": exit_code.flatten(),
         });
         append(w, "terminal_gone", task.as_deref(), &payload)?;
         tracked.exited = true;

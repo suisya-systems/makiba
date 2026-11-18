@@ -446,9 +446,9 @@ New:
 | --- | --- | --- |
 | `dispatcher_started` / `dispatcher_stopped` | `makibad` starts, stops cleanly | `pid`, `base`, `base_version` |
 | `base_resynced` | A `Resync` was handled | `reason`, `terminals` |
-| `terminal_status` | A terminal's status record changes | `task_id`, `state`, `kind`, `msg` |
-| `terminal_turn` | The base reports a turn end | `task_id`, `turn` |
-| `terminal_gone` | A terminal finished, was lost or was removed without a close | `task_id`, `reason`, `exit_code` |
+| `terminal_status` | A terminal's status record changes | `task_id`, `role`, `state`, `kind`, `msg` |
+| `terminal_turn` | The base reports a turn end | `task_id`, `role`, `turn` |
+| `terminal_gone` | A terminal finished, was lost or was removed without a close | `task_id`, `role`, `reason`, `exit_code` |
 | `worker_spawn_failed` | A launch could not be verified | `spawn_id`, `stage`, `reason`, `screen` |
 | `anomaly_raised` / `anomaly_cleared` | Section 11 | `task_id`, `rule` |
 | `message_sent` | Section 5.4 | `message_id` |
@@ -459,6 +459,8 @@ New:
 | `run_closed` | `makiba close` finished | `task_id` |
 | `secretary_renewed` | The secretary's terminal was replaced | `old`, `new` |
 | `curator_started` | The curator was launched | `spawn_id` |
+
+In `terminal_status`, `terminal_turn` and `terminal_gone`, `role` is the value of the terminal's `makiba.role` tag (`secretary`, `worker` or `curator`), or null when the terminal has no such tag; for a removal it comes from the tags the monitor kept.
 
 Dropped, because the thing they recorded no longer exists: `pr_watch_pane_started`, `context_handover_watch`, every kind the LLM dispatcher's loop wrote about itself.
 
