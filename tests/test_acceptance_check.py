@@ -456,7 +456,30 @@ def test_declared_rust_helper_is_not_a_test_target(repo):
     repo.fix()
     rc, out = repo.check()
     assert (rc, last(out)) == (1, "ACCEPTANCE: fail"), out
-    assert "tests/common/mod.rs is not a test target" in out, out
+    assert "no declared path is a test target" in out, out
+
+
+def declare_with_helper(repo):
+    repo.write("tests/data.txt", "fixture\n")
+    repo.add_test("tests/test_new.py")
+    repo.g("add", "tests/data.txt", "tests/test_new.py")
+    repo.test_commit("tests/test_new.py", "tests/data.txt")
+
+
+def test_declared_helper_with_declared_target_is_pass(repo):
+    declare_with_helper(repo)
+    repo.fix()
+    rc, out = repo.check()
+    assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
+
+
+def test_declared_helper_changed_after_test_commit_is_fail(repo):
+    declare_with_helper(repo)
+    repo.fix()
+    repo.write("tests/data.txt", "changed\n")
+    repo.g("commit", "-q", "-am", "helper")
+    rc, out = repo.check()
+    assert rc == 1 and "tests/data.txt changed after" in out, out
 
 
 def test_rust_library_not_building_at_test_commit_is_fail(repo):

@@ -6,6 +6,12 @@ rust-version = "1.89"
 description = "An organization where the person talks to one secretary, built on herdr-core."
 publish = false
 
+# The test agent (M0-4): tests launch it through CARGO_BIN_EXE_makiba-fake-agent. A release ships
+# only `makiba` (`cargo build --release --bin makiba`).
+[[bin]]
+name = "makiba-fake-agent"
+path = "tests/common/fake_agent.rs"
+
 [dependencies]
 rusqlite = { version = "0.43.0", features = ["bundled"] }
 serde_json = "1.0.154"
