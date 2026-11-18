@@ -170,12 +170,33 @@ impl Prepare {
         Ok(())
     }
 
-    /// `git worktree add -b <branch> <path> <default branch>` in the project's repository. A path
-    /// that already holds a worktree (a pass cut short before the stage was written) is kept.
-    fn add_worktree(&self, l: &Launch, path: &Path) -> std::result::Result<(), String> {
-        if path.join(".git").exists() {
-            return Ok(());
+    /// A pass cut short before the stage was written leaves the worktree behind: it is kept only
+    /// when it is a clean worktree of this repository on the expected branch.
+    fn check_existing(repo: &Path, path: &Path, branch: &str) -> std::result::Result<(), String> {
+        let git = |args: &[&str]| {
+            let out = Command::new("git").arg("-C").arg(path).args(args).output();
+            out.ok()
+                .filter(|o| o.status.success())
+                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        };
+        let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
+        let same = common.is_some_and(|c| {
+            std::fs::canonicalize(c).ok() == std::fs::canonicalize(repo.join(".git")).ok()
+        });
+        let on_branch = git(&["symbolic-ref", "--short", "HEAD"]).as_deref() == Some(branch);
+        let clean = git(&["status", "--porcelain", "--untracked-files=all"]).as_deref() == Some("");
+        if same && on_branch && clean {
+            Ok(())
+        } else {
+            Err(format!(
+                "{} exists and is not a clean worktree of the project on {branch}",
+                path.display()
+            ))
         }
+    }
+
+    /// `git worktree add -b <branch> <path> <default branch>` in the project's repository.
+    fn add_worktree(&self, l: &Launch, path: &Path) -> std::result::Result<(), String> {
         let repo = Some(self.places.repos.join(&l.project)).filter(|r| r.join(".git").exists());
         let repo = repo.ok_or_else(|| {
             format!(
@@ -183,11 +204,14 @@ impl Prepare {
                 l.project
             )
         })?;
-        std::fs::create_dir_all(path.parent().unwrap_or(path)).map_err(|e| e.to_string())?;
         let branch = l
             .branch
             .clone()
             .unwrap_or_else(|| format!("makiba/{}", l.task));
+        if path.exists() {
+            return Self::check_existing(&repo, path, &branch);
+        }
+        std::fs::create_dir_all(path.parent().unwrap_or(path)).map_err(|e| e.to_string())?;
         let out = Command::new("git")
             .arg("-C")
             .arg(repo)
@@ -248,5 +272,59 @@ mod tests {
         assert_eq!(stage, "failed");
         assert!(why.contains("no git repository"), "{why}");
         assert!(!wt.exists());
+    }
+
+    /// A destination that is not a worktree of the project is never taken for a prepared one.
+    #[test]
+    fn an_unrelated_folder_at_the_destination_fails_the_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repos/p");
+        std::fs::create_dir_all(&repo).unwrap();
+        let git = |d: &Path, a: &[&str]| {
+            let st = Command::new("git")
+                .arg("-C")
+                .arg(d)
+                .args(a)
+                .status()
+                .unwrap();
+            assert!(st.success());
+        };
+        git(&repo, &["init", "-q", "-b", "main"]);
+        git(
+            &repo,
+            &[
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@e",
+                "commit",
+                "-q",
+                "--allow-empty",
+                "-m",
+                "m",
+            ],
+        );
+        let other = dir.path().join("workers/p/t");
+        std::fs::create_dir_all(&other).unwrap();
+        git(&other, &["init", "-q"]);
+        let places = Places {
+            workers: dir.path().join("workers"),
+            docs: dir.path().join("docs"),
+            repos: dir.path().join("repos"),
+            settings: dir.path().join("settings"),
+        };
+        let l = Launch {
+            id: 1,
+            task: "t".into(),
+            project: "p".into(),
+            default_branch: "main".into(),
+            branch: None,
+            kind: "code".into(),
+            agent: "fake".into(),
+            stage: "planned".into(),
+            worktree: other.to_string_lossy().into(),
+        };
+        let why = Prepare::new(places).add_worktree(&l, &other).unwrap_err();
+        assert!(why.contains("not a clean worktree"), "{why}");
     }
 }
