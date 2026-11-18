@@ -143,3 +143,27 @@ fn keys_sent_to_a_scripted_dialog_arrive_in_the_record_file_in_order() {
     });
     base.end(&t).unwrap();
 }
+
+/// A lone esc refuses a prompt: the agent takes it as the Esc key, not as the start of a sequence.
+#[test]
+fn a_lone_esc_refuses_a_prompt() {
+    let base = running_base();
+    base.start().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let rec = dir.path().join("record");
+    let t = launch(&*base, "fake-esc", &rec, &["prompt", "done", "hang"]);
+
+    wait("blocked(permission)", || {
+        (status_of(&*base, &t) == Some((State::Blocked, Some(BlockKind::Permission)))).then_some(())
+    });
+    base.keys(&t, &["esc"]).unwrap();
+
+    wait("the esc recorded", || {
+        (!record(&rec).is_empty()).then_some(())
+    });
+    assert_eq!(record(&rec), ["key esc"]);
+    wait("done after the refusal", || {
+        (status_of(&*base, &t) == Some((State::Done, None))).then_some(())
+    });
+    base.end(&t).unwrap();
+}
