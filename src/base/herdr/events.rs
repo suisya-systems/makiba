@@ -186,19 +186,27 @@ fn read_message(conn: &mut Conn) -> Option<Value> {
             return None;
         }
         conn.reader.get_ref().set_read_timeout(Some(left)).ok()?;
-        match conn.reader.read_until(b'\n', &mut conn.buf) {
-            Ok(0) => return None,
-            Ok(_) if conn.buf.ends_with(b"\n") => {
-                let parsed = serde_json::from_slice(&conn.buf);
-                let blank = conn.buf.trim_ascii().is_empty();
-                conn.buf.clear();
-                match parsed {
-                    Ok(v) => return Some(v),
-                    Err(_) if blank => {}
-                    Err(_) => return None,
+        // One read at a time, so the deadline is checked between reads, not only between lines.
+        match conn.reader.fill_buf() {
+            Ok([]) => return None,
+            Ok(chunk) => {
+                let end = chunk
+                    .iter()
+                    .position(|&b| b == b'\n')
+                    .map_or(chunk.len(), |i| i + 1);
+                conn.buf.extend_from_slice(&chunk[..end]);
+                conn.reader.consume(end);
+                if conn.buf.ends_with(b"\n") {
+                    let parsed = serde_json::from_slice(&conn.buf);
+                    let blank = conn.buf.trim_ascii().is_empty();
+                    conn.buf.clear();
+                    match parsed {
+                        Ok(v) => return Some(v),
+                        Err(_) if blank => {}
+                        Err(_) => return None,
+                    }
                 }
             }
-            Ok(_) => {}
             Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::TimedOut) => {}
             Err(e) if e.kind() == ErrorKind::Interrupted => {}
             Err(_) => return None,
@@ -329,6 +337,31 @@ mod tests {
         assert!(event_of(&json!({"type": "doc"})).is_none());
         let lost = event_of(&json!({"type": "lost", "terminal": {"id": "t1"}}));
         assert!(matches!(lost, Some(TerminalEvent::Exited(t)) if !t.alive));
+    }
+
+    #[test]
+    fn a_line_that_trickles_in_does_not_hold_the_deadline_off() {
+        let (ours, theirs) = UnixStream::pair().unwrap();
+        let mut conn = Conn {
+            reader: BufReader::new(ours),
+            buf: Vec::new(),
+            watermark: 0,
+            deadline: Instant::now() + Duration::from_millis(300),
+        };
+        let writer = std::thread::spawn(move || {
+            let mut w = &theirs;
+            for _ in 0..30 {
+                if w.write_all(b"x").is_err() {
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        });
+        let started = Instant::now();
+        assert!(read_message(&mut conn).is_none());
+        assert!(started.elapsed() < Duration::from_millis(900));
+        drop(conn);
+        writer.join().unwrap();
     }
 
     #[test]
