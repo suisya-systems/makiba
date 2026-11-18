@@ -54,7 +54,7 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   # Own core: nothing of the person's default core is touched.
   SESSION=makiba-probe-$$
   export HC_SESSION=$SESSION
-  WORK=$(mktemp -d "${TMPDIR:-/tmp}/makiba-$PROBE.XXXXXX") || exit 2
+  WORK=$(mktemp -d "${TMPDIR:-/tmp}/makiba-$PROBE-XXXXXX") || exit 2
   export XDG_CONFIG_HOME=$WORK/config XDG_STATE_HOME=$WORK/state XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/tmp}
   mkdir -p "$XDG_CONFIG_HOME/herdr-core" "$XDG_STATE_HOME/herdr-core" || exit 2
   printf 'notes = false\n' > "$XDG_CONFIG_HOME/herdr-core/config.toml"   # hc types nothing on its own (hc --help)
