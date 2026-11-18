@@ -7,7 +7,8 @@
 # them (whose parent is then in BASE) may declare tests with "Acceptance-Test: <path>" trailers.
 # The base may be merged in after it (no force push). When it declares:
 #   - it is the only commit that declares, and it changes only declared paths and test helpers;
-#   - every declared path is a test target and fails at that commit and passes at HEAD. A Cargo
+#   - every declared path is a test target or a test helper (a file under tests/ that is not a
+#     target: protected, not run); at least one is a test target; every target fails at that commit and passes at HEAD. A Cargo
 #     target is tests/<name>.rs or tests/<name>/ holding main.rs (or that main.rs), run as
 #     `cargo test --locked --test <name>`; a Python test is tests/**/test_*.py (a directory: every
 #     test_*.py under it), run as `python3 -m pytest <path>`. See docs/acceptance-check.md;
@@ -97,19 +98,23 @@ while IFS= read -r p; do
   if [ -f "$work/t/$p" ]; then
     if n=$(rs_name "$p"); then tests+="rs $p $n"$'\n'
     elif is_py "$p"; then tests+="py $p"$'\n'
+    elif is_helper "$p"; then echo "acceptance-check: $p is a declared test helper (protected, not run)"
     else no "declared path $p is not a test target"
     fi
   elif [ -d "$work/t/$p" ]; then
     found=
     n=$(rs_name "$p/main.rs") && [ -f "$work/t/$p/main.rs" ] && found+="rs $p $n"$'\n'
     found+=$(cd "$work/t" && find "$p" -type f -name 'test_*.py' | sort | while IFS= read -r f; do is_py "$f" && echo "py $f"; done)
-    [ -n "$(printf '%s' "$found" | sed '/^$/d')" ] || no "declared path $p is not a test target"
-    tests+=$found$'\n'
+    if [ -n "$(printf '%s' "$found" | sed '/^$/d')" ]; then tests+=$found$'\n'
+    elif is_helper "$p"; then echo "acceptance-check: $p is a declared test helper (protected, not run)"
+    else no "declared path $p is not a test target"
+    fi
   else
     no "declared path $p does not exist at the test commit"
   fi
 done <<<"$paths"
 tests=$(printf '%s' "$tests" | sed '/^$/d')
+[ -n "$tests" ] || no "no declared path is a test target; declare at least one that fails at the test commit"
 
 run_rs() { # run_rs <tree> <name>: output in $work/out, Cargo's exit status returned
   (cd "$1" && export CARGO_TERM_COLOR=never && cargo fetch --locked && cargo test --locked --test "$2") >"$work/out" 2>&1
