@@ -175,7 +175,7 @@ else
   sb=$(term_info "$T"); t0=$(now); enqueue "$(msg 5 recv-5.txt "$k")" >/dev/null
   ab=""; i=0; while [ "$i" -lt 20 ]; do [ "$(seen_count 5)" -gt 0 ] && { ab=$(now); break; }; i=$((i + 1)); sleep 1; done
   sd=$(term_info "$T"); { echo "---- screen while blocked (before the prompt is answered)"; hc read --lines 80 "$T" 2>&1; echo "---- end"; } >> "$RESULT"
-  line=$(hc read "$T" 2>/dev/null | grep '❯' | head -n 1)   # TODO(confirm): the cursor sits on the one-time yes of a permission prompt
+  line=$(hc read "$T" 2>/dev/null | grep -E '^[[:space:]]*❯[[:space:]]*[0-9]+[.)]' | tail -n 1)   # only a numbered option row, never a submitted prompt line; TODO(confirm): the cursor sits on the one-time yes of a permission prompt
   case "$line" in *Yes*|*yes*) case "$line" in *"don't ask"*|*"always"*) ok="" ;; *) ok=1 ;; esac ;; *) ok="" ;; esac
   if [ -z "$ok" ]; then
     record channel-while-blocked NEEDS-HUMAN "blocked ('$sb'); text on screen while blocked: $( [ -n "$ab" ] && echo "yes after $(secs "$t0" "$ab")s" || echo "no in 20s"); the cursor line '$line' is not a one-time yes, so the prompt was not answered; screen text in the result file"
