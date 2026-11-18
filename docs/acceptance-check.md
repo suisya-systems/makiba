@@ -14,7 +14,7 @@ bash scripts/acceptance-check.sh <base sha> <head sha>
 
 1. The test commit is not a merge, and no other own commit declares. So no join commit comes before the test commit.
 2. The test commit changes only declared paths and test helpers.
-3. Every declared path is a test target that fails at the test commit and passes at head (below).
+3. At least one declared path is a test target; every declared target fails at the test commit and passes at head (below).
 4. The own commits after the test commit leave the declared paths, test helpers, `.github/` and the checker itself unchanged. New test targets may be added.
 
 The base may be merged into the branch after the test commit; a merge that brings in anything not in the base fails. A base merge counts in rule 4 only for files it leaves different from every parent (its own conflict resolution). Renames count as both paths.
@@ -23,7 +23,7 @@ No trailer: the job passes and prints `ACCEPTANCE: none`. The last line of the l
 
 ## Rule 3
 
-**Test targets.** A declared path is a test target: a file `tests/<name>.rs` directly under `tests/`, or a folder `tests/<name>/` holding `main.rs` (or that `main.rs` itself); its target name is `<name>`. For the development tools, a file `tests/**/test_*.py` is also a declared test (a declared folder: every `test_*.py` under it). A declared path that is neither, at the test commit, fails the check. Test helpers are the other files under `tests/` (`tests/common/`, fixtures, the test agent's source): the test commit may add them, and rule 4 protects them.
+**Test targets.** A declared path is a test target: a file `tests/<name>.rs` directly under `tests/`, or a folder `tests/<name>/` holding `main.rs` (or that `main.rs` itself); its target name is `<name>`. For the development tools, a file `tests/**/test_*.py` is also a declared test (a declared folder: every `test_*.py` under it). A declared path that is neither a target nor a test helper, at the test commit, fails the check; so does a declaration with no target at all. Test helpers are the other files under `tests/` (`tests/common/`, fixtures, the test agent's source): the test commit may add them, declared or not, and rule 4 protects them. A declared helper is not run and need not fail at the test commit.
 
 **How a target runs.** In each of the two worktrees (test commit and head), with `CARGO_TERM_COLOR=never`: `cargo fetch --locked` first, so that a download failure is not mistaken for a test result; then `cargo test --locked --test <name>`, with stdout and stderr kept. With `--test` Cargo builds the library, the binaries and that one test, and runs no other test and no doc test, so the output holds at most one `running N tests` line and one `test result:` line.
 
