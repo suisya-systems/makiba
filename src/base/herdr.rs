@@ -66,11 +66,12 @@ impl Herdr {
         let reply: Value =
             serde_json::from_str(&line).map_err(|e| other("reply", &e.to_string()))?;
         if let Some(err) = reply.get("error") {
-            let text = |k: &str| err.get(k).and_then(Value::as_str).map(String::from);
+            // The base's shape: {"code", "message", "data": {"kind", "hint"}}.
+            let text = |v: Option<&Value>| v.and_then(Value::as_str).map(String::from);
             return Err(BaseError::Other(Detail {
-                kind: text("kind").unwrap_or_else(|| "rpc".into()),
-                message: text("message").unwrap_or_else(|| err.to_string()),
-                hint: text("hint"),
+                kind: text(err.pointer("/data/kind")).unwrap_or_else(|| "rpc".into()),
+                message: text(err.get("message")).unwrap_or_else(|| err.to_string()),
+                hint: text(err.pointer("/data/hint")),
             }));
         }
         reply
@@ -171,5 +172,19 @@ mod tests {
         assert!(check_generation(&json!({"generation": GENERATION})).is_ok());
         assert!(check_generation(&json!({})).is_ok());
         assert!(check_generation(&json!({"generation": GENERATION + 1})).is_err());
+    }
+}
+
+#[cfg(test)]
+mod wire_tests {
+    use super::*;
+
+    /// The real base's answers, as the owner's run of scripts/check-hello-wire.sh showed them.
+    #[test]
+    fn the_real_replies_are_read() {
+        let ok = json!({"core": {"id": "c0", "name": "m"}, "framed": false, "generation": 1,
+            "methods": ["hello"], "version": "0.1.20"});
+        assert_eq!(version_of(&ok), Some("0.1.20"));
+        assert!(check_generation(&ok).is_ok());
     }
 }
