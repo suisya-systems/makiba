@@ -11,7 +11,14 @@
       "Read(~/.local/state/herdr-core/**)",
       "Edit(~/.local/state/herdr-core/**)",
       "Read(~/.config/makiba/person.key)",
-      "Edit(~/.config/makiba/person.key)"
+      "Edit(~/.config/makiba/person.key)",
+      "Bash(git commit *--no-veri*)",
+      "Bash(git commit -n*)",
+      "Bash(git commit * -n*)",
+      "Edit(~/.local/share/makiba/**)",
+      "Edit(~/.claude/settings.json)",
+      "Edit(.claude/settings*.json)",
+      "Edit(.mcp.json)"
     ]
   },
   "hooks": {
@@ -22,6 +29,27 @@
           {
             "type": "command",
             "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-base"
+          },
+          {
+            "type": "command",
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-dangerous-git"
+          },
+          {
+            "type": "command",
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-no-verify"
+          },
+          {
+            "type": "command",
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-workers-delete"
+          }
+        ]
+      },
+      {
+        "matcher": "^(Agent|Task)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-foreground-subagent"
           }
         ]
       }
@@ -42,7 +70,8 @@
         "~/.config/herdr-core",
         "~/.config/herdr-app",
         "~/.local/state/herdr-core",
-        "~/.config/makiba/person.key"
+        "~/.config/makiba/person.key",
+        "~/.local/share/makiba"
       ]
     }
   }
