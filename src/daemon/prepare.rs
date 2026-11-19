@@ -3,7 +3,9 @@
 //! A launch is prepared once its `run_taken` event exists (M3-1). Code: `git worktree add` from
 //! the project's own repository into `$MAKIBA_WORKERS_DIR/<project>/<task_id>` on a new branch
 //! from the project's default branch. Document: `$MAKIBA_DOCS_DIR/<task_id>/out/`, no git. Then
-//! the agent module writes `<state>/settings/<task_id>.json` (spec sections 2 and 9). The stage
+//! the agent module writes `<state>/settings/<task_id>.json`, the worker role's settings with the
+//! task's added, and the worker's rules file is written where the agent reads it (spec sections
+//! 2 and 9, Issue 134). The stage
 //! moves `planned`, `worktree_ready`, `settings_ready`, each recorded before the next step, and
 //! a launch already past a stage is not touched for it. Nothing is written inside a worktree.
 //!
@@ -15,7 +17,7 @@
 //! - (Owner) The workplace path is read from `run_launch.worktree`; `Places::workplace` computes
 //!   it, for the dispatch verb to use when it makes the row.
 
-use crate::agents::{self, Agent, TaskSettings};
+use crate::agents::{self, Agent, Role, TaskSettings};
 use crate::base::BaseDenies;
 use crate::db::Result;
 use crate::db::writer::StateWriter;
@@ -182,7 +184,14 @@ impl Prepare {
                 })
                 .collect()
         };
+        // The test agent reads no rules file, and its tests leave the share folder at its default.
+        if agent.name() != "fake" {
+            agents::on_path("claude")
+                .ok_or("no `claude` program on PATH, where `makiba up` checked it")?;
+            agents::write_rules(Role::Worker).map_err(|e| format!("the rules file: {e}"))?;
+        }
         let settings = TaskSettings {
+            role: Some(Role::Worker),
             write_dirs: vec![workplace, std::env::temp_dir()],
             deny_dirs: absolute([&self.denies.sockets[..], &self.denies.folders[..]].concat())?,
             deny_files: absolute(vec![

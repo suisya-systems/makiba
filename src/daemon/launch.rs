@@ -185,11 +185,11 @@ impl Launch {
             token,
         };
         let settings = self.settings.join(format!("{}.json", row.task));
+        let rules = agents::rules_path(Role::Worker);
         let argv = agent.argv(&AgentLaunch {
             role: Role::Worker,
             brief: Some(&row.brief),
-            // ponytail: the role rules files are M4-3; no agent module reads this yet.
-            rules_file: Path::new(""),
+            rules_file: &rules,
             settings_file: &settings,
             model: row.model.as_deref(),
             resume: None,
