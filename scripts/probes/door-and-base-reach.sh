@@ -41,6 +41,8 @@ case "${1:-}" in -h|--help) probe_usage "$0" "M4-2: P1 remaining steps and P11 w
 MAKIBA_BIN=${MAKIBA_BIN:-makiba}
 type -P "$MAKIBA_BIN" >/dev/null 2>&1 || { echo "RESULT door-and-base-reach: precondition-failed (MAKIBA_BIN=$MAKIBA_BIN not found; build with cargo build and point MAKIBA_BIN at target/debug/makiba)"; exit 2; }
 MAKIBA_BIN=$(type -P "$MAKIBA_BIN")
+# Absolute: the entry point below is a link to it, and a relative target would resolve from <share>.
+case "$MAKIBA_BIN" in /*) ;; *) MAKIBA_BIN=$PWD/$MAKIBA_BIN ;; esac
 ALL_STEPS="1 2 3 4 5 6 7 8 9 10 11 12 13 14 15"
 STEPS=${PROBE_STEPS:-$ALL_STEPS}
 for n in $STEPS; do
