@@ -35,6 +35,17 @@ fn a_git_named_by_its_path_or_a_quoted_push_is_refused_and_a_mention_passes() {
         ("deny-dangerous-git", "/usr/bin/git reset --hard", 2),
         ("deny-dangerous-git", "/usr/bin/git status", 0),
         ("deny-no-verify", "/usr/bin/git commit --no-verify -m x", 2),
+        (
+            "deny-no-verify",
+            "git -ccore.hooksPath=/dev/null commit -m x",
+            2,
+        ),
+        (
+            "deny-no-verify",
+            "git -chook.pre-commit.command=true commit -m x",
+            2,
+        ),
+        ("deny-no-verify", "git -c user.name=x commit -m x", 0),
         ("deny-push", "/usr/bin/git push", 2),
         ("deny-push", "git \"push\" origin HEAD", 2),
         ("deny-push", "git pu\\sh", 2),
@@ -59,6 +70,26 @@ fn an_rm_named_by_its_path_is_seen_and_a_large_write_is_not_refused_for_its_size
     let env = [("CLAUDE_PROJECT_DIR", root.as_path())];
     let write = write.to_string().into_bytes();
     assert_eq!(hook_in("worker-boundary", &write, &env), 0);
+}
+
+#[test]
+fn the_file_a_locked_settings_link_points_to_is_locked_too() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    std::fs::create_dir_all(root.join(".claude")).unwrap();
+    std::fs::write(root.join("conf.json"), "{}").unwrap();
+    std::os::unix::fs::symlink(root.join("conf.json"), root.join(".claude/settings.json")).unwrap();
+    let env = [("CLAUDE_PROJECT_DIR", root.as_path())];
+    for (target, expect) in [
+        ("conf.json", 2),
+        (".claude/settings.json", 2),
+        ("other.json", 0),
+    ] {
+        let write = serde_json::json!({"tool_name": "Write", "tool_input": {
+            "file_path": root.join(target), "content": "{}"}});
+        let code = hook_in("worker-boundary", write.to_string().as_bytes(), &env);
+        assert_eq!(code, expect, "{target}");
+    }
 }
 
 #[test]

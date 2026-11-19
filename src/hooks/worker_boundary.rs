@@ -36,7 +36,11 @@ pub fn check(payload: &Value) -> Result<(), String> {
     }
     let file = resolve(Path::new(&path));
     let root = resolve(Path::new(&root));
-    if LOCKED.iter().any(|l| file == root.join(l)) {
+    // A locked file may be a link to another file in the folder: that file is locked too.
+    if LOCKED
+        .iter()
+        .any(|l| file == root.join(l) || file == resolve(&root.join(l)))
+    {
         return Err(format!(
             "{path} configures this agent (its settings carry the guard hooks); ask the secretary instead"
         ));

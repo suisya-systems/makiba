@@ -75,17 +75,14 @@ pub fn check(payload: &Value) -> Result<(), String> {
             }
         }
     }
-    if (has(&whole, r"(^|[[:space:]])git[[:space:]]+-c[[:space:]]")
-        || has(
-            &whole,
-            r"(^|[[:space:]])git[[:space:]].*[[:space:]]-c[[:space:]]",
-        ))
+    if (has(&whole, r"(^|[[:space:]])git[[:space:]]+-c")
+        || has(&whole, r"(^|[[:space:]])git[[:space:]].*[[:space:]]-c"))
         && has(&whole, &format!(r"(^|[[:space:]]){any_sub}([[:space:]]|$)"))
     {
-        if icase(&whole, r"(^|[[:space:]])-c[[:space:]]+core\.hookspath=") {
+        if icase(&whole, r"(^|[[:space:]])-c[[:space:]]*core\.hookspath=") {
             return Err("git -c core.hooksPath=... switches the repository's hooks off".into());
         }
-        if icase(&whole, r"(^|[[:space:]])-c[[:space:]]+hook\.") {
+        if icase(&whole, r"(^|[[:space:]])-c[[:space:]]*hook\.") {
             return Err("git -c hook.* overrides the repository's hooks".into());
         }
     }
