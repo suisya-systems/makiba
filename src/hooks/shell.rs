@@ -1071,13 +1071,19 @@ pub fn segments_and_assignments(command: &str) -> (Vec<String>, Vec<String>) {
 /// written as `git`, so that the patterns that look for the word `git` see it. The original hooks
 /// missed a path-qualified git; this is makiba's addition.
 pub fn plain_git(text: &str) -> String {
+    plain(text, "git")
+}
+
+/// `text` with every word that names the program `name` by a path written as `name`.
+pub fn plain(text: &str, name: &str) -> String {
+    let exe = format!("{name}.exe");
     let mut out = String::new();
     let mut word = String::new();
     let flush = |word: &mut String, out: &mut String| {
         let lower = word.to_lowercase();
         let base = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
-        if (base == "git" || base == "git.exe") && lower != "git" {
-            out.push_str("git");
+        if (base == name || base == exe) && lower != name {
+            out.push_str(name);
         } else {
             out.push_str(word);
         }

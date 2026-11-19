@@ -38,7 +38,8 @@ pub fn check(payload: &Value) -> Result<(), String> {
     let recursive = Re::new(
         r"(^|[|&;()`$[:space:]])rm[[:space:]]+-[a-zA-Z]*[rR]|(^|[|&;()`$[:space:]])rm[[:space:]].*[[:space:]]-[a-zA-Z]*[rR]|(^|[|&;()`$[:space:]])rm[[:space:]].*--recursive",
     );
-    if !recursive.any_line(&command) {
+    // makiba's addition: `/bin/rm` is `rm` too.
+    if !recursive.any_line(&super::shell::plain(&command, "rm")) {
         return Ok(());
     }
     let home = std::env::var("HOME").unwrap_or_default();

@@ -1,4 +1,4 @@
-//! M4-3, beyond the carried cases: what makiba's git hooks add to claude-org-ja's (a git named by
+//! M4-3, beyond the carried cases: what makiba's hooks add to claude-org-ja's (a git or rm named by
 //! its path, a push spelt with quotes or a variable), and that no payload makes a hook crash,
 //! since a crash exits with a code other than 2 and Claude Code takes that as a pass.
 
@@ -6,8 +6,13 @@ use std::io::Write;
 use std::process::{Command, Stdio};
 
 fn hook(name: &str, stdin: &[u8]) -> i32 {
+    hook_in(name, stdin, &[])
+}
+
+fn hook_in(name: &str, stdin: &[u8], env: &[(&str, &std::path::Path)]) -> i32 {
     let mut child = Command::new(env!("CARGO_BIN_EXE_makiba"))
         .args(["hook", name])
+        .envs(env.iter().copied())
         .stdin(Stdio::piped())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -39,6 +44,21 @@ fn a_git_named_by_its_path_or_a_quoted_push_is_refused_and_a_mention_passes() {
     ] {
         assert_eq!(hook(name, &bash(command)), expect, "{name}: {command}");
     }
+}
+
+#[test]
+fn an_rm_named_by_its_path_is_seen_and_a_large_write_is_not_refused_for_its_size() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().canonicalize().unwrap();
+    let workers = root.join("workers");
+    let delete = bash(&format!("/bin/rm -rf {}/t1", workers.display()));
+    let env = [("MAKIBA_WORKERS_DIR", workers.as_path())];
+    assert_eq!(hook_in("deny-workers-delete", &delete, &env), 2);
+    let write = serde_json::json!({"tool_name": "Write", "tool_input": {
+        "file_path": root.join("big.txt"), "content": "x".repeat(300 * 1024)}});
+    let env = [("CLAUDE_PROJECT_DIR", root.as_path())];
+    let write = write.to_string().into_bytes();
+    assert_eq!(hook_in("worker-boundary", &write, &env), 0);
 }
 
 #[test]

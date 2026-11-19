@@ -33,11 +33,12 @@ const HOOKS: &[(&str, Hook)] = &[
     ("deny-foreground-subagent", deny_foreground_subagent::check),
 ];
 
-/// A payload larger than this is refused unread: the command checks recurse per character, and
-/// a crash would exit with a code other than 2, which Claude Code takes as a pass.
-pub const PAYLOAD_LIMIT: usize = 64 * 1024;
+/// A Bash command longer than this (in bytes) is refused unchecked: the command checks recurse
+/// per character, and a crash would exit with a code other than 2, which Claude Code takes as a
+/// pass. Only the command counts, so a large file written by the file tools is not refused.
+pub const COMMAND_LIMIT: usize = 64 * 1024;
 
-/// The stack of the thread that checks: room for a payload at `PAYLOAD_LIMIT`. It is reserved,
+/// The stack of the thread that checks: room for a command at `COMMAND_LIMIT`. It is reserved,
 /// not used, until a deep check needs it.
 const CHECK_STACK: usize = 512 * 1024 * 1024;
 
@@ -53,20 +54,21 @@ pub fn main(args: &[String]) -> ExitCode {
         return ExitCode::from(2);
     };
     let mut raw = Vec::new();
-    let verdict = match std::io::stdin()
-        .take(PAYLOAD_LIMIT as u64 + 1)
-        .read_to_end(&mut raw)
-    {
+    let verdict = match std::io::stdin().read_to_end(&mut raw) {
         Err(e) => Err(format!("cannot read the hook payload: {e}")),
-        Ok(n) if n > PAYLOAD_LIMIT => Err(format!(
-            "the hook payload is larger than {PAYLOAD_LIMIT} bytes; split the command"
-        )),
         Ok(_) => {
             let (tx, rx) = std::sync::mpsc::channel();
             let started = std::thread::Builder::new()
                 .stack_size(CHECK_STACK)
                 .spawn(move || {
-                    let _ = tx.send(read_payload(&raw).and_then(|p| hook(&p)));
+                    let _ = tx.send(read_payload(&raw).and_then(|p| {
+                        if command(&p).len() > COMMAND_LIMIT {
+                            return Err(format!(
+                                "the command is longer than {COMMAND_LIMIT} bytes; split it, or write long text with the file tools"
+                            ));
+                        }
+                        hook(&p)
+                    }));
                 });
             match started {
                 Err(e) => Err(format!("cannot start the check: {e}")),
