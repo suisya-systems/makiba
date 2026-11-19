@@ -239,7 +239,7 @@ S_PROMPTS=""
 shell_line() { # shell_line <label> <needle> <line>: sends the line; sets S_FOUND S_RESP S_TOOL S_DELTA and S_BLOCK (file)
   local lab=$1 i=0 settled=0 t0 t1
   wait_idle "$T" 60 || say "OBSERVE $lab: the agent was not idle before the send"
-  t0=$(hc read --lines 3000 "$T" 2>/dev/null | grep -c 'Bash(')
+  t0=$(hc read --lines 3000 "$T" 2>/dev/null | grep -cE '(Bash|Write|Edit)\(')
   hc send "$T" "$3" >/dev/null 2>&1 || { say "OBSERVE $lab: hc send failed"; S_FOUND=0 S_RESP=0 S_TOOL=0 S_DELTA=0; S_BLOCK=$WORK/block-$lab.txt; : > "$S_BLOCK"; return 1; }
   sleep 8
   while [ "$i" -lt 120 ] && [ "$settled" -lt 2 ]; do   # idle twice in a row: a model answer that is slow to start is not missed
@@ -250,7 +250,7 @@ shell_line() { # shell_line <label> <needle> <line>: sends the line; sets S_FOUN
     esac
     i=$((i + 4)); sleep 4
   done
-  t1=$(hc read --lines 3000 "$T" 2>/dev/null | grep -c 'Bash(')
+  t1=$(hc read --lines 3000 "$T" 2>/dev/null | grep -cE '(Bash|Write|Edit)\(')
   hc read --lines 3000 "$T" > "$WORK/screen-$lab.txt" 2>&1
   python3 "$WORK/block.py" "$WORK/screen-$lab.txt" "$2" > "$WORK/blockraw-$lab.txt"
   S_FOUND=$(sed -n '1s/.*found=\([0-9]\).*/\1/p' "$WORK/blockraw-$lab.txt"); S_FOUND=${S_FOUND:-0}
@@ -298,7 +298,8 @@ run_lines() { # run_lines <A|B>
   else say "OBSERVE shell-read-unscrubbed: $RES_READ (read = the decoy came through): $(excerpt "$S_BLOCK")"; fi
 
   shell_line "$k-write" 'WRITTEN-$((' "!echo WRITTEN-\$((6*7)) > $wf"
-  if [ "$(cat "$wf" 2>/dev/null)" = WRITTEN-42 ]; then RES_WRITE=written
+  if [ "$S_DELTA" -gt 0 ]; then RES_WRITE=model-acted   # a file could be the model's own work: not evidence of the shell-mode write
+  elif [ "$(cat "$wf" 2>/dev/null)" = WRITTEN-42 ]; then RES_WRITE=written
   elif grep -q '[^[:space:]]' "$S_BLOCK"; then RES_WRITE=refused
   else RES_WRITE=unclear; fi
   if [ "$k" = A ]; then
