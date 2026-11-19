@@ -39,11 +39,8 @@ pub fn has_git_subcmd(flat: &str, sub: &str) -> bool {
     )
 }
 
-/// True when a `--force-with-lease` push of `flat` may reach a protected or unreadable target.
-fn push_target_requires_deny(flat: &str) -> bool {
-    if has(flat, r"(^|[[:space:]])--(all|mirror|tags)([[:space:]=]|$)") {
-        return true;
-    }
+/// The words after `push` in `flat` that are not options: the remote, then the refspecs.
+fn push_positional(flat: &str) -> Vec<&str> {
     let mut args = Vec::new();
     for line in flat.split('\n') {
         let mut found = false;
@@ -55,7 +52,15 @@ fn push_target_requires_deny(flat: &str) -> bool {
             }
         }
     }
-    let positional: Vec<&str> = args.into_iter().filter(|t| !t.starts_with('-')).collect();
+    args.into_iter().filter(|t| !t.starts_with('-')).collect()
+}
+
+/// True when a `--force-with-lease` push of `flat` may reach a protected or unreadable target.
+fn push_target_requires_deny(flat: &str) -> bool {
+    if has(flat, r"(^|[[:space:]])--(all|mirror|tags)([[:space:]=]|$)") {
+        return true;
+    }
+    let positional = push_positional(flat);
     if positional.len() < 2 {
         return true;
     }
@@ -168,10 +173,12 @@ fn check_flat(flat: &str) -> Result<(), String> {
         let lease = has(flat, r"(^|[[:space:]])--force-with-lease([[:space:]=]|$)");
         let plain = has(flat, r"(^|[[:space:]])--force([[:space:]=]|$)")
             || has(flat, r"(^|[[:space:]])-f([[:space:]]|$)")
-            || has(flat, r"(^|[[:space:]])-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|$)");
+            || has(flat, r"(^|[[:space:]])-[a-zA-Z]*f[a-zA-Z]*([[:space:]]|$)")
+            // makiba's addition: a refspec starting with `+` forces that ref.
+            || push_positional(flat).iter().skip(1).any(|r| r.starts_with('+'));
         if plain {
             return refuse(
-                "a plain force push (--force, -f or a bundle holding f) rewrites shared history; use --force-with-lease to an unprotected branch you name",
+                "a plain force push (--force, -f, a bundle holding f, or a +refspec) rewrites shared history; use --force-with-lease to an unprotected branch you name",
             );
         }
         if lease && push_target_requires_deny(flat) {

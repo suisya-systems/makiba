@@ -63,6 +63,11 @@ pub fn check(payload: &Value) -> Result<(), String> {
 /// `path` made absolute, with symbolic links of its existing part resolved and `.` and `..`
 /// applied, as `realpath -m` does.
 pub fn resolve(path: &Path) -> PathBuf {
+    resolve_links(path, 0)
+}
+
+/// `resolve`, following at most 40 links that point to a missing file, as the kernel does.
+fn resolve_links(path: &Path, depth: usize) -> PathBuf {
     let mut out = if path.is_absolute() {
         PathBuf::from("/")
     } else {
@@ -76,7 +81,16 @@ pub fn resolve(path: &Path) -> PathBuf {
                 if exists {
                     match std::fs::canonicalize(&out) {
                         Ok(real) => out = real,
-                        Err(_) => exists = out.symlink_metadata().is_ok(),
+                        // A link to a missing file: a write creates its target, so the path is
+                        // the target's (makiba's addition; `realpath -m` follows it too).
+                        Err(_) => match std::fs::read_link(&out) {
+                            Ok(target) if depth < 40 => {
+                                let parent = out.parent().unwrap_or(Path::new("/")).to_path_buf();
+                                out = resolve_links(&parent.join(target), depth + 1);
+                                exists = false;
+                            }
+                            _ => exists = false,
+                        },
                     }
                 }
             }

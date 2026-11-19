@@ -34,6 +34,9 @@ fn a_git_named_by_its_path_or_a_quoted_push_is_refused_and_a_mention_passes() {
     for (name, command, expect) in [
         ("deny-dangerous-git", "/usr/bin/git reset --hard", 2),
         ("deny-dangerous-git", "/usr/bin/git status", 0),
+        ("deny-dangerous-git", "git push origin +HEAD:main", 2),
+        ("deny-dangerous-git", "git push origin feat/x +feat/y", 2),
+        ("deny-dangerous-git", "git push origin feat/x", 0),
         ("deny-no-verify", "/usr/bin/git commit --no-verify -m x", 2),
         (
             "deny-no-verify",
@@ -73,16 +76,20 @@ fn an_rm_named_by_its_path_is_seen_and_a_large_write_is_not_refused_for_its_size
 }
 
 #[test]
-fn the_file_a_locked_settings_link_points_to_is_locked_too() {
+fn a_link_to_a_locked_file_or_out_of_the_folder_is_followed() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().canonicalize().unwrap();
     std::fs::create_dir_all(root.join(".claude")).unwrap();
     std::fs::write(root.join("conf.json"), "{}").unwrap();
     std::os::unix::fs::symlink(root.join("conf.json"), root.join(".claude/settings.json")).unwrap();
+    // A link in the folder to a file outside it that does not exist yet: a write creates that file.
+    let outside = tempfile::tempdir().unwrap();
+    std::os::unix::fs::symlink(outside.path().join("new.txt"), root.join("dangling")).unwrap();
     let env = [("CLAUDE_PROJECT_DIR", root.as_path())];
     for (target, expect) in [
         ("conf.json", 2),
         (".claude/settings.json", 2),
+        ("dangling", 2),
         ("other.json", 0),
     ] {
         let write = serde_json::json!({"tool_name": "Write", "tool_input": {
