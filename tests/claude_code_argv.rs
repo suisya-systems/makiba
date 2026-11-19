@@ -137,3 +137,14 @@ fn a_model_and_a_resume_are_passed_and_the_task_stays_last() {
     assert_eq!(value(&a, "--resume"), Some("sess-1"));
     assert_eq!(a.last().map(String::as_str), Some(TASK));
 }
+
+#[test]
+fn workers_and_the_curator_start_in_auto_permission_mode() {
+    for role in [Role::Worker, Role::Curator] {
+        let a = argv(&agent(false), role, Some(TASK));
+        assert_eq!(value(&a, "--permission-mode"), Some("auto"), "{role:?}");
+        assert_eq!(a.last().map(String::as_str), Some(TASK));
+    }
+    let s = argv(&agent(false), Role::Secretary, None);
+    assert!(!s.iter().any(|x| x == "--permission-mode"));
+}

@@ -3,8 +3,8 @@
 //! last component is one of them. It is the second layer: the role settings deny the command by
 //! permission rule first, and the sandbox refuses the Unix socket the command would need.
 //!
-//! The payload reader fails closed, as claude-org-ja's `.hooks/lib` does: input that cannot be
-//! read, is empty, is not JSON or carries no string `tool_input.command` is refused.
+//! The payload is read by `hooks::read_payload`, which fails closed; a payload with no string
+//! `tool_input.command` is refused too.
 //!
 //! The command check is not a shell parser; each simplification leans to refusing. The command is
 //! read twice, and refused if either reading finds the name. The first keeps quoted text as one
@@ -20,8 +20,6 @@
 //! `source` that runs the command, and an alias are not seen.
 
 use serde_json::Value;
-use std::io::Read;
-use std::process::ExitCode;
 
 /// Words after which every later word of the same command may be the command that runs.
 const WRAPPERS: &[&str] = &[
@@ -30,34 +28,13 @@ const WRAPPERS: &[&str] = &[
     "if", "then", "else", "elif", "do", "while", "until", "!",
 ];
 
-pub fn main() -> ExitCode {
-    let mut raw = Vec::new();
-    let verdict = match std::io::stdin().read_to_end(&mut raw) {
-        Ok(_) => check_payload(&raw, &crate::base::worker_denies().commands),
-        Err(e) => Err(format!("cannot read the hook payload: {e}")),
-    };
-    match verdict {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(reason) => {
-            eprintln!("makiba: refused: {reason}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// `Ok` when the payload is readable and its command names none of `denied`; else the reason.
-pub fn check_payload(raw: &[u8], denied: &[String]) -> Result<(), String> {
-    let text = std::str::from_utf8(raw).map_err(|_| "the hook payload is not UTF-8".to_string())?;
-    if text.trim().is_empty() {
-        return Err("the hook payload is empty".into());
-    }
-    let payload: Value =
-        serde_json::from_str(text).map_err(|e| format!("the hook payload is not JSON: {e}"))?;
+/// `Ok` when the payload's command names none of the base's commands; else the reason.
+pub fn check(payload: &Value) -> Result<(), String> {
     let command = payload
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
         .ok_or("the hook payload has no string tool_input.command")?;
-    match named(command, denied) {
+    match named(command, &crate::base::worker_denies().commands) {
         Some(name) => Err(format!(
             "`{name}` is the base's command; no agent role may run it (spec section 1). Ask through the door's tools instead"
         )),
