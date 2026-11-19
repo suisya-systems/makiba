@@ -27,7 +27,7 @@ Until step 3, `makiba up` prints its one line on that version and starts as usua
 
 When a run finds a version whose sandbox or launch is worse than the last checked one, add it to `REFUSED` with a one-line reason that says what was found and where it is recorded (the Results row or the Issue). `makiba up` then refuses that version with the reason. Remove the entry when a later run shows the version fine, or leave it when the version is gone for good. Raising `LOWEST` is the same kind of change, for versions the organisation no longer supports.
 
-The tests of the refused list pass their own list to `check_with` and never add an entry to the shipped one, so adding a real entry needs no test edit.
+The tests of the refused list pass their own list to `check_with` and never add an entry to the shipped one. One assertion of `tests/claude_no_upper_bound_160.rs` (the shipped list is empty) fails when the first real entry is added; that failure is the signal, and the declared test is not edited without the owner's decision.
 
 ## History: the move to 2.1.328
 
