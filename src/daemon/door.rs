@@ -15,7 +15,7 @@
 use crate::base::Base;
 use crate::channel::Hub;
 use crate::cli::LINE_MAX;
-use crate::db::writer::{NewEvent, StateWriter};
+use crate::db::writer::{NewEvent, RunUpsert, StateWriter};
 use crate::spec::{DoorError, ErrorKind, Role, Verb, worker_agent_id};
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use serde_json::{Map, Value, json};
@@ -190,13 +190,17 @@ fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, DoorError> {
 pub struct Door {
     w: Mutex<StateWriter>,
     base: Arc<dyn Base>,
+    /// The agent module `dispatch` gives a launch: `MAKIBA_LAUNCH_AGENT`, read when `makibad`
+    /// starts, so no request can choose it.
+    agent: String,
 }
 
 impl Door {
-    pub fn new(w: StateWriter, base: Arc<dyn Base>) -> Door {
+    pub fn new(w: StateWriter, base: Arc<dyn Base>, agent: String) -> Door {
         Door {
             w: Mutex::new(w),
             base,
+            agent,
         }
     }
 
@@ -261,7 +265,7 @@ impl Door {
         if let Err(e) = begin() {
             return Err(internal(e));
         }
-        let r = run(&w, &actor, role, v, &args);
+        let r = run(&w, &self.agent, &actor, role, v, &args);
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
         }
@@ -411,14 +415,21 @@ fn record(
     idem: Option<&str>,
     r: &Response,
 ) -> bool {
-    match status_of(r) {
+    // `dispatch` returns at `accepted` and finishes later (spec section 5.2).
+    let status = match (verb, r) {
+        ("dispatch", Ok(_)) => Some("accepted"),
+        _ => status_of(r),
+    };
+    match status {
         Some(status) => insert_command(w, actor, verb, args, idem, status, r).is_some(),
         None => true,
     }
 }
 
-fn run(w: &StateWriter, actor: &str, role: Role, v: Verb, args: &Value) -> Response {
+fn run(w: &StateWriter, agent: &str, actor: &str, role: Role, v: Verb, args: &Value) -> Response {
     match v {
+        // The tool for the secretary is #42's; until then only the person's command is built.
+        Verb::Dispatch if role == Role::Person => dispatch(w, agent, actor, args),
         Verb::Send => {
             let to = str_arg(args, "to")?;
             let text = str_arg(args, "text")?;
@@ -440,6 +451,89 @@ fn run(w: &StateWriter, actor: &str, role: Role, v: Verb, args: &Value) -> Respo
         Verb::Config => config(args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
+}
+
+/// A name that becomes a path component and part of an agent id: `[A-Za-z0-9._-]`, not starting
+/// with `.` or `-`.
+fn plain_name(what: &str, s: &str) -> Result<(), DoorError> {
+    let ok = !s.is_empty()
+        && !s.starts_with(['.', '-'])
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'));
+    if ok {
+        Ok(())
+    } else {
+        Err(usage(format!(
+            "{what} is letters, digits, '.', '_' and '-', and does not start with '.' or '-': {s:?}"
+        )))
+    }
+}
+
+/// The project of a `document` dispatch given none (spec section 12 requires one for `code` only).
+const DOCUMENTS_PROJECT: &str = "documents";
+
+/// `dispatch` (spec section 12): a `queued` run, its first `run_launch` row and `delegate_sent`.
+/// The caller's transaction holds them together with the command's record.
+fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response {
+    let kind = str_arg(args, "kind")?;
+    if !["code", "document"].contains(&kind) {
+        return Err(usage(format!("kind is code or document, not {kind:?}")));
+    }
+    let task = str_arg(args, "task_id")?;
+    plain_name("task_id", task)?;
+    let title = str_arg(args, "title")?;
+    let brief = str_arg(args, "brief")?;
+    if title.trim().is_empty() || brief.trim().is_empty() {
+        return Err(usage("the title and the brief are not empty"));
+    }
+    let opt = |name: &str| {
+        args.get(name)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+    };
+    let project = match (opt("project"), kind) {
+        (Some(p), _) => p,
+        (None, "code") => return Err(usage("--project is required for kind code")),
+        (None, _) => DOCUMENTS_PROJECT,
+    };
+    plain_name("project", project)?;
+    if run_exists(w, task)? {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("task {task:?} was dispatched already"),
+            "a task id is used once; dispatch under another id",
+        ));
+    }
+    let spawn = random_key().map_err(internal)?[..32].to_string();
+    let worktree = super::prepare::Places::from_env(Path::new(""))
+        .workplace(kind, project, task)
+        .display()
+        .to_string();
+    let store = || -> crate::db::Result<()> {
+        w.upsert_run(&RunUpsert {
+            task_id: task,
+            project_slug: project,
+            title: Some(title),
+            status: Some("queued"),
+            branch: opt("branch"),
+            ..Default::default()
+        })?;
+        w.conn().execute(
+            "INSERT INTO run_launch (run_id, spawn_id, kind, agent, model, brief, worktree)
+             VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![task, spawn, kind, agent, opt("model"), brief, worktree],
+        )?;
+        w.append_event(&NewEvent {
+            kind: "delegate_sent",
+            actor: Some(actor),
+            payload: Some(&json!({"task_id": task, "spawn_id": spawn, "kind": kind})),
+            run_task_id: Some(task),
+            ..Default::default()
+        })?;
+        Ok(())
+    };
+    store().map_err(internal)?;
+    Ok(json!({"task_id": task, "spawn_id": spawn, "status": "queued"}))
 }
 
 /// May `role` send to `to`, and is there such a recipient?
@@ -603,7 +697,12 @@ pub struct Config {
     pub socket: Option<PathBuf>,
     pub port: u16,
     pub person_key: PathBuf,
+    /// `MAKIBA_LAUNCH_AGENT`: the agent module of the launches `dispatch` makes.
+    pub agent: String,
 }
+
+/// The test seam of `dispatch` (spec section 2): `claude_code` unless the variable names `fake`.
+pub const LAUNCH_AGENT_ENV: &str = "MAKIBA_LAUNCH_AGENT";
 
 impl Config {
     pub fn from_env() -> Result<Config, String> {
@@ -617,6 +716,18 @@ impl Config {
             },
             port: crate::cli::port()?,
             person_key: crate::cli::person_key_path(),
+            agent: match std::env::var(LAUNCH_AGENT_ENV)
+                .ok()
+                .filter(|v| !v.is_empty())
+            {
+                None => "claude_code".into(),
+                Some(a) if ["claude_code", "fake"].contains(&a.as_str()) => a,
+                Some(a) => {
+                    return Err(format!(
+                        "{LAUNCH_AGENT_ENV} is claude_code or fake, not {a:?}"
+                    ));
+                }
+            },
         })
     }
 }
@@ -693,7 +804,7 @@ pub fn start(cfg: &Config, db: &Path, base: Arc<dyn Base>, hub: Hub) -> Result<R
         socket: cfg.socket.clone(),
         addr,
     };
-    let door = Arc::new(Door::new(w, base));
+    let door = Arc::new(Door::new(w, base, cfg.agent.clone()));
     let d = Arc::clone(&door);
     if let Some(unix) = unix {
         std::thread::spawn(move || {

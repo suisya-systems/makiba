@@ -47,6 +47,8 @@ Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-p
 
 Test seam of verification (M3-6): `MAKIBA_VERIFY_TIMEOUT_MS`, read by `makibad` at start, is the time a launch has to be verified in milliseconds (section 5.3; default 180 s); nothing in the role files, `makiba up` or any launch sets it.
 
+Test seam of dispatch (Issue 143): the launch `dispatch` creates names the agent module `claude_code`, unless `makibad` was started with `MAKIBA_LAUNCH_AGENT=fake`, which names the test agent. The variable is read once, when `makibad` starts, from its own environment: no request, argument or tool of any role chooses the agent, and nothing in the role files, `makiba up` or any launch sets it. Any other value stops the start.
+
 Test seam of a restart (M3-7): a debug build of `makibad` reads `<state>/makibad.die-at` at start; its thread ends right after the step named there (`run_taken`, `worktree_ready`, `settings_ready`, `launch_returned`, `launched`, `dialog_passed`), as if killed. A release build has no such step: it never reads the file.
 
 Test seam of `makiba up`: `HC_BIN` is the `hc` program it runs as `hc server start` (default `hc`); a test points it at a stand-in.
