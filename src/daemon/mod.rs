@@ -14,6 +14,7 @@ pub mod notify_gate;
 pub mod person_key;
 pub mod prepare;
 mod recover;
+mod verify;
 
 use self::anomalies::Anomalies;
 use self::delivery::Delivery;
@@ -260,6 +261,7 @@ fn serve(
     let prepare = Prepare::new(Places::from_env(dir));
     let launch = launch::Launch::new(dir, door_addr);
     let mut dialogs = dialogs::Dialogs::new();
+    let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     while !stop.load(Ordering::SeqCst) {
@@ -305,6 +307,10 @@ fn serve(
             }
             if let Err(e) = launch.pass(&w, &*events_base) {
                 eprintln!("makibad: launch: {e}");
+            }
+            // Before the dialogs: a launch they move on is looked at on a later tick.
+            if let Err(e) = verify.pass(&w, &*events_base) {
+                eprintln!("makibad: verify: {e}");
             }
             if let Err(e) = dialogs.pass(&w, &*events_base) {
                 eprintln!("makibad: dialogs: {e}");

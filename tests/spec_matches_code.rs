@@ -364,7 +364,7 @@ fn statements(sql: &str) -> BTreeSet<String> {
         .collect()
 }
 
-/// Section 5 repeats the DDL of migrations v4 and v5; it is the same statements as `src/db/schema_v4.sql` and `schema_v5.sql`.
+/// Section 5 repeats the DDL of migrations v4 to v6; it is the same statements as `src/db/schema_v4.sql`, `schema_v5.sql` and `schema_v6.sql`.
 #[test]
 fn section_5_sql_is_migration_v4() {
     let s5 = section(SPEC, 5);
@@ -375,9 +375,10 @@ fn section_5_sql_is_migration_v4() {
     }
     let spec_stmts = statements(&spec_sql);
     let file_stmts: BTreeSet<String> = statements(&format!(
-        "{};{}",
+        "{};{};{}",
         makiba::db::SCHEMA_V4,
-        makiba::db::SCHEMA_V5
+        makiba::db::SCHEMA_V5,
+        makiba::db::SCHEMA_V6
     ))
     .into_iter()
     .filter(|s| !(s == "BEGIN" || s == "COMMIT" || s.starts_with("INSERT INTO schema_migrations")))

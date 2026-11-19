@@ -44,6 +44,8 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 
 Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-process stand-in, whose first `Resync` comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`; any other value uses the real base (session `$MAKIBA_BASE_SESSION`, default `makiba`). The test agent `fake` (M3-4) is launched only when `MAKIBA_FAKE_AGENT` holds its command line as a JSON array (program, record file, steps); without it a `fake` launch stays at `settings_ready`.
 
+Test seam of verification (M3-6): `MAKIBA_VERIFY_TIMEOUT_MS`, read by `makibad` at start, is the time a launch has to be verified in milliseconds (section 5.3; default 180 s); nothing in the role files, `makiba up` or any launch sets it.
+
 Test seam of the door: with `MAKIBA_DOOR=none` `makibad` opens no Unix socket (it says so in its log) and serves the port as usual, and the person's `makiba` fails at once saying the socket is off; nothing in the role files, `makiba up` or any launch sets it.
 
 Nothing is written into a target repository: no rules file, no settings file (paddock Q10, Q12).
@@ -109,7 +111,7 @@ An agent's key dies when its terminal is closed or replaced. The person key does
 
 ## 5. state.db
 
-The schema is carried from claude-org-ja at migration v3 (`projects`, `workstreams`, `worker_dirs`, `runs`, `events`, `event_deliveries`, `tags`, `tag_assignments`, `org_sessions`, `schema_migrations`). Migration v4 adds the tables below and migration v5 one column of `agents` (5.1). They are kept as SQL, `src/db/schema.sql`, `src/db/schema_v4.sql` and `src/db/schema_v5.sql`, and embedded in the binary (M0-5); the Rust code does not restate them. `unparsed_legacy` and the `*_pane_id` / `*_peer_id` columns of `org_sessions` are carried unchanged and unused.
+The schema is carried from claude-org-ja at migration v3 (`projects`, `workstreams`, `worker_dirs`, `runs`, `events`, `event_deliveries`, `tags`, `tag_assignments`, `org_sessions`, `schema_migrations`). Migration v4 adds the tables below, migration v5 one column of `agents` (5.1) and migration v6 two triggers on `events` (5.3). They are kept as SQL, `src/db/schema.sql`, `src/db/schema_v4.sql`, `src/db/schema_v5.sql` and `src/db/schema_v6.sql`, and embedded in the binary (M0-5); the Rust code does not restate them. `unparsed_legacy` and the `*_pane_id` / `*_peer_id` columns of `org_sessions` are carried unchanged and unused.
 
 Times are UTC text, `strftime('%Y-%m-%dT%H:%M:%fZ','now')`, as in the carried schema.
 
@@ -180,6 +182,32 @@ CREATE TABLE run_launch (
   verified_at      TEXT
 );
 CREATE INDEX idx_run_launch_run ON run_launch(run_id);
+```
+
+A launch is verified only by an observed first turn (Issue M3-6): at `dialog_passed`, once a `terminal_status` with state `working` or a `terminal_turn` carrying the launch's `spawn_id` is recorded (a record of another terminal of the task or the role never counts), `worker_spawn_verified`, stage `verified` with `verified_at` and `runs.status = 'in_use'` are written in one transaction, and `conversation_id` is read from the agent module (section 9). With no such record within the timeout (default 180 s, from the launch's `worker_spawned`; a launch still at `launched` included), `worker_spawn_failed`, stage `failed`, the run `failed` and a notice to the secretary are written in one transaction, and the terminal is left for inspection; a startup dialog that fails a launch (section 7) takes the same path. Migration v6 refuses any `worker_spawn_verified`, inserted or updated, whose payload's `event_id` does not name such a record of the same `spawn_id`:
+
+```sql
+CREATE TRIGGER events_verified_insert BEFORE INSERT ON events
+WHEN NEW.kind = 'worker_spawn_verified' AND NOT EXISTS (
+  SELECT 1 FROM events e
+  WHERE e.id = json_extract(NEW.payload_json, '$.event_id')
+    AND json_extract(e.payload_json, '$.spawn_id') = json_extract(NEW.payload_json, '$.spawn_id')
+    AND (e.kind = 'terminal_turn'
+         OR (e.kind = 'terminal_status' AND json_extract(e.payload_json, '$.state') = 'working')))
+BEGIN
+  SELECT RAISE(ABORT, 'worker_spawn_verified needs the id of a working status or a turn of its terminal');
+END;
+-- events_verified_update: the same, BEFORE UPDATE ON events.
+CREATE TRIGGER events_verified_update BEFORE UPDATE ON events
+WHEN NEW.kind = 'worker_spawn_verified' AND NOT EXISTS (
+  SELECT 1 FROM events e
+  WHERE e.id = json_extract(NEW.payload_json, '$.event_id')
+    AND json_extract(e.payload_json, '$.spawn_id') = json_extract(NEW.payload_json, '$.spawn_id')
+    AND (e.kind = 'terminal_turn'
+         OR (e.kind = 'terminal_status' AND json_extract(e.payload_json, '$.state') = 'working')))
+BEGIN
+  SELECT RAISE(ABORT, 'worker_spawn_verified needs the id of a working status or a turn of its terminal');
+END;
 ```
 
 `stage` is what makes a launch safe to resume after `makibad` dies (Issue M3-7): each step is recorded before the next begins, and on start `makibad` finishes or fails every row that is not `verified` or `failed`. For `launched` and later it first asks the base for a terminal carrying `makiba.spawn=<spawn_id>`; if one exists, it is adopted, never launched again.
@@ -473,6 +501,8 @@ New:
 | `curator_started` | The curator was launched | `spawn_id` |
 | `run_taken` | A pass of `makibad` took a `queued` run within `max_concurrent_workers` (counted: runs `in_use` plus launches not yet `verified` or `failed`; oldest `dispatched_at` first). The launch steps start from it | `task_id`, `spawn_id` (of the run's newest `run_launch` row) |
 
+`worker_spawn_verified` carries `task_id`, `spawn_id` and `event_id`, the id of the `terminal_status` (`working`) or `terminal_turn` of that `spawn_id` that verified the launch (section 5.3); the database refuses it without one.
+
 In `base_resynced`, `reason` is `start` for the first `Resync` of a `makibad` process and `resync` for every later one (a `Resync` carries no cause of its own), and `terminals` is the number of terminals of this organization in the list. It is written last, after the view is rebuilt, so a reader that waits for it sees the result.
 
 In `terminal_status`, `terminal_turn` and `terminal_gone`, `role` is the value of the terminal's `makiba.role` tag (`secretary`, `worker` or `curator`), or null when the terminal has no such tag; for a removal it comes from the tags the monitor kept.
@@ -557,10 +587,10 @@ src/lib.rs
 src/spec.rs            the names of this document as constants and enums (M0-8)
 src/base/              mod.rs (the Base trait), herdr.rs (private), stub.rs, version.rs, uses.rs
 src/agents/            mod.rs (the Agent trait), claude_code.rs, fake.rs, version.rs
-src/db/                mod.rs, schema.sql, schema_v4.sql, schema_v5.sql, writer.rs, queries.rs
+src/db/                mod.rs, schema.sql, schema_v4.sql to schema_v6.sql, writer.rs, queries.rs
 src/daemon/            mod.rs (makibad's main loop) and one module per Issue: monitor, anomalies,
                        delivery, inbox, notify_gate, recover, dispatch, door, person_key, launch,
-                       dialogs, close, prwatch, ...
+                       dialogs, verify, close, prwatch, ...
 src/channel.rs         the channel server
 src/cli.rs             the person's command; src/status_local.rs, its read-only view of state.db
 src/hooks/             one module per hook

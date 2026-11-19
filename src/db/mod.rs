@@ -2,7 +2,8 @@
 //!
 //! The SQL is carried from claude-org-ja and kept as SQL: `schema.sql` is v1 to v3, `schema_v4.sql`
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
-//! `schema_v5.sql` adds the launch identity to `agents`. `open` opens a database with the project's pragmas and `migrate` brings it to v5.
+//! `schema_v5.sql` adds the launch identity to `agents`, `schema_v6.sql` the triggers that keep a
+//! `worker_spawn_verified` to its evidence. `open` opens a database with the project's pragmas and `migrate` brings it to v6.
 
 use std::fmt;
 use std::path::Path;
@@ -22,6 +23,8 @@ pub const SCHEMA: &str = include_str!("schema.sql");
 pub const SCHEMA_V4: &str = include_str!("schema_v4.sql");
 /// v5: `agents.spawn_id`.
 pub const SCHEMA_V5: &str = include_str!("schema_v5.sql");
+/// v6: `worker_spawn_verified` only with the id of a working status or a turn of its terminal.
+pub const SCHEMA_V6: &str = include_str!("schema_v6.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -113,7 +116,7 @@ fn ddl_of(table: &str) -> String {
     ddl
 }
 
-/// Bring a database to v5: apply v3 to an empty one, upgrade an older one in place, then add v4 and v5.
+/// Bring a database to v6: apply v3 to an empty one, upgrade an older one in place, then add v4 to v6.
 /// Idempotent. Refuses to run inside a transaction, where it could not leave the caller's writes alone.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     if !conn.is_autocommit() {
@@ -161,19 +164,21 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         return Err(e.into());
     }
-    // v5, the same way.
-    let done: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM schema_migrations WHERE version = 5",
-        [],
-        |r| r.get(0),
-    )?;
-    if done == 0
-        && let Err(e) = conn.execute_batch(SCHEMA_V5)
-    {
-        if !conn.is_autocommit() {
-            let _ = conn.execute_batch("ROLLBACK");
+    // v5 and v6, the same way.
+    for (version, script) in [(5, SCHEMA_V5), (6, SCHEMA_V6)] {
+        let done: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
+            [version],
+            |r| r.get(0),
+        )?;
+        if done == 0
+            && let Err(e) = conn.execute_batch(script)
+        {
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            return Err(e.into());
         }
-        return Err(e.into());
     }
     Ok(())
 }
