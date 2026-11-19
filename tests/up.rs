@@ -9,7 +9,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::time::{Duration, Instant};
 
-const IN_RANGE: &str = "2.1.326 (Claude Code)";
+/// What `claude --version` prints for the lowest supported version.
+fn in_range() -> String {
+    let (a, b, c) = makiba::agents::version::LOWEST;
+    format!("{a}.{b}.{c} (Claude Code)")
+}
 
 struct Setup {
     root: tempfile::TempDir,
@@ -103,7 +107,7 @@ fn text(o: &Output) -> String {
 
 #[test]
 fn inside_an_agent_up_refuses_and_starts_nothing() {
-    let s = Setup::new(IN_RANGE);
+    let s = Setup::new(&in_range());
     let out = s.up(&[("CLAUDE_CODE_SESSION_ID", "abc")]);
     assert!(!out.status.success(), "{}", text(&out));
     assert!(text(&out).contains("login shell"), "{}", text(&out));
@@ -114,7 +118,7 @@ fn inside_an_agent_up_refuses_and_starts_nothing() {
 
 #[test]
 fn a_launched_agent_has_none_of_the_callers_variables() {
-    let s = Setup::new(IN_RANGE);
+    let s = Setup::new(&in_range());
     let tokens = [
         "GH_TOKEN",
         "GITHUB_TOKEN",
@@ -152,7 +156,7 @@ fn a_launched_agent_has_none_of_the_callers_variables() {
 
 #[test]
 fn a_second_up_starts_nothing_new() {
-    let s = Setup::new(IN_RANGE);
+    let s = Setup::new(&in_range());
     assert!(s.up(&[]).status.success());
     let pid = s.daemon_pid().expect("makibad is not running");
     let again = s.up(&[]);
@@ -163,7 +167,7 @@ fn a_second_up_starts_nothing_new() {
 
 #[test]
 fn the_person_key_is_private_and_a_second_up_keeps_it() {
-    let s = Setup::new(IN_RANGE);
+    let s = Setup::new(&in_range());
     assert!(s.up(&[]).status.success());
     assert_eq!(mode(&s.key()), 0o600);
     assert_eq!(mode(s.key().parent().unwrap()), 0o700);
