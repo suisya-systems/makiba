@@ -28,6 +28,9 @@ pub fn check(payload: &Value) -> Result<(), String> {
         return Ok(());
     }
     let (segments, assigns) = shell::segments_and_assignments(&command);
+    if let Some(why) = shell::unreadable(&segments, &assigns) {
+        return Err(why);
+    }
     for segment in segments.iter().filter(|s| !s.is_empty()) {
         let flat = shell::flat_segment(segment, &assigns);
         let subs = ["commit", "push", "merge", "pull", "am"].map(|s| has_git_subcmd(&flat, s));

@@ -159,6 +159,9 @@ pub fn check(payload: &Value) -> Result<(), String> {
     // Only where git is the segment's command, so a message that mentions a push is not one.
     let push_cmd = Re::new(PUSH_CMD);
     let (segments, assigns) = shell::segments_and_assignments(&command);
+    if let Some(why) = shell::unreadable(&segments, &assigns) {
+        return Err(why);
+    }
     for segment in segments.iter().filter(|s| !s.is_empty()) {
         let words = shell::expand(segment, &assigns).replace(['"', '\'', '\\'], "");
         if push_cmd.any_line(&shell::plain_git(&words)) {

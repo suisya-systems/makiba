@@ -37,6 +37,18 @@ fn a_git_named_by_its_path_or_a_quoted_push_is_refused_and_a_mention_passes() {
         ("deny-dangerous-git", "git push origin +HEAD:main", 2),
         ("deny-dangerous-git", "git push origin feat/x +feat/y", 2),
         ("deny-dangerous-git", "git push origin feat/x", 0),
+        // A quoted or escaped subcommand, and a variable assigned twice, are refused unread.
+        ("deny-dangerous-git", "git re\"set\" --hard", 2),
+        ("deny-dangerous-git", "git -C . re\\set --hard", 2),
+        ("deny-no-verify", "git com\"mit\" -n -m x", 2),
+        ("deny-push", "P=status; P=push; git $P origin HEAD", 2),
+        ("deny-dangerous-git", "P=status; P=reset; git $P --hard", 2),
+        (
+            "deny-dangerous-git",
+            "git commit -m \"a 'quoted' message\"",
+            0,
+        ),
+        ("deny-dangerous-git", "A=1; B=2; git status", 0),
         ("deny-no-verify", "/usr/bin/git commit --no-verify -m x", 2),
         (
             "deny-no-verify",

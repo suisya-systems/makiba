@@ -1101,6 +1101,60 @@ pub fn plain(text: &str, name: &str) -> String {
     out
 }
 
+/// Why the git hooks cannot read the command of `segments` as the shell will run it, if they
+/// cannot (makiba's addition; the reading here is text, see Issue 140):
+///
+/// - git's subcommand word holds a quote or a backslash (`re"set"`), which the flattening above
+///   would split into two words;
+/// - a variable is assigned more than once, so which value a later `$NAME` has depends on
+///   where it is used, and the expansion above takes the first.
+///
+/// Both lean to refusing.
+pub fn unreadable(segments: &[String], assigns: &[String]) -> Option<String> {
+    let takes_value = |t: &str| {
+        matches!(
+            t,
+            "-C" | "-c"
+                | "--git-dir"
+                | "--work-tree"
+                | "--namespace"
+                | "--exec-path"
+                | "--super-prefix"
+                | "--config-env"
+                | "--attr-source"
+        )
+    };
+    for segment in segments {
+        let words: Vec<&str> = segment.split_whitespace().collect();
+        for (i, w) in words.iter().enumerate() {
+            if plain_git(w) != "git" {
+                continue;
+            }
+            let mut j = i + 1;
+            while j < words.len() && words[j].starts_with('-') {
+                j += if takes_value(words[j]) { 2 } else { 1 };
+            }
+            if let Some(sub) = words.get(j)
+                && sub.contains(['"', '\'', '\\'])
+            {
+                return Some(format!(
+                    "git's subcommand {sub} is quoted or escaped, so the hooks cannot read it; write it plainly"
+                ));
+            }
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    for a in assigns {
+        let name = a.split('=').next().unwrap_or(a);
+        if !seen.insert(name) {
+            return Some(format!(
+                "{name} is assigned more than once, so the hooks cannot tell its value where it is used; use one name per value"
+            ));
+        }
+    }
+    None
+}
+
 /// A segment with the known variables expanded and its substitutions flattened.
 pub fn flat_segment(segment: &str, assignments: &[String]) -> String {
     let expanded = if assignments.is_empty() {
