@@ -185,11 +185,11 @@ impl Launch {
             token,
         };
         let settings = self.settings.join(format!("{}.json", row.task));
+        let rules = agents::rules_path(Role::Worker);
         let argv = agent.argv(&AgentLaunch {
             role: Role::Worker,
             brief: Some(&row.brief),
-            // ponytail: the role rules files are M4-3; no agent module reads this yet.
-            rules_file: Path::new(""),
+            rules_file: &rules,
             settings_file: &settings,
             model: row.model.as_deref(),
             resume: None,
@@ -207,8 +207,15 @@ impl Launch {
             cwd: PathBuf::from(&row.worktree),
             name: spec::worker_agent_id(&row.task),
             tags,
-            // Workers get an empty GH_CONFIG_DIR (spec section 6.4); no key goes here.
-            env: BTreeMap::from([("GH_CONFIG_DIR".to_string(), String::new())]),
+            // Workers get an empty GH_CONFIG_DIR (spec section 6.4); no key goes here. The role
+            // hooks find the entry point by MAKIBA_SHARE_DIR, as this process resolved it.
+            env: BTreeMap::from([
+                ("GH_CONFIG_DIR".to_string(), String::new()),
+                (
+                    "MAKIBA_SHARE_DIR".to_string(),
+                    crate::cli::share_dir().display().to_string(),
+                ),
+            ]),
             unset: UNSET.iter().map(|v| v.to_string()).collect(),
         }
     }

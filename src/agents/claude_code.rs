@@ -78,13 +78,10 @@ impl Agent for ClaudeCode {
             argv.extend(["--setting-sources".into(), "project,local".into()]);
             argv.extend(["--permission-mode".into(), "auto".into()]);
         }
-        // ponytail: the launch of a worker passes an empty rules path until M4-3.
-        if !launch.rules_file.as_os_str().is_empty() {
-            argv.extend([
-                "--append-system-prompt-file".into(),
-                launch.rules_file.display().to_string(),
-            ]);
-        }
+        argv.extend([
+            "--append-system-prompt-file".into(),
+            launch.rules_file.display().to_string(),
+        ]);
         if let Some(model) = launch.model {
             argv.extend(["--model".into(), model.into()]);
         }

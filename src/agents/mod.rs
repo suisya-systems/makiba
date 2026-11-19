@@ -1,6 +1,6 @@
 //! Claude Code and the agents makiba launches. Everything that differs between agent programs
 //! lives in one module per program behind the trait `Agent` (spec section 9). `fake` is the test
-//! agent; `claude_code` is added in M4.
+//! agent; `claude_code` is the interactive `claude` program.
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -63,6 +63,58 @@ pub struct TaskSettings {
     /// the person key file and `state.db`, resolved when the settings are written.
     pub deny_dirs: Vec<PathBuf>,
     pub deny_files: Vec<PathBuf>,
+    /// Folders denied for write only: the share folder as resolved, whose entry point the role
+    /// hooks run (the role's settings name only its default place).
+    pub deny_write_dirs: Vec<PathBuf>,
+    /// The role whose `roles/<role>/settings.json` the file is written on top of (Issue 134).
+    pub role: Option<Role>,
+}
+
+/// The role files of `roles/`, carried in the binary: the rules and the settings (Issue 134).
+fn role_files(role: Role) -> Option<(&'static str, &'static str)> {
+    match role {
+        Role::Worker => Some((
+            include_str!("../../roles/worker/rules.md"),
+            include_str!("../../roles/worker/settings.json"),
+        )),
+        Role::Secretary => Some((
+            include_str!("../../roles/secretary/rules.md"),
+            include_str!("../../roles/secretary/settings.json"),
+        )),
+        Role::Curator => Some((
+            include_str!("../../roles/curator/rules.md"),
+            include_str!("../../roles/curator/settings.json"),
+        )),
+        Role::Person => None,
+    }
+}
+
+/// Where a role's rules file is read by its agent: `<share>/roles/<role>/rules.md` (spec
+/// section 2), outside every workplace.
+pub fn rules_path(role: Role) -> PathBuf {
+    let name = match role {
+        Role::Secretary => "secretary",
+        Role::Worker => "worker",
+        Role::Curator => "curator",
+        Role::Person => "person",
+    };
+    crate::cli::share_dir()
+        .join("roles")
+        .join(name)
+        .join("rules.md")
+}
+
+/// Write the role's rules file from the binary unless it already holds them.
+pub fn write_rules(role: Role) -> io::Result<()> {
+    let Some((rules, _)) = role_files(role) else {
+        return Ok(());
+    };
+    let path = rules_path(role);
+    if std::fs::read_to_string(&path).is_ok_and(|s| s == rules) {
+        return Ok(());
+    }
+    std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+    std::fs::write(path, rules)
 }
 
 /// A path as a permission rule names it: `~/` as is, an absolute path in the `//` form.
@@ -103,14 +155,51 @@ fn fake_from_env() -> Option<fake::Fake> {
     ))
 }
 
-/// The module named `name` (a `run_launch.agent`). `claude_code` is added in M4.
+/// `<share>/makiba`, the entry point the role hooks run (spec section 2): a link to this binary.
+/// A link to another file is pointed here; a file that is not a link is the person's and is kept.
+pub fn link_entry_point() -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let link = crate::cli::share_dir().join("makiba");
+    match std::fs::symlink_metadata(&link) {
+        Ok(m) if !m.file_type().is_symlink() => return Ok(()),
+        Ok(_) if std::fs::read_link(&link).is_ok_and(|t| t == exe) => return Ok(()),
+        Ok(_) => std::fs::remove_file(&link)?,
+        Err(_) => std::fs::create_dir_all(crate::cli::share_dir())?,
+    }
+    std::os::unix::fs::symlink(exe, link)
+}
+
+/// `name` as `PATH` finds it, as `makiba up` runs it, made absolute: the agent starts in its
+/// workplace, where a relative entry of `PATH` would name another file.
+pub fn on_path(name: &str) -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    std::env::var_os("PATH")
+        .iter()
+        .flat_map(std::env::split_paths)
+        .map(|d| d.join(name))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .and_then(|p| std::path::absolute(p).ok())
+}
+
+/// The module named `name` (a `run_launch.agent`).
 pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
-    // Without the seam the test agent has no program: it can write settings, not be launched.
-    (name == "fake").then(|| {
-        Box::new(
-            fake_from_env().unwrap_or_else(|| fake::Fake::new(Path::new(""), Path::new(""), &[])),
-        ) as _
-    })
+    match name {
+        // Without the seam the test agent has no program: it can write settings, not be launched.
+        "fake" => {
+            Some(Box::new(fake_from_env().unwrap_or_else(|| {
+                fake::Fake::new(Path::new(""), Path::new(""), &[])
+            })))
+        }
+        // ponytail: `secretary.remote_control` has no store yet and only workers are launched.
+        "claude_code" => Some(Box::new(claude_code::ClaudeCode::new(
+            &on_path("claude").unwrap_or_else(|| PathBuf::from("claude")),
+            &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("makiba")),
+            false,
+        ))),
+        _ => None,
+    }
 }
 
 /// Whether a launch of `name` can be started: the test agent only when `MAKIBA_FAKE_AGENT` gives
@@ -130,10 +219,12 @@ pub fn mcp_config(door: &DoorAccess) -> String {
     .to_string()
 }
 
-/// The per-task settings file both modules write: sandbox on with no way around it, the write
-/// surface of `task`, and its denies, for Bash by the sandbox and for the Read and Edit tools
-/// (which run outside it) by permission rules. No Unix socket path is allowed: it does nothing on
-/// Linux (P1); agents reach `makibad` by the MCP configuration (M3-4).
+/// The per-task settings file both modules write: the role's settings when `task` names a role,
+/// with sandbox on and no way around it, the write surface of `task`, and its denies added, for
+/// Bash by the sandbox and for the Read and Edit tools (which run outside it) by permission
+/// rules. One file, passed as `--settings`: the form probe P7 measured under
+/// `--setting-sources project,local`. No Unix socket path is allowed: it does nothing on Linux
+/// (P1); agents reach `makibad` by the MCP configuration (M3-4).
 fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
     let shown =
         |ps: &[PathBuf]| -> Vec<String> { ps.iter().map(|p| p.display().to_string()).collect() };
@@ -148,20 +239,38 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
         .chain(task.deny_files.iter().map(|f| rule_path(f)));
     let rules: Vec<String> = targets
         .flat_map(|t| [format!("Read({t})"), format!("Edit({t})")])
+        .chain(
+            task.deny_write_dirs
+                .iter()
+                .map(|d| format!("Edit({}/**)", rule_path(d))),
+        )
         .collect();
-    let settings = serde_json::json!({
-        "permissions": {"deny": rules},
-        "sandbox": {
-            "enabled": true,
-            "failIfUnavailable": true,
-            "allowUnsandboxedCommands": false,
-            "filesystem": {
-                "allowWrite": shown(&task.write_dirs),
-                "denyRead": denied,
-                "denyWrite": denied,
-            },
-        },
-    });
+    let mut settings: serde_json::Value = match task.role.and_then(role_files) {
+        Some((_, role)) => serde_json::from_str(role).map_err(io::Error::other)?,
+        None => serde_json::json!({}),
+    };
+    // Each list keeps the role's entries and gains the task's that it does not hold yet.
+    let add = |list: &mut serde_json::Value, more: Vec<String>| {
+        if !list.is_array() {
+            *list = serde_json::json!([]);
+        }
+        let list = list.as_array_mut().expect("an array");
+        for m in more {
+            if !list.iter().any(|v| v.as_str() == Some(&m)) {
+                list.push(m.into());
+            }
+        }
+    };
+    add(&mut settings["permissions"]["deny"], rules);
+    let sandbox = &mut settings["sandbox"];
+    sandbox["enabled"] = true.into();
+    sandbox["failIfUnavailable"] = true.into();
+    sandbox["allowUnsandboxedCommands"] = false.into();
+    let fs = &mut sandbox["filesystem"];
+    fs["allowWrite"] = shown(&task.write_dirs).into();
+    add(&mut fs["denyRead"], denied.clone());
+    add(&mut fs["denyWrite"], denied);
+    add(&mut fs["denyWrite"], shown(&task.deny_write_dirs));
     std::fs::write(path, format!("{settings}\n"))
 }
 
