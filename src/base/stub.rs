@@ -287,7 +287,7 @@ impl Base for Stub {
     fn worker_denies(&self) -> BaseDenies {
         BaseDenies {
             commands: ["hc", "herdr-core", "herdr-app"].map(String::from).into(),
-            sockets: Vec::new(),
+            resolved: Vec::new(),
             folders: Vec::new(),
         }
     }

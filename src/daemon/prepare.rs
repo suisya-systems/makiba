@@ -194,7 +194,7 @@ impl Prepare {
         let settings = TaskSettings {
             role: Some(Role::Worker),
             write_dirs: vec![workplace, std::env::temp_dir()],
-            deny_dirs: absolute([&self.denies.sockets[..], &self.denies.folders[..]].concat())?,
+            deny_dirs: absolute([&self.denies.resolved[..], &self.denies.folders[..]].concat())?,
             deny_files: absolute(vec![
                 crate::cli::person_key_path(),
                 PathBuf::from(&state_db),
@@ -400,7 +400,7 @@ mod tests {
             state_db: PathBuf::from("rel-state/state.db"),
         };
         let denies = BaseDenies {
-            sockets: vec![PathBuf::from("rel-run/base")],
+            resolved: vec![PathBuf::from("rel-run/base")],
             folders: vec![PathBuf::from("~/.config/the-base")],
             ..Default::default()
         };

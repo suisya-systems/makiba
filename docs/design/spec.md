@@ -321,7 +321,7 @@ pub trait Base: Send + Sync {
     fn end(&self, t: &TerminalRef) -> Result<(), BaseError>;         // kill and remove
     fn events(&self) -> Result<EventStream, BaseError>;              // its own connection; section 6.5
     fn start(&self) -> Result<(), BaseError>;                        // makiba up: start the base's own place if needed
-    fn worker_denies(&self) -> BaseDenies;                           // commands, sockets and folders a role must not reach
+    fn worker_denies(&self) -> BaseDenies;                           // commands, resolved paths and folders a role must not reach
 }
 
 /// Never ends while the process runs: the implementation reconnects by itself and yields a Resync.
@@ -372,7 +372,7 @@ Errors are one enum, `BaseError`, with a variant per case the dispatcher decides
 | `events` | `events.subscribe`; `seq` restarts per core process; a missed-events notice exists. | A subscription was not found in the CLI guide. If there is none, poll `list` every 2 s and derive events from the difference. |
 | `start` | Start the session's core with a `config.toml` holding `notes = false`. | Use the running Orca or `orca serve`; turn off what puts Orca's rules into agents. |
 | Notices to the person | None. Stage 2 builds them, from the secretary and the pending table only. | Orca notifies the phone when any agent needs input or a terminal rings its bell. Workers' terminals would have to be silenced so that only the secretary's notify (requirement R2). Whether one terminal can be silenced: not found. |
-| `worker_denies` | The `hc`, `herdr-core`, `herdr-app` commands; `$XDG_RUNTIME_DIR/herdr-core/`; `~/.config/herdr-core`, `~/.config/herdr-app`, `~/.local/state/herdr-core`. | The `orca`, `orca-ide`, `orca-dev` commands; Orca's runtime socket and state folders (paths not recorded). |
+| `worker_denies` | The `hc`, `herdr-core`, `herdr-app` commands; `$XDG_RUNTIME_DIR/herdr-core/`; `~/.config/herdr-core`, `~/.config/herdr-app`, `~/.local/state/herdr-core`; the base's configuration folder of section 2, at `~/.config/makiba/base` and where `makiba up` resolves it. | The `orca`, `orca-ide`, `orca-dev` commands; Orca's runtime socket and state folders (paths not recorded). |
 
 The right-hand column is what was read, not what was run. It is here to show that the interface can be met by a second base. Before any Orca code is written, the checks of probes.md section 3 replace every "not found" and "not known" with a measured answer.
 

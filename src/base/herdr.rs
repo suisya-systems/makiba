@@ -41,19 +41,22 @@ pub fn socket_path(runtime_dir: Option<&Path>, session: &str) -> PathBuf {
         .join(format!("{session}.sock"))
 }
 
-/// The commands, the socket folder and the folders of herdr-core (spec section 6.2).
-pub fn denies(runtime_dir: Option<&Path>) -> BaseDenies {
+/// The commands, the socket folder and the folders of herdr-core (spec section 6.2), and the
+/// configuration folder `start` gives the core: at its default place in `folders`, which the
+/// static role settings name, and at `config_home`, where it is resolved, with the socket folder.
+pub fn denies(runtime_dir: Option<&Path>, config_home: &Path) -> BaseDenies {
     let socket_dir = socket_path(runtime_dir, "x")
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_default();
     BaseDenies {
         commands: ["hc", "herdr-core", "herdr-app"].map(String::from).into(),
-        sockets: vec![socket_dir],
+        resolved: vec![socket_dir, config_home.to_path_buf()],
         folders: [
             "~/.config/herdr-core",
             "~/.config/herdr-app",
             "~/.local/state/herdr-core",
+            "~/.config/makiba/base",
         ]
         .map(PathBuf::from)
         .into(),

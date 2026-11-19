@@ -117,7 +117,7 @@ fn a_claude_code_run_is_launched_with_the_role_rules_and_both_sets_of_denies() {
     .unwrap();
     let denies = BaseDenies {
         commands: vec!["hc".into()],
-        sockets: vec![root.join("run/herdr-core")],
+        resolved: vec![root.join("run/herdr-core")],
         folders: vec![PathBuf::from("~/.config/herdr-core")],
     };
     // SAFETY: the only test of this binary, and no thread of it has started yet.
