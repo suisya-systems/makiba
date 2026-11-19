@@ -20,9 +20,8 @@
 use crate::agents::{self, DialogPolicy};
 use crate::base::{Base, BlockKind, State, Status, Terminal};
 use crate::db::Result;
-use crate::db::writer::{NewEvent, StateWriter};
+use crate::db::writer::StateWriter;
 use crate::spec::TAG_SPAWN;
-use serde_json::json;
 use std::collections::BTreeMap;
 use std::time::{Duration, Instant};
 
@@ -338,27 +337,10 @@ fn passed(w: &StateWriter, id: i64) -> Result<()> {
     Ok(())
 }
 
-/// Stage `failed` and `worker_spawn_failed`, together (spec section 10). The terminal is left.
+/// Stage `failed` and `worker_spawn_failed`, together (spec section 10), with the run and the
+/// notice of M3-6. The terminal is left.
 fn fail(w: &StateWriter, row: &Row, why: &str, screen: &[String]) -> Result<()> {
-    w.transaction(|w| {
-        w.append_event(&NewEvent {
-            kind: "worker_spawn_failed",
-            actor: Some("makibad"),
-            payload: Some(&json!({
-                "spawn_id": row.spawn,
-                "stage": "launched",
-                "reason": why,
-                "screen": screen.join("\n"),
-            })),
-            run_task_id: Some(&row.task),
-            ..Default::default()
-        })?;
-        w.conn().execute(
-            "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
-            rusqlite::params![row.id, why],
-        )?;
-        Ok(())
-    })
+    super::verify::fail(w, row.id, &row.task, &row.spawn, "launched", why, screen)
 }
 
 #[cfg(test)]

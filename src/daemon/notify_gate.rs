@@ -24,14 +24,15 @@ const fn d(send: bool, reason: &'static str) -> Decision {
     Decision { send, reason }
 }
 
-/// The gate for a notice about `kind` (an anomaly rule name, or `unknown_terminal`). The two
-/// anomalies about the secretary are told to the person, not to the secretary; every other known
-/// kind is actionable, and an unknown one is sent.
+/// The gate for a notice about `kind` (an anomaly rule name, `unknown_terminal`, or
+/// `worker_spawn_failed`). The two anomalies about the secretary are told to the person, not to
+/// the secretary; every other known kind is actionable, and an unknown one is sent.
 pub fn decide(kind: &str) -> Decision {
     match kind {
         "secretary_gone" | "secretary_still" => d(false, "person_only"),
         "blocked_question" | "blocked_permission" | "blocked_auth" | "error" | "gone"
         | "done_no_report" | "no_status" | "unknown_terminal" => d(true, "actionable"),
+        "worker_spawn_failed" => d(true, "actionable"),
         _ => d(true, "unknown_kind"),
     }
 }

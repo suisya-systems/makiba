@@ -186,6 +186,21 @@ impl Org {
         );
     }
 
+    /// Wait up to 20 seconds for `task`'s launch to reach one of `stages`.
+    fn reaches_one_of(&self, task: &str, stages: &[&str]) {
+        let until = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < until {
+            if self
+                .stage(task)
+                .is_some_and(|s| stages.contains(&s.as_str()))
+            {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        panic!("{task}: still {:?}", self.stage(task));
+    }
+
     /// What the test agent of `task` received, one row per key, and its choices.
     fn record(&self, task: &str) -> Vec<String> {
         std::fs::read_to_string(self.work.join(task).join("record"))
@@ -275,7 +290,8 @@ fn no_key_is_ever_sent_to_a_terminal_that_has_a_status() {
         ("t5", status_then(TRUST_STATUS, &channel(LINE_1, LINE_2))),
     ]);
     for task in ["t1", "t2", "t3", "t4"] {
-        org.reaches(task, "dialog_passed");
+        // An agent whose first status is `working` goes on to `verified` (M3-6).
+        org.reaches_one_of(task, &["dialog_passed", "verified"]);
     }
     a_while();
     for (task, line) in [
