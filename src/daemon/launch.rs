@@ -23,10 +23,10 @@
 //! starts the child, and a worker's terminal is named `w-<task_id>`: of the dead process's request
 //! and this one's, exactly one child runs. With none seen, this process launches with a new key and
 //! settles the keys by the outcome: a launch that returns revokes the keys the dead process left; a
-//! refusal while a terminal carries the `makiba.spawn` tag adopts that terminal, which carries a
-//! left key, so only this attempt's key is revoked. (ponytail: after several restarts in a row more
-//! than one left key stays live while one terminal holds one; none was delivered to a running
-//! child. Tighten by recording which key a terminal's argv carries.)
+//! refusal while a terminal carries the `makiba.spawn` tag adopts that terminal and revokes no key:
+//! it may carry this attempt's key (only the reply was lost) or a left one. (ponytail: the keys of
+//! the launch that the terminal does not carry stay live, several after restarts in a row; none
+//! was delivered to a running child. Tighten by recording which key a terminal's argv carries.)
 
 use crate::agents::{self, Agent, AgentLaunch, DoorAccess, Role};
 use crate::base::{Base, LaunchSpec};
@@ -254,19 +254,13 @@ impl Launch {
     }
 }
 
-/// A refused launch: up when a terminal with its `makiba.spawn` exists (a late one of a dead
-/// process: it carries a left key, so only `hash`, this attempt's, is revoked); down, with every
-/// key of the launch revoked, when the base lists none; unsure while the base cannot list.
+/// A refused launch: up when a terminal with its `makiba.spawn` exists (no key is revoked: the
+/// terminal may be this attempt's, when only the reply was lost, or a dead process's late one, and
+/// which key it carries is not known); down, with every key of the launch revoked, when the base
+/// lists none; unsure while the base cannot list.
 fn settle(w: &StateWriter, base: &dyn Base, row: &Row, hash: String, refused: String) -> Outcome {
     match base.list() {
-        Ok(ts) if ts.iter().any(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn)) => {
-            let _ = w.conn().execute(
-                "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                 WHERE key_sha256 = ?1",
-                [hash],
-            );
-            Outcome::Up
-        }
+        Ok(ts) if ts.iter().any(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn)) => Outcome::Up,
         Ok(_) => {
             let _ = super::resume::revoke_keys(w, &row.spawn);
             Outcome::Down(refused)
