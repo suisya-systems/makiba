@@ -152,6 +152,20 @@ fn fake_from_env() -> Option<fake::Fake> {
     ))
 }
 
+/// `<share>/makiba`, the entry point the role hooks run (spec section 2): a link to this binary.
+/// A link to another file is pointed here; a file that is not a link is the person's and is kept.
+pub fn link_entry_point() -> io::Result<()> {
+    let exe = std::env::current_exe()?;
+    let link = crate::cli::share_dir().join("makiba");
+    match std::fs::symlink_metadata(&link) {
+        Ok(m) if !m.file_type().is_symlink() => return Ok(()),
+        Ok(_) if std::fs::read_link(&link).is_ok_and(|t| t == exe) => return Ok(()),
+        Ok(_) => std::fs::remove_file(&link)?,
+        Err(_) => std::fs::create_dir_all(crate::cli::share_dir())?,
+    }
+    std::os::unix::fs::symlink(exe, link)
+}
+
 /// `name` as `PATH` finds it, as `makiba up` runs it, made absolute: the agent starts in its
 /// workplace, where a relative entry of `PATH` would name another file.
 pub fn on_path(name: &str) -> Option<PathBuf> {

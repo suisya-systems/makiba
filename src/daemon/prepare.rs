@@ -189,6 +189,7 @@ impl Prepare {
             agents::on_path("claude")
                 .ok_or("no `claude` program on PATH, where `makiba up` checked it")?;
             agents::write_rules(Role::Worker).map_err(|e| format!("the rules file: {e}"))?;
+            agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
         let settings = TaskSettings {
             role: Some(Role::Worker),
