@@ -88,20 +88,17 @@ fn upgrading_the_base_names_the_test_and_the_probes() {
 
 #[test]
 fn a_claude_version_inside_the_range_is_accepted() {
-    assert!(agent_version::check("2.1.326 (Claude Code)").is_ok());
-    assert!(agent_version::check("2.1.326\n").is_ok());
+    let (a, b, c) = agent_version::LOWEST;
+    assert!(agent_version::check(&format!("{a}.{b}.{c} (Claude Code)")).is_ok());
+    assert!(agent_version::check(&format!("{a}.{b}.{c}\n")).is_ok());
 }
 
 #[test]
 fn a_claude_version_outside_the_range_or_unparsable_is_refused() {
-    for text in [
-        "2.1.318 (Claude Code)",
-        "2.1.327 (Claude Code)",
-        "3.0.0",
-        "",
-        "claude",
-        "2.1",
-    ] {
+    let (lo, hi) = (agent_version::LOWEST, agent_version::HIGHEST);
+    let below = format!("{}.{}.{} (Claude Code)", lo.0, lo.1, lo.2 - 1);
+    let above = format!("{}.{}.{} (Claude Code)", hi.0, hi.1, hi.2 + 1);
+    for text in [below.as_str(), above.as_str(), "3.0.0", "", "claude", "2.1"] {
         let err = agent_version::check(text).expect_err(text).to_string();
         assert!(
             err.contains(&format!("{text:?}")) || err.contains(text),
