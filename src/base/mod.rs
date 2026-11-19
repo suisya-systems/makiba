@@ -33,6 +33,14 @@ pub fn connect_session_as(session: &str, timeout: Duration, org: &str) -> Box<dy
     )
 }
 
+/// What a role must not reach on the real base (spec section 6.2): its commands, its socket folder
+/// and its folders. The real base's `Base::worker_denies` returns the same; the hook
+/// `makiba hook deny-base` and the role settings are checked against it.
+pub fn worker_denies() -> BaseDenies {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    herdr::denies(runtime.as_deref())
+}
+
 /// The real base of `session`, at `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`.
 pub fn connect_session(session: &str, timeout: Duration) -> Box<dyn Base> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
@@ -157,8 +165,12 @@ pub type EventStream = Box<dyn Iterator<Item = BaseEvent> + Send>;
 /// What a role must not reach: commands, socket paths and folders (spec section 6.2).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct BaseDenies {
+    /// Command names, matched as a command word or as the last component of its path.
     pub commands: Vec<String>,
+    /// Resolved in this process. A static role file cannot name them; the per-task settings
+    /// written at launch do (M4-2).
     pub sockets: Vec<PathBuf>,
+    /// In the `~/` form Claude Code's permission rules and sandbox paths both read as the home.
     pub folders: Vec<PathBuf>,
 }
 
