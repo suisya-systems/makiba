@@ -389,8 +389,8 @@ mod tests {
             state_db: PathBuf::from("rel-state/state.db"),
         };
         let denies = BaseDenies {
-            sockets: vec![PathBuf::from("rel-run/herdr-core")],
-            folders: vec![PathBuf::from("~/.config/herdr-core")],
+            sockets: vec![PathBuf::from("rel-run/base")],
+            folders: vec![PathBuf::from("~/.config/the-base")],
             ..Default::default()
         };
         let l = Launch {
@@ -416,13 +416,13 @@ mod tests {
             .filter_map(|p| p.as_str())
             .collect();
         for want in [
-            cwd.join("rel-run/herdr-core"),
+            cwd.join("rel-run/base"),
             cwd.join("rel-state/state.db"),
             cwd.join("rel-state/state.db-wal"),
         ] {
             assert!(denied.contains(&&*want.to_string_lossy()), "{text}");
         }
-        assert!(denied.contains(&"~/.config/herdr-core"), "{text}");
+        assert!(denied.contains(&"~/.config/the-base"), "{text}");
         assert!(
             denied
                 .iter()
