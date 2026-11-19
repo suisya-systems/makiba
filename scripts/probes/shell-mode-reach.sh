@@ -179,7 +179,7 @@ PY
 launch_run() { # launch_run <task> <scrub 0|1>
   TASK=$1; T=w-$TASK; WP=$DOCS/$TASK; SETTINGS=$STATE/settings/$TASK.json
   local spawn=spawn-$TASK-$$ st="" i=0
-  { echo "SHIMTASK=$TASK"; [ "$2" = 1 ] && echo "export CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"; } > "$WORK/shim.env"
+  { echo "SHIMTASK=$TASK"; if [ "$2" = 1 ]; then echo "export CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1"; else echo "unset CLAUDE_CODE_SUBPROCESS_ENV_SCRUB"; fi; } > "$WORK/shim.env"   # B unsets it: the invoking shell may export it
   sql "INSERT INTO projects (slug, display_name) VALUES ('probe', 'probe')" >/dev/null
   sql "INSERT INTO runs (task_id, project_id, pattern, title, status, verification) VALUES (?, (SELECT id FROM projects WHERE slug = 'probe'), 'B', ?, 'queued', 'standard')" "$TASK" "$TASK" >/dev/null
   sql "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree) VALUES ((SELECT id FROM runs WHERE task_id = ?), ?, 'document', 'fake', 'probe', ?)" "$TASK" "$spawn" "$WP" >/dev/null
@@ -315,6 +315,8 @@ run_lines() { # run_lines <A|B>
   local nflag nhook
   nflag=$(grep -Eci 'details: \[|\[cyber\]|safeguards|usage policy' "$WORK/full-$k.txt")
   nhook=$(grep -Eci 'PreToolUse|hook' "$WORK/full-$k.txt")
+  cp -f "$WORK/full-$k.txt" "$OUTDIR/$PROBE-screen-$k.txt"   # the scratch folder is removed at the end
+  [ "$nflag" -eq 0 ] || { echo "---- safeguard-flag lines of $k"; grep -Ei 'details: \[|\[cyber\]|safeguards|usage policy' "$WORK/full-$k.txt" | head -n 10 | cut -c1-200; echo "----"; } >> "$RESULT"
   FLAGS="$FLAGS $k=$nflag"; FLAGTOTAL=$((FLAGTOTAL + nflag))
   say "OBSERVE hook-lines-$k: $nhook screen line(s) name PreToolUse or hook; first: $(grep -Ei 'PreToolUse|hook' "$WORK/full-$k.txt" | head -n 3 | cut -c1-160 | tr '\n' '|')"
   say "OBSERVE model-answered-$k:$(printf '%s' "$ANSWERED" | tr ' ' '\n' | grep "^$k-" | tr '\n' ' ') (1 = a model line followed the output; respondToBashCommands was not set)"
