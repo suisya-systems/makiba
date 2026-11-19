@@ -46,7 +46,8 @@ struct Row {
     stage: String,
     agent: String,
     worktree: String,
-    /// The first working status or turn recorded with the launch's spawn id.
+    /// The first working status or turn recorded with the launch's spawn id within the timeout
+    /// (one recorded later does not count, even if a pass sees it before the launch is failed).
     evidence: Option<i64>,
     /// Milliseconds since the launch.
     waited: i64,
@@ -73,19 +74,23 @@ impl Verify {
         self.next = Instant::now() + EVERY;
         let rows: Vec<Row> = {
             let mut st = w.conn().prepare(
-                "SELECT l.id, r.id, r.task_id, l.spawn_id, l.stage, l.agent, l.worktree,
+                "SELECT id, run_id, task_id, spawn_id, stage, agent, worktree,
                    (SELECT min(e.id) FROM events e
-                    WHERE json_extract(e.payload_json, '$.spawn_id') = l.spawn_id
+                    WHERE json_extract(e.payload_json, '$.spawn_id') = spawn_id
                       AND (e.kind = 'terminal_turn' OR (e.kind = 'terminal_status'
-                           AND json_extract(e.payload_json, '$.state') = 'working'))),
-                   CAST((julianday('now') - julianday(COALESCE(
-                     (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
-                      AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id),
-                     l.created_at))) * 86400000 AS INTEGER)
-                 FROM run_launch l JOIN runs r ON r.id = l.run_id
-                 WHERE l.stage IN ('launched', 'dialog_passed') ORDER BY l.id",
+                           AND json_extract(e.payload_json, '$.state') = 'working'))
+                      AND julianday(e.occurred_at) <= julianday(launched) + ?1 / 86400000.0),
+                   CAST((julianday('now') - julianday(launched)) * 86400000 AS INTEGER)
+                 FROM (SELECT l.id, r.id AS run_id, r.task_id, l.spawn_id, l.stage, l.agent,
+                         l.worktree, COALESCE(
+                           (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
+                            AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id),
+                           l.created_at) AS launched
+                       FROM run_launch l JOIN runs r ON r.id = l.run_id
+                       WHERE l.stage IN ('launched', 'dialog_passed'))
+                 ORDER BY id",
             )?;
-            st.query_map([], |r| {
+            st.query_map([self.timeout.as_millis() as i64], |r| {
                 Ok(Row {
                     id: r.get(0)?,
                     run_id: r.get(1)?,
@@ -382,6 +387,25 @@ mod tests {
             1
         );
         assert!(stub.get(&TerminalRef("w-t1".into())).unwrap().alive);
+    }
+
+    /// Evidence recorded after the timeout does not verify: the launch fails.
+    #[test]
+    fn evidence_recorded_after_the_timeout_does_not_verify() {
+        let (_d, w) = org("dialog_passed", 10_000);
+        record(&w, "terminal_status", "s1", json!({"state": "working"}));
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.pass(&w, &Stub::new()).unwrap();
+        assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
+        // Recorded within it, the same evidence verifies however late the pass.
+        let (_d, w) = org("dialog_passed", 10_000);
+        record(&w, "terminal_status", "s1", json!({"state": "working"}));
+        let mut v = Verify::new(Duration::from_secs(60));
+        v.pass(&w, &Stub::new()).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "verified"
+        );
     }
 
     /// A dialog failure (M3-5) takes the same path: the run failed and the secretary told.
