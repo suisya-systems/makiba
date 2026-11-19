@@ -191,6 +191,8 @@ impl Prepare {
             agents::write_rules(Role::Worker).map_err(|e| format!("the rules file: {e}"))?;
             agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
+        // The worktree is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
+        let mcp_json = absolute(vec![workplace.join(".mcp.json")])?;
         let settings = TaskSettings {
             role: Some(Role::Worker),
             write_dirs: vec![workplace, std::env::temp_dir()],
@@ -202,6 +204,7 @@ impl Prepare {
                 PathBuf::from(format!("{state_db}-shm")),
             ])?,
             deny_write_dirs: vec![crate::cli::share_dir()],
+            deny_write_files: mcp_json,
         };
         agent
             .write_task_settings(
