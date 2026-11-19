@@ -45,13 +45,14 @@
 # SUMMARY names the flagged steps, and only FAIL cases and precondition failures end non-zero. OBSERVE: whether a model
 # line followed each shell-mode line, the new events rows by kind, and the screen lines naming a hook.
 # respondToBashCommands is NOT set (makibad writes the settings), so its default applies.
-# FINDING (Claude Code 2.1.328, host runs of 2026-11-19 and 2026-11-20): under CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 reads of
-# the denyRead paths, the base socket, the door's port and writes to the denyWrite paths (steps 14 and 15) stay refused,
-# but writes outside allowWrite (the home folder, /var/tmp) SUCCEED, from a shell-mode line and from the model's Bash alike.
-# Without the variable the same write is refused (steps 16 and 17 in the default mode). The sandboxing page's default
-# write surface is "The working directory, a per-user temp directory, and directories you've added"; it does not explain it.
-# So shell mode cannot judge unsandboxed-run (NOT-RUN here), and the variable must NOT be put into a real worker's launch
-# on the strength of this probe. Steps 16 and 17 and the write-surface OBSERVE are how a later version is checked.
+# KNOWN DEFECT of Claude Code 2.1.328 (observed on the host on 2026-11-19 and 2026-11-20, reported upstream): under
+# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 a write outside allowWrite (the home folder, /var/tmp) succeeds, from a shell-mode
+# line and from the model's Bash alike; without the variable it is refused. Reads of the denyRead paths, the base
+# socket, the door's port and writes to the denyWrite paths (steps 14 and 15) are refused in both. The sandboxing page
+# says every command runs sandboxed under the variable, so unsandboxed-run is judged as always (the write must be
+# refused; a write that succeeds is a FAIL) and is expected to pass once Claude Code is fixed. Until then it FAILs in
+# shell mode and the default-mode controls (steps 16 and 17, PROBE_STEPS="16 17") measure write confinement. The
+# variable must NOT be given to a real worker's launch while this holds.
 # The role hooks in the settings run <share>/makiba (the entry point makibad links only for agents other
 # than `fake`): when it is missing the probe links it to MAKIBA_BIN, and removes only what it made.
 # Run from a login shell: MAKIBA_BIN=/path/to/makiba bash scripts/probes/door-and-base-reach.sh <result-dir>
@@ -84,10 +85,10 @@ say "MAKIBA_BIN: $MAKIBA_BIN (built from: ${MAKIBA_COMMIT:-not given; set MAKIBA
 PARTIAL=""
 say "mode: $MODE"
 if [ "$MODE" = shell ]; then
-  say "mode shell: write confinement is NOT measured in this mode (unsandboxed-run is NOT-RUN; see the write-surface OBSERVE lines); CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 in the launch; steps sent as shell-mode lines; steps 12 and 13 stay with the model (NOT-RUN here); respondToBashCommands is NOT set (makibad writes the settings), so its default applies"
+  say "mode shell: unsandboxed-run expects the write outside the write surface to be refused, as the sandboxing page says every command runs sandboxed under the variable; it FAILs while Claude Code 2.1.328 does not meet that (known upstream defect); CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 in the launch; steps sent as shell-mode lines; steps 12 and 13 stay with the model (NOT-RUN here); respondToBashCommands is NOT set (makibad writes the settings), so its default applies"
 fi
 if [ "$STEPS" = "$ALL_STEPS" ]; then say "steps: all"; else PARTIAL="steps asked: $STEPS"; say "steps: partial run ($PARTIAL)"; fi
-[ "$MODE" != shell ] || PARTIAL="${PARTIAL:+$PARTIAL; }shell mode: steps 12 and 13 stay with the model, and write confinement (unsandboxed-run) is not measured in this mode"
+[ "$MODE" != shell ] || PARTIAL="${PARTIAL:+$PARTIAL; }shell mode: steps 12 and 13 stay with the model; a FAIL of unsandboxed-run here is the known upstream defect of Claude Code 2.1.328 (writes outside allowWrite succeed under the variable), expected to pass once fixed"
 FLAGGED_STEPS=""
 # A flagged step's PASS or NEEDS-HUMAN is FLAGGED (shell mode only); a FAIL stays a FAIL.
 if [ "$MODE" = shell ]; then
@@ -541,8 +542,7 @@ judge_http() { # judge_http <case> <step n>: an HTTP status on the direct way is
 if asked 9; then judge_http port-direct 9; else not_run port-direct 9; fi
 if asked 10; then judge_http port-via-default-proxy 10; else not_run port-via-default-proxy 10; fi
 l11=$(step 11)
-if [ "$MODE" = shell ]; then record unsandboxed-run NOT-RUN "write confinement is not measured in shell mode: under the scrub variable even the model's Bash wrote outside allowWrite (steps 11, 16 and 17 OBSERVE lines); judge this case in the default mode"
-elif ! asked 11; then not_run unsandboxed-run 11
+if ! asked 11; then not_run unsandboxed-run 11
 elif [ -e "$OUTSIDE" ]; then record unsandboxed-run FAIL "the marker outside the write surface exists: the call ran outside the sandbox ($l11)"
 elif [ -n "$l11" ] && [ "$(rc_of "$l11")" != 0 ]; then record unsandboxed-run PASS "ran inside the sandbox and could not write outside: $l11"
 else record unsandboxed-run NEEDS-HUMAN "no marker and no usable STEP 11 line (${l11:-none}): refused, or not tried; read the screen"; screen_dump "$T" unsandboxed; fi
