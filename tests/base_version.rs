@@ -96,7 +96,7 @@ fn a_claude_version_inside_the_range_is_accepted() {
 fn a_claude_version_outside_the_range_or_unparsable_is_refused() {
     for text in [
         "2.1.318 (Claude Code)",
-        "2.1.327 (Claude Code)",
+        "2.1.329 (Claude Code)",
         "3.0.0",
         "",
         "claude",
