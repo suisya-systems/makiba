@@ -63,6 +63,9 @@ pub struct TaskSettings {
     /// the person key file and `state.db`, resolved when the settings are written.
     pub deny_dirs: Vec<PathBuf>,
     pub deny_files: Vec<PathBuf>,
+    /// Folders denied for write only: the share folder as resolved, whose entry point the role
+    /// hooks run (the role's settings name only its default place).
+    pub deny_write_dirs: Vec<PathBuf>,
     /// The role whose `roles/<role>/settings.json` the file is written on top of (Issue 134).
     pub role: Option<Role>,
 }
@@ -236,6 +239,11 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
         .chain(task.deny_files.iter().map(|f| rule_path(f)));
     let rules: Vec<String> = targets
         .flat_map(|t| [format!("Read({t})"), format!("Edit({t})")])
+        .chain(
+            task.deny_write_dirs
+                .iter()
+                .map(|d| format!("Edit({}/**)", rule_path(d))),
+        )
         .collect();
     let mut settings: serde_json::Value = match task.role.and_then(role_files) {
         Some((_, role)) => serde_json::from_str(role).map_err(io::Error::other)?,
@@ -262,6 +270,7 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
     fs["allowWrite"] = shown(&task.write_dirs).into();
     add(&mut fs["denyRead"], denied.clone());
     add(&mut fs["denyWrite"], denied);
+    add(&mut fs["denyWrite"], shown(&task.deny_write_dirs));
     std::fs::write(path, format!("{settings}\n"))
 }
 

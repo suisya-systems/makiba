@@ -201,6 +201,7 @@ impl Prepare {
                 PathBuf::from(format!("{state_db}-wal")),
                 PathBuf::from(format!("{state_db}-shm")),
             ])?,
+            deny_write_dirs: vec![crate::cli::share_dir()],
         };
         agent
             .write_task_settings(

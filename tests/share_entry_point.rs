@@ -69,6 +69,24 @@ fn a_claude_code_launch_links_the_entry_point_and_the_test_agent_writes_nothing(
     taken(&w, &root, "t-cc", "claude_code");
     assert_eq!(prepare.pass(&w).unwrap(), ["t-cc"]);
     assert_eq!(std::fs::read_link(&link).unwrap(), exe);
+    // The share folder as resolved is denied for write, wherever it is.
+    let text = std::fs::read_to_string(root.join("settings/t-cc.json")).unwrap();
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    let share_s = share.to_string_lossy();
+    let named = |list: &serde_json::Value, want: &str| {
+        list.as_array()
+            .unwrap()
+            .iter()
+            .any(|x| x.as_str() == Some(want))
+    };
+    assert!(
+        named(&v["sandbox"]["filesystem"]["denyWrite"], &share_s),
+        "{text}"
+    );
+    assert!(
+        named(&v["permissions"]["deny"], &format!("Edit(/{share_s}/**)")),
+        "{text}"
+    );
 
     std::fs::remove_file(&link).unwrap();
     std::os::unix::fs::symlink(root.join("elsewhere"), &link).unwrap();
