@@ -152,7 +152,8 @@ fn fake_from_env() -> Option<fake::Fake> {
     ))
 }
 
-/// `name` as `PATH` finds it, as `makiba up` runs it.
+/// `name` as `PATH` finds it, as `makiba up` runs it, made absolute: the agent starts in its
+/// workplace, where a relative entry of `PATH` would name another file.
 pub fn on_path(name: &str) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     std::env::var_os("PATH")
@@ -162,6 +163,7 @@ pub fn on_path(name: &str) -> Option<PathBuf> {
         .find(|p| {
             std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
         })
+        .and_then(|p| std::path::absolute(p).ok())
 }
 
 /// The module named `name` (a `run_launch.agent`).
