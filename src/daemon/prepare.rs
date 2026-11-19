@@ -74,6 +74,7 @@ struct Launch {
     agent: String,
     stage: String,
     worktree: String,
+    spawn: String,
 }
 
 impl Prepare {
@@ -82,13 +83,14 @@ impl Prepare {
     }
 
     /// One pass: moves every taken launch still `planned` or `worktree_ready` as far as it goes.
-    /// Returns the task ids that reached `settings_ready`. A launch that cannot be prepared is
-    /// `failed` with the reason (ponytail: its run stays as it is; M3-7 owns the recovery).
+    /// Returns the task ids that reached `settings_ready`. A launch that cannot be prepared goes
+    /// through the failure path of M3-6 (Issue 124): `worker_spawn_failed` with the stage and the
+    /// reason, the launch and its run `failed`, and a notice to the secretary, in one transaction.
     pub fn pass(&self, w: &StateWriter) -> Result<Vec<String>> {
         let launches: Vec<Launch> = {
             let mut st = w.conn().prepare(
                 "SELECT l.id, r.task_id, p.slug, COALESCE(p.default_branch, 'main'),
-                        r.branch, l.kind, l.agent, l.stage, l.worktree
+                        r.branch, l.kind, l.agent, l.stage, l.worktree, l.spawn_id
                  FROM run_launch l JOIN runs r ON r.id = l.run_id
                  JOIN projects p ON p.id = r.project_id
                  WHERE l.stage IN ('planned', 'worktree_ready')
@@ -107,6 +109,7 @@ impl Prepare {
                     agent: r.get(6)?,
                     stage: r.get(7)?,
                     worktree: r.get(8)?,
+                    spawn: r.get(9)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -116,10 +119,13 @@ impl Prepare {
             match self.prepare(w, &l) {
                 Ok(()) => ready.push(l.task),
                 Err(why) => {
-                    w.conn().execute(
-                        "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
-                        rusqlite::params![l.id, why],
+                    // The stage it got to: `prepare` may have moved it past the one read.
+                    let stage: String = w.conn().query_row(
+                        "SELECT stage FROM run_launch WHERE id = ?1",
+                        [l.id],
+                        |r| r.get(0),
                     )?;
+                    super::verify::fail(w, l.id, &l.task, &l.spawn, &stage, &why, &[])?;
                 }
             }
         }
@@ -325,6 +331,7 @@ mod tests {
             agent: "fake".into(),
             stage: "planned".into(),
             worktree: other.to_string_lossy().into(),
+            spawn: "s".into(),
         };
         let why = Prepare::new(places).add_worktree(&l, &other).unwrap_err();
         assert!(why.contains("not a clean worktree"), "{why}");
