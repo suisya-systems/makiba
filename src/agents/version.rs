@@ -7,8 +7,9 @@ use std::fmt;
 
 /// The supported range, as written in messages.
 pub const SUPPORTED: &str = ">=2.1.326,<=2.1.328";
-const LOWEST: (u64, u64, u64) = (2, 1, 326);
-const HIGHEST: (u64, u64, u64) = (2, 1, 328);
+/// The lowest and highest supported version. Public so that tests build the edges from them.
+pub const LOWEST: (u64, u64, u64) = (2, 1, 326);
+pub const HIGHEST: (u64, u64, u64) = (2, 1, 328);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentVersionError {
