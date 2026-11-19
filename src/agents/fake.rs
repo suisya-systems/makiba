@@ -77,14 +77,7 @@ impl Agent for Fake {
     /// Sandbox on, the write surface of `task`. No Unix socket path is allowed: it does nothing
     /// on Linux (P1); agents reach `makibad` by the MCP configuration (M3-4).
     fn write_task_settings(&self, path: &Path, task: &TaskSettings) -> io::Result<()> {
-        let dirs: Vec<_> = task
-            .write_dirs
-            .iter()
-            .map(|d| d.display().to_string())
-            .collect();
-        let settings =
-            serde_json::json!({"sandbox": {"enabled": true, "filesystem": {"allowWrite": dirs}}});
-        std::fs::write(path, format!("{settings}\n"))
+        super::write_sandbox_settings(path, task)
     }
 
     fn conversation_id(&self, _worktree: &Path) -> Option<String> {
