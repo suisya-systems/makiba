@@ -94,11 +94,10 @@ fn a_claude_version_inside_the_range_is_accepted() {
 }
 
 #[test]
-fn a_claude_version_outside_the_range_or_unparsable_is_refused() {
-    let (lo, hi) = (agent_version::LOWEST, agent_version::HIGHEST);
+fn a_claude_version_below_the_range_or_unparsable_is_refused() {
+    let lo = agent_version::LOWEST;
     let below = format!("{}.{}.{} (Claude Code)", lo.0, lo.1, lo.2 - 1);
-    let above = format!("{}.{}.{} (Claude Code)", hi.0, hi.1, hi.2 + 1);
-    for text in [below.as_str(), above.as_str(), "3.0.0", "", "claude", "2.1"] {
+    for text in [below.as_str(), "1.0.0", "", "claude", "2.1"] {
         let err = agent_version::check(text).expect_err(text).to_string();
         assert!(
             err.contains(&format!("{text:?}")) || err.contains(text),

@@ -1,49 +1,36 @@
-# Upgrading the supported Claude Code versions
+# Claude Code versions
 
-makiba supports the Claude Code versions in `SUPPORTED` of [`src/agents/version.rs`](../src/agents/version.rs) (now `>=2.1.326,<=2.1.328`) and checks the text `claude --version` prints against it. It is a separate constant from the base's ([upgrading-the-base.md](upgrading-the-base.md)), because Claude Code is not behind the seam and updates itself. The check at `makiba up` is M4-4's.
+makiba has no upper bound on Claude Code's version. `makiba up` reads the text `claude --version` prints and checks it against the constants of [`src/agents/version.rs`](../src/agents/version.rs):
 
-The range runs from the lowest to the highest version that a recorded run of the probes covers (the `claude --version` column of `docs/design/probes.md`, section 4 Results), and no wider.
+- `LOWEST` (`SUPPORTED`, now `>=2.1.326`): a version below it is refused.
+- `REFUSED`: versions refused by name, each with a one-line reason (empty today). `makiba up` refuses a listed version and prints the reason.
+- `NEWEST_CHECKED` (now 2.1.328): the newest version the organisation has run the probes on. It is information, not a bound: when the version found is newer, `makiba up` prints one line saying so and goes on.
+- A text that cannot be read as a version is refused.
 
-## When the range moves
+The reason for no upper bound: Claude Code updates itself, several times a week, and a user cannot choose its version, unlike the base's ([upgrading-the-base.md](upgrading-the-base.md)), whose release makiba installs. What an upper bound would catch is mostly caught already at launch: a startup dialog that is not on the list fails the launch with the screen recorded, and a launch that does not start working fails its verification. What it alone would catch is a version whose sandbox settings silently mean less. That is guarded where it stops nobody: the organisation runs the probes on new versions, and a bad one is refused by name.
 
-Claude Code releases more often than the base, so the range moves only after the owner has rerun the following on the new version:
+## A person who installs makiba
 
-- Probes P1, P3, P4, P5 and P7 to P11 of `docs/design/probes.md` (P7, P8, P9, P10, P11 included).
-- paddock's carried probes, listed in probes.md section 1.
-- The runbook of M4-5, `docs/runbooks/first-worker.md`, once.
-- P6 only when `secretary.remote_control` is on.
+Does nothing. Claude Code may update at any time; `makiba up` accepts it.
 
-The startup-dialog and prompt tests of M3-5 and M6-8 use the test agent and cannot show a change in the real screens. These reruns can.
+## When a new version appears
 
-## How
+The organisation, on a host that runs the pinned base:
 
-1. Install the new version on a host that runs the pinned base.
-2. Run the reruns above and add their rows to the Results table of probes.md, with the `claude --version` text.
-3. Change `SUPPORTED`, `LOWEST` and `HIGHEST` in `src/agents/version.rs` to the lowest and highest version the Results table now covers.
+1. Run the reach probe in shell mode (`PROBE_MODE=shell`), then the default-mode steps that its README names for what shell mode does not cover ([`scripts/probes/README.md`](../scripts/probes/README.md): the Read and Edit tool steps, and the steps it names for `unsandboxed-run`).
+2. Record the result as a row in the Results table of [`docs/design/probes.md`](design/probes.md) (section 4), with the `claude --version` text. When the probes of that file are rerun as well (P1, P3, P4, P5, P7, P8, P9, P10, P11, and P6 only when `secretary.remote_control` is on; paddock's carried probes are listed in probes.md section 1), their rows go there too. The first-worker runbook, `docs/runbooks/first-worker.md` (M4-5), is run once when a person judges that the change calls for it.
+3. Move `NEWEST_CHECKED` in `src/agents/version.rs` to the version. No test needs an edit: the tests build their versions from the constants.
 
-## What a move of the range touches
+Until step 3, `makiba up` prints its one line on that version and starts as usual.
 
-- The three constants in `src/agents/version.rs`.
-- The row for the new version in `docs/design/probes.md`.
-- The declared test of Issue 153, `tests/claude_range_153.rs`, when the versions it lists change. It names 2.1.326 to 2.1.328 on purpose and is never edited: once 2.1.329 enters the range it fails, and that failure is the signal to look at it (the owner decides whether it is retired or left as the record of that move).
+## A bad version
 
-Nothing else under `tests/` needs an edit. The tests that check the range (`tests/base_version.rs`, `tests/up.rs`, and `tests/range_boundary_154.rs` of Issue 154) build the lowest, the highest, one below and one above from `LOWEST` and `HIGHEST`.
+When a run finds a version whose sandbox or launch is worse than the last checked one, add it to `REFUSED` with a one-line reason that says what was found and where it is recorded (the Results row or the Issue). `makiba up` then refuses that version with the reason. Remove the entry when a later run shows the version fine, or leave it when the version is gone for good. Raising `LOWEST` is the same kind of change, for versions the organisation no longer supports.
 
-## The move to 2.1.328
+The tests of the refused list pass their own list to `check_with` and never add an entry to the shipped one, so adding a real entry needs no test edit.
 
-The range moved from 2.1.326 to 2.1.328 (Issue 153, 2026-11-20) on a **partial rerun**. This is an exception to the list above, made by the owner because the host was on 2.1.328 and the run of M4-5 (Issue 35) cannot start while `makiba up` refuses that version. It does not change the rule for later moves: a move to a version beyond 2.1.328 asks for the full list above.
+## History: the move to 2.1.328
 
-Rerun on 2.1.328 (rows in probes.md section 4):
+The range moved from 2.1.326 to 2.1.328 (Issue 153, 2026-11-20) on a partial rerun, because the host was on 2.1.328 and the run of M4-5 (Issue 35) could not start while `makiba up` refused it. Rerun on 2.1.328 (rows in probes.md section 4): P1 and P11 (M4-2, commit 4f95687); `door-and-base-reach` (13 of 13 cases before the role hooks were wired into the launch; steps 1 to 9 as before and steps 14 and 15 after Issue 144; steps 10 to 13 are tracked in Issue 150); `shell-mode-reach`. Not rerun: P3, P4, P5, P7 to P10 as their own probes, paddock's carried probes, and the first-worker runbook.
 
-- P1 and P11 (rerun, M4-2), commit 4f95687.
-- `door-and-base-reach`: 13 of 13 cases before the role hooks were wired into the launch; after Issue 144, steps 1 to 9 answered as before across two runs that the model's safeguards then stopped, and steps 14 and 15 passed in a partial run.
-- `shell-mode-reach`: shell-mode lines are sandboxed under the scrub variable.
-
-Not rerun on 2.1.328:
-
-- Steps 10 to 13 of `door-and-base-reach` since Issue 144 (tracked in Issue 150).
-- P3, P4, P5, P7, P8, P9 and P10 as their own probes (P7 to P10 last ran on 2.1.327).
-- paddock's carried probes.
-- The runbook of M4-5, which Issue 35 itself runs.
-
-Where the rest is tracked: Issue 150 (the reach probe is stopped by the model's safeguards at a different step each run), Issue 147 (following Claude Code versions without a person), Issue 35 (the first real worker).
+Issue 160 (2026-11-20) replaced the upper bound with this rule; it also closed Issue 147, whose automatic check was not built.

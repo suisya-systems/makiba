@@ -33,7 +33,7 @@ Check each one; stop at the first that fails and say which.
 
 1. **Probe P1 passed.** `docs/design/probes.md` section 4 has the row `P1 (rerun, M4-2)`, PASS, 2026-11-19, hc 0.1.21, Claude Code 2.1.328, commit 4f95687. Write the commit and the row's date in the results.
 2. **A person's login shell, on the host, not inside an agent.** `env | grep -E '^(CLAUDE|HC_)'` prints nothing.
-3. **Versions in range.** `hc --version` is 0.1.21 (the supported range is `>=0.1.21,<0.1.22`, `src/base/version.rs`). `claude --version` is **2.1.326, 2.1.327 or 2.1.328**: the range in `src/agents/version.rs` is `>=2.1.326,<=2.1.328`, and `makiba up` refuses any other version. The range was widened to 2.1.328 on a partial rerun (`docs/upgrading-claude-code.md`, "The move to 2.1.328"), and this runbook is the rerun it left for this run (Issue 35); write the `claude --version` text in the results.
+3. **Versions.** `hc --version` is 0.1.21 (the supported range is `>=0.1.21,<0.1.22`, `src/base/version.rs`). `claude --version` is **2.1.326 or newer** (`>=2.1.326` in `src/agents/version.rs`; there is no upper bound, and `makiba up` refuses a version below it or one on its refused list, with the reason). A version newer than the newest checked one (2.1.328) makes `makiba up` print one line and go on; write the `claude --version` text in the results. The move to 2.1.328 was made on a partial rerun (`docs/upgrading-claude-code.md`, "History"), and this runbook is the rerun it left for this run (Issue 35).
 4. **`claude` is logged in.** Open `claude` once by hand in any folder; it must not ask to sign in. Quit it.
 5. **Programs on PATH:** `hc`, `claude`, `git`, `python3`, `sqlite3`, `curl`, `pgrep`, `sha256sum`. `cargo` to build.
 6. **A build of this commit:** `cargo build` in the repository, then `MK=$PWD/target/debug/makiba` and `COMMIT=$(git rev-parse --short HEAD)`. Write `COMMIT`, `hc --version` and `claude --version` in the results.
@@ -128,7 +128,7 @@ If it differs:
 | What you see | Meaning | Do |
 | --- | --- | --- |
 | `makiba: denied: <VAR> is set: this shell is inside an agent...` | an agent or a terminal of the base owns this shell | open a plain login shell; do not unset the variable by hand |
-| `makiba: unavailable: Claude Code version ... is not supported` | precondition 3 | stop; the owner decides |
+| `makiba: unavailable: Claude Code version ... is below the lowest supported version` or `... is refused: <reason>` | precondition 3 | stop; the owner decides |
 | `cannot start the base: ... set HC_BIN to the hc program` | `hc` not on PATH | set `HC_BIN` |
 | `cannot start the base: ... hc server start failed: ...` | the core did not start | read the text; run `hcs ls` to see if a core of this session exists |
 | `makibad exited at once` or `not subscribed ... after 20 s` | see the log | `tail "$MAKIBA_STATE_DIR/makibad.log"`; file an Issue with it |

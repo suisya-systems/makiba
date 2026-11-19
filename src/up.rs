@@ -37,7 +37,8 @@ fn unavailable<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> Failure + '_ {
     move |e| (ErrorKind::Unavailable, format!("{what}: {e}"))
 }
 
-/// `claude --version` must be inside the supported range.
+/// `claude --version` must be at or above the lowest supported version and not refused by name;
+/// a version newer than the newest checked one is said so in one line and accepted.
 fn check_claude() -> Result<(), Failure> {
     let out = Command::new("claude")
         .arg("--version")
@@ -49,12 +50,16 @@ fn check_claude() -> Result<(), Failure> {
             format!("`claude --version` failed: {}", out.status),
         ));
     }
-    version::check(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
+    let note = version::check(&String::from_utf8_lossy(&out.stdout)).map_err(|e| {
         (
             ErrorKind::Unavailable,
             format!("{e}; no secretary or worker is started"),
         )
-    })
+    })?;
+    if let Some(line) = note {
+        println!("claude: {line}");
+    }
+    Ok(())
 }
 
 /// Whether a `makibad` holds the lock of the state folder `dir`.
