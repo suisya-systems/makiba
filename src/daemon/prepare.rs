@@ -168,15 +168,29 @@ impl Prepare {
         // The person key where it is now (`MAKIBA_PERSON_KEY` may move it); SQLite's side files
         // hold the same rows as `state.db`.
         let state_db = self.places.state_db.display().to_string();
+        // A relative path (a relative `MAKIBA_PERSON_KEY`, `MAKIBA_STATE_DIR` or
+        // `XDG_RUNTIME_DIR`) would be read from the agent's folder: each is made absolute here,
+        // where it was meant. The `~/` form is the home's in both places and is kept.
+        let absolute = |ps: Vec<PathBuf>| -> std::result::Result<Vec<PathBuf>, String> {
+            ps.into_iter()
+                .map(|p| {
+                    if p.starts_with("~") {
+                        Ok(p)
+                    } else {
+                        std::path::absolute(&p).map_err(|e| format!("{}: {e}", p.display()))
+                    }
+                })
+                .collect()
+        };
         let settings = TaskSettings {
             write_dirs: vec![workplace, std::env::temp_dir()],
-            deny_dirs: [&self.denies.sockets[..], &self.denies.folders[..]].concat(),
-            deny_files: vec![
+            deny_dirs: absolute([&self.denies.sockets[..], &self.denies.folders[..]].concat())?,
+            deny_files: absolute(vec![
                 crate::cli::person_key_path(),
                 PathBuf::from(&state_db),
                 PathBuf::from(format!("{state_db}-wal")),
                 PathBuf::from(format!("{state_db}-shm")),
-            ],
+            ])?,
         };
         agent
             .write_task_settings(
@@ -360,5 +374,60 @@ mod tests {
             .add_worktree(&l, &other)
             .unwrap_err();
         assert!(why.contains("not a clean worktree"), "{why}");
+    }
+
+    /// A relative deny path is written absolute, as the daemon meant it; `~/` is kept.
+    #[test]
+    fn relative_deny_paths_are_written_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let places = Places {
+            workers: dir.path().join("workers"),
+            docs: dir.path().join("docs"),
+            repos: dir.path().join("repos"),
+            settings: dir.path().join("settings"),
+            state_db: PathBuf::from("rel-state/state.db"),
+        };
+        let denies = BaseDenies {
+            sockets: vec![PathBuf::from("rel-run/herdr-core")],
+            folders: vec![PathBuf::from("~/.config/herdr-core")],
+            ..Default::default()
+        };
+        let l = Launch {
+            id: 1,
+            task: "t".into(),
+            project: "p".into(),
+            default_branch: "main".into(),
+            branch: None,
+            kind: "document".into(),
+            agent: "fake".into(),
+            stage: "worktree_ready".into(),
+            worktree: dir.path().join("docs/t").to_string_lossy().into(),
+            spawn: "s".into(),
+        };
+        Prepare::new(places, denies).prepare(&w, &l).unwrap();
+        let text = std::fs::read_to_string(dir.path().join("settings/t.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let denied: Vec<&str> = v["sandbox"]["filesystem"]["denyRead"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|p| p.as_str())
+            .collect();
+        for want in [
+            cwd.join("rel-run/herdr-core"),
+            cwd.join("rel-state/state.db"),
+            cwd.join("rel-state/state.db-wal"),
+        ] {
+            assert!(denied.contains(&&*want.to_string_lossy()), "{text}");
+        }
+        assert!(denied.contains(&"~/.config/herdr-core"), "{text}");
+        assert!(
+            denied
+                .iter()
+                .all(|p| p.starts_with('/') || p.starts_with("~/")),
+            "{text}"
+        );
     }
 }
