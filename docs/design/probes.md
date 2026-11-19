@@ -78,7 +78,7 @@ Cause, read in the sources (not run): sandbox-runtime's README, section "Unix So
 
 What this changes: spec section 3 and M4-2 assumed that a sandbox can allow one socket path. On Linux it cannot. The owner decided on 2026-11-18 (plan.md section 3.3) that agents reach `makibad` by MCP tools, and that the Unix socket stays for the person's own `makiba`. P1's "if it fails" branch above (a spool folder) is option A there, the way back, and not the decision.
 
-What P1 still has to run after the decision. The door step is replaced by P11, which tests the port and the token. The steps P1 did not reach remain, for the base and for the person key file: `hc ls` against the running core, the state-folder decoy read made unambiguous (a path that exists), the person key file, `/proc`, the double fork, the unsandboxed run, and the Read and Edit tools. They are run when M4-2 repeats P1 with the settings `makibad` really writes (M4-2).
+What P1 still has to run after the decision. The door step is replaced by P11, which tests the port and the token. The steps P1 did not reach remain, for the base and for the person key file: `hc ls` against the running core, the state-folder decoy read made unambiguous (a path that exists), the person key file, `/proc`, the double fork, the unsandboxed run, and the Read and Edit tools. They are run when M4-2 repeats P1 with the settings `makibad` really writes (M4-2). The script for that rerun, which also repeats P11's port and token cases, is `scripts/probes/door-and-base-reach.sh` (see `scripts/probes/README.md`); its result goes into section 4.
 
 ### P2. The real base and the test agent run in GitHub's CI
 

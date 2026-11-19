@@ -261,7 +261,7 @@ fn serve(
     let mut monitor = Monitor::new(&org.to_string_lossy());
     let mut anomalies = Anomalies::new();
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
-    let prepare = Prepare::new(Places::from_env(dir));
+    let prepare = Prepare::new(Places::from_env(dir), events_base.worker_denies());
     let launch = launch::Launch::new(dir, door_addr);
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());

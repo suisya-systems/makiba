@@ -16,6 +16,7 @@
 //!   it, for the dispatch verb to use when it makes the row.
 
 use crate::agents::{self, Agent, TaskSettings};
+use crate::base::BaseDenies;
 use crate::db::Result;
 use crate::db::writer::StateWriter;
 use std::path::{Path, PathBuf};
@@ -27,6 +28,8 @@ pub struct Places {
     pub docs: PathBuf,
     pub repos: PathBuf,
     pub settings: PathBuf,
+    /// `<state>/state.db`: denied to agents, whose `status` goes through the door (M4-2).
+    pub state_db: PathBuf,
 }
 
 impl Places {
@@ -46,6 +49,7 @@ impl Places {
             docs: dir("MAKIBA_DOCS_DIR", "makiba-docs"),
             repos: dir("MAKIBA_REPOS_DIR", "makiba-repos"),
             settings: state.join("settings"),
+            state_db: state.join("state.db"),
         }
     }
 
@@ -62,6 +66,8 @@ impl Places {
 
 pub struct Prepare {
     places: Places,
+    /// What the base says a role must not reach (spec section 6.2).
+    denies: BaseDenies,
 }
 
 struct Launch {
@@ -78,8 +84,8 @@ struct Launch {
 }
 
 impl Prepare {
-    pub fn new(places: Places) -> Prepare {
-        Prepare { places }
+    pub fn new(places: Places, denies: BaseDenies) -> Prepare {
+        Prepare { places, denies }
     }
 
     /// One pass: moves every taken launch still `planned` or `worktree_ready` as far as it goes.
@@ -159,8 +165,18 @@ impl Prepare {
         let agent: Box<dyn Agent> = agents::by_name(&l.agent)
             .ok_or_else(|| format!("no agent module named {:?}", l.agent))?;
         std::fs::create_dir_all(&self.places.settings).map_err(|e| e.to_string())?;
+        // The person key where it is now (`MAKIBA_PERSON_KEY` may move it); SQLite's side files
+        // hold the same rows as `state.db`.
+        let state_db = self.places.state_db.display().to_string();
         let settings = TaskSettings {
             write_dirs: vec![workplace, std::env::temp_dir()],
+            deny_dirs: [&self.denies.sockets[..], &self.denies.folders[..]].concat(),
+            deny_files: vec![
+                crate::cli::person_key_path(),
+                PathBuf::from(&state_db),
+                PathBuf::from(format!("{state_db}-wal")),
+                PathBuf::from(format!("{state_db}-shm")),
+            ],
         };
         agent
             .write_task_settings(
@@ -269,8 +285,14 @@ mod tests {
             docs: dir.path().join("docs"),
             repos: dir.path().join("repos"),
             settings: dir.path().join("settings"),
+            state_db: dir.path().join("state.db"),
         };
-        assert!(Prepare::new(places).pass(&w).unwrap().is_empty());
+        assert!(
+            Prepare::new(places, BaseDenies::default())
+                .pass(&w)
+                .unwrap()
+                .is_empty()
+        );
         let (stage, why): (String, String) = w
             .conn()
             .query_row("SELECT stage, failed_reason FROM run_launch", [], |r| {
@@ -320,6 +342,7 @@ mod tests {
             docs: dir.path().join("docs"),
             repos: dir.path().join("repos"),
             settings: dir.path().join("settings"),
+            state_db: dir.path().join("state.db"),
         };
         let l = Launch {
             id: 1,
@@ -333,7 +356,9 @@ mod tests {
             worktree: other.to_string_lossy().into(),
             spawn: "s".into(),
         };
-        let why = Prepare::new(places).add_worktree(&l, &other).unwrap_err();
+        let why = Prepare::new(places, BaseDenies::default())
+            .add_worktree(&l, &other)
+            .unwrap_err();
         assert!(why.contains("not a clean worktree"), "{why}");
     }
 }
