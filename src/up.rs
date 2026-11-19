@@ -75,7 +75,7 @@ fn daemon_running(dir: &Path) -> Result<bool, Failure> {
 }
 
 /// Start `makiba daemon` detached, with the variables of section 6.4 removed, and wait until it
-/// holds its lock.
+/// has subscribed to the base.
 fn start_daemon(dir: &Path) -> Result<(), Failure> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(unavailable("cannot find makiba"))?;
@@ -94,7 +94,24 @@ fn start_daemon(dir: &Path) -> Result<(), Failure> {
         cmd.env_remove(v);
     }
     let mut child = cmd.spawn().map_err(unavailable("cannot start makibad"))?;
-    let until = Instant::now() + Duration::from_secs(10);
+    // Ready = the dispatcher row names this child and says it is subscribed (its lock is taken
+    // earlier, before the base has answered).
+    let pid = child.id();
+    let ready = || -> bool {
+        rusqlite::Connection::open_with_flags(
+            dir.join("state.db"),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        )
+        .and_then(|c| {
+            c.query_row(
+                "SELECT subscribed FROM dispatcher WHERE id = 1 AND pid = ?1",
+                [pid],
+                |r| r.get::<_, i64>(0),
+            )
+        })
+        .is_ok_and(|s| s == 1)
+    };
+    let until = Instant::now() + Duration::from_secs(20);
     while Instant::now() < until {
         if let Some(status) = child.try_wait().map_err(unavailable("makibad"))? {
             return Err((
@@ -105,14 +122,17 @@ fn start_daemon(dir: &Path) -> Result<(), Failure> {
                 ),
             ));
         }
-        if daemon_running(dir)? {
+        if ready() {
             return Ok(());
         }
         std::thread::sleep(Duration::from_millis(50));
     }
     Err((
         ErrorKind::Unavailable,
-        "makibad did not take its lock in 10 s".into(),
+        format!(
+            "makibad is not subscribed to the base after 20 s; see {}",
+            dir.join("makibad.log").display()
+        ),
     ))
 }
 
