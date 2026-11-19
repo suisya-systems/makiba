@@ -23,16 +23,19 @@
 //! starts the child, and a worker's terminal is named `w-<task_id>`: of the dead process's request
 //! and this one's, exactly one child runs. With none seen, this process launches with a new key and
 //! settles the keys by the outcome: a launch that returns revokes the keys the dead process left; a
-//! refusal while a terminal carries the `makiba.spawn` tag adopts that terminal and revokes no key:
-//! it may carry this attempt's key (only the reply was lost) or a left one. (ponytail: the keys of
-//! the launch that the terminal does not carry stay live, several after restarts in a row; none
-//! was delivered to a running child. Tighten by recording which key a terminal's argv carries.)
+//! refusal while a terminal carries the `makiba.spawn` tag adopts that terminal: it may carry this
+//! attempt's key (only the reply was lost) or a left one.
+//!
+//! Every terminal carries the hash of its key in the `makiba.key` tag (Issue 131), so an adoption
+//! keeps that key and revokes every other key of the launch. A terminal without the tag (started
+//! before it existed) revokes none.
 
 use crate::agents::{self, Agent, AgentLaunch, DoorAccess, Role};
+use crate::base::Terminal;
 use crate::base::{Base, LaunchSpec};
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
-use crate::spec::{self, TAG_ORG, TAG_ROLE, TAG_SPAWN, TAG_TASK_ID};
+use crate::spec::{self, TAG_KEY, TAG_ORG, TAG_ROLE, TAG_SPAWN, TAG_TASK_ID};
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -176,6 +179,7 @@ impl Launch {
 
     /// The launch spec of `row` with `token` in its argv (spec sections 4, 6.3, 6.4).
     fn spec(&self, row: &Row, agent: &dyn Agent, token: String) -> LaunchSpec {
+        let key_hash = super::door::sha256_hex(&token);
         let door = DoorAccess {
             address: self.door.clone(),
             token,
@@ -196,6 +200,7 @@ impl Launch {
             (TAG_TASK_ID.to_string(), row.task.clone()),
             (TAG_SPAWN.to_string(), row.spawn.clone()),
             (TAG_ORG.to_string(), self.org.clone()),
+            (TAG_KEY.to_string(), key_hash),
         ]);
         LaunchSpec {
             argv,
@@ -217,13 +222,13 @@ impl Launch {
         let Ok(terminals) = base.list() else {
             return Outcome::Later;
         };
-        match terminals
+        let ours: Vec<&Terminal> = terminals
             .iter()
             .filter(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn))
-            .count()
-        {
+            .collect();
+        match ours.len() {
             0 => {}
-            1 => return Outcome::Up,
+            1 => return adopt(w, row, ours[0]),
             n => return Outcome::Several(format!("{n} terminals carry {TAG_SPAWN}={}", row.spawn)),
         }
         let agent_id = spec::worker_agent_id(&row.task);
@@ -254,19 +259,36 @@ impl Launch {
     }
 }
 
-/// A refused launch: up when a terminal with its `makiba.spawn` exists (no key is revoked: the
-/// terminal may be this attempt's, when only the reply was lost, or a dead process's late one, and
-/// which key it carries is not known); down, with every key of the launch revoked, when the base
-/// lists none; unsure while the base cannot list.
+/// A refused launch: up, adopting the terminal, when one carries the launch's `makiba.spawn`; down,
+/// with every key of the launch revoked, when the base lists none; unsure while the base cannot
+/// list.
 fn settle(w: &StateWriter, base: &dyn Base, row: &Row, hash: String, refused: String) -> Outcome {
     match base.list() {
-        Ok(ts) if ts.iter().any(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn)) => Outcome::Up,
-        Ok(_) => {
-            let _ = super::resume::revoke_keys(w, &row.spawn);
-            Outcome::Down(refused)
-        }
+        Ok(ts) => match ts
+            .iter()
+            .find(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn))
+        {
+            Some(t) => adopt(w, row, t),
+            None => {
+                let _ = super::resume::revoke_keys(w, &row.spawn);
+                Outcome::Down(refused)
+            }
+        },
         Err(_) => Outcome::Unsure { hash, refused },
     }
+}
+
+/// The launch's terminal exists: keep the key it was started with (its `makiba.key` tag) and revoke
+/// every other key of the launch. No tag, no key is revoked.
+fn adopt(w: &StateWriter, row: &Row, t: &Terminal) -> Outcome {
+    if let Some(carried) = t.tags.get(TAG_KEY) {
+        let _ = w.conn().execute(
+            "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE spawn_id = ?1 AND key_sha256 != ?2 AND revoked_at IS NULL",
+            [&row.spawn, carried],
+        );
+    }
+    Outcome::Up
 }
 
 /// `worker_spawned` and stage `launched`, together.
