@@ -19,7 +19,8 @@ pub const TAG_ROLE: &str = "makiba.role";
 pub const TAG_TASK_ID: &str = "makiba.task_id";
 pub const TAG_SPAWN: &str = "makiba.spawn";
 pub const TAG_ORG: &str = "makiba.org";
-pub const TAG_KEYS: &[&str] = &[TAG_ROLE, TAG_TASK_ID, TAG_SPAWN, TAG_ORG];
+pub const TAG_KEY: &str = "makiba.key";
+pub const TAG_KEYS: &[&str] = &[TAG_ROLE, TAG_TASK_ID, TAG_SPAWN, TAG_ORG, TAG_KEY];
 
 /// Event kinds carried from claude-org-ja, with the same meaning (spec section 10).
 pub const EVENT_KINDS_CARRIED: &[&str] = &[

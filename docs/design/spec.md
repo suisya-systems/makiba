@@ -384,6 +384,7 @@ Tags are the only record of which terminal belongs to which run. `state.db` hold
 | `makiba.task_id` | the run's `task_id` | workers |
 | `makiba.spawn` | an id made at each launch: `run_launch.spawn_id` for a worker and the curator, a fresh one for each secretary launch | every terminal `makibad` launches |
 | `makiba.org` | the state folder's absolute path | every terminal, so two organizations on one base do not adopt each other's terminals |
+| `makiba.key` | the SHA-256 of the key the terminal was started with, in lowercase hex (never the key) | workers; the secretary and the curator when M6 launches them with a key. A launch that adopts a terminal keeps the key whose hash it carries and revokes every other key of the spawn; a terminal without the tag (started before it existed) revokes none |
 
 On start and after every `Resync`, `makibad` lists terminals with `makiba.org=<its own>` and rebuilds its view from the tags.
 

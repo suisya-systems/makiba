@@ -143,7 +143,7 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
         )
     );
 
-    // Base::get right after launch shows the four tags.
+    // Base::get right after launch shows the tags.
     let terminal = local
         .list()
         .unwrap()
@@ -161,7 +161,10 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
-    assert_eq!(got.tags, want);
+    let mut tags = got.tags;
+    // The fifth tag, the hash of the key (Issue 131), is checked against the stored hash below.
+    let key_tag = tags.remove("makiba.key");
+    assert_eq!(tags, want);
 
     // What the agent recorded of its environment and its arguments.
     let rows = wait(|| {
@@ -195,6 +198,7 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
             .collect()
     };
     assert_eq!(stored.len(), 1, "one key for the worker: {stored:?}");
+    assert_eq!(key_tag.as_deref(), Some(stored[0].as_str()), "makiba.key");
 
     // Its recorded argument list carries the token, and the token hashes to the stored hash.
     let mut in_args = keys_in(&args.join(" "));
