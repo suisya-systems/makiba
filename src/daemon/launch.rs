@@ -6,6 +6,9 @@
 //! that carries no key, and the unset list of spec section 6.4. Then `worker_spawned` and stage
 //! `launched` are written in one transaction.
 //!
+//! A launch the base refused, once settled, fails by the path of M3-6 (Issue 124), as does one
+//! that cannot be prepared (prepare.rs): the run `failed` and the secretary told.
+//!
 //! A launch whose record could not be written is not launched again by this process: only the
 //! record is retried. A launch the base refused is looked for by its `makiba.spawn` tag before it
 //! is failed, since an error does not prove that no terminal exists.
@@ -143,7 +146,7 @@ impl Launch {
                 }
                 Outcome::Down(why) => {
                     self.lock().remove(&row.spawn);
-                    fail(w, &row, &why)?;
+                    super::resume::fail(w, row.id, &row.task, &row.spawn, "settings_ready", &why)?;
                 }
                 Outcome::Unsure { hash, refused } => {
                     self.lock()
@@ -255,17 +258,6 @@ fn settle(w: &StateWriter, base: &dyn Base, row: &Row, hash: String, refused: St
         }
         Err(_) => Outcome::Unsure { hash, refused },
     }
-}
-
-/// Stage `failed` with `why`, and the launch's keys revoked, together.
-fn fail(w: &StateWriter, row: &Row, why: &str) -> Result<()> {
-    w.transaction(|w| {
-        w.conn().execute(
-            "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
-            rusqlite::params![row.id, why],
-        )?;
-        super::resume::revoke_keys(w, &row.spawn)
-    })
 }
 
 /// `worker_spawned` and stage `launched`, together.
