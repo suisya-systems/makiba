@@ -170,9 +170,19 @@ mkstep() { # mkstep <n> <command>: cN.sh runs the command and records its exit c
   printf '%s\n' "out=\$($2 2>&1)" 'rc=$?' \
     "printf 'STEP $1 exit=%s out=%s\\n' \"\$rc\" \"\$(printf %s \"\$out\" | tr '\\n' ' ' | cut -c1-600)\" >> report.txt" > "$WP/c$1.sh"
 }
+# One line naming the phase that was refused, never a traceback: a traceback quotes the source line,
+# and the fourth host run took a marker quoted there for a success.
 cat > "$WP/sock.py" <<'PY'
 import socket, sys
-s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1]); print("CONNECTED")
+try:
+    s = socket.socket(socket.AF_UNIX)
+except OSError as e:
+    print("phase=socket errno=%s %s" % (e.errno, e.strerror)); sys.exit(1)
+try:
+    s.settimeout(5); s.connect(sys.argv[1])
+except OSError as e:
+    print("phase=connect errno=%s %s" % (e.errno, e.strerror)); sys.exit(1)
+print("phase=connected")
 PY
 cat > "$WP/db.py" <<PY
 import sqlite3
@@ -215,10 +225,11 @@ if os.fork() == 0:
     if os.fork() == 0:
         r = []
         for name, fam, addr in (("unix", socket.AF_UNIX, "$CORESOCK"), ("tcp", socket.AF_INET, ("127.0.0.1", $PORT))):
+            phase = "socket"
             try:
-                s = socket.socket(fam); s.settimeout(5); s.connect(addr); r.append(name + "=CONNECTED")
+                s = socket.socket(fam); phase = "connect"; s.settimeout(5); s.connect(addr); r.append("%s=connected" % name)
             except OSError as e:
-                r.append("%s=errno%s" % (name, e.errno))
+                r.append("%s=refused-at-%s-errno%s" % (name, phase, e.errno))
         open(out, "w").write(" ".join(r)); os._exit(0)
     os._exit(0)
 for _ in range(50):
@@ -298,7 +309,6 @@ judge_blocked() { # judge_blocked <case> <step n> [text that must not appear]
   if [ -z "$l" ] && prompted "$2"; then record "$1" NEEDS-HUMAN "no STEP $2 line: a permission prompt was shown instead and declined (screen above)"; return; fi
   if [ -z "$l" ]; then record "$1" NEEDS-HUMAN "no STEP $2 line: the call was refused before it ran or never made; read the screen"; screen_dump "$T" "$1"; return; fi
   if printf '%s' "$l" | grep -Eqi "$DENYRE"; then record "$1" FAIL "refused by a deny rule, not by the sandbox: $l"; return; fi
-  if printf '%s' "$l" | grep -q CONNECTED; then record "$1" FAIL "connect() succeeded: $l"; return; fi
   if [ -n "${3:-}" ] && printf '%s' "$l" | grep -qF -- "$3"; then record "$1" FAIL "the call got through: $l"; return; fi
   if [ "$(rc_of "$l")" = 0 ]; then record "$1" FAIL "exit 0, the call got through: $l"; screen_dump "$T" "$1"
   elif printf '%s' "$l" | grep -Eqi "$SBXRE"; then record "$1" PASS "failed with a sandbox-style error: $l"
@@ -307,8 +317,18 @@ judge_blocked() { # judge_blocked <case> <step n> [text that must not appear]
 
 # The control first: from outside the sandbox the core answers and lists the worker.
 if hc ls 2>/dev/null | grep -q "$T"; then judge_blocked hc-ls 1 "$T"
+  case "$(step 1)" in *"did not stop or start"*|*"cannot start core"*)
+    say "NOTE hc-ls: hc found no core it could reach at the session's socket and tried to start one of its own, which failed inside the sandbox. The core it was named runs and answers from outside (it lists $T), so this shows that the running core was not reached from Bash; why the connection failed is shown by base-socket, not by hc's message." ;;
+  esac
 else record hc-ls NEEDS-HUMAN "the core does not list $T from outside either, so a refusal proves nothing"; fi
-judge_blocked base-socket 2
+l2=$(step 2)
+case "$l2" in
+  *" out=phase=connected"*) record base-socket FAIL "connect() to the core's socket succeeded: $l2" ;;
+  *" out=phase=socket errno="*) record base-socket PASS "the AF_UNIX socket itself could not be made (refused before any path was looked at): $l2" ;;
+  *" out=phase=connect errno="*) record base-socket PASS "the socket was made, connect() to the core's path was refused: $l2" ;;
+  "") if prompted 2; then record base-socket NEEDS-HUMAN "no STEP 2 line: a permission prompt was shown instead and declined (screen above)"; else record base-socket NEEDS-HUMAN "no STEP 2 line; read the screen"; screen_dump "$T" base-socket; fi ;;
+  *) record base-socket NEEDS-HUMAN "not recognised: $l2" ;;
+esac
 judge_blocked state-decoy-read 3 "$DECOY"
 judge_blocked config-decoy-read 4 "$DECOY"
 judge_blocked person-key-read 5 "$PKDECOY"
@@ -328,8 +348,8 @@ esac
 say "OBSERVE processes-visible-from-bash: $(printf '%s' "$l7" | sed -n 's/.* readable=\(.*\)$/readable=\1/p')"
 l8=$(step 8)
 case "$l8" in
-  *CONNECTED*) record double-fork FAIL "a double-forked child after setsid got through: $l8" ;;
-  *"unix=errno"*"tcp=errno"*) record double-fork PASS "both refused from a double-forked child after setsid: $l8" ;;
+  *unix=connected*|*tcp=connected*) record double-fork FAIL "a double-forked child after setsid got through: $l8" ;;
+  *"unix=refused-at-"*"tcp=refused-at-"*) record double-fork PASS "both refused from a double-forked child after setsid: $l8" ;;
   *) record double-fork NEEDS-HUMAN "no usable STEP 8 line (${l8:-none}); read the screen"; screen_dump "$T" fork ;;
 esac
 CTL=$(python3 "$WP/webcheck.py" noproxy "http://127.0.0.1:$PORT/makiba-probe-outside" 2>&1)
