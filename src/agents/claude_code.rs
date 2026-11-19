@@ -71,8 +71,12 @@ impl Agent for ClaudeCode {
         }
         // P7: nothing of the person's own settings reaches a worker or the curator. The
         // secretary's case is decided with M6-2.
+        // Workers and the curator start in auto permission mode (M4-3, paddock's templates), so
+        // most permission prompts never appear. The mode is an option because Claude Code ignores
+        // `defaultMode: "auto"` in a project settings file (paddock inventory, PRM-2).
         if matches!(launch.role, Role::Worker | Role::Curator) {
             argv.extend(["--setting-sources".into(), "project,local".into()]);
+            argv.extend(["--permission-mode".into(), "auto".into()]);
         }
         // ponytail: the launch of a worker passes an empty rules path until M4-3.
         if !launch.rules_file.as_os_str().is_empty() {
