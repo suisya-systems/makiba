@@ -10,6 +10,8 @@
       "Edit(~/.config/herdr-app/**)",
       "Read(~/.local/state/herdr-core/**)",
       "Edit(~/.local/state/herdr-core/**)",
+      "Read(~/.config/makiba/base/**)",
+      "Edit(~/.config/makiba/base/**)",
       "Read(~/.config/makiba/person.key)",
       "Edit(~/.config/makiba/person.key)",
       "Bash(git commit *--no-veri*)",
@@ -84,6 +86,7 @@
         "~/.config/herdr-core",
         "~/.config/herdr-app",
         "~/.local/state/herdr-core",
+        "~/.config/makiba/base",
         "~/.config/makiba/person.key",
         "~/.config/gh/hosts.yml"
       ],
@@ -91,6 +94,7 @@
         "~/.config/herdr-core",
         "~/.config/herdr-app",
         "~/.local/state/herdr-core",
+        "~/.config/makiba/base",
         "~/.config/makiba/person.key",
         "~/.local/share/makiba"
       ]
