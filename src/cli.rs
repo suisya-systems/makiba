@@ -49,7 +49,7 @@ pub fn person_key_path() -> PathBuf {
 }
 
 /// The configuration folder `makiba up` gives the base's core as its `XDG_CONFIG_HOME`:
-/// `${XDG_CONFIG_HOME:-~/.config}/makiba/base`. The person's own herdr-core configuration is
+/// `${XDG_CONFIG_HOME:-~/.config}/makiba/base`. The person's own configuration of the base is
 /// never written.
 pub fn base_config_home() -> PathBuf {
     env_path("XDG_CONFIG_HOME")
