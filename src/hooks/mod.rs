@@ -24,6 +24,7 @@ pub mod worker_boundary;
 type Hook = fn(&Value) -> Result<(), String>;
 
 const HOOKS: &[(&str, Hook)] = &[
+    ("deny-base", deny_base::check),
     ("deny-push", deny_push::check),
     ("deny-dangerous-git", deny_dangerous_git::check),
     ("deny-no-verify", deny_no_verify::check),
@@ -32,22 +33,55 @@ const HOOKS: &[(&str, Hook)] = &[
     ("deny-foreground-subagent", deny_foreground_subagent::check),
 ];
 
+/// A payload larger than this is refused unread: the command checks recurse per character, and
+/// a crash would exit with a code other than 2, which Claude Code takes as a pass.
+pub const PAYLOAD_LIMIT: usize = 64 * 1024;
+
+/// The stack of the thread that checks: room for a payload at `PAYLOAD_LIMIT`. It is reserved,
+/// not used, until a deep check needs it.
+const CHECK_STACK: usize = 512 * 1024 * 1024;
+
+/// A check that takes longer is refused: a hook Claude Code times out (60 s by default) does
+/// not block the call. The matcher is not linear on some long commands.
+const CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
+
 pub fn main(args: &[String]) -> ExitCode {
     let name = args.first().map(String::as_str);
-    if name == Some("deny-base") {
-        return deny_base::main();
-    }
-    let Some((_, hook)) = HOOKS.iter().find(|(n, _)| Some(*n) == name) else {
-        let names: Vec<&str> = std::iter::once("deny-base")
-            .chain(HOOKS.iter().map(|(n, _)| *n))
-            .collect();
+    let Some(&(_, hook)) = HOOKS.iter().find(|(n, _)| Some(*n) == name) else {
+        let names: Vec<&str> = HOOKS.iter().map(|(n, _)| *n).collect();
         eprintln!("usage: makiba hook <{}>", names.join("|"));
         return ExitCode::from(2);
     };
     let mut raw = Vec::new();
-    let verdict = match std::io::stdin().read_to_end(&mut raw) {
-        Ok(_) => read_payload(&raw).and_then(|p| hook(&p)),
+    let verdict = match std::io::stdin()
+        .take(PAYLOAD_LIMIT as u64 + 1)
+        .read_to_end(&mut raw)
+    {
         Err(e) => Err(format!("cannot read the hook payload: {e}")),
+        Ok(n) if n > PAYLOAD_LIMIT => Err(format!(
+            "the hook payload is larger than {PAYLOAD_LIMIT} bytes; split the command"
+        )),
+        Ok(_) => {
+            let (tx, rx) = std::sync::mpsc::channel();
+            let started = std::thread::Builder::new()
+                .stack_size(CHECK_STACK)
+                .spawn(move || {
+                    let _ = tx.send(read_payload(&raw).and_then(|p| hook(&p)));
+                });
+            match started {
+                Err(e) => Err(format!("cannot start the check: {e}")),
+                // A panic drops the sender; a check that runs past the budget is not waited for.
+                Ok(_) => rx.recv_timeout(CHECK_BUDGET).unwrap_or_else(|e| {
+                    Err(match e {
+                        std::sync::mpsc::RecvTimeoutError::Timeout => format!(
+                            "the check took longer than {} s; split the command",
+                            CHECK_BUDGET.as_secs()
+                        ),
+                        _ => "the check failed".into(),
+                    })
+                }),
+            }
+        }
     };
     verdict_exit(verdict)
 }

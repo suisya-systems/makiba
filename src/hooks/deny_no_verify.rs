@@ -55,7 +55,7 @@ pub fn check(payload: &Value) -> Result<(), String> {
             );
         }
     }
-    let mut whole = shell::flatten_text(&command);
+    let mut whole = shell::plain_git(&shell::flatten_text(&command));
     if !assigns.is_empty() {
         whole = shell::expand(&whole, &assigns);
     }

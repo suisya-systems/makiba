@@ -39,14 +39,29 @@ pub struct Re {
     icase: bool,
 }
 
+thread_local! {
+    /// Each pattern compiled once per thread: a hook checks the same patterns on every segment.
+    static CACHE: std::cell::RefCell<std::collections::HashMap<(String, bool), std::rc::Rc<Re>>> =
+        Default::default();
+}
+
 impl Re {
-    pub fn new(pattern: &str) -> Re {
-        Re::build(pattern, false)
+    pub fn new(pattern: &str) -> std::rc::Rc<Re> {
+        Re::cached(pattern, false)
     }
 
     /// Case is ignored, as with `grep -i`.
-    pub fn icase(pattern: &str) -> Re {
-        Re::build(pattern, true)
+    pub fn icase(pattern: &str) -> std::rc::Rc<Re> {
+        Re::cached(pattern, true)
+    }
+
+    fn cached(pattern: &str, icase: bool) -> std::rc::Rc<Re> {
+        CACHE.with(|c| {
+            c.borrow_mut()
+                .entry((pattern.to_string(), icase))
+                .or_insert_with(|| std::rc::Rc::new(Re::build(pattern, icase)))
+                .clone()
+        })
     }
 
     fn build(pattern: &str, icase: bool) -> Re {

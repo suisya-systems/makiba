@@ -20,8 +20,6 @@
 //! `source` that runs the command, and an alias are not seen.
 
 use serde_json::Value;
-use std::io::Read;
-use std::process::ExitCode;
 
 /// Words after which every later word of the same command may be the command that runs.
 const WRAPPERS: &[&str] = &[
@@ -30,29 +28,13 @@ const WRAPPERS: &[&str] = &[
     "if", "then", "else", "elif", "do", "while", "until", "!",
 ];
 
-pub fn main() -> ExitCode {
-    let mut raw = Vec::new();
-    let verdict = match std::io::stdin().read_to_end(&mut raw) {
-        Ok(_) => check_payload(&raw, &crate::base::worker_denies().commands),
-        Err(e) => Err(format!("cannot read the hook payload: {e}")),
-    };
-    match verdict {
-        Ok(()) => ExitCode::SUCCESS,
-        Err(reason) => {
-            eprintln!("makiba: refused: {reason}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// `Ok` when the payload is readable and its command names none of `denied`; else the reason.
-pub fn check_payload(raw: &[u8], denied: &[String]) -> Result<(), String> {
-    let payload = super::read_payload(raw)?;
+/// `Ok` when the payload's command names none of the base's commands; else the reason.
+pub fn check(payload: &Value) -> Result<(), String> {
     let command = payload
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
         .ok_or("the hook payload has no string tool_input.command")?;
-    match named(command, denied) {
+    match named(command, &crate::base::worker_denies().commands) {
         Some(name) => Err(format!(
             "`{name}` is the base's command; no agent role may run it (spec section 1). Ask through the door's tools instead"
         )),

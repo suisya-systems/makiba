@@ -16,7 +16,14 @@ use super::re::Re;
 use super::shell;
 use serde_json::Value;
 
-const PUSH_RE: &str = r"(^|[|&;[:space:](`])git([[:space:]]+(-[^[:space:]]+([[:space:]]+[^|&;[:space:]]+)?)?)*[[:space:]]+push([[:space:];&|)`<>]|$)";
+/// The original's pattern, rewritten to match the same commands without its ambiguity (which
+/// backtracks for minutes on a long run of options or blanks): no empty item, since a run of
+/// blanks already joins two items, and an option's value does not start with `-`, since such a
+/// word reads as an option anyway.
+const PUSH_RE: &str = r"(^|[|&;[:space:](`])git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-|&;[:space:]][^|&;[:space:]]*)?)*[[:space:]]+push([[:space:];&|)`<>]|$)";
+
+/// `PUSH_RE` where git is the command: at the start, after assignments and wrappers.
+const PUSH_CMD: &str = r"^[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+|(env|command|builtin|exec|sudo|nohup|time|nice|timeout[[:space:]]+[^[:space:]]+)[[:space:]]+)*git([[:space:]]+-[^[:space:]]+([[:space:]]+[^-|&;[:space:]][^|&;[:space:]]*)?)*[[:space:]]+push([[:space:];&|)`<>]|$)";
 
 const READ_GROUPS: &[&str] = &[
     "search",
@@ -137,12 +144,26 @@ pub fn check(payload: &Value) -> Result<(), String> {
         return Ok(());
     }
     let push = Re::new(PUSH_RE);
-    if push.any_line(&command) {
+    if push.any_line(&shell::plain_git(&command)) {
         return Err(PUSH_REASON.into());
     }
     let lines: Vec<String> = command.split('\n').map(String::from).collect();
-    if shell::unwrap(&lines).iter().any(|b| push.any_line(b)) {
+    if shell::unwrap(&lines)
+        .iter()
+        .any(|b| push.any_line(&shell::plain_git(b)))
+    {
         return Err(format!("{PUSH_REASON} (seen inside eval or bash -c)"));
+    }
+    // makiba's addition: each segment as the shell reads its words (quotes and backslashes
+    // dropped, known variables expanded), so `git "push"` and `G=push; git $G` are seen.
+    // Only where git is the segment's command, so a message that mentions a push is not one.
+    let push_cmd = Re::new(PUSH_CMD);
+    let (segments, assigns) = shell::segments_and_assignments(&command);
+    for segment in segments.iter().filter(|s| !s.is_empty()) {
+        let words = shell::expand(segment, &assigns).replace(['"', '\'', '\\'], "");
+        if push_cmd.any_line(&shell::plain_git(&words)) {
+            return Err(PUSH_REASON.into());
+        }
     }
     check_gh(&command)
 }

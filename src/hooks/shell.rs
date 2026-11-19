@@ -1067,6 +1067,34 @@ pub fn segments_and_assignments(command: &str) -> (Vec<String>, Vec<String>) {
     (segs, assigns)
 }
 
+/// `text` with every word that names git by a path (`/usr/bin/git`, `C:\git.exe`, `git.exe`)
+/// written as `git`, so that the patterns that look for the word `git` see it. The original hooks
+/// missed a path-qualified git; this is makiba's addition.
+pub fn plain_git(text: &str) -> String {
+    let mut out = String::new();
+    let mut word = String::new();
+    let flush = |word: &mut String, out: &mut String| {
+        let lower = word.to_lowercase();
+        let base = lower.rsplit(['/', '\\']).next().unwrap_or(&lower);
+        if (base == "git" || base == "git.exe") && lower != "git" {
+            out.push_str("git");
+        } else {
+            out.push_str(word);
+        }
+        word.clear();
+    };
+    for c in text.chars() {
+        if c.is_whitespace() {
+            flush(&mut word, &mut out);
+            out.push(c);
+        } else {
+            word.push(c);
+        }
+    }
+    flush(&mut word, &mut out);
+    out
+}
+
 /// A segment with the known variables expanded and its substitutions flattened.
 pub fn flat_segment(segment: &str, assignments: &[String]) -> String {
     let expanded = if assignments.is_empty() {
@@ -1074,5 +1102,5 @@ pub fn flat_segment(segment: &str, assignments: &[String]) -> String {
     } else {
         expand(segment, assignments)
     };
-    flatten_text(&expanded)
+    plain_git(&flatten_text(&expanded))
 }
