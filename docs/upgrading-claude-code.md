@@ -1,6 +1,6 @@
 # Upgrading the supported Claude Code versions
 
-makiba supports the Claude Code versions in `SUPPORTED` of [`src/agents/version.rs`](../src/agents/version.rs) (now `>=2.1.326,<=2.1.326`) and checks the text `claude --version` prints against it. It is a separate constant from the base's ([upgrading-the-base.md](upgrading-the-base.md)), because Claude Code is not behind the seam and updates itself. The check at `makiba up` is M4-4's.
+makiba supports the Claude Code versions in `SUPPORTED` of [`src/agents/version.rs`](../src/agents/version.rs) (now `>=2.1.326,<=2.1.328`) and checks the text `claude --version` prints against it. It is a separate constant from the base's ([upgrading-the-base.md](upgrading-the-base.md)), because Claude Code is not behind the seam and updates itself. The check at `makiba up` is M4-4's.
 
 The range runs from the lowest to the highest version that a recorded run of the probes covers (the `claude --version` column of `docs/design/probes.md`, section 4 Results), and no wider.
 
@@ -20,3 +20,22 @@ The startup-dialog and prompt tests of M3-5 and M6-8 use the test agent and cann
 1. Install the new version on a host that runs the pinned base.
 2. Run the reruns above and add their rows to the Results table of probes.md, with the `claude --version` text.
 3. Change `SUPPORTED`, `LOWEST` and `HIGHEST` in `src/agents/version.rs` to the lowest and highest version the Results table now covers, and the cases of `tests/base_version.rs` that name them.
+
+## The move to 2.1.328
+
+The range moved from 2.1.326 to 2.1.328 (Issue 153, 2026-11-20) on a **partial rerun**. This is an exception to the list above, made by the owner because the host was on 2.1.328 and the run of M4-5 (Issue 35) cannot start while `makiba up` refuses that version. It does not change the rule for later moves: a move to a version beyond 2.1.328 asks for the full list above.
+
+Rerun on 2.1.328 (rows in probes.md section 4):
+
+- P1 and P11 (rerun, M4-2), commit 4f95687.
+- `door-and-base-reach`: 13 of 13 cases before the role hooks were wired into the launch; after Issue 144, steps 1 to 9 answered as before across two runs that the model's safeguards then stopped, and steps 14 and 15 passed in a partial run.
+- `shell-mode-reach`: shell-mode lines are sandboxed under the scrub variable.
+
+Not rerun on 2.1.328:
+
+- Steps 10 to 13 of `door-and-base-reach` since Issue 144 (tracked in Issue 150).
+- P3, P4, P5, P7, P8, P9 and P10 as their own probes (P7 to P10 last ran on 2.1.327).
+- paddock's carried probes.
+- The runbook of M4-5, which Issue 35 itself runs.
+
+Where the rest is tracked: Issue 150 (the reach probe is stopped by the model's safeguards at a different step each run), Issue 147 (following Claude Code versions without a person), Issue 35 (the first real worker).
