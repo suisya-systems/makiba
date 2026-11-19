@@ -1,0 +1,49 @@
+{
+  "permissions": {
+    "deny": [
+      "Bash(hc:*)",
+      "Bash(herdr-core:*)",
+      "Bash(herdr-app:*)",
+      "Read(~/.config/herdr-core/**)",
+      "Edit(~/.config/herdr-core/**)",
+      "Read(~/.config/herdr-app/**)",
+      "Edit(~/.config/herdr-app/**)",
+      "Read(~/.local/state/herdr-core/**)",
+      "Edit(~/.local/state/herdr-core/**)",
+      "Read(~/.config/makiba/person.key)",
+      "Edit(~/.config/makiba/person.key)"
+    ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-base"
+          }
+        ]
+      }
+    ]
+  },
+  "sandbox": {
+    "enabled": true,
+    "failIfUnavailable": true,
+    "allowUnsandboxedCommands": false,
+    "filesystem": {
+      "denyRead": [
+        "~/.config/herdr-core",
+        "~/.config/herdr-app",
+        "~/.local/state/herdr-core",
+        "~/.config/makiba/person.key"
+      ],
+      "denyWrite": [
+        "~/.config/herdr-core",
+        "~/.config/herdr-app",
+        "~/.local/state/herdr-core",
+        "~/.config/makiba/person.key"
+      ]
+    }
+  }
+}
