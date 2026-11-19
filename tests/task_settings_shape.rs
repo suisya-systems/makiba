@@ -133,7 +133,7 @@ fn the_settings_and_the_launch_written_for_a_run_have_their_shape() {
     std::fs::create_dir_all(&dir).unwrap();
     let denies = BaseDenies {
         commands: vec!["hc".into()],
-        sockets: vec![root.join("run/herdr-core")],
+        resolved: vec![root.join("run/herdr-core")],
         folders: vec![
             PathBuf::from("~/.config/herdr-core"),
             PathBuf::from("~/.local/state/herdr-core"),
