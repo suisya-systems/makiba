@@ -45,14 +45,9 @@
 # SUMMARY names the flagged steps, and only FAIL cases and precondition failures end non-zero. OBSERVE: whether a model
 # line followed each shell-mode line, the new events rows by kind, and the screen lines naming a hook.
 # respondToBashCommands is NOT set (makibad writes the settings), so its default applies.
-# KNOWN DEFECT of Claude Code 2.1.328 (observed on the host on 2026-11-19 and 2026-11-20, to be reported upstream; the secretary holds the report): under
-# CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 a write outside allowWrite (the home folder, /var/tmp) succeeds, from a shell-mode
-# line and from the model's Bash alike; without the variable it is refused. Reads of the denyRead paths, the base
-# socket, the door's port and writes to the denyWrite paths (steps 14 and 15) are refused in both. The sandboxing page
-# says every command runs sandboxed under the variable, so unsandboxed-run is judged as always (the write must be
-# refused; a write that succeeds is a FAIL) and is expected to pass once Claude Code is fixed. Until then it FAILs in
-# shell mode and the default-mode controls (steps 16 and 17, PROBE_STEPS="16 17") measure write confinement. The
-# variable must NOT be given to a real worker's launch while this holds.
+# In shell mode the case unsandboxed-run fails on Claude Code 2.1.328 for a reason outside makiba; it was reported to the
+# vendor on 2026-11-20 and is tracked there. Until it is resolved, the default-mode steps 16 and 17 are the measurement
+# for this case. Do not add this mode's launch variable to a real worker's launch.
 # The role hooks in the settings run <share>/makiba (the entry point makibad links only for agents other
 # than `fake`): when it is missing the probe links it to MAKIBA_BIN, and removes only what it made.
 # Run from a login shell: MAKIBA_BIN=/path/to/makiba bash scripts/probes/door-and-base-reach.sh <result-dir>
@@ -85,10 +80,10 @@ say "MAKIBA_BIN: $MAKIBA_BIN (built from: ${MAKIBA_COMMIT:-not given; set MAKIBA
 PARTIAL=""
 say "mode: $MODE"
 if [ "$MODE" = shell ]; then
-  say "mode shell: unsandboxed-run expects the write outside the write surface to be refused, as the sandboxing page says every command runs sandboxed under the variable; it FAILs while Claude Code 2.1.328 does not meet that (known defect of Claude Code, to be reported upstream); CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 in the launch; steps sent as shell-mode lines; steps 12 and 13 stay with the model (NOT-RUN here); respondToBashCommands is NOT set (makibad writes the settings), so its default applies"
+  say "mode shell: unsandboxed-run is tracked with the vendor (see the header); CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1 in the launch; steps sent as shell-mode lines; steps 12 and 13 stay with the model (NOT-RUN here); respondToBashCommands is NOT set (makibad writes the settings), so its default applies"
 fi
 if [ "$STEPS" = "$ALL_STEPS" ]; then say "steps: all"; else PARTIAL="steps asked: $STEPS"; say "steps: partial run ($PARTIAL)"; fi
-[ "$MODE" != shell ] || PARTIAL="${PARTIAL:+$PARTIAL; }shell mode: steps 12 and 13 stay with the model; a FAIL of unsandboxed-run here is the known defect of Claude Code 2.1.328 (to be reported upstream) (writes outside allowWrite succeed under the variable), expected to pass once fixed"
+[ "$MODE" != shell ] || PARTIAL="${PARTIAL:+$PARTIAL; }shell mode: steps 12 and 13 stay with the model; unsandboxed-run fails on Claude Code 2.1.328 for a reason outside makiba, tracked with the vendor; steps 16 and 17 are the measurement for it"
 FLAGGED_STEPS=""
 # A flagged step's PASS or NEEDS-HUMAN is FLAGGED (shell mode only); a FAIL stays a FAIL.
 if [ "$MODE" = shell ]; then
