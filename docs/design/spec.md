@@ -390,7 +390,7 @@ On start and after every `Resync`, `makibad` lists terminals with `makiba.org=<i
 
 ### 6.4 Environment removed at launch
 
-For every agent, carried from paddock's templates (measured there, inventory L-N4): `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_TMPDIR`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`. Workers and the curator also get an empty `GH_CONFIG_DIR`.
+For every agent, carried from paddock's templates (measured there, inventory L-N4): `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_TMPDIR`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`. Workers and the curator also get an empty `GH_CONFIG_DIR`. A worker launched by `makibad` gets `MAKIBA_SHARE_DIR` set to the share folder `makibad` resolved (absolute), so its role hooks run the entry point `makibad` linked there (section 2).
 
 The base adds its own (measured in paddock, inventory L-N2): `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`.
 

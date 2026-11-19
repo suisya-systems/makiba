@@ -38,13 +38,15 @@ pub fn door_path() -> Option<PathBuf> {
 }
 
 /// `$MAKIBA_SHARE_DIR`, default `${XDG_DATA_HOME:-~/.local/share}/makiba`: the role files.
+/// Made absolute, since an agent reads it from its own folder.
 pub fn share_dir() -> PathBuf {
-    env_path("MAKIBA_SHARE_DIR").unwrap_or_else(|| {
+    let dir = env_path("MAKIBA_SHARE_DIR").unwrap_or_else(|| {
         env_path("XDG_DATA_HOME")
             .or_else(|| env_path("HOME").map(|h| h.join(".local/share")))
             .unwrap_or_else(|| PathBuf::from("."))
             .join("makiba")
-    })
+    });
+    std::path::absolute(&dir).unwrap_or(dir)
 }
 
 /// `$MAKIBA_PERSON_KEY`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/person.key`.
