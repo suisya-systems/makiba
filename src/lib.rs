@@ -10,6 +10,7 @@ pub mod channel;
 pub mod cli;
 pub mod daemon;
 pub mod db;
+pub mod hooks;
 pub mod spec;
 pub mod status_local;
 pub mod up;

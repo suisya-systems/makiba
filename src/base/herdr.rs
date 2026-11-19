@@ -41,6 +41,25 @@ pub fn socket_path(runtime_dir: Option<&Path>, session: &str) -> PathBuf {
         .join(format!("{session}.sock"))
 }
 
+/// The commands, the socket folder and the folders of herdr-core (spec section 6.2).
+pub fn denies(runtime_dir: Option<&Path>) -> BaseDenies {
+    let socket_dir = socket_path(runtime_dir, "x")
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_default();
+    BaseDenies {
+        commands: ["hc", "herdr-core", "herdr-app"].map(String::from).into(),
+        sockets: vec![socket_dir],
+        folders: [
+            "~/.config/herdr-core",
+            "~/.config/herdr-app",
+            "~/.local/state/herdr-core",
+        ]
+        .map(PathBuf::from)
+        .into(),
+    }
+}
+
 impl Herdr {
     pub fn new(socket: PathBuf, timeout: Duration) -> Herdr {
         Herdr {
@@ -393,7 +412,7 @@ impl Base for Herdr {
         }
     }
     fn worker_denies(&self) -> BaseDenies {
-        BaseDenies::default()
+        super::worker_denies()
     }
 }
 
