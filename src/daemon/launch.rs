@@ -13,7 +13,7 @@
 //! Before a key is issued the base is asked for a terminal carrying the launch's `makiba.spawn`
 //! (Issue M3-7): one that exists was launched by a process that died before its record, and is
 //! adopted (recorded, no key, no second launch). With none, keys of the launch left by such a
-//! process are revoked first. Two or more fail the launch. (ponytail: a process killed while
+//! process are revoked first. Two or more fail the launch and its run as resume.rs does. (ponytail: a process killed while
 //! `Base::launch` was in flight may see none and launch again; the base has no idempotent create.)
 
 use crate::agents::{self, Agent, AgentLaunch, DoorAccess, Role};
@@ -74,6 +74,8 @@ enum Outcome {
     },
     /// The base cannot list yet: nothing was issued or launched; the next pass tries again.
     Later,
+    /// More than one terminal carries the launch's spawn id: failed as in resume.rs.
+    Several(String),
 }
 
 struct Row {
@@ -148,6 +150,9 @@ impl Launch {
                         .insert(row.spawn.clone(), Pending::Unsure { hash, refused });
                 }
                 Outcome::Later => {}
+                Outcome::Several(why) => {
+                    super::resume::fail(w, row.id, &row.task, &row.spawn, "settings_ready", &why)?;
+                }
             }
         }
         Ok(launched)
@@ -207,7 +212,7 @@ impl Launch {
         {
             0 => {}
             1 => return Outcome::Up,
-            n => return Outcome::Down(format!("{n} terminals carry {TAG_SPAWN}={}", row.spawn)),
+            n => return Outcome::Several(format!("{n} terminals carry {TAG_SPAWN}={}", row.spawn)),
         }
         if let Err(e) = super::resume::revoke_keys(w, &row.spawn) {
             eprintln!("makibad: launch {}: {e}", row.task);
@@ -418,7 +423,8 @@ mod tests {
             unset: vec![],
         })
         .unwrap();
-        assert!(matches!(l.start(&w, &stub, &row), Outcome::Down(_)));
+        assert!(matches!(l.start(&w, &stub, &row), Outcome::Several(_)));
+        // `pass` fails it by resume::fail (tested in resume.rs), with the run.
         assert_eq!(stub.list().unwrap().len(), 2, "no terminal is ended");
     }
 

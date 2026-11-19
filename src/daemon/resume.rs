@@ -23,6 +23,22 @@ pub(super) fn revoke_keys(w: &StateWriter, spawn: &str) -> Result<()> {
     Ok(())
 }
 
+/// A launch at `stage` whose terminal cannot be adopted: failed by the path of M3-6 and its keys
+/// revoked, in one transaction. No terminal is ended.
+pub(super) fn fail(
+    w: &StateWriter,
+    id: i64,
+    task: &str,
+    spawn: &str,
+    stage: &str,
+    why: &str,
+) -> Result<()> {
+    w.transaction(|w| {
+        super::verify::fail(w, id, task, spawn, stage, why, &[])?;
+        revoke_keys(w, spawn)
+    })
+}
+
 /// One try of the start pass. `true` once it is done; `false` while the base cannot list.
 pub fn pass(w: &StateWriter, base: &dyn Base) -> Result<bool> {
     let rows: Vec<(i64, String, String, String)> = {
@@ -50,10 +66,7 @@ pub fn pass(w: &StateWriter, base: &dyn Base) -> Result<bool> {
             0 => format!("no terminal carries {TAG_SPAWN}={spawn} after a restart"),
             n => format!("{n} terminals carry {TAG_SPAWN}={spawn}"),
         };
-        w.transaction(|w| {
-            super::verify::fail(w, id, &task, &spawn, &stage, &why, &[])?;
-            revoke_keys(w, &spawn)
-        })?;
+        fail(w, id, &task, &spawn, &stage, &why)?;
     }
     Ok(true)
 }
