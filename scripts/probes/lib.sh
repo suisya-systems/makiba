@@ -88,7 +88,7 @@ screen_dump() { # screen_dump <terminal> <label>: captured screen text into the 
 }
 
 finish() {
-  say "SUMMARY $PROBE: $FAILS failing case(s)${PARTIAL:+; partial run, $PARTIAL, the other cases NOT-RUN}; result file $RESULT"
+  say "SUMMARY $PROBE: $FAILS failing case(s)${PARTIAL:+; partial run, $PARTIAL, the other cases NOT-RUN}${FLAGGED_STEPS:+; flagged step(s) (not pass, not fail):$FLAGGED_STEPS}; result file $RESULT"
   [ "$FAILS" -eq 0 ]; exit $?
 }
 
