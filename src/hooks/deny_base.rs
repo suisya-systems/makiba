@@ -73,7 +73,13 @@ pub fn named<'a>(command: &str, denied: &'a [String]) -> Option<&'a str> {
         })
         .collect();
     for segment in flat.lines() {
-        let mut words = segment.split_whitespace();
+        // A redirection written against a word (`cmd>out`) is a word of its own.
+        let mut words = segment
+            .split_whitespace()
+            .flat_map(|w| match w.find(['<', '>']) {
+                Some(i) if !w[..i].chars().all(|c| c.is_ascii_digit()) => vec![&w[..i], &w[i..]],
+                _ => vec![w],
+            });
         let mut wrapped = false;
         let mut past_command = false;
         while let Some(w) = words.next() {
@@ -137,6 +143,9 @@ mod tests {
             "tool ls",
             "/opt/bin/tool ls",
             "'tool' ls",
+            "tool>/dev/null",
+            "/opt/bin/tool<in",
+            "tool 2>&1",
             "t\\ool ls",
             "X=1 tool",
             ">log tool",
