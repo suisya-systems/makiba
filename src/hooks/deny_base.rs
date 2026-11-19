@@ -67,6 +67,8 @@ pub fn check_payload(raw: &[u8], denied: &[String]) -> Result<(), String> {
 
 /// The first of `denied` that `command` runs, as far as the check above can tell.
 pub fn named<'a>(command: &str, denied: &'a [String]) -> Option<&'a str> {
+    // A backslash-newline continues the line, so the shell joins the words around it.
+    let command = &command.replace("\\\n", "");
     [quoted(command), flattened(command)]
         .iter()
         .flatten()
@@ -218,6 +220,7 @@ mod tests {
             "&>log tool",
             "X='a b' /opt/bin/tool ls",
             "echo \"$(tool ls)\"",
+            "/opt/bin/to\\\nol ls",
             "t\\ool ls",
             "X=1 tool",
             ">log tool",
