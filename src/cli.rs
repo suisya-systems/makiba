@@ -1,4 +1,4 @@
-//! The person's command (spec section 12): `makiba send`, `report` and `show`. It talks to
+//! The person's command (spec section 12): `makiba dispatch`, `send`, `report` and `show`. It talks to
 //! `makibad` over the person's socket only, with the content of the person key file as its key;
 //! with no file it sends no key. It never opens `state.db` (only `src/status_local.rs` does, for
 //! `status`), so it uses no database module.
@@ -88,7 +88,40 @@ fn person_key() -> Option<String> {
     (!key.is_empty()).then(|| key.to_string())
 }
 
-const USAGE: &str = "usage:\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n";
+const USAGE: &str = "usage:\n  makiba dispatch --kind code|document --task-id <id> --title <t> --brief-file <f> [--project <slug>] [--model m] [--branch b]\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n";
+
+/// `dispatch`'s arguments: the flags with their values, the brief read from its file here (spec
+/// section 12), so the content travels over the door and `makibad` opens no path.
+fn dispatch_args(rest: &[&str]) -> Result<Value, String> {
+    let mut args = serde_json::Map::new();
+    for pair in rest.chunks(2) {
+        let [flag, value] = pair else {
+            return Err(format!("{} needs a value", pair[0]));
+        };
+        let name = match *flag {
+            "--kind" => "kind",
+            "--task-id" => "task_id",
+            "--title" => "title",
+            "--project" => "project",
+            "--model" => "model",
+            "--branch" => "branch",
+            "--brief-file" => {
+                let text = std::fs::read_to_string(value)
+                    .map_err(|e| format!("cannot read {value}: {e}"))?;
+                args.insert("brief".into(), text.into());
+                continue;
+            }
+            other => return Err(format!("no flag {other} for dispatch")),
+        };
+        args.insert(name.into(), (*value).into());
+    }
+    for need in ["kind", "task_id", "title", "brief"] {
+        if !args.contains_key(need) {
+            return Err(format!("dispatch needs {}", need.replace('_', "-")));
+        }
+    }
+    Ok(Value::Object(args))
+}
 
 /// The request's verb and arguments, from the command line.
 fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
@@ -109,6 +142,7 @@ fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
             "report",
             json!({"state": state, "task": task, "text": text}),
         )),
+        ("dispatch", flags) if !typed => Ok(("dispatch", dispatch_args(flags)?)),
         ("show", [id]) if !typed => {
             let id: i64 = id.parse().map_err(|_| format!("not a message id: {id}"))?;
             Ok(("show", json!({"id": id})))
@@ -152,7 +186,7 @@ fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// `makiba send|report|show ...`.
+/// `makiba dispatch|send|report|show ...`.
 pub fn main(args: &[String]) -> ExitCode {
     let (verb, request) = match parse(args) {
         Ok(r) => r,
@@ -186,5 +220,50 @@ pub fn main(args: &[String]) -> ExitCode {
             eprintln!("makiba: {}: {message}", kind.as_str());
             exit(kind.exit_code())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(a: &[&str]) -> Vec<String> {
+        a.iter().map(|s| s.to_string()).collect()
+    }
+
+    /// `dispatch` reads the brief file itself and sends its content as `brief`.
+    #[test]
+    fn dispatch_sends_the_files_content_and_needs_its_four_arguments() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.md");
+        std::fs::write(&f, "do it\n").unwrap();
+        let f = f.to_str().unwrap();
+        let (verb, v) = parse(&args(&[
+            "dispatch",
+            "--kind",
+            "code",
+            "--task-id",
+            "t",
+            "--title",
+            "T",
+            "--brief-file",
+            f,
+            "--project",
+            "p",
+            "--model",
+            "m",
+            "--branch",
+            "b",
+        ]))
+        .unwrap();
+        assert_eq!(verb, "dispatch");
+        assert_eq!(
+            v,
+            json!({"kind": "code", "task_id": "t", "title": "T", "brief": "do it\n",
+                   "project": "p", "model": "m", "branch": "b"})
+        );
+        assert!(parse(&args(&["dispatch", "--kind", "code", "--task-id", "t"])).is_err());
+        assert!(parse(&args(&["dispatch", "--kind"])).is_err());
+        assert!(parse(&args(&["dispatch", "--bogus", "x"])).is_err());
     }
 }
