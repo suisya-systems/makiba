@@ -19,7 +19,15 @@ The startup-dialog and prompt tests of M3-5 and M6-8 use the test agent and cann
 
 1. Install the new version on a host that runs the pinned base.
 2. Run the reruns above and add their rows to the Results table of probes.md, with the `claude --version` text.
-3. Change `SUPPORTED`, `LOWEST` and `HIGHEST` in `src/agents/version.rs` to the lowest and highest version the Results table now covers, and the cases of `tests/base_version.rs` that name them.
+3. Change `SUPPORTED`, `LOWEST` and `HIGHEST` in `src/agents/version.rs` to the lowest and highest version the Results table now covers.
+
+## What a move of the range touches
+
+- The three constants in `src/agents/version.rs`.
+- The row for the new version in `docs/design/probes.md`.
+- The declared test of Issue 153, `tests/claude_range_153.rs`, when the versions it lists change. It names 2.1.326 to 2.1.328 on purpose and is never edited: once 2.1.329 enters the range it fails, and that failure is the signal to look at it (the owner decides whether it is retired or left as the record of that move).
+
+Nothing else under `tests/` needs an edit. The tests that check the range (`tests/base_version.rs`, `tests/up.rs`, and `tests/range_boundary_154.rs` of Issue 154) build the lowest, the highest, one below and one above from `LOWEST` and `HIGHEST`.
 
 ## The move to 2.1.328
 
