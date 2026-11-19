@@ -29,6 +29,8 @@ pub struct Herdr {
     timeout: Duration,
     /// The organization this base acts for. Without one, `launch` and `list` refuse.
     org: Option<String>,
+    /// The session `start` starts the core of (`HC_SESSION`).
+    session: Option<String>,
 }
 
 /// `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`; `/tmp` when the variable is not set, as the base does.
@@ -45,7 +47,13 @@ impl Herdr {
             socket,
             timeout,
             org: None,
+            session: None,
         }
+    }
+
+    pub fn for_session(mut self, session: &str) -> Herdr {
+        self.session = Some(session.to_string());
+        self
     }
 
     pub fn for_organization(mut self, org: &str) -> Herdr {
@@ -126,8 +134,17 @@ fn other(kind: &str, message: &str) -> BaseError {
     })
 }
 
-fn not_built(what: &str) -> BaseError {
-    other("not_built", &format!("{what} is not built yet"))
+/// Make `<config_home>/herdr-core/config.toml` say `notes = false` (spec section 6.2, `start`): the
+/// base sends no notices and gives agents no rules of its own. The folder is makiba's own, never
+/// the person's herdr-core configuration.
+fn notes_off(config_home: &Path) -> std::io::Result<()> {
+    let dir = config_home.join("herdr-core");
+    std::fs::create_dir_all(&dir)?;
+    let file = dir.join("config.toml");
+    if std::fs::read_to_string(&file).ok().as_deref() != Some("notes = false\n") {
+        std::fs::write(&file, "notes = false\n")?;
+    }
+    Ok(())
 }
 
 /// The core's version, at the top of the result or under `core`.
@@ -331,8 +348,49 @@ impl Base for Herdr {
     fn events(&self) -> Result<EventStream, BaseError> {
         self.events_stream()
     }
+    /// `notes = false` in makiba's own config folder, then `$HC_BIN server start` (default `hc`) with the
+    /// variables of spec section 6.4 removed from its environment, so no terminal of the core
+    /// inherits them. Never stops or restarts a core.
     fn start(&self) -> Result<(), BaseError> {
-        Err(not_built("start"))
+        let session = self.session.as_deref().ok_or_else(|| {
+            other(
+                "session",
+                "this connection has no session; use connect_session_as",
+            )
+        })?;
+        let config_home = crate::cli::base_config_home();
+        notes_off(&config_home)
+            .map_err(|e| other("config", &format!("cannot write the base's config: {e}")))?;
+        let hc = std::env::var_os("HC_BIN").unwrap_or_else(|| "hc".into());
+        let mut cmd = std::process::Command::new(&hc);
+        cmd.args(["server", "start"]);
+        for v in crate::daemon::launch::UNSET {
+            cmd.env_remove(v);
+        }
+        // The core reads its configuration from makiba's folder; a client of the same session
+        // keeps its own settings and still reaches it.
+        let out = cmd
+            .env("HC_SESSION", session)
+            .env("XDG_CONFIG_HOME", &config_home)
+            .output()
+            .map_err(|e| {
+                BaseError::Unavailable(Detail {
+                    kind: "spawn".into(),
+                    message: format!("cannot run {}: {e}", hc.to_string_lossy()),
+                    hint: Some("set HC_BIN to the hc program".into()),
+                })
+            })?;
+        if out.status.success() {
+            Ok(())
+        } else {
+            Err(other(
+                "start",
+                &format!(
+                    "`hc server start` failed: {}",
+                    String::from_utf8_lossy(&out.stderr).trim()
+                ),
+            ))
+        }
     }
     fn worker_denies(&self) -> BaseDenies {
         BaseDenies::default()

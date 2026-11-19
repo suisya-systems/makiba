@@ -12,3 +12,4 @@ pub mod daemon;
 pub mod db;
 pub mod spec;
 pub mod status_local;
+pub mod up;
