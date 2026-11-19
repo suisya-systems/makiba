@@ -23,6 +23,13 @@ pub fn connect_as(socket: &Path, timeout: Duration, org: &str) -> Box<dyn Base> 
     Box::new(herdr::Herdr::new(socket.to_path_buf(), timeout).for_organization(org))
 }
 
+/// The real base of `session`, which `Base::start` can start (`makiba up`).
+pub fn connect_session_for_start(session: &str, timeout: Duration) -> Box<dyn Base> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let socket = herdr::socket_path(runtime.as_deref(), session);
+    Box::new(herdr::Herdr::new(socket, timeout).for_session(session))
+}
+
 /// As `connect_as`, for the real base of `session`.
 pub fn connect_session_as(session: &str, timeout: Duration, org: &str) -> Box<dyn Base> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);

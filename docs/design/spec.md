@@ -37,6 +37,7 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 | The person's door | `$MAKIBA_DOOR`, default `${XDG_RUNTIME_DIR}/makiba/door.sock` | Unix socket, for the person's `makiba`. A sandboxed agent cannot create a Unix socket on Linux (section 3). |
 | The agents' door | `$MAKIBA_PORT`, a fixed port on 127.0.0.1, default 47317 | An MCP server over HTTP in `makibad`. The port is fixed because a running agent's configuration holds it and outlives a restart of `makibad`. |
 | The person key | `$MAKIBA_PERSON_KEY`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/person.key` | Mode 0600, in a folder of mode 0700. Created by `makiba up` when absent. Every agent role's settings deny reading it (section 3). |
+| The base's configuration | `${XDG_CONFIG_HOME:-~/.config}/makiba/base/herdr-core/config.toml` | Holds `notes = false`. Written by `makiba up`, which starts the core with this folder as its `XDG_CONFIG_HOME`; the person's own herdr-core configuration is never written. |
 | Repositories | `$MAKIBA_REPOS_DIR`, default `~/makiba-repos/<project>` | The project's own repository, cloned there when the project is registered (not by dispatch). A code launch whose project has no git repository there is `failed` with a reason. |
 | Worktrees (code) | `$MAKIBA_WORKERS_DIR`, default `~/makiba-workers/<project>/<task_id>` | Created with `git worktree add` from the project's own repository (the row above), which a person trusts once (paddock #216). |
 | Working folders (document) | `$MAKIBA_DOCS_DIR`, default `~/makiba-docs/<task_id>/` | A plain folder under a parent a person trusts once. `out/` holds what is handed over and is kept after close. |
@@ -47,6 +48,8 @@ Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-p
 Test seam of verification (M3-6): `MAKIBA_VERIFY_TIMEOUT_MS`, read by `makibad` at start, is the time a launch has to be verified in milliseconds (section 5.3; default 180 s); nothing in the role files, `makiba up` or any launch sets it.
 
 Test seam of a restart (M3-7): a debug build of `makibad` reads `<state>/makibad.die-at` at start; its thread ends right after the step named there (`run_taken`, `worktree_ready`, `settings_ready`, `launch_returned`, `launched`, `dialog_passed`), as if killed. A release build has no such step: it never reads the file.
+
+Test seam of `makiba up`: `HC_BIN` is the `hc` program it runs as `hc server start` (default `hc`); a test points it at a stand-in.
 
 Test seam of the door: with `MAKIBA_DOOR=none` `makibad` opens no Unix socket (it says so in its log) and serves the port as usual, and the person's `makiba` fails at once saying the socket is off; nothing in the role files, `makiba up` or any launch sets it.
 
