@@ -118,8 +118,23 @@ fn flattened(command: &str) -> Vec<Vec<String>> {
         })
         .collect();
     flat.lines()
-        .map(|segment| segment.split_whitespace().map(String::from).collect())
+        .map(|segment| {
+            segment
+                .split_whitespace()
+                .flat_map(split_redirection)
+                .collect()
+        })
         .collect()
+}
+
+/// A word split at its first `<` or `>`, unless what comes before is only a descriptor (`2>&1`).
+fn split_redirection(word: &str) -> Vec<String> {
+    match word.find(['<', '>']) {
+        Some(i) if !word[..i].chars().all(|c| c.is_ascii_digit() || c == '&') => {
+            vec![word[..i].to_string(), word[i..].to_string()]
+        }
+        _ => vec![word.to_string()],
+    }
 }
 
 /// The first of `denied` that the command of `words` runs.
@@ -213,6 +228,8 @@ mod tests {
             "bash -c 'tool ls'",
             "find . -exec tool {} ;",
             "if true; then tool; fi",
+            "bash -c 'tool>/dev/null'",
+            "sh -c \"/opt/bin/tool<in\"",
         ] {
             assert!(hit(c), "{c}");
         }

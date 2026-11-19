@@ -59,6 +59,20 @@ pub struct PromptView {
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct TaskSettings {
     pub write_dirs: Vec<PathBuf>,
+    /// Folders and files denied for read and write (M4-2): the base's socket and state folders,
+    /// the person key file and `state.db`, resolved when the settings are written.
+    pub deny_dirs: Vec<PathBuf>,
+    pub deny_files: Vec<PathBuf>,
+}
+
+/// A path as a permission rule names it: `~/` as is, an absolute path in the `//` form.
+fn rule_path(p: &Path) -> String {
+    let s = p.display().to_string();
+    if s.starts_with('/') {
+        format!("/{s}")
+    } else {
+        s
+    }
 }
 
 /// What the prompt line of an agent's screen shows (spec section 7, the wake line).
@@ -116,17 +130,38 @@ pub fn mcp_config(door: &DoorAccess) -> String {
     .to_string()
 }
 
-/// The per-task settings file both modules write: sandbox on, the write surface of `task`. No Unix
-/// socket path is allowed: it does nothing on Linux (P1); agents reach `makibad` by the MCP
-/// configuration (M3-4).
+/// The per-task settings file both modules write: sandbox on with no way around it, the write
+/// surface of `task`, and its denies, for Bash by the sandbox and for the Read and Edit tools
+/// (which run outside it) by permission rules. No Unix socket path is allowed: it does nothing on
+/// Linux (P1); agents reach `makibad` by the MCP configuration (M3-4).
 fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
-    let dirs: Vec<_> = task
-        .write_dirs
-        .iter()
-        .map(|d| d.display().to_string())
+    let shown =
+        |ps: &[PathBuf]| -> Vec<String> { ps.iter().map(|p| p.display().to_string()).collect() };
+    let denied: Vec<String> = shown(&task.deny_dirs)
+        .into_iter()
+        .chain(shown(&task.deny_files))
         .collect();
-    let settings =
-        serde_json::json!({"sandbox": {"enabled": true, "filesystem": {"allowWrite": dirs}}});
+    let targets = task
+        .deny_dirs
+        .iter()
+        .map(|d| format!("{}/**", rule_path(d)))
+        .chain(task.deny_files.iter().map(|f| rule_path(f)));
+    let rules: Vec<String> = targets
+        .flat_map(|t| [format!("Read({t})"), format!("Edit({t})")])
+        .collect();
+    let settings = serde_json::json!({
+        "permissions": {"deny": rules},
+        "sandbox": {
+            "enabled": true,
+            "failIfUnavailable": true,
+            "allowUnsandboxedCommands": false,
+            "filesystem": {
+                "allowWrite": shown(&task.write_dirs),
+                "denyRead": denied,
+                "denyWrite": denied,
+            },
+        },
+    });
     std::fs::write(path, format!("{settings}\n"))
 }
 

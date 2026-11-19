@@ -114,6 +114,7 @@ mod tests {
         let file = dir.path().join("t.json");
         let task = TaskSettings {
             write_dirs: vec!["/w".into(), "/tmp".into()],
+            ..Default::default()
         };
         Fake::new(Path::new("a"), Path::new("r"), &[])
             .write_task_settings(&file, &task)
