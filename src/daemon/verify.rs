@@ -108,6 +108,9 @@ impl Verify {
         for row in rows {
             match row.evidence {
                 Some(event) if row.stage == "dialog_passed" => verified(w, &row, event)?,
+                // Seen working in time, still at `launched` (a restart came after the timeout):
+                // the dialog step moves it on (Issue M3-7).
+                Some(_) => {}
                 _ if row.waited >= self.timeout.as_millis() as i64 => {
                     let why = format!(
                         "no working status or turn of its terminal within {} ms of the launch",

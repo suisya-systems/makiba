@@ -148,6 +148,7 @@ impl Prepare {
                     [l.id],
                 )
                 .map_err(|e| db(e.into()))?;
+            super::crash::point("worktree_ready");
         }
         let agent: Box<dyn Agent> = agents::by_name(&l.agent)
             .ok_or_else(|| format!("no agent module named {:?}", l.agent))?;
@@ -167,6 +168,7 @@ impl Prepare {
                 [l.id],
             )
             .map_err(|e| db(e.into()))?;
+        super::crash::point("settings_ready");
         Ok(())
     }
 

@@ -296,6 +296,7 @@ impl Dialogs {
                 && !policies.iter().any(|d| shown_with(d, s))
             {
                 passed(w, row.id)?;
+                super::crash::point("dialog_passed");
                 continue;
             }
             let Ok(screen) = base.read(&t.id, 0) else {
