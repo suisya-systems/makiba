@@ -15,9 +15,18 @@
 //!
 //! Before a key is issued the base is asked for a terminal carrying the launch's `makiba.spawn`
 //! (Issue M3-7): one that exists was launched by a process that died before its record, and is
-//! adopted (recorded, no key, no second launch). With none, keys of the launch left by such a
-//! process are revoked first. Two or more fail the launch and its run as resume.rs does. (ponytail: a process killed while
-//! `Base::launch` was in flight may see none and launch again; the base has no idempotent create.)
+//! adopted (recorded, no key, no second launch). Two or more fail the launch and its run as
+//! resume.rs does.
+//!
+//! A process killed while `Base::launch` was in flight (Issue 122) may leave a terminal that
+//! appears late. The base refuses a second live terminal of the same name (`name_taken`) before it
+//! starts the child, and a worker's terminal is named `w-<task_id>`: of the dead process's request
+//! and this one's, exactly one child runs. With none seen, this process launches with a new key and
+//! settles the keys by the outcome: a launch that returns revokes the keys the dead process left; a
+//! refusal while a terminal carries the `makiba.spawn` tag adopts that terminal and revokes no key:
+//! it may carry this attempt's key (only the reply was lost) or a left one. (ponytail: the keys of
+//! the launch that the terminal does not carry stay live, several after restarts in a row; none
+//! was delivered to a running child. Tighten by recording which key a terminal's argv carries.)
 
 use crate::agents::{self, Agent, AgentLaunch, DoorAccess, Role};
 use crate::base::{Base, LaunchSpec};
@@ -217,10 +226,6 @@ impl Launch {
             1 => return Outcome::Up,
             n => return Outcome::Several(format!("{n} terminals carry {TAG_SPAWN}={}", row.spawn)),
         }
-        if let Err(e) = super::resume::revoke_keys(w, &row.spawn) {
-            eprintln!("makibad: launch {}: {e}", row.task);
-            return Outcome::Later;
-        }
         let agent_id = spec::worker_agent_id(&row.task);
         let token = match super::door::issue_key(
             w,
@@ -235,6 +240,12 @@ impl Launch {
         let hash = super::door::sha256_hex(&token);
         match base.launch(&self.spec(row, &*agent, token)) {
             Ok(_) => {
+                // The child carries this key: the ones a dead process left are dead keys.
+                let _ = w.conn().execute(
+                    "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                     WHERE spawn_id = ?1 AND key_sha256 != ?2 AND revoked_at IS NULL",
+                    [&row.spawn, &hash],
+                );
                 super::crash::point("launch_returned");
                 Outcome::Up
             }
@@ -243,17 +254,15 @@ impl Launch {
     }
 }
 
-/// A refused launch: up when a terminal with its `makiba.spawn` exists; down, with its key
-/// revoked, when the base lists none; unsure while the base cannot list.
+/// A refused launch: up when a terminal with its `makiba.spawn` exists (no key is revoked: the
+/// terminal may be this attempt's, when only the reply was lost, or a dead process's late one, and
+/// which key it carries is not known); down, with every key of the launch revoked, when the base
+/// lists none; unsure while the base cannot list.
 fn settle(w: &StateWriter, base: &dyn Base, row: &Row, hash: String, refused: String) -> Outcome {
     match base.list() {
         Ok(ts) if ts.iter().any(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn)) => Outcome::Up,
         Ok(_) => {
-            let _ = w.conn().execute(
-                "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-                 WHERE key_sha256 = ?1",
-                [hash],
-            );
+            let _ = super::resume::revoke_keys(w, &row.spawn);
             Outcome::Down(refused)
         }
         Err(_) => Outcome::Unsure { hash, refused },
