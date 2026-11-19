@@ -3,6 +3,7 @@
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
 pub mod anomalies;
+mod crash;
 pub mod delivery;
 mod dialogs;
 pub mod dispatch;
@@ -14,6 +15,7 @@ pub mod notify_gate;
 pub mod person_key;
 pub mod prepare;
 mod recover;
+mod resume;
 mod verify;
 
 use self::anomalies::Anomalies;
@@ -180,6 +182,7 @@ fn serve(
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = take_lock(dir)?;
+    crash::arm(dir);
     let stop = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(|e| e.to_string())?;
@@ -264,6 +267,7 @@ fn serve(
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
+    let mut resumed = false;
     while !stop.load(Ordering::SeqCst) {
         match rx.recv_timeout(TICK) {
             Ok(Msg::Subscribed(Ok(()))) => {
@@ -305,15 +309,24 @@ fn serve(
             if let Err(e) = prepare.pass(&w) {
                 eprintln!("makibad: prepare: {e}");
             }
-            if let Err(e) = launch.pass(&w, &*events_base) {
-                eprintln!("makibad: launch: {e}");
+            // No launch step runs until the start pass has looked for every launch's terminal.
+            if !resumed {
+                match resume::pass(&w, &*events_base) {
+                    Ok(done) => resumed = done,
+                    Err(e) => eprintln!("makibad: resume: {e}"),
+                }
             }
-            // Before the dialogs: a launch they move on is looked at on a later tick.
-            if let Err(e) = verify.pass(&w, &*events_base) {
-                eprintln!("makibad: verify: {e}");
-            }
-            if let Err(e) = dialogs.pass(&w, &*events_base) {
-                eprintln!("makibad: dialogs: {e}");
+            if resumed {
+                if let Err(e) = launch.pass(&w, &*events_base) {
+                    eprintln!("makibad: launch: {e}");
+                }
+                // Before the dialogs: a launch they move on is looked at on a later tick.
+                if let Err(e) = verify.pass(&w, &*events_base) {
+                    eprintln!("makibad: verify: {e}");
+                }
+                if let Err(e) = dialogs.pass(&w, &*events_base) {
+                    eprintln!("makibad: dialogs: {e}");
+                }
             }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");

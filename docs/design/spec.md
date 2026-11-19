@@ -46,6 +46,8 @@ Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-p
 
 Test seam of verification (M3-6): `MAKIBA_VERIFY_TIMEOUT_MS`, read by `makibad` at start, is the time a launch has to be verified in milliseconds (section 5.3; default 180 s); nothing in the role files, `makiba up` or any launch sets it.
 
+Test seam of a restart (M3-7): a debug build of `makibad` reads `<state>/makibad.die-at` at start; its thread ends right after the step named there (`run_taken`, `worktree_ready`, `settings_ready`, `launch_returned`, `launched`, `dialog_passed`), as if killed. A release build has no such step: it never reads the file.
+
 Test seam of the door: with `MAKIBA_DOOR=none` `makibad` opens no Unix socket (it says so in its log) and serves the port as usual, and the person's `makiba` fails at once saying the socket is off; nothing in the role files, `makiba up` or any launch sets it.
 
 Nothing is written into a target repository: no rules file, no settings file (paddock Q10, Q12).
@@ -211,6 +213,10 @@ END;
 ```
 
 `stage` is what makes a launch safe to resume after `makibad` dies (Issue M3-7): each step is recorded before the next begins, and on start `makibad` finishes or fails every row that is not `verified` or `failed`. For `launched` and later it first asks the base for a terminal carrying `makiba.spawn=<spawn_id>`; if one exists, it is adopted, never launched again.
+
+- `planned`, `worktree_ready`, `settings_ready`: each step reads the stage, so a new process continues from it. Before a key is issued at `settings_ready`, the base is asked for a terminal carrying the launch's `makiba.spawn`: one that exists was launched by a process that died before writing `launched`, and is adopted (`worker_spawned` and `launched` are written, no key is issued, the base is not asked to launch). With none, keys of the launch left by such a process are revoked before the new one is issued.
+- `launched`, `dialog_passed`: a start pass runs before any launch, dialog or verify step of the process. Exactly one terminal with the tag: adopted; nothing is written, its key stays, and the dialog and verify steps take it on from its stage (the timeout still counts from its `worker_spawned`; a launch at `launched` that has its evidence in time is not failed by the timeout). None: failed by the path above (`worker_spawn_failed` with the stage, the run `failed`, the notice) with its keys revoked, in one transaction. Two or more: failed the same way; none of them is ended.
+- A process killed while `Base::launch` was in flight may find no terminal and launch again (Issue 122).
 
 ### 5.4 `messages`
 

@@ -8,8 +8,13 @@
 //!
 //! A launch whose record could not be written is not launched again by this process: only the
 //! record is retried. A launch the base refused is looked for by its `makiba.spawn` tag before it
-//! is failed, since an error does not prove that no terminal exists. (ponytail: a crash between
-//! the launch and the record can still launch twice; M3-7 adopts by `makiba.spawn`, spec 5.3.)
+//! is failed, since an error does not prove that no terminal exists.
+//!
+//! Before a key is issued the base is asked for a terminal carrying the launch's `makiba.spawn`
+//! (Issue M3-7): one that exists was launched by a process that died before its record, and is
+//! adopted (recorded, no key, no second launch). With none, keys of the launch left by such a
+//! process are revoked first. Two or more fail the launch. (ponytail: a process killed while
+//! `Base::launch` was in flight may see none and launch again; the base has no idempotent create.)
 
 use crate::agents::{self, Agent, AgentLaunch, DoorAccess, Role};
 use crate::base::{Base, LaunchSpec};
@@ -63,7 +68,12 @@ enum Pending {
 enum Outcome {
     Up,
     Down(String),
-    Unsure { hash: String, refused: String },
+    Unsure {
+        hash: String,
+        refused: String,
+    },
+    /// The base cannot list yet: nothing was issued or launched; the next pass tries again.
+    Later,
 }
 
 struct Row {
@@ -125,17 +135,19 @@ impl Launch {
                 Outcome::Up => {
                     self.lock().insert(row.spawn.clone(), Pending::Up);
                     record(w, &row)?;
+                    super::crash::point("launched");
                     self.lock().remove(&row.spawn);
                     launched.push(row.task);
                 }
                 Outcome::Down(why) => {
                     self.lock().remove(&row.spawn);
-                    fail(w, row.id, &why)?;
+                    fail(w, &row, &why)?;
                 }
                 Outcome::Unsure { hash, refused } => {
                     self.lock()
                         .insert(row.spawn.clone(), Pending::Unsure { hash, refused });
                 }
+                Outcome::Later => {}
             }
         }
         Ok(launched)
@@ -179,11 +191,28 @@ impl Launch {
         }
     }
 
-    /// Issue the key and ask the base; a refusal is settled by looking for the terminal.
+    /// Adopt the launch's terminal if it exists; otherwise issue the key and ask the base. A
+    /// refusal is settled by looking for the terminal.
     fn start(&self, w: &StateWriter, base: &dyn Base, row: &Row) -> Outcome {
         let Some(agent) = agents::by_name(&row.agent) else {
             return Outcome::Down(format!("no agent module named {:?}", row.agent));
         };
+        let Ok(terminals) = base.list() else {
+            return Outcome::Later;
+        };
+        match terminals
+            .iter()
+            .filter(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn))
+            .count()
+        {
+            0 => {}
+            1 => return Outcome::Up,
+            n => return Outcome::Down(format!("{n} terminals carry {TAG_SPAWN}={}", row.spawn)),
+        }
+        if let Err(e) = super::resume::revoke_keys(w, &row.spawn) {
+            eprintln!("makibad: launch {}: {e}", row.task);
+            return Outcome::Later;
+        }
         let agent_id = spec::worker_agent_id(&row.task);
         let token = match super::door::issue_key(
             w,
@@ -197,7 +226,10 @@ impl Launch {
         };
         let hash = super::door::sha256_hex(&token);
         match base.launch(&self.spec(row, &*agent, token)) {
-            Ok(_) => Outcome::Up,
+            Ok(_) => {
+                super::crash::point("launch_returned");
+                Outcome::Up
+            }
             Err(e) => settle(w, base, row, hash, e.to_string()),
         }
     }
@@ -220,12 +252,15 @@ fn settle(w: &StateWriter, base: &dyn Base, row: &Row, hash: String, refused: St
     }
 }
 
-fn fail(w: &StateWriter, id: i64, why: &str) -> Result<()> {
-    w.conn().execute(
-        "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
-        rusqlite::params![id, why],
-    )?;
-    Ok(())
+/// Stage `failed` with `why`, and the launch's keys revoked, together.
+fn fail(w: &StateWriter, row: &Row, why: &str) -> Result<()> {
+    w.transaction(|w| {
+        w.conn().execute(
+            "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
+            rusqlite::params![row.id, why],
+        )?;
+        super::resume::revoke_keys(w, &row.spawn)
+    })
 }
 
 /// `worker_spawned` and stage `launched`, together.
@@ -352,9 +387,39 @@ mod tests {
             Outcome::Down(_)
         ));
         assert_eq!(revoked(&w), [true]);
-        // The name is taken by this launch's own terminal: it exists.
+        // The name is taken by this launch's own terminal: it exists, and is adopted without a
+        // key (Issue M3-7).
         assert!(matches!(l.start(&w, &taken("s1"), &row), Outcome::Up));
-        assert_eq!(revoked(&w), [true, false]);
+        assert_eq!(revoked(&w), [true]);
+    }
+
+    /// A terminal of the launch left by a process that died before its record is adopted: no key,
+    /// no second launch. Keys left by a process that died before its terminal existed are revoked
+    /// before a new one is issued. Two terminals of the launch fail it.
+    #[test]
+    fn a_launch_looks_for_its_terminal_before_it_issues_a_key() {
+        let (dir, w, row) = org();
+        let l = Launch::new(dir.path(), "127.0.0.1:1".into());
+        let stub = Stub::new();
+        let left =
+            super::super::door::issue_key(&w, spec::Role::Worker, "w-t1", Some(1), Some("s1"))
+                .unwrap();
+        assert!(!left.is_empty());
+        assert!(matches!(l.start(&w, &stub, &row), Outcome::Up));
+        assert_eq!(revoked(&w), [true, false], "the left key is revoked first");
+        assert!(matches!(l.start(&w, &stub, &row), Outcome::Up));
+        assert_eq!(revoked(&w), [true, false], "adopted: no key");
+        stub.launch(&LaunchSpec {
+            argv: vec![],
+            cwd: "/".into(),
+            name: "w-t1-again".into(),
+            tags: BTreeMap::from([(TAG_SPAWN.to_string(), "s1".to_string())]),
+            env: BTreeMap::new(),
+            unset: vec![],
+        })
+        .unwrap();
+        assert!(matches!(l.start(&w, &stub, &row), Outcome::Down(_)));
+        assert_eq!(stub.list().unwrap().len(), 2, "no terminal is ended");
     }
 
     /// A refusal from a base that cannot list either keeps the launch and its key: the next pass
@@ -368,7 +433,16 @@ mod tests {
             std::time::Duration::from_secs(1),
             "org",
         );
-        let Outcome::Unsure { hash, refused } = l.start(&w, &*gone, &row) else {
+        // A base that cannot list is not asked to launch: no key is issued.
+        assert!(matches!(l.start(&w, &*gone, &row), Outcome::Later));
+        assert!(revoked(&w).is_empty());
+        // A launch refused and then not settled (the list after the refusal failed).
+        let token =
+            super::super::door::issue_key(&w, spec::Role::Worker, "w-t1", Some(1), Some("s1"))
+                .unwrap();
+        let hash = super::super::door::sha256_hex(&token);
+        let Outcome::Unsure { hash, refused } = settle(&w, &*gone, &row, hash, "refused".into())
+        else {
             panic!("a base that cannot list settles nothing");
         };
         assert_eq!(revoked(&w), [false]);

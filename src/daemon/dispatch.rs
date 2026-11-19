@@ -43,6 +43,7 @@ impl Dispatch {
         let mut taken = Vec::new();
         // One transaction per run, so the count and the event are never apart.
         while let Some(task) = w.transaction(|w| self.take_one(w))? {
+            super::crash::point("run_taken");
             taken.push(task);
         }
         Ok(taken)
