@@ -16,7 +16,7 @@ Once a branch is pushed you never force-push it, so it takes the base in as a me
 2. `git status --porcelain --untracked-files=no` must print nothing. If tracked files have uncommitted changes, stop: they are the worker's; ask it with mcp__makiba__send.
 3. `git merge-base --is-ancestor origin/<base> HEAD` succeeds: the branch already contains the base. Stop.
 4. `git merge --no-edit origin/<base>`. On a conflict, `git merge --abort`, which leaves the branch as it was, and send the conflict to the worker to resolve; it reports done again.
-5. `git push origin <branch>` (no force), then mcp__makiba__pr with `state` `pushed` and the new full `head`, as in the pull-request skill.
+5. `git push origin <branch>` (no force), then mcp__makiba__pr with `state` `pushed`, the pull request's `repo`, `pr` and `task`, and the new full `head`, as in the pull-request skill.
 
 Never rebase a pushed branch, never `--force`, never reset. Your hooks refuse the dangerous forms.
 

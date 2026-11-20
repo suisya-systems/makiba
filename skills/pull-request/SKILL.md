@@ -27,7 +27,7 @@ You push and open pull requests for the workers' commits; workers never push. CI
 
 ## New commits on an open pull request
 
-After the push, call mcp__makiba__pr with `state` `pushed` and the new `head`. The watch of the old head ends; the new head is watched.
+After the push, call mcp__makiba__pr with `state` `pushed`, the same `repo`, `pr` and `task` as when it was opened, and the new full `head`: every call carries all five. The watch of the old head ends; the new head is watched.
 
 ## Main moved under a pushed branch
 
