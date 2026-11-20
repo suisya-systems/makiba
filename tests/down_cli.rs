@@ -56,16 +56,24 @@ fn down_stops_makibad_and_suspends_the_runs() {
         std::thread::sleep(Duration::from_millis(50));
     }
     assert!(subscribed(), "makibad did not subscribe");
-    {
-        let w = makiba::db::writer::StateWriter::open(&state.join("state.db")).unwrap();
+    // The running makibad writes too: a busy database is tried again for a few seconds.
+    let store = || -> makiba::db::Result<()> {
+        let w = makiba::db::writer::StateWriter::open(&state.join("state.db"))?;
         w.upsert_run(&makiba::db::writer::RunUpsert {
             task_id: "t1",
             project_slug: "p",
             status: Some("in_use"),
             ..Default::default()
         })
-        .unwrap();
+        .map(drop)
+    };
+    let until = Instant::now() + Duration::from_secs(10);
+    let mut stored = store();
+    while stored.is_err() && Instant::now() < until {
+        std::thread::sleep(Duration::from_millis(100));
+        stored = store();
     }
+    stored.unwrap();
 
     let out = makiba(state, &["down"]).output().unwrap();
     assert!(out.status.success(), "{}", text(&out));
