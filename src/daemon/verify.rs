@@ -139,10 +139,10 @@ fn screen_of(base: &dyn Base, spawn: &str) -> Vec<String> {
 }
 
 /// `worker_spawn_verified`, stage `verified` and the run `in_use`, together; the conversation id
-/// when the agent module has one.
+/// when the agent module has one (a resumed launch keeps the id it resumed).
 fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<()> {
-    let conversation =
-        agents::by_name(&row.agent).and_then(|a| a.conversation_id(Path::new(&row.worktree)));
+    let conversation = agents::by_name(&row.agent)
+        .and_then(|a| a.conversation_id(Path::new(&row.worktree), &agents::session_id(&row.spawn)));
     w.transaction(|w| {
         w.append_event(&NewEvent {
             kind: "worker_spawn_verified",
@@ -152,14 +152,15 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<()> {
             ..Default::default()
         })?;
         w.conn().execute(
-            "UPDATE run_launch SET stage = 'verified', conversation_id = ?2,
+            "UPDATE run_launch SET stage = 'verified',
+               conversation_id = COALESCE(conversation_id, ?2),
                verified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?1",
             params![row.id, conversation],
         )?;
         // ponytail: a run closed while its launch was under way is not brought back.
         w.conn().execute(
-            "UPDATE runs SET status = 'in_use' WHERE id = ?1 AND status = 'queued'",
+            "UPDATE runs SET status = 'in_use' WHERE id = ?1 AND status IN ('queued', 'suspended')",
             [row.run_id],
         )?;
         Ok(())
@@ -169,6 +170,10 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<()> {
 /// A launch that cannot be verified, at `stage`: `worker_spawn_failed` with `screen`, stage
 /// `failed`, the run `failed`, and a notice to the secretary if the gate sends it, together. The
 /// terminal is left.
+///
+/// A resume of a `suspended` run (Issue 41: a launch with a conversation id before it is
+/// verified) does not fail its run: its keys are revoked and a fresh launch is added with the
+/// same brief and workplace, and the relaunch ends the terminal left here.
 pub(super) fn fail(
     w: &StateWriter,
     id: i64,
@@ -191,14 +196,25 @@ pub(super) fn fail(
             run_task_id: Some(task),
             ..Default::default()
         })?;
+        let resumed: bool = w.conn().query_row(
+            "SELECT l.conversation_id IS NOT NULL AND l.stage != 'verified' AND r.status = 'suspended'
+             FROM run_launch l JOIN runs r ON r.id = l.run_id WHERE l.id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
         w.conn().execute(
             "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
             params![id, why],
         )?;
+        if resumed {
+            super::resume::revoke_keys(w, spawn)?;
+            super::launch::add_relaunch(w, id, None)?;
+            return Ok(());
+        }
         w.conn().execute(
             "UPDATE runs SET status = 'failed', outcome_note = ?2,
                completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE task_id = ?1 AND status = 'queued'",
+             WHERE task_id = ?1 AND status IN ('queued', 'suspended')",
             params![task, format!("launch failed: {why}")],
         )?;
         if !super::notify_gate::decide("worker_spawn_failed").send {

@@ -638,7 +638,7 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     if state == "done" {
         w.conn()
             .execute(
-                "UPDATE runs SET status = 'review' WHERE task_id = ?1 AND status IN ('queued','in_use')",
+                "UPDATE runs SET status = 'review' WHERE task_id = ?1 AND status IN ('queued','in_use','suspended')",
                 [task],
             )
             .map_err(internal)?;

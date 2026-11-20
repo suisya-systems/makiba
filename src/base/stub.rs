@@ -284,6 +284,10 @@ impl Base for Stub {
         Ok(())
     }
 
+    fn stop(&self) -> Result<(), BaseError> {
+        Ok(())
+    }
+
     fn worker_denies(&self) -> BaseDenies {
         BaseDenies {
             commands: ["hc", "herdr-core", "herdr-app"].map(String::from).into(),

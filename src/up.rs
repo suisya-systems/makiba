@@ -2,9 +2,14 @@
 //! exists, from the person's login shell: it refuses inside an agent, checks the Claude Code
 //! version, creates the person key, starts the base's own place and `makibad`. The secretary is
 //! M6-2: `up` starts none and says so.
+//!
+//! After `makiba down` or a stop of the base (Issue 41) it brings the work back before `makibad`
+//! starts: a base that was not running had its programs stopped, so the runs at work are suspended
+//! first (`down::suspend`); then every `suspended` run gets a new launch (`resume`) that the
+//! daemon's passes take on.
 
 use crate::agents::version;
-use crate::base;
+use crate::base::{self, BaseError};
 use crate::daemon::{self, launch::UNSET, person_key};
 use crate::db::writer::StateWriter;
 use crate::spec::ErrorKind;
@@ -25,7 +30,7 @@ const BASE_VARS: &[&str] = &[
 ];
 
 /// The variable that shows `up` runs inside an agent or in a terminal of the base, if any.
-fn agent_variable() -> Option<String> {
+pub(crate) fn agent_variable() -> Option<String> {
     std::env::vars_os()
         .filter_map(|(k, _)| k.into_string().ok())
         .find(|k| k.starts_with("CLAUDE") || BASE_VARS.contains(&k.as_str()))
@@ -63,7 +68,7 @@ fn check_claude() -> Result<(), Failure> {
 }
 
 /// Whether a `makibad` holds the lock of the state folder `dir`.
-fn daemon_running(dir: &Path) -> Result<bool, Failure> {
+pub(crate) fn daemon_running(dir: &Path) -> Result<bool, Failure> {
     let path = dir.join("makibad.lock");
     let file: File = OpenOptions::new()
         .read(true)
@@ -161,14 +166,29 @@ fn run() -> Result<(), Failure> {
             .map_err(|e| (ErrorKind::Internal, e))?;
     }
     let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
-    base::connect_session_for_start(&session, Duration::from_secs(10))
-        .start()
-        .map_err(|e| {
-            (
-                ErrorKind::Unavailable,
-                format!("cannot start the base: {e}"),
-            )
-        })?;
+    let the_base = base::connect_session_for_start(&session, Duration::from_secs(10));
+    // Nothing listening at the base's socket: the base is stopped, and its programs with it.
+    let stopped = matches!(the_base.hello(), Err(BaseError::Unavailable(d)) if d.kind == "connect");
+    let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
+    // Suspended before the base is back: a makibad still running would otherwise see the stopped
+    // workers' terminals missing on its reconnect and fail their runs first.
+    if stopped {
+        let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
+        crate::down::suspend(&w).map_err(internal)?;
+    }
+    the_base.start().map_err(|e| {
+        (
+            ErrorKind::Unavailable,
+            format!("cannot start the base: {e}"),
+        )
+    })?;
+    {
+        let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
+        let resumed = resume(&w).map_err(internal)?;
+        if !resumed.is_empty() {
+            println!("resumed: {}", resumed.join(" "));
+        }
+    }
     if daemon_running(&dir)? {
         println!("makibad: already running");
     } else {
@@ -178,6 +198,40 @@ fn run() -> Result<(), Failure> {
     // ponytail: the secretary is M6-2; `--no-secretary` has nothing to switch off until then.
     println!("secretary: not started (M6-2)");
     Ok(())
+}
+
+/// A new launch for every `suspended` run with no launch under way (Issue 41): copied from its
+/// newest launch, in its workplace as it is, resuming the conversation of its newest `verified`
+/// launch if that has one. A resume that is not verified is replaced by a fresh launch
+/// (`verify::fail`). The session row goes back to `ACTIVE`. Returns the task ids relaunched; a
+/// second call adds nothing.
+pub fn resume(w: &StateWriter) -> crate::db::Result<Vec<String>> {
+    w.transaction(|w| {
+        let runs: Vec<(String, i64, Option<String>)> = w
+            .conn()
+            .prepare(
+                "SELECT r.task_id, l.id,
+                   (SELECT v.conversation_id FROM run_launch v WHERE v.run_id = r.id
+                    AND v.stage = 'verified' ORDER BY v.id DESC LIMIT 1)
+                 FROM runs r
+                 JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
+                 WHERE r.status = 'suspended' AND l.stage IN ('verified', 'failed')
+                 ORDER BY r.id",
+            )?
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        for (_, from, conversation) in &runs {
+            daemon::launch::add_relaunch(w, *from, conversation.as_deref())?;
+        }
+        w.conn().execute(
+            "UPDATE org_sessions SET status = 'ACTIVE',
+               resumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = 1 AND status = 'SUSPENDED'",
+            [],
+        )?;
+        Ok(runs.into_iter().map(|(task, _, _)| task).collect())
+    })
 }
 
 /// `makiba up [--no-secretary]`.

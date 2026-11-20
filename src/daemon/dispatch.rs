@@ -54,7 +54,8 @@ impl Dispatch {
         // waiting on a launch (ponytail: a launch left open on a run that ended is not counted).
         let busy: i64 = w.conn().query_row(
             &format!(
-                "SELECT count(*) FROM runs r WHERE r.status = 'in_use' OR (r.status = 'queued'
+                "SELECT count(*) FROM runs r WHERE r.status = 'in_use'
+                 OR (r.status IN ('queued', 'suspended')
                  AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
                              AND l.stage NOT IN ('verified', 'failed') AND {TAKEN}))"
             ),

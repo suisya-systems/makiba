@@ -18,7 +18,7 @@ Shows (Issue 35, definition of done):
 
 Where the code at this commit has no way to do what the Issue says, and what this runbook does instead:
 
-- **No `makiba close`, no `makiba down`, no `makiba peek`.** The verbs are in spec section 12 but not built: `makiba` accepts `up`, `status`, `dispatch`, `send`, `report`, `show` and `daemon` only, and the door answers "not built yet" to the others. The run therefore ends at `review`, and section 8 cleans up by hand (`kill`, `hc kill`, `hc server stop`). The worker's screen is read with `hc read`.
+- **No `makiba close`, no `makiba peek`.** The verbs are in spec section 12 but not built: `makiba` accepts `up`, `down`, `status`, `dispatch`, `send`, `report`, `show` and `daemon` only, and the door answers "not built yet" to the others. `makiba down` suspends the run and `makiba up` brings it back (spec section 12); it does not close it. The run therefore ends at `review`, and section 8 cleans up by hand (`kill`, `hc kill`, `hc server stop`). The worker's screen is read with `hc read`.
 - **`makiba status` shows only the heartbeat.** There is no command that lists events, runs or messages. Section 5 reads `state.db` read-only with the `sqlite3` program.
 - **`report_done` is not an event kind.** The done report is a row of `messages` with `kind = 'report_done'`; its trace in `events` is a `message_sent` event whose `run_id` is the run's. Section 5 has the query that joins them, and the event kinds the run does write.
 - **`makiba show` cannot read the worker's report.** Only the sender and the recipient of a message may read it (the recipient is `secretary`, which does not exist yet). Read the body from `messages`.

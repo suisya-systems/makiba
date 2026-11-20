@@ -96,6 +96,16 @@ impl Agent for ClaudeCode {
         argv
     }
 
+    /// A first launch names its conversation with `--session-id` (Issue 41); a resume already
+    /// names it with `--resume`. Put right after the program, never just before the task.
+    fn argv_with_session(&self, launch: &AgentLaunch, session: Option<&str>) -> Vec<String> {
+        let mut argv = self.argv(launch);
+        if let (None, Some(id)) = (launch.resume, session) {
+            argv.splice(1..1, ["--session-id".to_string(), id.to_string()]);
+        }
+        argv
+    }
+
     fn startup_dialogs(&self) -> &[DialogPolicy] {
         &DIALOGS
     }
@@ -114,9 +124,9 @@ impl Agent for ClaudeCode {
         super::write_sandbox_settings(path, task)
     }
 
-    // ponytail: read from Claude Code's own transcript folder once a resume is built (M4).
-    fn conversation_id(&self, _worktree: &Path) -> Option<String> {
-        None
+    /// The session id makiba gave it at launch (`--session-id`).
+    fn conversation_id(&self, _worktree: &Path, session: &str) -> Option<String> {
+        Some(session.to_string())
     }
 
     fn wraps_delivery(&self) -> bool {

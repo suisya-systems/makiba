@@ -186,6 +186,26 @@ pub fn on_path(name: &str) -> Option<PathBuf> {
         .and_then(|p| std::path::absolute(p).ok())
 }
 
+/// The conversation id makiba names for the launch `spawn` (Issue 41): a version 4 UUID made from
+/// the SHA-256 of the spawn id, so it needs no store until the launch is verified.
+pub fn session_id(spawn: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let mut b: [u8; 16] = Sha256::digest(spawn.as_bytes())[..16]
+        .try_into()
+        .expect("16 bytes");
+    b[6] = (b[6] & 0x0f) | 0x40;
+    b[8] = (b[8] & 0x3f) | 0x80;
+    let h: String = b.iter().map(|x| format!("{x:02x}")).collect();
+    format!(
+        "{}-{}-{}-{}-{}",
+        &h[..8],
+        &h[8..12],
+        &h[12..16],
+        &h[16..20],
+        &h[20..]
+    )
+}
+
 /// The module named `name` (a `run_launch.agent`).
 pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
     match name {
@@ -289,6 +309,11 @@ pub trait Agent: Send + Sync {
     /// Full argv for the agent program, with the door's address and the agent's token. Unsetting
     /// variables is the base's job.
     fn argv(&self, launch: &AgentLaunch) -> Vec<String>;
+    /// As `argv`, naming the conversation `session` of a first launch (Issue 41) when the program
+    /// takes one; a resume (`launch.resume`) is never given one.
+    fn argv_with_session(&self, launch: &AgentLaunch, _session: Option<&str>) -> Vec<String> {
+        self.argv(launch)
+    }
     /// The policy list of spec section 7.
     fn startup_dialogs(&self) -> &[DialogPolicy];
     /// For a blocked terminal: the prompt's text, normalized, and its two keys.
@@ -300,8 +325,9 @@ pub trait Agent: Send + Sync {
     }
     /// The per-task settings file: sandbox write surface, the door, denies.
     fn write_task_settings(&self, path: &Path, task: &TaskSettings) -> io::Result<()>;
-    /// The id to pass back as `resume`, read after the first turn.
-    fn conversation_id(&self, worktree: &Path) -> Option<String>;
+    /// The id to pass back as `resume`, read after the first turn; `session` is the one makiba
+    /// named at launch (`session_id`).
+    fn conversation_id(&self, worktree: &Path, session: &str) -> Option<String>;
     /// True when spec section 8's wrapper is safe to type as is.
     fn wraps_delivery(&self) -> bool;
     /// True when this program can take a channel push; when false a delivery goes by the wake

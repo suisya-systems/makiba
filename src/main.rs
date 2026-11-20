@@ -9,6 +9,7 @@ fn main() -> ExitCode {
         Some("status") => makiba::status_local::main(),
         Some("dispatch" | "send" | "report" | "show") => makiba::cli::main(&args),
         Some("up") => makiba::up::main(&args[1..]),
+        Some("down") => makiba::down::main(&args[1..]),
         _ => {
             print!("{}", makiba::USAGE);
             ExitCode::SUCCESS
