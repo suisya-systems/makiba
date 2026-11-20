@@ -178,12 +178,14 @@ fn the_person_key_is_private_and_a_second_up_keeps_it() {
 }
 
 #[test]
-fn a_claude_outside_the_range_stops_up_before_anything_starts() {
-    let s = Setup::new("9.9.9 (Claude Code)");
+fn a_claude_below_the_range_stops_up_before_anything_starts() {
+    let (a, b, c) = makiba::agents::version::LOWEST;
+    let below = format!("{a}.{b}.{}", c - 1);
+    let s = Setup::new(&format!("{below} (Claude Code)"));
     let out = s.up(&[]);
     assert!(!out.status.success(), "{}", text(&out));
     let said = text(&out);
-    assert!(said.contains("9.9.9"), "{said}");
+    assert!(said.contains(&below), "{said}");
     assert!(said.contains(makiba::agents::version::SUPPORTED), "{said}");
     assert!(!s.path("hc.rec").exists(), "the base was started");
     assert!(!s.lock().exists(), "makibad was started");
