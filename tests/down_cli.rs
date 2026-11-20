@@ -107,5 +107,9 @@ fn down_refuses_inside_an_agent_and_bad_arguments() {
     );
     let out = makiba(tmp.path(), &["down", "--bogus"]).output().unwrap();
     assert!(!out.status.success());
-    assert!(text(&out).contains("usage: makiba down"), "{}", text(&out));
+    assert!(
+        text(&out).to_lowercase().contains("usage: makiba down"),
+        "{}",
+        text(&out)
+    );
 }

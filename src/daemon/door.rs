@@ -255,8 +255,44 @@ impl Door {
             let _ = record(&w, &actor, verb, &args, idem, &r);
             return r;
         }
-        if v == Verb::Send && args.get("typed") == Some(&json!(true)) {
-            return self.typed(&w, &actor, role, &args, idem);
+        if args.get("typed") == Some(&json!(true)) {
+            // Typed sends are recorded before anything is typed, outside the verb's transaction.
+            let target = match v {
+                Verb::Send => str_arg(&args, "to")
+                    .and_then(|to| Ok((to, str_arg(&args, "text")?)))
+                    .and_then(|(to, text)| {
+                        recipient(&w, role, to)?;
+                        Ok(Some((to.to_string(), text.to_string(), None)))
+                    }),
+                Verb::Answer => {
+                    question(&w, &args).map(|q| q.map(|q| (q.to.clone(), q.body.clone(), Some(q))))
+                }
+                _ => Ok(None),
+            };
+            match target {
+                Err(e) => {
+                    let r = Err(e);
+                    let _ = record(&w, &actor, verb, &args, idem, &r);
+                    return r;
+                }
+                Ok(Some((to, text, q))) => {
+                    return self.typed(
+                        &w,
+                        &actor,
+                        verb,
+                        &args,
+                        idem,
+                        &to,
+                        &text,
+                        |w, id| match &q {
+                            None => Ok(json!({"id": id})),
+                            Some(q) => q.answered(w, &actor, id),
+                        },
+                    );
+                }
+                // An answer to a prompt types no text: the verb's own path.
+                Ok(None) => {}
+            }
         }
         // The verb's writes and its record are one transaction (a verb's own transaction joins it).
         // IMMEDIATE takes the write lock first: a deferred one that reads, then writes after
@@ -265,7 +301,7 @@ impl Door {
         if let Err(e) = begin() {
             return Err(internal(e));
         }
-        let r = run(&w, &self.agent, &actor, role, v, &args);
+        let r = run(&w, &*self.base, &self.agent, &actor, role, v, &args);
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
         }
@@ -287,31 +323,27 @@ impl Door {
     /// `send` with `typed` (spec section 7). The command is recorded before anything is typed, as
     /// not finished, so a retry of the same `idem` after a crash answers that the outcome is not
     /// known instead of typing again. `send_typed` records the message before it types.
+    /// `after` runs once the text was typed, with the message id, and gives the result (an
+    /// answer marks its entry answered there).
+    #[allow(clippy::too_many_arguments)]
     fn typed(
         &self,
         w: &StateWriter,
         actor: &str,
-        role: Role,
+        verb: &str,
         args: &Value,
         idem: Option<&str>,
+        to: &str,
+        text: &str,
+        after: impl FnOnce(&StateWriter, i64) -> Response,
     ) -> Response {
-        let (to, text) = match (str_arg(args, "to"), str_arg(args, "text")) {
-            (Ok(to), Ok(text)) => (to, text),
-            (Err(e), _) | (_, Err(e)) => return Err(e),
-        };
-        if let Err(e) = recipient(w, role, to) {
-            let r = Err(e);
-            let _ = record(w, actor, "send", args, idem, &r);
-            return r;
-        }
         let unknown: Response = Err(internal(
             "the outcome of an earlier typed send with this idem is not known; it is not sent again",
         ));
-        let Some(id) = insert_command(w, actor, "send", args, idem, "accepted", &unknown) else {
+        let Some(id) = insert_command(w, actor, verb, args, idem, "accepted", &unknown) else {
             return Err(internal("cannot record the request"));
         };
         let r = super::delivery::send_typed(w, &*self.base, actor, to, "message", text)
-            .map(|id| json!({"id": id}))
             .map_err(|e| match e {
                 super::delivery::TypedError::Usage(m) => usage(m),
                 super::delivery::TypedError::Conflict(m) => refuse(
@@ -320,7 +352,8 @@ impl Door {
                     "nothing was typed or stored; send again later or without typed",
                 ),
                 super::delivery::TypedError::Failed(m) => internal(m),
-            });
+            })
+            .and_then(|id| after(w, id));
         let done = match status_of(&r) {
             None => w
                 .conn()
@@ -428,10 +461,31 @@ fn record(
     }
 }
 
-fn run(w: &StateWriter, agent: &str, actor: &str, role: Role, v: Verb, args: &Value) -> Response {
+fn run(
+    w: &StateWriter,
+    base: &dyn Base,
+    agent: &str,
+    actor: &str,
+    role: Role,
+    v: Verb,
+    args: &Value,
+) -> Response {
     match v {
-        // The tool for the secretary is #42's; until then only the person's command is built.
-        Verb::Dispatch if role == Role::Person => dispatch(w, agent, actor, args),
+        Verb::Dispatch => dispatch(w, agent, actor, args),
+        Verb::Status => status(w),
+        Verb::Peek => peek(w, base, args),
+        Verb::Pending => pending(w, args),
+        Verb::Answer => answer(w, base, actor, args),
+        Verb::Renew => {
+            if str_arg(args, "handover")?.trim().is_empty() {
+                return Err(usage("the handover is not empty"));
+            }
+            Err(refuse(
+                ErrorKind::Internal,
+                "renew is wired in M6-5; nothing was stored and no secretary was launched",
+                "",
+            ))
+        }
         Verb::Send => {
             let to = str_arg(args, "to")?;
             let text = str_arg(args, "text")?;
@@ -455,6 +509,277 @@ fn run(w: &StateWriter, agent: &str, actor: &str, role: Role, v: Verb, args: &Va
         Verb::Pr => pr(w, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
+}
+
+/// `status` (spec section 12): what the person's local `makiba status --json` prints, read from
+/// the door's own database file.
+fn status(w: &StateWriter) -> Response {
+    let file: String = w
+        .conn()
+        .query_row(
+            "SELECT file FROM pragma_database_list WHERE name = 'main'",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    crate::status_local::read(Path::new(&file)).map_err(internal)
+}
+
+/// How many lines `peek` returns when not told, and at most.
+const PEEK_LINES: u64 = 40;
+const PEEK_MAX: u64 = 1000;
+
+/// The one live terminal of `task`'s worker, or `not_found`.
+fn worker_terminal(base: &dyn Base, task: &str) -> Result<crate::base::Terminal, DoorError> {
+    super::delivery::find_terminal(base, &worker_agent_id(task))
+        .map_err(|e| refuse(ErrorKind::Unavailable, format!("the base: {e}"), ""))?
+        .ok_or_else(|| {
+            refuse(
+                ErrorKind::NotFound,
+                format!("task {task:?} has no single live worker terminal"),
+                "",
+            )
+        })
+}
+
+/// `peek` (spec section 12): the last lines of a worker's screen, read through the base.
+fn peek(w: &StateWriter, base: &dyn Base, args: &Value) -> Response {
+    let task = str_arg(args, "task_id")?;
+    let lines = match args.get("lines") {
+        None | Some(Value::Null) => PEEK_LINES,
+        Some(n) => n
+            .as_u64()
+            .filter(|n| (1..=PEEK_MAX).contains(n))
+            .ok_or_else(|| usage(format!("lines is a number from 1 to {PEEK_MAX}")))?,
+    };
+    if !run_exists(w, task)? {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    let t = worker_terminal(base, task)?;
+    let screen = base
+        .read(&t.id, lines as usize)
+        .map_err(|e| refuse(ErrorKind::Unavailable, format!("the base: {e}"), ""))?;
+    Ok(json!({"task_id": task, "lines": screen}))
+}
+
+fn id_arg(args: &Value) -> Result<i64, DoorError> {
+    args.get("id")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| usage("the argument id (a pending id) is missing"))
+}
+
+/// `pending` (spec section 12): the table of questions kept by hand. The logic of
+/// `pending_decisions.py` is M6-4's.
+fn pending(w: &StateWriter, args: &Value) -> Response {
+    let c = w.conn();
+    match str_arg(args, "action")? {
+        "add" => {
+            let task = str_arg(args, "task")?;
+            let q = str_arg(args, "question")?;
+            if q.trim().is_empty() {
+                return Err(usage("the question is not empty"));
+            }
+            if !run_exists(w, task)? {
+                return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+            }
+            c.execute(
+                "INSERT INTO pending (run_id, kind, question)
+                 VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'question', ?2)",
+                params![task, q],
+            )
+            .map_err(internal)?;
+            Ok(json!({"id": c.last_insert_rowid(), "status": "open"}))
+        }
+        action @ ("escalate" | "withdraw") => {
+            let id = id_arg(args)?;
+            let (to, from) = if action == "escalate" {
+                ("escalated", "('open')")
+            } else {
+                ("withdrawn", "('open','escalated')")
+            };
+            let changed = c
+                .execute(
+                    &format!("UPDATE pending SET status = ?1 WHERE id = ?2 AND status IN {from}"),
+                    params![to, id],
+                )
+                .map_err(internal)?;
+            if changed == 1 {
+                return Ok(json!({"id": id, "status": to}));
+            }
+            let now: Option<String> = c
+                .query_row("SELECT status FROM pending WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .optional()
+                .map_err(internal)?;
+            Err(match now {
+                None => refuse(ErrorKind::NotFound, format!("no pending entry {id}"), ""),
+                Some(st) => refuse(
+                    ErrorKind::Conflict,
+                    format!("pending entry {id} is {st}; it cannot be {to}"),
+                    "",
+                ),
+            })
+        }
+        "list" => {
+            let mut q = c
+                .prepare(
+                    "SELECT p.id, r.task_id, p.kind, p.question, p.status FROM pending p
+                     LEFT JOIN runs r ON r.id = p.run_id
+                     WHERE p.status IN ('open','escalated') ORDER BY p.id",
+                )
+                .map_err(internal)?;
+            let rows = q
+                .query_map([], |r| {
+                    Ok(
+                        json!({"id": r.get::<_, i64>(0)?, "task_id": r.get::<_, Option<String>>(1)?,
+                              "kind": r.get::<_, String>(2)?, "question": r.get::<_, String>(3)?,
+                              "status": r.get::<_, String>(4)?}),
+                    )
+                })
+                .and_then(|rows| rows.collect::<rusqlite::Result<Vec<_>>>())
+                .map_err(internal)?;
+            Ok(json!({"entries": rows}))
+        }
+        other => Err(usage(format!(
+            "action is add, escalate, withdraw or list, not {other:?}"
+        ))),
+    }
+}
+
+/// A question an `answer` names, ready to be sent to its worker.
+struct Question {
+    id: i64,
+    answer: String,
+    to: String,
+    task: String,
+    body: String,
+}
+
+impl Question {
+    /// Mark the entry answered, after its message `message` was stored (or typed).
+    fn answered(&self, w: &StateWriter, actor: &str, message: i64) -> Response {
+        let changed = w
+            .conn()
+            .execute(
+                "UPDATE pending SET status = 'answered', answer = ?1, answered_by = ?2,
+                   answered_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = ?3 AND status IN ('open','escalated')",
+                params![self.answer, actor, self.id],
+            )
+            .map_err(internal)?;
+        if changed != 1 {
+            return Err(internal(format!(
+                "pending entry {} changed while it was answered",
+                self.id
+            )));
+        }
+        Ok(json!({"id": self.id, "status": "answered", "message": message}))
+    }
+}
+
+/// The entry an `answer` names: `Some` for an open question, `None` for a prompt (answered by
+/// `answer` itself); refused when there is none or it is closed.
+fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError> {
+    let id = id_arg(args)?;
+    let answer = str_arg(args, "answer")?;
+    if !["yes", "no"].contains(&answer) {
+        return Err(usage(format!("answer is yes or no, not {answer:?}")));
+    }
+    let note = args
+        .get("note")
+        .and_then(Value::as_str)
+        .filter(|n| !n.is_empty());
+    let row: Option<(String, String, Option<String>)> = w
+        .conn()
+        .query_row(
+            "SELECT p.kind, p.status, r.task_id FROM pending p
+             LEFT JOIN runs r ON r.id = p.run_id WHERE p.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((kind, status, task)) = row else {
+        return Err(refuse(
+            ErrorKind::NotFound,
+            format!("no pending entry {id}"),
+            "",
+        ));
+    };
+    if !["open", "escalated"].contains(&status.as_str()) {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("pending entry {id} is {status} already"),
+            "",
+        ));
+    }
+    let Some(task) = task else {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("pending entry {id} belongs to no task, so nobody can be answered"),
+            "",
+        ));
+    };
+    if kind == "prompt" {
+        return Ok(None);
+    }
+    let mut body = format!("Answer to pending entry {id}: {answer}");
+    if let Some(note) = note {
+        body.push_str(&format!("\nNote: {note}"));
+    }
+    Ok(Some(Question {
+        id,
+        answer: answer.to_string(),
+        to: worker_agent_id(&task),
+        task,
+        body,
+    }))
+}
+
+/// `answer` (spec sections 7 and 12). A question: its answer is queued to the worker and the
+/// entry is answered, in the caller's transaction. A prompt: the screen is read again; nothing is
+/// typed until M6-8 (`stale` when the recorded prompt is gone, `internal` while it is there).
+fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Response {
+    if let Some(q) = question(w, args)? {
+        let id = store_message(w, actor, &q.to, "message", Some(&q.task), &q.body)?;
+        return q.answered(w, actor, id);
+    }
+    let id = id_arg(args)?;
+    let (task, text): (String, Option<String>) = w
+        .conn()
+        .query_row(
+            "SELECT r.task_id, p.prompt_text FROM pending p JOIN runs r ON r.id = p.run_id
+             WHERE p.id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(internal)?;
+    let text = text.unwrap_or_default();
+    let shown = match super::delivery::find_terminal(base, &worker_agent_id(&task)) {
+        Ok(Some(t)) => base
+            .read(&t.id, PEEK_MAX as usize)
+            .map_err(|e| refuse(ErrorKind::Unavailable, format!("the base: {e}"), ""))?
+            .join("\n"),
+        Ok(None) => String::new(),
+        Err(e) => return Err(refuse(ErrorKind::Unavailable, format!("the base: {e}"), "")),
+    };
+    if text.trim().is_empty() || !shown.contains(text.trim()) {
+        return Err(refuse(
+            ErrorKind::Stale,
+            format!(
+                "the prompt of pending entry {id} is no longer on {task}'s screen; nothing was typed"
+            ),
+            "list the pending entries again",
+        ));
+    }
+    Err(refuse(
+        ErrorKind::Internal,
+        format!(
+            "the prompt of pending entry {id} is still shown; prompts are answered from M6-8, nothing was typed"
+        ),
+        "",
+    ))
 }
 
 /// A name that becomes a path component and part of an agent id: `[A-Za-z0-9._-]`, not starting
@@ -1256,6 +1581,66 @@ fn tool(v: Verb) -> Value {
             "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",
             Map::new(),
             &[],
+        ),
+        Verb::Dispatch => (
+            "Dispatch a task: a queued run and its first launch. kind is code or document; project is required for code. The brief is the task text itself.",
+            Map::from_iter([
+                (
+                    "kind".into(),
+                    json!({"type": "string", "enum": ["code", "document"]}),
+                ),
+                ("task_id".into(), text.clone()),
+                ("title".into(), text.clone()),
+                ("brief".into(), text.clone()),
+                ("project".into(), text.clone()),
+                ("model".into(), text.clone()),
+                ("branch".into(), text.clone()),
+            ]),
+            &["kind", "task_id", "title", "brief"],
+        ),
+        Verb::Status => (
+            "The dispatcher's state, as the person's makiba status --json shows it.",
+            Map::new(),
+            &[],
+        ),
+        Verb::Peek => (
+            "The last lines of a worker's screen, read by makibad (default 40, at most 1000).",
+            Map::from_iter([
+                ("task_id".into(), text.clone()),
+                ("lines".into(), json!({"type": "integer"})),
+            ]),
+            &["task_id"],
+        ),
+        Verb::Pending => (
+            "Keep the pending table of questions: add (task, question), escalate or withdraw (id), list.",
+            Map::from_iter([
+                (
+                    "action".into(),
+                    json!({"type": "string", "enum": ["add", "escalate", "withdraw", "list"]}),
+                ),
+                ("id".into(), json!({"type": "integer"})),
+                ("task".into(), text.clone()),
+                ("question".into(), text.clone()),
+            ]),
+            &["action"],
+        ),
+        Verb::Answer => (
+            "Answer a pending entry yes or no. A question's answer goes to its worker (typed: typed into its terminal); a permission prompt is answered from M6-8.",
+            Map::from_iter([
+                ("id".into(), json!({"type": "integer"})),
+                (
+                    "answer".into(),
+                    json!({"type": "string", "enum": ["yes", "no"]}),
+                ),
+                ("note".into(), text.clone()),
+                ("typed".into(), json!({"type": "boolean"})),
+            ]),
+            &["id", "answer"],
+        ),
+        Verb::Renew => (
+            "Ask to be replaced by a fresh secretary that resumes from the handover text. Wired in M6-5: refused until then.",
+            Map::from_iter([("handover".into(), text.clone())]),
+            &["handover"],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
     };
