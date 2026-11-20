@@ -285,6 +285,18 @@ CREATE TABLE pr_watches (
 
 A new head for the same PR marks every older `watching` row `superseded` in the same transaction that inserts the new row.
 
+`makiba pr opened|pushed` (Issue 38, M5-3) is the only writer of new rows: in one transaction it writes `pr_opened` or `fix_pushed`, marks every other `watching` row of the PR `superseded`, and makes the row of the given head `watching` with `ci_watch_started`. The same head reported again takes a `superseded` or `failed` row up as a new watch (`started_at` is renewed, `conclusion` and `finished_at` cleared); a `completed` row, or one already `watching`, is left as it is.
+
+`makibad` owns the pollers. A poller is a function of the table: every pass gives each `watching` row a poller that has none (all of them, on start), and ends the poller of a row that is no longer `watching` or whose `started_at` changed. A poller only reads; its result is written by the loop, once, by `UPDATE ... WHERE status = 'watching' AND started_at = <the activation it was started for>`, together with the event and a `notice` to the secretary. A result stays queued until that transaction commits, and a late result of a superseded watch writes nothing. Ending `makibad` kills the pollers and their child processes.
+
+| Row ends | `status`, `conclusion` | Event | When |
+| --- | --- | --- | --- |
+| Checks decided | `completed`, `passed` or `failed` | `ci_completed`: `repo`, `pr`, `head_oid`, `status`, `fail_count`, `pending_count`, `total_checks`, `probe_attempts` | No check of the head is pending (a failed check waits for a sibling still running; a `passed` waits for every workflow run of the head to finish) |
+| Cannot go on | `failed` | `ci_watch_failed`: `repo`, `pr`, `head_oid`, `reason` | The program is missing (`gh_missing`), or for the budget the head's checks could not be read (`gh_unreadable: ...`) or there were none (`no_checks: ...`), or the poller crashed (`poller_crashed`) |
+| A new head | `superseded` | none | `pr` with another head |
+
+Reading, carried from claude-org-ja `tools/pr_watch.py` (its push to the secretary and its transport switch are not carried): `gh api --paginate` of `repos/<repo>/commits/<head>/check-runs`, of `.../status` and of `repos/<repo>/actions/runs?head_sha=<head>`, so only the exact head is read. A check run is pending unless `completed`; its `conclusion` `success`, `skipped` and `neutral` pass, and `failure`, `cancelled`, `timed_out`, `action_required`, `startup_failure` and `stale` fail. A commit status `success` passes, `failure` and `error` fail, any other state is pending. What cannot be read is pending. A pending check is polled without a bound; an empty or unreadable observation is retried until the budget has passed since the first one (a readable one resets it). Test seam of the watch (Issue 38): `MAKIBA_GH` names the program (default `gh`), `MAKIBA_PRWATCH_INTERVAL_MS` is the poll interval (default 30000) and `MAKIBA_PRWATCH_BUDGET_MS` the budget (default 300000), all read when `makibad` starts; nothing in the role files, `makiba up` or any launch sets them. Not carried: the exit-code classes, the `gh pr checks --json` fallback, the merge watch, the conflict announce, the head-change loop (a push is `pr pushed`) and the exponential backoff.
+
 ### 5.7 `dispatcher`
 
 One row, the dispatcher's own heartbeat.
@@ -570,7 +582,7 @@ When the secretary's terminal is gone, `makibad` launches a new one by the path 
 | `show` | `<message id>` | Prints a message's full body. Only its sender and recipient may. | `show` |
 | `pending` | `add\|escalate\|withdraw\|list ...` | Maintains the pending table for questions. | `pending` |
 | `answer` | `<pending id> yes\|no [--note <t>] [--typed]` | For a question: queues the answer to the worker (`--typed`: typed, section 7). For a prompt: section 7. | `answer`, and `typed` |
-| `pr` | `opened\|pushed --repo <o/n> --pr <n> --head <oid> --task <task_id>` | Records the event and starts or replaces the CI watch. | `pr` |
+| `pr` | `opened\|pushed --repo <o/n> --pr <n> --head <oid> --task <task_id>` | Records the event and starts or replaces the CI watch (section 5.6). | `pr`, the number as the integer `pr` |
 | `renew` | `--handover-file <f>` | The secretary asks to be replaced. `makibad` stores the handover and launches a fresh secretary that resumes from it. | `renew`, the handover as the argument `handover` |
 | `config` | `get\|set <key> [<value>]` | Organization and project settings (`max_concurrent_workers`, `merge_approval_mode`, `conversation_language`, `artifact_language`). Person only. | none |
 | (none) | - | Returns the caller's unconfirmed messages, each wrapped, and confirms them (section 8). | `inbox` |
