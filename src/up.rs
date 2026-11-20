@@ -169,6 +169,13 @@ fn run() -> Result<(), Failure> {
     let the_base = base::connect_session_for_start(&session, Duration::from_secs(10));
     // Nothing listening at the base's socket: the base is stopped, and its programs with it.
     let stopped = matches!(the_base.hello(), Err(BaseError::Unavailable(d)) if d.kind == "connect");
+    let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
+    // Suspended before the base is back: a makibad still running would otherwise see the stopped
+    // workers' terminals missing on its reconnect and fail their runs first.
+    if stopped {
+        let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
+        crate::down::suspend(&w).map_err(internal)?;
+    }
     the_base.start().map_err(|e| {
         (
             ErrorKind::Unavailable,
@@ -176,11 +183,7 @@ fn run() -> Result<(), Failure> {
         )
     })?;
     {
-        let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
         let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
-        if stopped {
-            crate::down::suspend(&w).map_err(internal)?;
-        }
         let resumed = resume(&w).map_err(internal)?;
         if !resumed.is_empty() {
             println!("resumed: {}", resumed.join(" "));
