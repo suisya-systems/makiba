@@ -17,6 +17,7 @@ mod monitor;
 pub mod notify_gate;
 pub mod person_key;
 pub mod prepare;
+mod prompts;
 pub mod prwatch;
 mod recover;
 mod resume;
@@ -319,6 +320,7 @@ fn serve_until(
     let mut secretary = (std::env::var(secretary::SECRETARY_ENV).as_deref() == Ok("1"))
         .then(|| secretary::Secretary::from_env(dir));
     let mut dialogs = dialogs::Dialogs::new();
+    let mut prompts = prompts::Prompts::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
     let mut triage =
@@ -396,6 +398,9 @@ fn serve_until(
                 }
                 if let Err(e) = dialogs.pass(&w, &*events_base) {
                     eprintln!("makibad: dialogs: {e}");
+                }
+                if let Err(e) = prompts.pass(&w, &*events_base) {
+                    eprintln!("makibad: prompts: {e}");
                 }
             }
             if let Err(e) = prwatch.pass(&w) {
