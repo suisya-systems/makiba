@@ -56,8 +56,11 @@ pub fn timeout_from_env() -> Duration {
 /// unseen.
 pub fn count_raw(knowledge: &Path) -> io::Result<usize> {
     let raw = knowledge.join("raw");
-    if !raw.is_dir() {
-        return Ok(0);
+    match std::fs::metadata(&raw) {
+        Ok(m) if m.is_dir() => {}
+        Ok(_) => return Ok(0),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Err(e) => return Err(e),
     }
     let mut n = 0;
     for entry in std::fs::read_dir(&raw)? {
