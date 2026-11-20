@@ -415,9 +415,11 @@ fn record(
     idem: Option<&str>,
     r: &Response,
 ) -> bool {
-    // `dispatch` returns at `accepted` and finishes later (spec section 5.2).
+    // `dispatch` and `close` return at `accepted` and finish later (spec section 5.2); a close
+    // of a run closed already is `done` again.
     let status = match (verb, r) {
         ("dispatch", Ok(_)) => Some("accepted"),
+        ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
         _ => status_of(r),
     };
     match status {
@@ -582,6 +584,27 @@ fn store_message(
     task: Option<&str>,
     body: &str,
 ) -> Result<i64, DoorError> {
+    message_row(w, sender, recipient, kind, task, body).map_err(internal)
+}
+
+/// A notice of `makibad` to `recipient` about `task` (a pass that cannot finish, Issue 37).
+pub(super) fn notice(
+    w: &StateWriter,
+    recipient: &str,
+    task: &str,
+    body: &str,
+) -> crate::db::Result<i64> {
+    message_row(w, "makibad", recipient, "notice", Some(task), body)
+}
+
+fn message_row(
+    w: &StateWriter,
+    sender: &str,
+    recipient: &str,
+    kind: &str,
+    task: Option<&str>,
+    body: &str,
+) -> crate::db::Result<i64> {
     let store = || -> crate::db::Result<i64> {
         let event = w.append_event(&NewEvent {
             kind: "message_sent",
@@ -606,7 +629,7 @@ fn store_message(
         )?;
         Ok(id)
     };
-    store().map_err(internal)
+    store()
 }
 
 fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
@@ -654,30 +677,42 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
 fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let task = str_arg(args, "task_id")?;
     let abandon = args.get("abandon") == Some(&json!(true));
-    let row: Option<(i64, bool, bool)> = w
+    // The newest close of the run that was accepted (an `already` answer is not one).
+    let row: Option<(i64, bool, bool, Option<String>)> = w
         .conn()
         .query_row(
             "SELECT r.id,
                     EXISTS (SELECT 1 FROM events WHERE run_id = r.id AND kind = 'run_closed'),
-                    EXISTS (SELECT 1 FROM messages WHERE run_id = r.id AND kind = 'report_done')
+                    EXISTS (SELECT 1 FROM messages WHERE run_id = r.id AND kind = 'report_done'),
+                    (SELECT c.status FROM commands c WHERE c.verb = 'close'
+                       AND json_extract(c.args_json, '$.task_id') = r.task_id
+                       AND c.status IN ('accepted', 'done', 'failed')
+                       AND json_extract(c.result_json, '$.result.closed') IS NULL
+                     ORDER BY c.id DESC LIMIT 1)
              FROM runs r WHERE r.task_id = ?1",
             [task],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((run, closed, done)) = row else {
+    let Some((run, closed, done, last)) = row else {
         return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
     };
-    if closed {
+    // A close whose teardown failed is accepted again (Issue 37); any other close of a closed
+    // run is `done` again.
+    let retry = closed && last.as_deref() == Some("failed");
+    if closed && !retry {
         return Ok(json!({"task_id": task, "closed": "already"}));
     }
-    if !done && !abandon {
+    if !closed && !done && !abandon {
         return Err(refuse(
             ErrorKind::Conflict,
             format!("task {task:?} has no done report"),
             "wait for the worker's report done, or close with --abandon",
         ));
+    }
+    if !abandon {
+        unsaved_work(w, run)?;
     }
     let status = if done && !abandon {
         "completed"
@@ -685,11 +720,17 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
         "abandoned"
     };
     let store = || -> crate::db::Result<()> {
+        if retry && !abandon {
+            return Ok(());
+        }
         w.conn().execute(
             "UPDATE runs SET status = ?1, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?2",
             params![status, run],
         )?;
+        if retry {
+            return Ok(());
+        }
         // A launch under way would start a worker for a closed run (as `down` fails them).
         w.conn().execute(
             "UPDATE run_launch SET stage = 'failed', failed_reason = 'makiba close'
@@ -706,7 +747,34 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
         Ok(())
     };
     store().map_err(internal)?;
+    let status: String = w
+        .conn()
+        .query_row("SELECT status FROM runs WHERE id = ?1", [run], |r| r.get(0))
+        .map_err(internal)?;
     Ok(json!({"task_id": task, "status": status}))
+}
+
+/// Refuse a close (without `--abandon`) while a code worktree of the run holds unsaved work.
+fn unsaved_work(w: &StateWriter, run: i64) -> Result<(), DoorError> {
+    let paths: Vec<String> = w
+        .conn()
+        .prepare("SELECT DISTINCT worktree FROM run_launch WHERE run_id = ?1 AND kind = 'code'")
+        .and_then(|mut st| {
+            st.query_map([run], |r| r.get(0))?
+                .collect::<rusqlite::Result<_>>()
+        })
+        .map_err(internal)?;
+    for p in paths.iter().map(Path::new).filter(|p| p.exists()) {
+        if let Some(why) = super::close::unsaved(p) {
+            return Err(refuse(
+                ErrorKind::Conflict,
+                why,
+                "push the work (commit it first), or close with --abandon, which removes the \
+                 worktree and keeps its branch in the project's repository",
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// `pr opened|pushed` (spec section 12): the event, the older watches of the PR `superseded`

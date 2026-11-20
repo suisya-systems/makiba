@@ -3,6 +3,7 @@
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
 pub mod anomalies;
+mod close;
 mod crash;
 pub mod delivery;
 mod dialogs;
@@ -292,6 +293,7 @@ fn serve_until(
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
+    let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     let mut resumed = false;
@@ -363,6 +365,10 @@ fn serve_until(
             }
             if let Err(e) = delivery.wake_pass(&w, &*events_base) {
                 eprintln!("makibad: wake: {e}");
+            }
+            // Last: a launch pass that was mid-step when the door accepted the close has finished.
+            if let Err(e) = close.pass(&w, &*events_base) {
+                eprintln!("makibad: close: {e}");
             }
         }
         if Instant::now() >= next_beat {
