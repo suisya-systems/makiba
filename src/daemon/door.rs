@@ -38,11 +38,12 @@ const IO_LIMIT: Duration = Duration::from_secs(5);
 /// MCP protocol versions answered as asked; any other gets the first.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// The settings `config` knows (spec section 12).
-const CONFIG_KEYS: [&str; 4] = [
+const CONFIG_KEYS: [&str; 5] = [
     "max_concurrent_workers",
     "merge_approval_mode",
     "conversation_language",
     "artifact_language",
+    super::project::OWNERS_KEY,
 ];
 
 /// What a request comes to: the response's `result`, or its `error`.
@@ -493,11 +494,14 @@ fn record(
     idem: Option<&str>,
     r: &Response,
 ) -> bool {
-    // `dispatch` and `close` return at `accepted` and finish later (spec section 5.2); a close
-    // of a run closed already is `done` again.
+    // `dispatch`, `close` and `push` return at `accepted` and finish later (spec section 5.2); a
+    // close of a run closed already is `done` again.
     let status = match (verb, r) {
-        ("dispatch", Ok(_)) => Some("accepted"),
+        ("dispatch" | "project", Ok(_)) => Some("accepted"),
         ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
+        // `makibad`'s secretary pass carries a renewal out (Issue 46).
+        ("renew", Ok(_)) => Some("accepted"),
+        ("push", Ok(_)) => Some("accepted"),
         _ => status_of(r),
     };
     match status {
@@ -521,16 +525,7 @@ fn run(
         Verb::Peek => peek(w, base, args),
         Verb::Pending => pending(w, args),
         Verb::Answer => answer(w, base, actor, args),
-        Verb::Renew => {
-            if str_arg(args, "handover")?.trim().is_empty() {
-                return Err(usage("the handover is not empty"));
-            }
-            Err(refuse(
-                ErrorKind::Internal,
-                "renew is wired in M6-5; nothing was stored and no secretary was launched",
-                "",
-            ))
-        }
+        Verb::Renew => renew(w, args),
         Verb::Send => {
             let to = str_arg(args, "to")?;
             let text = str_arg(args, "text")?;
@@ -553,8 +548,45 @@ fn run(
         Verb::Config => config(w, actor, args),
         Verb::Pr => pr(w, args),
         Verb::Note => note(w, actor, args),
+        Verb::Push => push(w, args),
+        Verb::Project => {
+            let slug = str_arg(args, "slug")?;
+            plain_name("slug", slug)?;
+            super::project::accept(w, role, slug, str_arg(args, "repo")?)
+        }
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
+}
+
+/// `renew` (spec section 12, Issue 46): the handover is stored in the command's own row, which
+/// `makibad`'s secretary pass takes up. One renewal at a time.
+fn renew(w: &StateWriter, args: &Value) -> Response {
+    let handover = str_arg(args, "handover")?;
+    if handover.trim().is_empty() {
+        return Err(usage("the handover is empty"));
+    }
+    if handover.len() > super::secretary::HANDOVER_MAX {
+        return Err(usage(format!(
+            "the handover is over {} bytes",
+            super::secretary::HANDOVER_MAX
+        )));
+    }
+    let under_way: bool = w
+        .conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM commands WHERE verb = 'renew' AND status = 'accepted')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    if under_way {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            "a renewal of the secretary is under way",
+            "wait for it to finish (makiba status)",
+        ));
+    }
+    Ok(json!({"renewal": "accepted"}))
 }
 
 /// `status` (spec section 12): what the person's local `makiba status --json` prints, read from
@@ -934,6 +966,13 @@ fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response
         (None, _) => DOCUMENTS_PROJECT,
     };
     plain_name("project", project)?;
+    if kind == "code" && super::project::under_way(w, project).map_err(internal)? {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("the repository of project {project} is being fetched"),
+            "dispatch once the notice says the project tool is done",
+        ));
+    }
     if run_exists(w, task)? {
         return Err(refuse(
             ErrorKind::Conflict,
@@ -1365,6 +1404,32 @@ fn publish_note(raw: &Path, stem: &str, staged: &Path) -> std::io::Result<String
     Err(std::io::Error::other(format!("no free name for {stem}")))
 }
 
+/// `push` (Issue 190): accepted for a run that has a code worktree; `makibad` pushes it on a
+/// thread of its own (push.rs) and ends the command `done` or `failed` with a notice.
+fn push(w: &StateWriter, args: &Value) -> Response {
+    let task = str_arg(args, "task")?;
+    let worktree: Option<Option<String>> = w
+        .conn()
+        .query_row(
+            "SELECT (SELECT worktree FROM run_launch WHERE run_id = r.id AND kind = 'code'
+                     ORDER BY id DESC LIMIT 1)
+             FROM runs r WHERE r.task_id = ?1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    match worktree {
+        None => Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), "")),
+        Some(None) => Err(refuse(
+            ErrorKind::Conflict,
+            format!("task {task:?} has no code worktree to push"),
+            "",
+        )),
+        Some(Some(_)) => Ok(json!({"task": task, "status": "accepted"})),
+    }
+}
+
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let id = args
         .get("id")
@@ -1405,6 +1470,9 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let action = str_arg(args, "action")?;
     if !["get", "set"].contains(&action) {
         return Err(usage(format!("action is get or set, not {action:?}")));
+    }
+    if key == super::project::OWNERS_KEY {
+        return allowed_owners(w, actor, action, args);
     }
     let Some((kind, per_project)) = super::language::kind_of(key) else {
         return match action {
@@ -1466,6 +1534,38 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     };
     store().map_err(internal)?;
     Ok(shown(Some(value)))
+}
+
+/// `config get|set allowed_repo_owners` (Issue 184): the organization's, a comma list of GitHub
+/// owners whose repositories the secretary may have fetched. Stored as `config_set`.
+fn allowed_owners(w: &StateWriter, actor: &str, action: &str, args: &Value) -> Response {
+    let key = super::project::OWNERS_KEY;
+    if args
+        .get("project")
+        .and_then(Value::as_str)
+        .is_some_and(|p| !p.is_empty())
+    {
+        return Err(usage(format!("{key} is the organization's: no --project")));
+    }
+    let shown = |v: Option<&str>| json!({"key": key, "project": "", "value": v});
+    if action == "get" {
+        let v = super::language::get(w.conn(), "", key).map_err(internal)?;
+        return Ok(shown(v.as_deref()));
+    }
+    let value = str_arg(args, "value")?;
+    let Some(value) = super::project::owners_value(value) else {
+        return Err(usage(format!(
+            "{key} is a comma list of GitHub owners, not {value:?}"
+        )));
+    };
+    w.append_event(&NewEvent {
+        kind: "config_set",
+        actor: Some(actor),
+        payload: Some(&json!({"project": "", "key": key, "value": value})),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    Ok(shown(Some(&value)))
 }
 
 // ---- the acceptance gate (Issue 47) ------------------------------------------------------------
@@ -2152,6 +2252,11 @@ fn tool(v: Verb) -> Value {
             ]),
             &["state", "repo", "pr", "head", "task"],
         ),
+        Verb::Push => (
+            "Have makibad push a worker's branch: the run's worktree, on its branch, clean, pushed as its head to the same branch at origin, never forced. Answers accepted; a notice tells you the head pushed (then record it with pr) or why it failed.",
+            Map::from_iter([("task".into(), text.clone())]),
+            &["task"],
+        ),
         Verb::Inbox => (
             "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",
             Map::new(),
@@ -2225,6 +2330,11 @@ fn tool(v: Verb) -> Value {
                 ("text".into(), text.clone()),
             ]),
             &["task", "topic", "text"],
+        ),
+        Verb::Project => (
+            "Register a project and have makibad clone its GitHub repository, or fetch it and fast-forward its default branch when the clone exists. repo is OWNER/NAME only. Answers accepted; a notice says when it is done or why it failed. Dispatch into the project after that notice.",
+            Map::from_iter([("slug".into(), text.clone()), ("repo".into(), text.clone())]),
+            &["slug", "repo"],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
     };

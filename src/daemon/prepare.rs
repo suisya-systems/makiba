@@ -11,7 +11,8 @@
 //!
 //! Reading of the Issue where the spec is silent (reported to the secretary):
 //! - (Owner) The project's own repository is `$MAKIBA_REPOS_DIR/<project>` (default
-//!   `~/makiba-repos/<project>`); with no git repository there the launch fails. Nothing is cloned.
+//!   `~/makiba-repos/<project>`); with no git repository there the launch fails. Preparation
+//!   clones nothing: the verb `project` does (Issue 184).
 //! - The new branch is named `runs.branch` when set, else `makiba/<task_id>`; it starts from
 //!   `projects.default_branch`.
 //! - (Owner) The workplace path is read from `run_launch.worktree`; `Places::workplace` computes
@@ -25,6 +26,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The folders preparation writes into.
+#[derive(Clone)]
 pub struct Places {
     pub workers: PathBuf,
     pub docs: PathBuf,
@@ -286,7 +288,7 @@ impl Prepare {
         let repo = Some(self.places.repos.join(&l.project)).filter(|r| r.join(".git").exists());
         let repo = repo.ok_or_else(|| {
             format!(
-                "project {:?} has no git repository in the repositories folder",
+                "project {:?} has no git repository in the repositories folder; register it with the tool project",
                 l.project
             )
         })?;
