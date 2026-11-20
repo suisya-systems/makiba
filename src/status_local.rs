@@ -171,7 +171,11 @@ fn secretary_state(conn: &Connection, stage: Option<&str>) -> String {
                              AND julianday(l.created_at) > julianday(c.finished_at))",
     );
     let failed = failed.map_or_else(String::new, |why| format!(" (last renewal failed: {why})"));
-    if gone.as_deref() == Some("anomaly_raised") || stage == Some("failed") {
+    // As makibad's `down`: a launch `makiba up` failed after a stop of the base is not relaunched.
+    let failed_launch = one("SELECT 'y' FROM run_launch
+         WHERE id = (SELECT max(id) FROM run_launch WHERE role = 'secretary')
+           AND stage = 'failed' AND failed_reason IS NOT 'the base was stopped'");
+    if gone.as_deref() == Some("anomaly_raised") || failed_launch.is_some() {
         return format!("gone{failed}; makibad relaunches it");
     }
     format!("{}{failed}", stage.unwrap_or("not launched"))

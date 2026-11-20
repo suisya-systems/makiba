@@ -429,7 +429,8 @@ pub(crate) fn stopped(w: &StateWriter) -> Result<bool> {
 }
 
 /// The current secretary is down: `secretary_gone` is open for the newest secretary terminal, or
-/// the newest secretary launch failed.
+/// the newest secretary launch failed. A launch `makiba up` failed after a stop of the base is not:
+/// whether a secretary comes back is then `up`'s decision (`--no-secretary`).
 pub(crate) fn down(w: &StateWriter) -> Result<bool> {
     let gone = w
         .conn()
@@ -448,8 +449,8 @@ pub(crate) fn down(w: &StateWriter) -> Result<bool> {
     let failed = w
         .conn()
         .query_row(
-            "SELECT stage = 'failed' FROM run_launch WHERE role = 'secretary'
-             ORDER BY id DESC LIMIT 1",
+            "SELECT stage = 'failed' AND failed_reason IS NOT 'the base was stopped'
+             FROM run_launch WHERE role = 'secretary' ORDER BY id DESC LIMIT 1",
             [],
             |r| r.get::<_, bool>(0),
         )
