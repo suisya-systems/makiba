@@ -85,7 +85,7 @@ impl Close {
         let jobs: Vec<Job> = {
             let mut st = w.conn().prepare(
                 "SELECT c.id, r.task_id, r.id, p.slug,
-                        COALESCE(json_extract(c.args_json, '$.abandon'), 0) = 1
+                        COALESCE(json_type(c.args_json, '$.abandon') = 'true', 0)
                  FROM commands c JOIN runs r ON r.task_id = json_extract(c.args_json, '$.task_id')
                  JOIN projects p ON p.id = r.project_id
                  WHERE c.verb = 'close' AND c.status = 'accepted' ORDER BY c.id",
@@ -251,7 +251,8 @@ impl Close {
         }
         let real_s = real.to_string_lossy();
         if j.abandon {
-            // A HEAD on no branch would be lost with the worktree: a ref keeps it.
+            // A HEAD on no branch would be lost with the worktree: a ref of its own keeps it
+            // (one per commit, so two workplaces of the run never overwrite each other's).
             let lost = git(
                 &real,
                 &[
@@ -266,7 +267,7 @@ impl Close {
             if lost.is_some_and(|n| n != "0")
                 && let Some(head) = git(&real, &["rev-parse", "HEAD"])
             {
-                let r = format!("refs/makiba/closed/{}", j.task);
+                let r = format!("refs/makiba/closed/{}/{head}", j.task);
                 git(&repo, &["update-ref", &r, &head])
                     .ok_or_else(|| format!("cannot keep HEAD {head} of {real_s} as {r}"))?;
             }
