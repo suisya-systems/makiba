@@ -240,6 +240,9 @@ pub enum Command {
         action: String,
         key: String,
         value: Option<String>,
+        /// The project of a project's setting (`artifact_language`).
+        #[arg(long)]
+        project: Option<String>,
     },
 }
 
@@ -341,9 +344,14 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
         Command::Note { task, topic, text } => {
             ("note", json!({"task": task, "topic": topic, "text": text}))
         }
-        Command::Config { action, key, value } => (
+        Command::Config {
+            action,
+            key,
+            value,
+            project,
+        } => (
             "config",
-            json!({"action": action, "key": key, "value": none(value)}),
+            json!({"action": action, "key": key, "value": none(value), "project": none(project)}),
         ),
     })
 }

@@ -114,6 +114,8 @@ struct Row {
     model: Option<String>,
     brief: String,
     worktree: String,
+    /// The run's project, for its artifact language (Issue 48).
+    project: Option<String>,
     /// Set on a launch that resumes a conversation (`makiba up`, Issue 41).
     resume: Option<String>,
     /// Whether the run had an earlier launch: a relaunch first ends the run's old terminals.
@@ -139,8 +141,10 @@ impl Launch {
             let mut st = w.conn().prepare(
                 "SELECT l.id, r.id, r.task_id, l.role, l.spawn_id, l.agent, l.model, l.brief,
                         l.worktree, l.conversation_id,
-                        EXISTS (SELECT 1 FROM run_launch e WHERE e.run_id = l.run_id AND e.id < l.id)
+                        EXISTS (SELECT 1 FROM run_launch e WHERE e.run_id = l.run_id AND e.id < l.id),
+                        p.slug
                  FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
+                 LEFT JOIN projects p ON p.id = r.project_id
                  WHERE l.stage = 'settings_ready' ORDER BY l.id",
             )?;
             st.query_map([], |r| {
@@ -156,6 +160,7 @@ impl Launch {
                     worktree: r.get(8)?,
                     resume: r.get(9)?,
                     relaunch: r.get(10)?,
+                    project: r.get(11)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -174,7 +179,17 @@ impl Launch {
             }
         }
         let mut launched = Vec::new();
-        for row in rows {
+        for mut row in rows {
+            // The language sentences are read at each first launch, so a change reaches the next
+            // conversation; a resume keeps the one it had (Issue 48).
+            if row.resume.is_none() {
+                row.brief = super::language::task_text(
+                    w.conn(),
+                    &row.role,
+                    row.project.as_deref(),
+                    &row.brief,
+                )?;
+            }
             let pending = self.lock().get(&row.spawn).cloned();
             let outcome = match pending {
                 Some(Pending::Up) => Outcome::Up,
@@ -529,6 +544,7 @@ mod tests {
             model: None,
             brief: "b".into(),
             worktree: "/w".into(),
+            project: None,
             resume: None,
             relaunch: false,
         };
