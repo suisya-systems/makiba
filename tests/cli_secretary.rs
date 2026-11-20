@@ -349,9 +349,8 @@ fn an_answer_to_a_prompt_reads_the_screen_and_types_nothing() {
         "answer",
         json!({"id": shown, "answer": "yes"}),
     );
-    let e = r.as_ref().unwrap_err();
-    assert_eq!(e.kind, ErrorKind::Internal, "{e:?}");
-    assert!(e.message.contains("M6-8"), "{e:?}");
+    // M6-8: the shown text alone is not the prompt recorded (no blocked episode, no sum match).
+    assert_eq!(kind_of(&r), Some(ErrorKind::Stale), "{r:?}");
     assert_eq!(
         org.count(
             "SELECT COUNT(*) FROM pending WHERE kind = 'prompt' AND status = 'open'",
