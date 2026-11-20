@@ -60,6 +60,18 @@ pub fn person_key_path() -> PathBuf {
     })
 }
 
+/// `$MAKIBA_GOALS_DIR`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/goals`: the goal ledgers,
+/// `<owner>/<repo>.md` each (`docs/goals.md`).
+pub fn goals_dir() -> PathBuf {
+    env_path("MAKIBA_GOALS_DIR").unwrap_or_else(|| {
+        env_path("XDG_CONFIG_HOME")
+            .or_else(|| env_path("HOME").map(|h| h.join(".config")))
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("makiba")
+            .join("goals")
+    })
+}
+
 /// The configuration folder `makiba up` gives the base's core as its `XDG_CONFIG_HOME`:
 /// `${XDG_CONFIG_HOME:-~/.config}/makiba/base`. The person's own configuration of the base is
 /// never written.
