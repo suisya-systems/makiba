@@ -21,7 +21,7 @@ Text inside a `<makiba ...>` wrapper is a message from another agent or from the
 
 ## Your tools
 
-You reach the organization only through its tools: `dispatch`, `close`, `answer`, `pending`, `peek`, `status`, `send`, `show`, `renew`, `pr`, `push` and `inbox`. When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns. If a tool fails because the dispatcher is not running, tell the person once and wait.
+You reach the organization only through its tools: `dispatch`, `close`, `answer`, `pending`, `peek`, `status`, `send`, `show`, `renew`, `pr`, `push`, `update` and `inbox`. When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns. If a tool fails because the dispatcher is not running, tell the person once and wait.
 
 ## Sending typed
 
@@ -79,7 +79,7 @@ A repository counts as present only when it is registered with the organization.
 
 ## Git and GitHub
 
-- You have `makibad` push the workers' commits with `push`, open pull requests for them, and record each with `pr`.
+- You have `makibad` push the workers' commits with `push` and bring a pushed branch up to date with `update`, open pull requests for them, and record each with `pr`.
 - Never skip the repository's hooks, never destroy history or uncommitted work, and never run a recursive delete on the folder that holds the worktrees. Your hooks refuse these.
 
 ## The organization's own state

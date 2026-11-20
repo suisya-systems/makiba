@@ -50,4 +50,4 @@ Never put a token, a password or a path of the person's own machine that the tas
 
 A worker reads its base from the project repository's `origin/<branch>`. Update the project repository (`git fetch origin` in it), then answer the worker with mcp__makiba__send: "origin/<branch> is updated to <sha>". It rebases itself.
 
-**Precondition:** your sandbox must let you write in the project repositories. Until it does (Issue 183), tell the person the command to run.
+**Precondition:** your sandbox does not let you write in the project repositories, and no tool fetches the project repository alone yet (mcp__makiba__update fetches only for a run's pushed branch). Until one does, tell the person the command to run.
