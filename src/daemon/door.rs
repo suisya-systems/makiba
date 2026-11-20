@@ -438,6 +438,7 @@ fn run(w: &StateWriter, agent: &str, actor: &str, role: Role, v: Verb, args: &Va
             Ok(json!({"id": id}))
         }
         Verb::Report => report(w, actor, role, args),
+        Verb::Close => close(w, actor, args),
         Verb::Show => show(w, actor, args),
         Verb::Inbox => {
             let b = super::inbox::inbox(w, actor).map_err(internal)?;
@@ -644,6 +645,61 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
             .map_err(internal)?;
     }
     Ok(json!({"id": id}))
+}
+
+/// `close` (spec section 12), the gate of Issue 36: refused without a `report_done` unless
+/// `abandon`; a run closed already is `done` again. Ending the terminal and removing the working
+/// folder are Issue 37's.
+fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let task = str_arg(args, "task_id")?;
+    let abandon = args.get("abandon") == Some(&json!(true));
+    let row: Option<(i64, bool, bool)> = w
+        .conn()
+        .query_row(
+            "SELECT r.id,
+                    EXISTS (SELECT 1 FROM events WHERE run_id = r.id AND kind = 'run_closed'),
+                    EXISTS (SELECT 1 FROM messages WHERE run_id = r.id AND kind = 'report_done')
+             FROM runs r WHERE r.task_id = ?1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((run, closed, done)) = row else {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    };
+    if closed {
+        return Ok(json!({"task_id": task, "closed": "already"}));
+    }
+    if !done && !abandon {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("task {task:?} has no done report"),
+            "wait for the worker's report done, or close with --abandon",
+        ));
+    }
+    let status = if done && !abandon {
+        "completed"
+    } else {
+        "abandoned"
+    };
+    let store = || -> crate::db::Result<()> {
+        w.conn().execute(
+            "UPDATE runs SET status = ?1, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?2",
+            params![status, run],
+        )?;
+        w.append_event(&NewEvent {
+            kind: "run_closed",
+            actor: Some(actor),
+            payload: Some(&json!({"task_id": task})),
+            run_task_id: Some(task),
+            ..Default::default()
+        })?;
+        Ok(())
+    };
+    store().map_err(internal)?;
+    Ok(json!({"task_id": task, "status": status}))
 }
 
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
@@ -1044,6 +1100,14 @@ fn tool(v: Verb) -> Value {
                 ("text".into(), text.clone()),
             ]),
             &["state", "task", "text"],
+        ),
+        Verb::Close => (
+            "Close a task's run. Refused (conflict) before its done report unless abandon is true, which marks the run abandoned.",
+            Map::from_iter([
+                ("task_id".into(), text.clone()),
+                ("abandon".into(), json!({"type": "boolean"})),
+            ]),
+            &["task_id"],
         ),
         Verb::Show => (
             "The full body of a message you sent or received, by its id.",
