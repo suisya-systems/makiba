@@ -14,7 +14,6 @@ use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::{self, TAG_ORG, TAG_ROLE, TAG_SPAWN};
 use serde_json::json;
-use std::collections::BTreeSet;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -83,8 +82,6 @@ pub struct Curator {
     agent: String,
     /// The newest `run_closed` event already counted for; -1 before the first count.
     seen: i64,
-    /// Spawn ids whose `curator_started` is written.
-    started: BTreeSet<String>,
     next: Instant,
 }
 
@@ -111,7 +108,6 @@ impl Curator {
             timeout,
             agent,
             seen: -1,
-            started: BTreeSet::new(),
             next: Instant::now(),
         }
     }
@@ -180,7 +176,7 @@ impl Curator {
     }
 
     /// `curator_started` for every curator launch that has a `worker_spawned`, once.
-    fn record_started(&mut self, w: &StateWriter) -> Result<()> {
+    fn record_started(&self, w: &StateWriter) -> Result<()> {
         let spawns: Vec<String> = {
             let mut st = w.conn().prepare(
                 "SELECT l.spawn_id FROM run_launch l
@@ -194,14 +190,12 @@ impl Curator {
                 .collect::<std::result::Result<_, _>>()?
         };
         for spawn in spawns {
-            if self.started.insert(spawn.clone()) {
-                w.append_event(&NewEvent {
-                    kind: "curator_started",
-                    actor: Some("makibad"),
-                    payload: Some(&json!({"spawn_id": spawn})),
-                    ..Default::default()
-                })?;
-            }
+            w.append_event(&NewEvent {
+                kind: "curator_started",
+                actor: Some("makibad"),
+                payload: Some(&json!({"spawn_id": spawn})),
+                ..Default::default()
+            })?;
         }
         Ok(())
     }
