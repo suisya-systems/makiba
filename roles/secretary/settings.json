@@ -14,6 +14,8 @@
       "Edit(~/.config/makiba/base/**)",
       "Read(~/.config/makiba/person.key)",
       "Edit(~/.config/makiba/person.key)",
+      "Read(~/.config/makiba/gate.key)",
+      "Edit(~/.config/makiba/gate.key)",
       "Bash(git commit *--no-veri*)",
       "Bash(git commit -n*)",
       "Bash(git commit * -n*)",
@@ -43,6 +45,11 @@
           {
             "type": "command",
             "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-workers-delete"
+          },
+          {
+            "type": "command",
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook merge-gate",
+            "timeout": 900
           }
         ]
       },
@@ -70,7 +77,8 @@
         "~/.config/herdr-app",
         "~/.local/state/herdr-core",
         "~/.config/makiba/base",
-        "~/.config/makiba/person.key"
+        "~/.config/makiba/person.key",
+        "~/.config/makiba/gate.key"
       ],
       "denyWrite": [
         "~/.config/herdr-core",
@@ -78,6 +86,7 @@
         "~/.local/state/herdr-core",
         "~/.config/makiba/base",
         "~/.config/makiba/person.key",
+        "~/.config/makiba/gate.key",
         "~/.local/share/makiba"
       ]
     }

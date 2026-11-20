@@ -223,6 +223,7 @@ impl Prepare {
             deny_dirs: absolute([&self.denies.resolved[..], &self.denies.folders[..]].concat())?,
             deny_files: absolute(vec![
                 crate::cli::person_key_path(),
+                crate::cli::gate_key_path(),
                 PathBuf::from(&state_db),
                 PathBuf::from(format!("{state_db}-wal")),
                 PathBuf::from(format!("{state_db}-shm")),
