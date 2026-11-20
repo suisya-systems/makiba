@@ -66,6 +66,13 @@ impl Agent for ClaudeCode {
             "--dangerously-load-development-channels".into(),
             format!("server:{CHANNEL_SERVER}"),
         ];
+        // The secretary's skills (Issue 182), placed there before the launch.
+        if launch.role == Role::Secretary {
+            argv.extend([
+                "--plugin-dir".into(),
+                super::plugin_dir().display().to_string(),
+            ]);
+        }
         if launch.role == Role::Secretary && self.remote_control {
             argv.push("--remote-control".into());
         }
