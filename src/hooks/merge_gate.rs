@@ -291,11 +291,20 @@ fn refused_segment(variant: &str, segment: &str, seg_mentions: bool) -> Option<S
         .filter(|c| !matches!(c, '"' | '\'' | '\\'))
         .collect();
     let mentions = seg_mentions || mentions_merge(&text);
-    let words: Vec<String> = shell_words(variant)
-        .into_iter()
-        .map(|w| w.trim_start_matches(['(', '{']).to_string())
-        .filter(|w| !w.is_empty())
-        .collect();
+    // The shell removes a redirection (and the target of a bare operator) wherever it stands:
+    // `gh pr 2>/dev/null merge 7` runs `gh pr merge 7`.
+    let mut words: Vec<String> = Vec::new();
+    let mut target = false;
+    for w in shell_words(variant) {
+        let w = w.trim_start_matches(['(', '{']).to_string();
+        if std::mem::take(&mut target) || w.is_empty() {
+            continue;
+        }
+        match redirection(&w) {
+            Some(alone) => target = alone,
+            None => words.push(w),
+        }
+    }
     let cmd = command_words(&words);
     let first = cmd.first()?;
     if opaque(first) {

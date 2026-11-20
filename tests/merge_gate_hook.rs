@@ -19,6 +19,15 @@ fn a_redirection_before_the_program_does_not_hide_a_merge() {
     ] {
         assert!(parse(&cmd).is_err(), "not refused: {cmd:?}");
     }
+    // Between the program, its group and its subcommand, too.
+    for cmd in [
+        format!("gh pr 2>/dev/null {M} 7 --repo o/r --squash"),
+        format!("gh 2> err.txt pr {M} 7"),
+        format!("gh pr >out.txt {M} 7"),
+        format!("gh api -X PUT 2>/dev/null repos/o/r/pulls/3/{M}"),
+    ] {
+        assert!(parse(&cmd).is_err(), "not refused: {cmd:?}");
+    }
     // A redirection after the program is still read as before.
     assert_eq!(parse("gh pr view 7 --json mergedAt 2>/dev/null"), Ok(None));
 }
