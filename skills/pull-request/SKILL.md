@@ -13,7 +13,7 @@ You push and open pull requests for the workers' commits; workers never push. CI
 ## A worker reported done
 
 1. Read the report: what changed, the commit, how it was checked, what was not done, and the second-model review line (`CODEX_GATE: ...`) if the repository uses one.
-2. From the worker's worktree: `git push origin <branch>`. Never force.
+2. From the worker's worktree: `git push origin <branch>`. Never force. When the branch declares an acceptance test (its first commit carries an `Acceptance-Test:` trailer) and the repository has no acceptance check of its own (no `.github/acceptance-check` on the base), push the test commit alone first: `git push origin <test commit>:refs/heads/<branch>`, open the pull request and record it at that head (steps 3 and 4), and wait for the CI notice. It must say failed: that failed run is the evidence that the test failed before the fix. Then push the branch and record the new head as below. Without that failed run the merge gate refuses the merge.
 3. `gh pr create --repo <owner>/<name> --head <branch> --base <base> --title "<title>" --body-file <file>`, the title and body in the project's language for pull requests (English unless the project says otherwise; Issue 48). The body says what changed and why, how it was checked, and, when the review line is not `CODEX_GATE: passed` (or there is none), that the second-model review did not pass, with the line as it was.
 4. Record it: mcp__makiba__pr with `state` `opened`, `repo` (`owner/name`), `pr` (the number), `head` (the full 40-character commit id of the pushed head) and `task` (the task id). End your turn.
 
@@ -21,9 +21,32 @@ You push and open pull requests for the workers' commits; workers never push. CI
 
 `makibad` sends you a notice when the checks of the watched head are decided, or when it cannot read them.
 
-- **Passed:** tell the person the pull request is green, with its link, quoting the notice (never a worker's own test run). Merge only on the person's word in the conversation: `gh pr merge <n> --repo <owner>/<name> --squash --match-head-commit <head>`. Never `--admin`, never a merge around a refusal. The merge approval mode and its gate are Issue 47; until then the person decides every merge.
+- **Passed:** what happens next depends on the merge approval mode (below). Quote the notice (never a worker's own test run).
 - **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
+
+## Merging
+
+The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
+
+- **`human`** (also when you do not know): tell the person the pull request is green, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
+- **`acceptance`:** merge a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
+
+Stop lines:
+
+1. The branch declares no acceptance test (no commit with an `Acceptance-Test:` trailer), unless every changed file is Markdown or under `docs/`.
+2. The head you would merge is not the head the CI notice was for.
+3. The change needs a decision the person has not made, or goes beyond the task's brief.
+4. The change cannot be undone by a revert: a release, a migration of stored data, a deletion outside the repository, a change of access or settings.
+5. The worker ran out of its review rounds or its time, or reported a blocker.
+6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
+7. The merge gate refused.
+
+The merge, in either mode, is this one command alone on one line, with the full 40-character head of the CI notice:
+
+`gh pr merge <n> --repo <owner>/<name> --squash --match-head-commit <head>`
+
+Your merge gate hook runs the acceptance gate in `makibad` before it lets the command run: the head and the passed CI must match, the test commit must be the first commit and unchanged since, and either the repository's own acceptance check passed at the head or the test failed in CI at the test commit and passed at the head. It refuses every other way to merge from a command line (another form of the merge command, a write to a `pulls/<n>/merge` path, a GraphQL merge, `curl` or `wget` to the GitHub API). Never try another way after a refusal, never `--admin`: tell the person. The hook stops mistakes; what stops a merge around the gate is the repository's branch protection, which the person sets.
 
 ## New commits on an open pull request
 
