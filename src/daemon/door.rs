@@ -1812,6 +1812,11 @@ fn tool(v: Verb) -> Value {
             Map::from_iter([("handover".into(), text.clone())]),
             &["handover"],
         ),
+        Verb::Project => (
+            "Register a project and have makibad clone its GitHub repository, or fetch it and fast-forward its default branch when the clone exists. repo is OWNER/NAME only. Answers accepted; a notice says when it is done or why it failed. Dispatch into the project after that notice.",
+            Map::from_iter([("slug".into(), text.clone()), ("repo".into(), text.clone())]),
+            &["slug", "repo"],
+        ),
         _ => ("Not built yet.", Map::new(), &[]),
     };
     props.insert(

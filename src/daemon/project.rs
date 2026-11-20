@@ -353,17 +353,25 @@ fn fetch(
             Some(&dest),
             &["fetch", "--no-recurse-submodules", "--prune", "origin"],
         )?;
-        let default = git
-            .run(
+        // The remote's own default branch; a clone made by hand may not record it yet.
+        let remote_head = || {
+            git.run(
                 Some(&dest),
                 &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
             )
-            .ok()
-            .and_then(|r| r.strip_prefix("origin/").map(String::from));
+        };
+        let default = match remote_head() {
+            Ok(r) => r,
+            Err(_) => {
+                git.run(Some(&dest), &["remote", "set-head", "origin", "--auto"])?;
+                remote_head()?
+            }
+        };
+        let default = default.strip_prefix("origin/").unwrap_or(&default);
         let head = git.run(Some(&dest), &["symbolic-ref", "--short", "HEAD"])?;
-        if default.as_deref().is_some_and(|d| d != head) {
+        if default != head {
             return Err(conflict(format!(
-                "{} is on {head}, not on the default branch",
+                "{} is on {head}, not on the default branch {default}",
                 dest.display()
             )));
         }
