@@ -6,7 +6,7 @@
 //!
 //! The thread checks, at the time it runs: the worktree is strictly under the workers folder and
 //! a worktree of the project's repository, on the run's branch, with no uncommitted change to a
-//! tracked file and nothing half-joined (a merge, rebase, cherry-pick or revert). It pushes
+//! tracked file and nothing half-joined (a merge, rebase, cherry-pick or revert, one commit or a sequence). It pushes
 //! `<head>:refs/heads/<branch>` to `origin`, never forced, with no terminal prompt, so a missing
 //! credential fails at once with git's message. A restart runs an `accepted` push again; git
 //! finds it pushed already or pushes it.
@@ -106,6 +106,7 @@ fn work(places: &Places, j: &Job) -> std::result::Result<String, String> {
         "REVERT_HEAD",
         "rebase-merge",
         "rebase-apply",
+        "sequencer",
     ] {
         let p = PathBuf::from(git(
             &real,
