@@ -11,7 +11,7 @@ The triage scan reads dependencies only from the same line as the keyword (`Bloc
 ## Steps
 
 1. The repository is always named as `<owner>/<name>`; never guess it. Ask the person when the request does not say.
-2. Pick the kind and write the sections, in the project's language for issues (English unless the project says otherwise; Issue 48):
+2. Pick the kind and write the sections, in the project's artifact language (English unless your launch task or a later notice names another for the project; spec section 13):
 
 | Kind | Headings, in order |
 | --- | --- |

@@ -38,4 +38,4 @@ The answer reaches the worker by channel. If the worker answers that it will not
 
 ## Not carried
 
-paddock's hidden proposal cards (a yes/no proposal of your own shown only when the person goes quiet) have no counterpart: a proposal of your own stays in the conversation. Settling the conversation language is Issue 48.
+paddock's hidden proposal cards (a yes/no proposal of your own shown only when the person goes quiet) have no counterpart: a proposal of your own stays in the conversation. The conversation language is a setting (spec section 13).

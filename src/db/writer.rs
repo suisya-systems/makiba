@@ -160,9 +160,13 @@ impl StateWriter {
     // ---- transactions -------------------------------------------------------------------
 
     /// Open a transaction. A no-op when one is already open.
+    ///
+    /// `IMMEDIATE` takes the write lock first, waiting the busy timeout for it. A deferred one that
+    /// reads, then writes, holds a WAL snapshot when it asks for the lock, and SQLite then answers
+    /// `database is locked` at once, without waiting (Issue 181).
     pub fn begin(&self) -> Result<()> {
         if self.conn.is_autocommit() {
-            self.conn.execute_batch("BEGIN")?;
+            self.conn.execute_batch("BEGIN IMMEDIATE")?;
         }
         Ok(())
     }

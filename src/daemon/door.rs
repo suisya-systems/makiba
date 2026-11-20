@@ -498,7 +498,7 @@ fn run(
                 .collect();
             Ok(json!({"messages": messages, "more": b.more}))
         }
-        Verb::Config => config(args),
+        Verb::Config => config(w, actor, args),
         Verb::Pr => pr(w, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
@@ -1264,7 +1264,9 @@ fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
     Ok(json!({"id": id, "from": from, "to": to, "kind": kind, "body": body}))
 }
 
-fn config(args: &Value) -> Response {
+/// `config` (spec section 12, Issue 48). A set is a `config_set` event in the command's own
+/// transaction; `max_concurrent_workers` and `merge_approval_mode` are not stored yet.
+fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let key = str_arg(args, "key")?;
     if !CONFIG_KEYS.contains(&key) {
         return Err(usage(format!(
@@ -1272,12 +1274,70 @@ fn config(args: &Value) -> Response {
             CONFIG_KEYS.join(", ")
         )));
     }
-    // ponytail: no store yet; M6-7 builds it and fills `value`.
-    match str_arg(args, "action")? {
-        "get" => Ok(json!({"key": key, "value": null})),
-        "set" => Err(internal("config set is not built yet (M6-7)")),
-        other => Err(usage(format!("action is get or set, not {other:?}"))),
+    let action = str_arg(args, "action")?;
+    if !["get", "set"].contains(&action) {
+        return Err(usage(format!("action is get or set, not {action:?}")));
     }
+    let Some((kind, per_project)) = super::language::kind_of(key) else {
+        return match action {
+            "get" => Ok(json!({"key": key, "value": null})),
+            _ => Err(internal(format!(
+                "config set {key} is not built yet (its environment variable sets it)"
+            ))),
+        };
+    };
+    let project = args
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty());
+    let project = match (project, per_project) {
+        (Some(p), true) => {
+            plain_name("project", p)?;
+            p
+        }
+        (None, true) => {
+            return Err(usage(format!(
+                "{key} is a project's: name it with --project"
+            )));
+        }
+        (Some(_), false) => {
+            return Err(usage(format!("{key} is the organization's: no --project")));
+        }
+        (None, false) => "",
+    };
+    let shown = |v: Option<&str>| json!({"key": key, "project": project, "value": v});
+    if action == "get" {
+        let v = super::language::get(w.conn(), project, key).map_err(internal)?;
+        return Ok(shown(v.as_deref()));
+    }
+    let value = str_arg(args, "value")?;
+    if super::language::sentence(kind, value).is_none() {
+        return Err(usage(format!(
+            "{key} is one of {}, not {value:?}",
+            super::language::codes(kind).join(", ")
+        )));
+    }
+    let store = || -> crate::db::Result<()> {
+        w.append_event(&NewEvent {
+            kind: "config_set",
+            actor: Some(actor),
+            payload: Some(&json!({"project": project, "key": key, "value": value})),
+            ..Default::default()
+        })?;
+        // The secretary opens the project's pull requests and issues (skills makiba:pull-request, makiba:issue).
+        if per_project {
+            notice_untasked(
+                w,
+                crate::spec::AGENT_SECRETARY,
+                &format!(
+                    "The artifact language of project {project} is now {value}: write its pull requests and issues in it."
+                ),
+            )?;
+        }
+        Ok(())
+    };
+    store().map_err(internal)?;
+    Ok(shown(Some(value)))
 }
 
 // ---- the entrances ----------------------------------------------------------------------------
