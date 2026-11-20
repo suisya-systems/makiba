@@ -226,6 +226,12 @@ pub enum Command {
         #[arg(long)]
         handover_file: PathBuf,
     },
+    /// Register a project and have makibad clone or fetch its GitHub repository.
+    Project {
+        slug: String,
+        /// OWNER/NAME of a GitHub repository.
+        repo: String,
+    },
     /// Organization and project settings.
     Config {
         #[arg(value_parser = ["get", "set"])]
@@ -332,6 +338,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             "pr",
             json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
         ),
+        Command::Project { slug, repo } => ("project", json!({"slug": slug, "repo": repo})),
         Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
         Command::Config {
             action,

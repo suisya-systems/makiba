@@ -38,11 +38,12 @@ const IO_LIMIT: Duration = Duration::from_secs(5);
 /// MCP protocol versions answered as asked; any other gets the first.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// The settings `config` knows (spec section 12).
-const CONFIG_KEYS: [&str; 4] = [
+const CONFIG_KEYS: [&str; 5] = [
     "max_concurrent_workers",
     "merge_approval_mode",
     "conversation_language",
     "artifact_language",
+    super::project::OWNERS_KEY,
 ];
 
 /// What a request comes to: the response's `result`, or its `error`.
@@ -451,7 +452,7 @@ fn record(
     // `dispatch` and `close` return at `accepted` and finish later (spec section 5.2); a close
     // of a run closed already is `done` again.
     let status = match (verb, r) {
-        ("dispatch", Ok(_)) => Some("accepted"),
+        ("dispatch" | "project", Ok(_)) => Some("accepted"),
         ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
         _ => status_of(r),
     };
@@ -507,6 +508,11 @@ fn run(
         }
         Verb::Config => config(w, actor, args),
         Verb::Pr => pr(w, args),
+        Verb::Project => {
+            let slug = str_arg(args, "slug")?;
+            plain_name("slug", slug)?;
+            super::project::accept(w, role, slug, str_arg(args, "repo")?)
+        }
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
 }
@@ -888,6 +894,13 @@ fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response
         (None, _) => DOCUMENTS_PROJECT,
     };
     plain_name("project", project)?;
+    if kind == "code" && super::project::under_way(w, project).map_err(internal)? {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("the repository of project {project} is being fetched"),
+            "dispatch once the notice says the project tool is done",
+        ));
+    }
     if run_exists(w, task)? {
         return Err(refuse(
             ErrorKind::Conflict,
@@ -1254,6 +1267,9 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     if !["get", "set"].contains(&action) {
         return Err(usage(format!("action is get or set, not {action:?}")));
     }
+    if key == super::project::OWNERS_KEY {
+        return allowed_owners(w, actor, action, args);
+    }
     let Some((kind, per_project)) = super::language::kind_of(key) else {
         return match action {
             "get" => Ok(json!({"key": key, "value": null})),
@@ -1314,6 +1330,38 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     };
     store().map_err(internal)?;
     Ok(shown(Some(value)))
+}
+
+/// `config get|set allowed_repo_owners` (Issue 184): the organization's, a comma list of GitHub
+/// owners whose repositories the secretary may have fetched. Stored as `config_set`.
+fn allowed_owners(w: &StateWriter, actor: &str, action: &str, args: &Value) -> Response {
+    let key = super::project::OWNERS_KEY;
+    if args
+        .get("project")
+        .and_then(Value::as_str)
+        .is_some_and(|p| !p.is_empty())
+    {
+        return Err(usage(format!("{key} is the organization's: no --project")));
+    }
+    let shown = |v: Option<&str>| json!({"key": key, "project": "", "value": v});
+    if action == "get" {
+        let v = super::language::get(w.conn(), "", key).map_err(internal)?;
+        return Ok(shown(v.as_deref()));
+    }
+    let value = str_arg(args, "value")?;
+    let Some(value) = super::project::owners_value(value) else {
+        return Err(usage(format!(
+            "{key} is a comma list of GitHub owners, not {value:?}"
+        )));
+    };
+    w.append_event(&NewEvent {
+        kind: "config_set",
+        actor: Some(actor),
+        payload: Some(&json!({"project": "", "key": key, "value": value})),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    Ok(shown(Some(&value)))
 }
 
 // ---- the entrances ----------------------------------------------------------------------------

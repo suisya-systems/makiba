@@ -158,6 +158,7 @@ pub enum Verb {
     Renew,
     Config,
     Inbox,
+    Project,
 }
 
 impl Verb {
@@ -177,6 +178,7 @@ impl Verb {
         Verb::Renew,
         Verb::Config,
         Verb::Inbox,
+        Verb::Project,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -196,6 +198,7 @@ impl Verb {
             Verb::Renew => "renew",
             Verb::Config => "config",
             Verb::Inbox => "inbox",
+            Verb::Project => "project",
         }
     }
 }
@@ -237,6 +240,7 @@ impl Role {
         match self {
             Role::Secretary => &[
                 Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox,
+                Project,
             ],
             Role::Worker | Role::Curator => &[Report, Send, Show, Inbox],
             Role::Person => Verb::ALL,
