@@ -70,7 +70,7 @@ impl Agent for ClaudeCode {
             argv.push("--remote-control".into());
         }
         // P7: nothing of the person's own settings reaches a worker or the curator. The
-        // secretary's case is decided with M6-2.
+        // secretary keeps them (M6-2): it is the person's own session, as in paddock.
         // Workers and the curator start in auto permission mode (M4-3, paddock's templates), so
         // most permission prompts never appear. The mode is an option because Claude Code ignores
         // `defaultMode: "auto"` in a project settings file (paddock inventory, PRM-2).
