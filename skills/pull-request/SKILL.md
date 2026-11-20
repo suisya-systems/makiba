@@ -8,7 +8,7 @@ when_to_use: A worker reports done and its branch must become a pull request; a 
 
 You have `makibad` push the workers' commits (mcp__makiba__push) and you open the pull requests; workers never push, and you never push from a shell yourself. CI is watched by `makibad` once you record the pull request with mcp__makiba__pr. You never watch CI yourself: no `gh pr checks --watch`, no `gh run watch`, no sleep loop. While a shell call runs you take no input.
 
-**Precondition:** opening and landing a pull request need your `gh` to reach GitHub (Issue 183). Until it does, tell the person the `gh` commands to run. The push itself goes through `makibad` and needs nothing of your sandbox.
+Your sandbox lets your `gh` reach `api.github.com` with the person's stored login, which is all opening and landing a pull request needs. If `gh` fails to authenticate (the person signs in only with an environment token, which is not supported), tell the person the `gh` commands to run. Pushes go through `makibad` (mcp__makiba__push, mcp__makiba__update) and need nothing of your sandbox.
 
 ## A worker reported done
 
@@ -54,7 +54,7 @@ After mcp__makiba__push and its notice, call mcp__makiba__pr with `state` `pushe
 
 ## Main moved under a pushed branch
 
-Use the update-branch skill (a merge, never a rebase or a force), then record the new head as above.
+Use the update-branch skill: mcp__makiba__update has `makibad` merge the base in (a merge, never a rebase or a force) and push it; then record the new head as above.
 
 ## After the merge
 

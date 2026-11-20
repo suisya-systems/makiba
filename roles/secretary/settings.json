@@ -68,6 +68,9 @@
     "enabled": true,
     "failIfUnavailable": true,
     "allowUnsandboxedCommands": false,
+    "network": {
+      "allowedDomains": ["api.github.com"]
+    },
     "filesystem": {
       "denyRead": [
         "~/.config/herdr-core",

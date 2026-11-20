@@ -494,14 +494,14 @@ fn record(
     idem: Option<&str>,
     r: &Response,
 ) -> bool {
-    // `dispatch`, `close` and `push` return at `accepted` and finish later (spec section 5.2); a
+    // `dispatch`, `close`, `push` and `update` return at `accepted` and finish later (spec section 5.2); a
     // close of a run closed already is `done` again.
     let status = match (verb, r) {
         ("dispatch" | "project", Ok(_)) => Some("accepted"),
         ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
         // `makibad`'s secretary pass carries a renewal out (Issue 46).
         ("renew", Ok(_)) => Some("accepted"),
-        ("push", Ok(_)) => Some("accepted"),
+        ("push" | "update", Ok(_)) => Some("accepted"),
         _ => status_of(r),
     };
     match status {
@@ -554,6 +554,7 @@ fn run(
             plain_name("slug", slug)?;
             super::project::accept(w, role, slug, str_arg(args, "repo")?)
         }
+        Verb::Update => update(w, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
 }
@@ -1430,6 +1431,29 @@ fn push(w: &StateWriter, args: &Value) -> Response {
     }
 }
 
+/// `update` (Issue 183): `base` a valid branch name, then accepted as `push` is; `makibad` merges
+/// `origin/<base>` into the branch and pushes it on a thread of its own (push.rs).
+fn update(w: &StateWriter, args: &Value) -> Response {
+    let base = str_arg(args, "base")?;
+    let valid = !base.starts_with('-')
+        && std::process::Command::new("git")
+            .args(["check-ref-format", "--branch", base])
+            .stdin(std::process::Stdio::null())
+            .output()
+            .is_ok_and(|o| o.status.success());
+    if !valid {
+        return Err(refuse(
+            ErrorKind::Usage,
+            format!("{base:?} is not a branch name"),
+            "",
+        ));
+    }
+    push(w, args).map(|mut v| {
+        v["base"] = base.into();
+        v
+    })
+}
+
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let id = args
         .get("id")
@@ -2256,6 +2280,11 @@ fn tool(v: Verb) -> Value {
             "Have makibad push a worker's branch: the run's worktree, on its branch, clean, pushed as its head to the same branch at origin, never forced. Answers accepted; a notice tells you the head pushed (then record it with pr) or why it failed.",
             Map::from_iter([("task".into(), text.clone())]),
             &["task"],
+        ),
+        Verb::Update => (
+            "Have makibad bring a pushed worker branch up to date with its base: fetch, then merge origin/<base> into the run's worktree (a merge commit, never a rebase) and push it, never forced. Refused when the worktree has uncommitted changes, is on another branch, the branch is not at origin or moved there; a conflict is undone and its files named. Answers accepted; a notice tells you the new head (then record it with pr pushed) or why it failed.",
+            Map::from_iter([("task".into(), text.clone()), ("base".into(), text.clone())]),
+            &["task", "base"],
         ),
         Verb::Inbox => (
             "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",

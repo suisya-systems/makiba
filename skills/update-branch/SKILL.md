@@ -1,23 +1,25 @@
 ---
 name: update-branch
-description: Take the base branch into a pushed worker branch with a merge commit, so the next push needs no force, then record the new head.
+description: Have makibad take the base branch into a pushed worker branch with a merge commit and push it, so no push is ever forced, then record the new head.
 when_to_use: Main moved under a branch that is already pushed (a pull request is open or CI is watched), and the branch must take main in.
 ---
 
 # update-branch
 
-Once a branch is pushed you never force-push it, so it takes the base in as a merge commit and the next push is a fast-forward. A branch that is not pushed yet is the worker's to rebase: tell it with mcp__makiba__send.
+Once a branch is pushed it is never force-pushed, so it takes the base in as a merge commit and the push is a fast-forward. `makibad` does it for you with mcp__makiba__update; you never run git in a worker's worktree yourself. A branch that is not pushed yet is the worker's to rebase: tell it with mcp__makiba__send.
 
-**Precondition:** your sandbox must let you write in the worker's worktree and the project repository's git folder (Issue 183). Until it does, tell the person the commands to run.
+## Steps
 
-## Steps, in the worker's worktree
+1. mcp__makiba__update with `task` (the task id) and `base` (the pull request's base branch, for example `main`). It answers `accepted`; end your turn.
+2. `makibad` fetches the base and the branch from origin, merges `origin/<base>` into the run's worktree when the branch does not hold it yet (a merge commit, never a rebase), pushes the result, never forced, and sends you a notice.
+3. The notice names the head at origin: call mcp__makiba__pr with `state` `pushed`, the pull request's `repo`, `pr` and `task`, and that full `head`, as in the pull-request skill. When the notice says nothing was merged and the head is the one already recorded, there is nothing to record.
+4. The notice says it failed:
+   - A conflict: the merge was undone and the notice names the files. Send them to the worker with mcp__makiba__send to resolve (it merges the base itself and commits); it reports done again, and you push with mcp__makiba__push.
+   - Uncommitted changes, or the worktree on another branch: they are the worker's; ask it with mcp__makiba__send, then call update again.
+   - The branch is not at origin: it was never pushed; it is the worker's to rebase.
+   - The branch moved at origin: somebody else pushed to it. Tell the person; nothing was merged or pushed.
+   - The push failed after the merge (git's message, for example a missing credential): the merge stays in the worktree; once the cause is dealt with, call update or push again.
 
-1. `git fetch origin`.
-2. `git status --porcelain --untracked-files=no` must print nothing. If tracked files have uncommitted changes, stop: they are the worker's; ask it with mcp__makiba__send.
-3. `git merge-base --is-ancestor origin/<base> HEAD` succeeds: the branch already contains the base. Stop.
-4. `git merge --no-edit origin/<base>`. On a conflict, `git merge --abort`, which leaves the branch as it was, and send the conflict to the worker to resolve; it reports done again.
-5. `git push origin <branch>` (no force), then mcp__makiba__pr with `state` `pushed`, the pull request's `repo`, `pr` and `task`, and the new full `head`, as in the pull-request skill.
-
-Never rebase a pushed branch, never `--force`, never reset. Your hooks refuse the dangerous forms.
+Never rebase a pushed branch, never force, never reset. Your hooks refuse the dangerous forms.
 
 A merged branch whose pull request has a test-first acceptance declaration still keeps that test commit first: the merge does not rewrite it.
