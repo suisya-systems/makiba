@@ -3,6 +3,7 @@
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
 pub mod anomalies;
+mod close;
 mod crash;
 pub mod delivery;
 mod dialogs;
@@ -292,6 +293,7 @@ fn serve_until(
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
+    let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     let mut resumed = false;
@@ -327,6 +329,11 @@ fn serve_until(
         // The rules and the delivery read what is committed: not before the first Resync is
         // reconciled. Order: recover, monitor, then anomalies and delivery.
         if monitor.reconciled() {
+            // First: a close accepted while a pass of the last tick was mid-step is finished only
+            // after that pass is (they share this thread), and before any pass starts more work.
+            if let Err(e) = close.pass(&w, &*events_base) {
+                eprintln!("makibad: close: {e}");
+            }
             if let Err(e) = anomalies.pass(&w) {
                 eprintln!("makibad: anomaly pass failed: {e}");
             }
