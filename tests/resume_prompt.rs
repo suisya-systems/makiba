@@ -111,8 +111,12 @@ fn a_resume_is_given_the_fixed_line_and_a_first_launch_its_brief() {
     assert!(!r.iter().any(|x| x == "the brief of r"), "{r:?}");
     assert_eq!(after(&r, "--resume").as_deref(), Some("conv-r"));
     assert_eq!(
-        f.last().map(String::as_str),
-        Some("the brief of f"),
+        f[f.len().saturating_sub(3)..].join("\n"),
+        concat!(
+            "the brief of f\n\n",
+            include_str!("../roles/locale/artifact/en.md")
+        )
+        .trim(),
         "{f:?}"
     );
     assert!(!f.iter().any(|x| x == RESUME_PROMPT), "{f:?}");
