@@ -101,7 +101,7 @@ const READ_KEYS3: &[&str] = &[
     "repo:license:list",
     "repo:license:view",
 ];
-const GROUPS: &[&str] = &[
+pub(crate) const GROUPS: &[&str] = &[
     "pr",
     "issue",
     "repo",
@@ -320,7 +320,7 @@ fn classify_gh(text: &str) -> Vec<String> {
     out
 }
 
-fn takes_value(t: &str) -> bool {
+pub(crate) fn takes_value(t: &str) -> bool {
     matches!(
         t,
         "-R" | "--repo"
