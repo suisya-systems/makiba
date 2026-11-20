@@ -10,6 +10,7 @@ pub mod delivery;
 mod dialogs;
 pub mod dispatch;
 pub mod door;
+pub mod gate;
 mod gh;
 pub mod inbox;
 pub mod launch;

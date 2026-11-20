@@ -156,6 +156,7 @@ pub enum Verb {
     Pr,
     Renew,
     Config,
+    Gate,
     Inbox,
 }
 
@@ -175,6 +176,7 @@ impl Verb {
         Verb::Pr,
         Verb::Renew,
         Verb::Config,
+        Verb::Gate,
         Verb::Inbox,
     ];
 
@@ -194,6 +196,7 @@ impl Verb {
             Verb::Pr => "pr",
             Verb::Renew => "renew",
             Verb::Config => "config",
+            Verb::Gate => "gate",
             Verb::Inbox => "inbox",
         }
     }

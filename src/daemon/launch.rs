@@ -264,6 +264,18 @@ impl Launch {
         if role != Role::Secretary {
             env.insert("GH_CONFIG_DIR".to_string(), String::new());
         }
+        // The secretary's merge gate hook finds its key file and the door where this process
+        // put them (spec section 3): the paths, never the key.
+        if role == Role::Secretary {
+            let abs = |p: PathBuf| std::path::absolute(&p).unwrap_or(p).display().to_string();
+            env.insert(
+                "MAKIBA_GATE_KEY".to_string(),
+                abs(crate::cli::gate_key_path()),
+            );
+            if let Some(door) = crate::cli::door_path().filter(|_| !crate::cli::door_off()) {
+                env.insert("MAKIBA_DOOR".to_string(), abs(door));
+            }
+        }
         LaunchSpec {
             argv,
             cwd: PathBuf::from(&row.worktree),
