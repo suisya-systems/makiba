@@ -15,3 +15,4 @@ pub mod hooks;
 pub mod spec;
 pub mod status_local;
 pub mod up;
+pub mod work_discovery;
