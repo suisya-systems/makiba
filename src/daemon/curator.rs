@@ -88,6 +88,9 @@ pub struct Curator {
     /// The newest `run_closed` event already counted for; -1 before the first count.
     seen: i64,
     next: Instant,
+    /// Ended curator terminals whose revoke (and notice) the database refused: `(spawn, past)`,
+    /// written by the next pass, as the base no longer lists them.
+    unsettled: Vec<(String, bool)>,
 }
 
 impl Curator {
@@ -114,6 +117,7 @@ impl Curator {
             agent,
             seen: -1,
             next: Instant::now(),
+            unsettled: Vec::new(),
         }
     }
 
@@ -126,12 +130,19 @@ impl Curator {
         }
         self.next = Instant::now() + EVERY;
         self.record_started(w)?;
+        for (spawn, past) in std::mem::take(&mut self.unsettled) {
+            if let Err(e) = self.finish(w, &spawn, past) {
+                eprintln!("makibad: cannot revoke the ended curator's keys: {e}");
+                self.unsettled.push((spawn, past));
+            }
+        }
         // The base cannot list: nothing is decided, the next pass tries again.
         let Ok(terminals) = base.list() else {
             return Ok(());
         };
         let mut running = false;
-        for t in terminals.iter().filter(|t| self.is_ours(t)) {
+        let ours: Vec<&Terminal> = terminals.iter().filter(|t| self.is_ours(t)).collect();
+        for t in ours {
             running |= !self.settle(w, base, t)?;
         }
         let latest: i64 = w.conn().query_row(
@@ -149,7 +160,8 @@ impl Curator {
             |r| r.get(0),
         )?;
         // This close is answered, whatever the answer: a curator that runs is not asked again.
-        self.seen = latest;
+        // A launch the database refused leaves it unanswered, for the next pass.
+        let before = std::mem::replace(&mut self.seen, latest);
         if running || in_flight {
             return Ok(());
         }
@@ -168,6 +180,7 @@ impl Curator {
                     &self.agent,
                 ) {
                     eprintln!("makibad: cannot add the curator launch: {e}");
+                    self.seen = before;
                 }
             }
             Ok(_) => {}
@@ -209,8 +222,12 @@ impl Curator {
     /// the base keeps it and its name) or is past the time limit is ended, its key revoked; only
     /// the last with a notice to the secretary.
     /// Returns whether it is gone. A failed end is tried again by the next pass.
-    fn settle(&self, w: &StateWriter, base: &dyn Base, t: &Terminal) -> Result<bool> {
+    fn settle(&mut self, w: &StateWriter, base: &dyn Base, t: &Terminal) -> Result<bool> {
         let spawn = t.tags.get(TAG_SPAWN).cloned().unwrap_or_default();
+        // Ended already; what is left is written at the start of a pass.
+        if self.unsettled.iter().any(|(s, _)| *s == spawn) {
+            return Ok(true);
+        }
         if t.alive && self.reported(w, &spawn)? {
             // Keys first: a failed end is tried again by the next pass, the report still there.
             w.transaction(|w| super::resume::revoke_keys(w, &spawn))?;
@@ -228,8 +245,17 @@ impl Curator {
             eprintln!("makibad: cannot end the curator terminal {}: {e}", t.id.0);
             return Ok(false);
         }
+        if let Err(e) = self.finish(w, &spawn, past) {
+            self.unsettled.push((spawn, past));
+            return Err(e);
+        }
+        Ok(true)
+    }
+
+    /// After the end: the keys revoked and, past the time limit, the notice, in one transaction.
+    fn finish(&self, w: &StateWriter, spawn: &str, past: bool) -> Result<()> {
         w.transaction(|w| {
-            super::resume::revoke_keys(w, &spawn)?;
+            super::resume::revoke_keys(w, spawn)?;
             if past {
                 let body = format!(
                     "The curator was ended after its time limit of {} minutes. Its cycle may be unfinished: the raw notes were not all curated.",
@@ -238,8 +264,7 @@ impl Curator {
                 super::verify::notify_secretary(w, None, &body)?;
             }
             Ok(())
-        })?;
-        Ok(true)
+        })
     }
 
     /// Whether the curator of launch `spawn` sent its report (Issue 177): a message of the curator
@@ -353,5 +378,72 @@ mod tests {
         let dir = notes(&["a.md"]);
         std::os::unix::fs::symlink("/nonexistent/gone", dir.path().join("raw/b.md")).unwrap();
         assert_eq!(count(&dir), 1);
+    }
+
+    /// Issue 181: a write the database refuses while another connection holds the lock is not lost.
+    fn locked(path: &Path) -> rusqlite::Connection {
+        let lock = crate::db::open(path).unwrap();
+        lock.execute_batch("BEGIN IMMEDIATE").unwrap();
+        lock
+    }
+
+    #[test]
+    fn a_refused_launch_leaves_the_close_unanswered() {
+        let knowledge = notes(&five().iter().map(String::as_str).collect::<Vec<_>>());
+        let db = tempfile::tempdir().unwrap();
+        let path = db.path().join("state.db");
+        let w = StateWriter::open(&path).unwrap();
+        let mut c = Curator::new("org", knowledge.path().into(), TIMEOUT, "fake".into());
+        w.append_event(&NewEvent {
+            kind: "run_closed",
+            ..Default::default()
+        })
+        .unwrap();
+        let lock = locked(&path);
+        c.pass(&w, &crate::base::stub::Stub::new()).unwrap();
+        drop(lock);
+        let launches = || -> i64 {
+            w.conn()
+                .query_row("SELECT count(*) FROM run_launch", [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(launches(), 0);
+        c.next = Instant::now();
+        c.pass(&w, &crate::base::stub::Stub::new()).unwrap();
+        assert_eq!(launches(), 1);
+    }
+
+    #[test]
+    fn a_refused_revoke_after_the_end_is_written_by_the_next_pass() {
+        use crate::base::{LaunchSpec, stub::Stub};
+        let knowledge = notes(&[]);
+        let db = tempfile::tempdir().unwrap();
+        let path = db.path().join("state.db");
+        let w = StateWriter::open(&path).unwrap();
+        let mut c = Curator::new("org", knowledge.path().into(), TIMEOUT, "fake".into());
+        let base = Stub::new();
+        let t = base
+            .launch(&LaunchSpec {
+                argv: vec!["x".into()],
+                cwd: knowledge.path().into(),
+                name: "c-s1".into(),
+                tags: std::collections::BTreeMap::from([
+                    (TAG_ROLE.to_string(), "curator".to_string()),
+                    (TAG_ORG.to_string(), "org".to_string()),
+                    (TAG_SPAWN.to_string(), "c-s1".to_string()),
+                ]),
+                env: Default::default(),
+                unset: vec![],
+            })
+            .unwrap();
+        base.exit(&t, 0);
+        let lock = locked(&path);
+        assert!(c.pass(&w, &base).is_err());
+        drop(lock);
+        assert!(base.list().unwrap().is_empty(), "the terminal was ended");
+        assert_eq!(c.unsettled, vec![("c-s1".to_string(), false)]);
+        c.next = Instant::now();
+        c.pass(&w, &base).unwrap();
+        assert!(c.unsettled.is_empty());
     }
 }
