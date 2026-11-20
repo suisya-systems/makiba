@@ -5,6 +5,7 @@
 pub mod anomalies;
 mod close;
 mod crash;
+pub mod curator;
 pub mod delivery;
 mod dialogs;
 pub mod dispatch;
@@ -203,6 +204,26 @@ fn serve(
     )
 }
 
+/// Open `state.db`. Another process opening it at the same moment (the door's request, a test)
+/// can make the open itself answer "database is locked" before the busy timeout applies, so a
+/// busy answer is tried again for a few seconds.
+fn open_state(path: &Path) -> Result<StateWriter, String> {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        match StateWriter::open(path) {
+            Err(crate::db::Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) && Instant::now() < until =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            other => return other.map_err(|e| e.to_string()),
+        }
+    }
+}
+
 fn serve_until(
     dir: &Path,
     connect: &dyn Fn() -> Box<dyn Base>,
@@ -216,7 +237,7 @@ fn serve_until(
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(|e| e.to_string())?;
     }
-    let w = StateWriter::open(&dir.join("state.db")).map_err(|e| e.to_string())?;
+    let w = open_state(&dir.join("state.db"))?;
     let base = connect();
     // Not subscribed yet: the row says so, and the heartbeat already runs.
     w.conn()
@@ -292,6 +313,7 @@ fn serve_until(
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
     let prepare = Prepare::new(Places::from_env(dir), events_base.worker_denies());
     let launch = launch::Launch::new(dir, door_addr);
+    let mut curator = curator::Curator::from_env(dir);
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
@@ -357,6 +379,9 @@ fn serve_until(
             if resumed {
                 if let Err(e) = launch.pass(&w, &*events_base) {
                     eprintln!("makibad: launch: {e}");
+                }
+                if let Err(e) = curator.pass(&w, &*events_base) {
+                    eprintln!("makibad: curator: {e}");
                 }
                 // Before the dialogs: a launch they move on is looked at on a later tick.
                 if let Err(e) = verify.pass(&w, &*events_base) {
