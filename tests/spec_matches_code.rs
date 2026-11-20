@@ -284,7 +284,7 @@ fn every_kind_of_name_is_read_from_the_document() {
     assert_eq!(count("error:"), 8);
     assert_eq!(count("tag:"), 5);
     assert_eq!(count("agent-id:"), 4);
-    assert_eq!(count("event:"), 14 + 23);
+    assert_eq!(count("event:"), 14 + 24);
 }
 
 #[test]
