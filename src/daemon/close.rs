@@ -1,7 +1,7 @@
 //! Finishing a close (Issue M5-2, spec sections 5.2 and 12). The door accepts `close`: it decides
 //! (a done report or `--abandon`, no unsaved work in a code worktree), sets the run `completed` or
 //! `abandoned`, fails the launches under way and writes `run_closed`, and records the command
-//! `accepted`. This pass, last in `makibad`'s loop, finishes every `accepted` close in order:
+//! `accepted`. This pass, first in each tick of `makibad`'s loop, finishes every `accepted` close in order:
 //!
 //! 1. every terminal of this organization carrying the task or a spawn of the run is ended, and
 //!    the pass goes on only once a new list shows none; every live worker key of the run or of a

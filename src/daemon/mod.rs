@@ -329,6 +329,11 @@ fn serve_until(
         // The rules and the delivery read what is committed: not before the first Resync is
         // reconciled. Order: recover, monitor, then anomalies and delivery.
         if monitor.reconciled() {
+            // First: a close accepted while a pass of the last tick was mid-step is finished only
+            // after that pass is (they share this thread), and before any pass starts more work.
+            if let Err(e) = close.pass(&w, &*events_base) {
+                eprintln!("makibad: close: {e}");
+            }
             if let Err(e) = anomalies.pass(&w) {
                 eprintln!("makibad: anomaly pass failed: {e}");
             }
@@ -365,10 +370,6 @@ fn serve_until(
             }
             if let Err(e) = delivery.wake_pass(&w, &*events_base) {
                 eprintln!("makibad: wake: {e}");
-            }
-            // Last: a launch pass that was mid-step when the door accepted the close has finished.
-            if let Err(e) = close.pass(&w, &*events_base) {
-                eprintln!("makibad: close: {e}");
             }
         }
         if Instant::now() >= next_beat {
