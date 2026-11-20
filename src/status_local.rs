@@ -46,7 +46,10 @@ pub fn main(as_json: bool) -> ExitCode {
 }
 
 /// The same read as an object, with no age in it, so two reads of one heartbeat agree:
-/// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}}`.
+/// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}, "merge_approval_mode"}`. The mode
+/// is read from this process's environment at each call, as the gate reads it (Issue 188): through
+/// the door that is `makibad`'s, which the secretary reads before every merge; run by the person,
+/// it is the person's shell's.
 pub fn read(path: &std::path::Path) -> Result<Value, String> {
     let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("cannot open {}: {e}", path.display()))?;
@@ -66,9 +69,12 @@ pub fn read(path: &std::path::Path) -> Result<Value, String> {
     );
     let (pid, subscribed, beat, age) = row.unwrap_or((None, 0, None, None));
     let running = age.is_some_and(|a| a < STALE.as_secs_f64());
+    let mode =
+        crate::daemon::gate::mode_of(std::env::var(crate::daemon::gate::MODE_ENV).ok().as_deref())
+            .0;
     Ok(
         json!({"makibad": {"pid": pid, "heartbeat_at": beat, "subscribed": subscribed == 1,
-                          "running": running}}),
+                          "running": running}, "merge_approval_mode": mode}),
     )
 }
 
