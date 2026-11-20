@@ -75,5 +75,18 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     if !fresh {
         text.push_str("makibad is not running: the heartbeat is older than 30 s\n");
     }
+    // The secretary (Issue 43): its newest launch, and how the person attaches to it.
+    let stage: Option<String> = conn
+        .query_row(
+            "SELECT stage FROM run_launch WHERE role = 'secretary' ORDER BY id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
+    let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
+    text.push_str(&format!(
+        "secretary: {}; attach with HC_SESSION={session} hc attach secretary\n",
+        stage.as_deref().unwrap_or("not launched")
+    ));
     Ok((text, fresh))
 }

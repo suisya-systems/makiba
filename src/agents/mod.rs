@@ -206,6 +206,10 @@ pub fn session_id(spawn: &str) -> String {
     )
 }
 
+/// The setting `secretary.remote_control` (spec section 2): `1` is on, anything else off. Read
+/// only here, for the secretary only (plan.md section 2, probe P6).
+pub const REMOTE_CONTROL_ENV: &str = "MAKIBA_SECRETARY_REMOTE_CONTROL";
+
 /// The module named `name` (a `run_launch.agent`).
 pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
     match name {
@@ -215,11 +219,10 @@ pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
                 fake::Fake::new(Path::new(""), Path::new(""), &[])
             })))
         }
-        // ponytail: `secretary.remote_control` has no store yet and only workers are launched.
         "claude_code" => Some(Box::new(claude_code::ClaudeCode::new(
             &on_path("claude").unwrap_or_else(|| PathBuf::from("claude")),
             &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("makiba")),
-            false,
+            std::env::var(REMOTE_CONTROL_ENV).as_deref() == Ok("1"),
         ))),
         _ => None,
     }
