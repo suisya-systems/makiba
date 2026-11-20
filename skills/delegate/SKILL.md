@@ -1,6 +1,6 @@
 ---
 name: delegate
-description: Hand one task to a new worker with the dispatch tool. The dispatcher makes the worktree or the working folder, writes the worker's settings and launches it; the secretary writes the brief.
+description: Hand one task to a new worker with the dispatch tool. The dispatcher makes the worktree or the working folder, writes the worker's settings and launches it; the secretary writes the brief and registers a project with the project tool.
 when_to_use: A request is ready to hand to a worker; a worker sends "base is stale"; a launch failed and the notice came to you.
 ---
 
@@ -10,8 +10,10 @@ Start one worker for one task with mcp__makiba__dispatch. You never make a workt
 
 ## Preconditions
 
-- The project is registered: its repository is in the repositories folder (`$MAKIBA_REPOS_DIR/<project>`, spec section 2), on the branch work starts from. **Limit:** no tool registers or clones a project. A request that names a repository that is not there, or names none, goes to the person: ask them to register it, and say that you cannot (a verb for it is Issue 184). A document request needs no repository (see the document skill).
-- The worker branches from the project repository's own default branch as it is on the machine; `makibad` does not fetch. When the base must be newer, the project repository has to be updated first (see "base is stale" below).
+- The project is registered: its repository is in the repositories folder (`$MAKIBA_REPOS_DIR/<project>`, spec section 2). A request for a repository that is not there: call mcp__makiba__project with `slug` (the project's name, as `dispatch`'s `project`) and `repo` (`OWNER/NAME` on GitHub, never a URL or a path). It answers `accepted`; `makibad` clones it and a notice says when it is done or why it failed. Dispatch only after the notice says done (a code dispatch of the project is refused while it runs).
+- A `project` refused `denied`: the owner is not in the organization's `allowed_repo_owners`. Ask the person to register it themselves (`makiba project <slug> <OWNER/NAME>`) or to allow the owner (`makiba config set allowed_repo_owners <owners>`); never guess another owner. A bare name with no owner: ask the person for `OWNER/NAME`.
+- A request that names no repository at all: ask the person which repository it is for. makiba does not make a local repository yet. A document request needs no repository (see the document skill).
+- The worker branches from the project repository's default branch as it is on the machine. When the base must be newer, call mcp__makiba__project again for the project: on an existing clone it fetches and fast-forwards the default branch.
 
 ## Dispatch
 
@@ -48,6 +50,4 @@ Never put a token, a password or a path of the person's own machine that the tas
 
 ## A worker says "base is stale"
 
-A worker reads its base from the project repository's `origin/<branch>`. Update the project repository (`git fetch origin` in it), then answer the worker with mcp__makiba__send: "origin/<branch> is updated to <sha>". It rebases itself.
-
-**Precondition:** your sandbox does not let you write in the project repositories, and no tool fetches the project repository alone yet (mcp__makiba__update fetches only for a run's pushed branch). Until one does, tell the person the command to run.
+A worker reads its base from the project repository's `origin/<branch>`. Call mcp__makiba__project with the project's slug and repository; when the notice says it is done, answer the worker with mcp__makiba__send: "origin/<branch> is updated to <sha>" (the sha is in the notice). It rebases itself. If the notice says it failed, tell the person the reason.

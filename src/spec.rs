@@ -164,6 +164,7 @@ pub enum Verb {
     Inbox,
     Note,
     Push,
+    Project,
     Update,
 }
 
@@ -186,6 +187,7 @@ impl Verb {
         Verb::Inbox,
         Verb::Note,
         Verb::Push,
+        Verb::Project,
         Verb::Update,
     ];
 
@@ -208,6 +210,7 @@ impl Verb {
             Verb::Inbox => "inbox",
             Verb::Note => "note",
             Verb::Push => "push",
+            Verb::Project => "project",
             Verb::Update => "update",
         }
     }
@@ -250,7 +253,7 @@ impl Role {
         match self {
             Role::Secretary => &[
                 Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox, Note,
-                Push, Update,
+                Push, Project, Update,
             ],
             Role::Worker | Role::Curator => &[Report, Send, Show, Inbox],
             Role::Person => Verb::ALL,
