@@ -117,10 +117,32 @@ impl Agent for ClaudeCode {
         &DIALOGS
     }
 
-    // ponytail: Claude Code's permission prompt is not recognized until its text is measured on
-    // the pinned version; an unrecognized prompt is not answered.
-    fn recognize_prompt(&self, _screen: &[String]) -> Option<PromptView> {
-        None
+    /// paddock's rule, measured on a host (inventory row L-N3, probe of 2026-11-14: relay yes and
+    /// no PASS): the dialog is the non-empty rows from the last rule row (only U+2500) to the end,
+    /// or the whole screen with none; it is a prompt only when it has exactly one cursor row and
+    /// that row is the one-time `1. Yes` as a whole (never "Yes, and don't ask again"). Yes is
+    /// Enter, no is Escape. (ponytail: not measured by a makiba probe yet; a screen that does
+    /// not match is a question and gets no key.)
+    fn recognize_prompt(&self, screen: &[String]) -> Option<PromptView> {
+        let rows: Vec<&str> = screen
+            .iter()
+            .map(|l| l.trim_end())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let rule = |l: &&str| {
+            let t = l.trim();
+            !t.is_empty() && t.chars().all(|c| c == '\u{2500}')
+        };
+        let block = &rows[rows.iter().rposition(rule).unwrap_or(0)..];
+        let mut cursors = block
+            .iter()
+            .filter_map(|l| l.trim_start().strip_prefix('\u{276f}'));
+        let one = cursors.next()?;
+        (cursors.next().is_none() && one.trim() == "1. Yes").then(|| PromptView {
+            text: block.join("\n"),
+            yes_key: "enter",
+            no_key: "esc",
+        })
     }
 
     fn composer(&self, _screen: &[String]) -> Composer {
@@ -142,5 +164,67 @@ impl Agent for ClaudeCode {
 
     fn has_channel(&self) -> bool {
         true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cc() -> ClaudeCode {
+        ClaudeCode::new(Path::new("claude"), Path::new("makiba"), false)
+    }
+
+    /// A Bash prompt as paddock's probe saw it, under a transcript that has a sent message.
+    fn screen(cursor_on: usize) -> Vec<String> {
+        let options = [
+            "1. Yes",
+            "2. Yes, and don't ask again for touch commands",
+            "3. No",
+        ];
+        let mut s: Vec<String> = ["\u{276f} Run touch a.txt", "", &"\u{2500}".repeat(40)]
+            .map(String::from)
+            .into();
+        s.extend(
+            [
+                " Bash command",
+                "",
+                "   touch a.txt",
+                "",
+                " Do you want to proceed?",
+            ]
+            .map(String::from),
+        );
+        for (i, o) in options.iter().enumerate() {
+            let mark = if i == cursor_on { "\u{276f}" } else { " " };
+            s.push(format!(" {mark} {o}"));
+        }
+        s.push(String::new());
+        s
+    }
+
+    #[test]
+    fn a_prompt_with_the_cursor_on_the_one_time_yes_is_recognized_below_its_rule() {
+        let v = cc().recognize_prompt(&screen(0)).unwrap();
+        assert!(v.text.starts_with('\u{2500}'), "{:?}", v.text);
+        assert!(v.text.contains("Do you want to proceed?") && !v.text.contains("Run touch"));
+        assert_eq!((v.yes_key, v.no_key), ("enter", "esc"));
+    }
+
+    #[test]
+    fn a_cursor_on_another_option_or_two_cursor_rows_is_not_recognized() {
+        assert_eq!(cc().recognize_prompt(&screen(1)), None);
+        assert_eq!(cc().recognize_prompt(&screen(2)), None);
+        // No rule row: the whole screen, where the transcript's sent message is a second cursor.
+        let no_rule: Vec<String> = screen(0)
+            .into_iter()
+            .filter(|l| !l.contains('\u{2500}'))
+            .collect();
+        assert_eq!(cc().recognize_prompt(&no_rule), None);
+        // The folder-trust dialog's first option is not the one-time yes.
+        let trust: Vec<String> = ["\u{276f} 1. Yes, I trust this folder", "  2. No, exit"]
+            .map(String::from)
+            .into();
+        assert_eq!(cc().recognize_prompt(&trust), None);
     }
 }
