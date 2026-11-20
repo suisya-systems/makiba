@@ -461,7 +461,10 @@ fn unix(t: &SystemTime) -> f64 {
 
 /// The one live terminal of this organization that is `recipient`'s (by its tags). `None` when
 /// there is none or more than one.
-fn find_terminal(base: &dyn Base, recipient: &str) -> Result<Option<Terminal>, BaseError> {
+pub(super) fn find_terminal(
+    base: &dyn Base,
+    recipient: &str,
+) -> Result<Option<Terminal>, BaseError> {
     let Some((role, task)) = identity(recipient) else {
         return Ok(None);
     };

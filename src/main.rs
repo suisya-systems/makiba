@@ -1,18 +1,27 @@
+use clap::Parser;
+use makiba::cli::{Command, Makiba};
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
+    // Not the person's verbs: started by makiba itself and by Claude Code (spec section 14).
     match args.first().map(String::as_str) {
-        Some("daemon") => makiba::daemon::main(),
-        Some("channel") => makiba::channel::main(&args[1..]),
-        Some("hook") => makiba::hooks::main(&args[1..]),
-        Some("status") => makiba::status_local::main(),
-        Some("dispatch" | "send" | "report" | "show" | "pr" | "close") => makiba::cli::main(&args),
-        Some("up") => makiba::up::main(&args[1..]),
-        Some("down") => makiba::down::main(&args[1..]),
-        _ => {
-            print!("{}", makiba::USAGE);
-            ExitCode::SUCCESS
+        Some("daemon") => return makiba::daemon::main(),
+        Some("channel") => return makiba::channel::main(&args[1..]),
+        Some("hook") => return makiba::hooks::main(&args[1..]),
+        _ => {}
+    }
+    let parsed = match Makiba::try_parse_from(std::env::args()) {
+        Ok(m) => m,
+        Err(e) => {
+            let _ = e.print();
+            return makiba::cli::exit(e.exit_code());
         }
+    };
+    match parsed.verb {
+        Command::Up { .. } => makiba::up::main(&args[1..]),
+        Command::Down { .. } => makiba::down::main(&args[1..]),
+        Command::Status { json } => makiba::status_local::main(json),
+        other => makiba::cli::main(other),
     }
 }

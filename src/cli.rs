@@ -1,4 +1,5 @@
-//! The person's command (spec section 12): `makiba dispatch`, `send`, `report`, `show`, `pr` and `close`. It talks to
+//! The person's command (spec section 12), defined with clap. The verbs other than `up`, `down`
+//! and `status` (run locally by `main.rs`) talk to
 //! `makibad` over the person's socket only, with the content of the person key file as its key;
 //! with no file it sends no key. It never opens `state.db` (only `src/status_local.rs` does, for
 //! `status`), so it uses no database module.
@@ -7,10 +8,11 @@
 //! daemon takes them from this module and not the other way round.
 
 use crate::spec::{EXIT_OK, ErrorKind};
+use clap::{Parser, Subcommand};
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::Duration;
 
@@ -100,103 +102,239 @@ fn person_key() -> Option<String> {
     (!key.is_empty()).then(|| key.to_string())
 }
 
-const USAGE: &str = "usage:\n  makiba dispatch --kind code|document --task-id <id> --title <t> --brief-file <f> [--project <slug>] [--model m] [--branch b]\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n  makiba pr opened|pushed --repo <owner/name> --pr <n> --head <oid> --task <task_id>\n  makiba close <task_id> [--abandon]\n";
-
-/// `dispatch`'s arguments: the flags with their values, the brief read from its file here (spec
-/// section 12), so the content travels over the door and `makibad` opens no path.
-fn dispatch_args(rest: &[&str]) -> Result<Value, String> {
-    let mut args = serde_json::Map::new();
-    for pair in rest.chunks(2) {
-        let [flag, value] = pair else {
-            return Err(format!("{} needs a value", pair[0]));
-        };
-        let name = match *flag {
-            "--kind" => "kind",
-            "--task-id" => "task_id",
-            "--title" => "title",
-            "--project" => "project",
-            "--model" => "model",
-            "--branch" => "branch",
-            "--brief-file" => {
-                let text = std::fs::read_to_string(value)
-                    .map_err(|e| format!("cannot read {value}: {e}"))?;
-                args.insert("brief".into(), text.into());
-                continue;
-            }
-            other => return Err(format!("no flag {other} for dispatch")),
-        };
-        args.insert(name.into(), (*value).into());
-    }
-    for need in ["kind", "task_id", "title", "brief"] {
-        if !args.contains_key(need) {
-            return Err(format!("dispatch needs {}", need.replace('_', "-")));
-        }
-    }
-    Ok(Value::Object(args))
+/// The person's command: one subcommand per verb of spec section 12 that the person runs.
+/// `makiba --help` and each verb's help come from here; `tests/cli_secretary.rs` compares it with
+/// the table of section 12. `daemon`, `channel` and `hook` are not the person's verbs and are
+/// matched by `main.rs` before this parser.
+#[derive(Parser, Debug)]
+#[command(
+    name = "makiba",
+    about = "An organization where the person talks to one secretary.",
+    arg_required_else_help = true,
+    disable_help_subcommand = true
+)]
+pub struct Makiba {
+    #[command(subcommand)]
+    pub verb: Command,
 }
 
-/// `pr`'s arguments: the state, then the four flags with their values.
-fn pr_args(state: &str, rest: &[&str]) -> Result<Value, String> {
-    let mut args = serde_json::Map::new();
-    args.insert("state".into(), state.into());
-    for pair in rest.chunks(2) {
-        let [flag, value] = pair else {
-            return Err(format!("{} needs a value", pair[0]));
-        };
-        match *flag {
-            "--repo" | "--head" | "--task" => {
-                args.insert(flag[2..].into(), (*value).into());
-            }
-            "--pr" => {
-                let n: i64 = value
-                    .parse()
-                    .map_err(|_| format!("not a pull request number: {value}"))?;
-                args.insert("pr".into(), n.into());
-            }
-            other => return Err(format!("no flag {other} for pr")),
-        }
-    }
-    for need in ["repo", "pr", "head", "task"] {
-        if !args.contains_key(need) {
-            return Err(format!("pr needs --{need}"));
-        }
-    }
-    Ok(Value::Object(args))
+#[derive(Subcommand, Debug)]
+pub enum Command {
+    /// Start the base if needed, makibad and the secretary. From a login shell.
+    Up {
+        #[arg(long)]
+        no_secretary: bool,
+    },
+    /// Record the state and end the worker terminals; the secretary and the base only when asked.
+    Down {
+        #[arg(long)]
+        secretary: bool,
+        #[arg(long)]
+        stop_base: bool,
+    },
+    /// The dispatcher's heartbeat, read from state.db without makibad.
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Create a queued run and its first launch. --project is required for code.
+    Dispatch {
+        #[arg(long, value_parser = ["code", "document"])]
+        kind: String,
+        #[arg(long)]
+        task_id: String,
+        #[arg(long)]
+        title: String,
+        /// Read here; its content travels over the door.
+        #[arg(long)]
+        brief_file: PathBuf,
+        #[arg(long, required_if_eq("kind", "code"))]
+        project: Option<String>,
+        #[arg(long)]
+        model: Option<String>,
+        #[arg(long)]
+        branch: Option<String>,
+    },
+    /// Close a task's run; refused before its done report unless --abandon.
+    Close {
+        task_id: String,
+        #[arg(long)]
+        abandon: bool,
+    },
+    /// The last lines of a worker's screen, read by makibad.
+    Peek {
+        task_id: String,
+        #[arg(long)]
+        lines: Option<u32>,
+    },
+    /// Queue a message; with --typed, type it into the recipient.
+    Send {
+        to: String,
+        #[arg(required_unless_present = "file", conflicts_with = "file")]
+        text: Option<String>,
+        #[arg(long)]
+        file: Option<PathBuf>,
+        #[arg(long)]
+        typed: bool,
+    },
+    /// Report on a task to the secretary.
+    Report {
+        #[arg(value_parser = ["start", "done", "blocked"])]
+        state: String,
+        #[arg(long)]
+        task: String,
+        text: String,
+    },
+    /// A message's full body.
+    Show { message_id: i64 },
+    /// Keep the pending table of questions: add (--task, --question), escalate, withdraw, list.
+    Pending {
+        #[arg(value_parser = ["add", "escalate", "withdraw", "list"])]
+        action: String,
+        pending_id: Option<i64>,
+        #[arg(long)]
+        task: Option<String>,
+        #[arg(long)]
+        question: Option<String>,
+    },
+    /// Answer a pending entry yes or no.
+    Answer {
+        pending_id: i64,
+        #[arg(value_parser = ["yes", "no"])]
+        answer: String,
+        #[arg(long)]
+        note: Option<String>,
+        #[arg(long)]
+        typed: bool,
+    },
+    /// Record that a pull request was opened or a fix pushed, and watch its CI.
+    Pr {
+        #[arg(value_parser = ["opened", "pushed"])]
+        state: String,
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        pr: i64,
+        #[arg(long)]
+        head: String,
+        #[arg(long)]
+        task: String,
+    },
+    /// Ask for a fresh secretary that resumes from the handover.
+    Renew {
+        /// Read here; its content travels over the door.
+        #[arg(long)]
+        handover_file: PathBuf,
+    },
+    /// Organization and project settings.
+    Config {
+        #[arg(value_parser = ["get", "set"])]
+        action: String,
+        key: String,
+        value: Option<String>,
+    },
 }
 
-/// The request's verb and arguments, from the command line.
-fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
-    let (verb, rest) = args.split_first().ok_or("no verb")?;
-    let typed = rest.iter().any(|a| a == "--typed");
-    let rest: Vec<&str> = rest
-        .iter()
-        .map(String::as_str)
-        .filter(|a| *a != "--typed")
-        .collect();
-    match (verb.as_str(), rest.as_slice()) {
-        ("send", [to, "--file", f]) => {
-            let text = std::fs::read_to_string(f).map_err(|e| format!("cannot read {f}: {e}"))?;
-            Ok(("send", json!({"to": to, "text": text, "typed": typed})))
+fn read(path: &Path) -> Result<String, String> {
+    std::fs::read_to_string(path).map_err(|e| format!("cannot read {}: {e}", path.display()))
+}
+
+/// The door's verb and arguments of a verb that goes over the door. Files named by the person
+/// are read here (spec section 12), so `makibad` opens no path.
+pub fn request(c: Command) -> Result<(&'static str, Value), String> {
+    let none = |v: Option<String>| v.map_or(Value::Null, Value::String);
+    Ok(match c {
+        Command::Up { .. } | Command::Down { .. } | Command::Status { .. } => {
+            return Err("this verb runs locally, not over the door".into());
         }
-        ("send", [to, text]) => Ok(("send", json!({"to": to, "text": text, "typed": typed}))),
-        ("report", [state, "--task", task, text]) if !typed => Ok((
+        Command::Dispatch {
+            kind,
+            task_id,
+            title,
+            brief_file,
+            project,
+            model,
+            branch,
+        } => {
+            let mut args = json!({"kind": kind, "task_id": task_id, "title": title,
+                                  "brief": read(&brief_file)?});
+            for (k, v) in [("project", project), ("model", model), ("branch", branch)] {
+                if let Some(v) = v {
+                    args[k] = v.into();
+                }
+            }
+            ("dispatch", args)
+        }
+        Command::Close { task_id, abandon } => {
+            ("close", json!({"task_id": task_id, "abandon": abandon}))
+        }
+        Command::Peek { task_id, lines } => {
+            let mut args = json!({"task_id": task_id});
+            if let Some(n) = lines {
+                args["lines"] = n.into();
+            }
+            ("peek", args)
+        }
+        Command::Send {
+            to,
+            text,
+            file,
+            typed,
+        } => {
+            let text = match (text, file) {
+                (_, Some(f)) => read(&f)?,
+                (Some(t), None) => t,
+                (None, None) => return Err("send needs a text or --file".into()),
+            };
+            ("send", json!({"to": to, "text": text, "typed": typed}))
+        }
+        Command::Report { state, task, text } => (
             "report",
             json!({"state": state, "task": task, "text": text}),
-        )),
-        ("dispatch", flags) if !typed => Ok(("dispatch", dispatch_args(flags)?)),
-        ("close", [task]) if !typed => Ok(("close", json!({"task_id": task, "abandon": false}))),
-        ("close", [task, "--abandon"]) if !typed => {
-            Ok(("close", json!({"task_id": task, "abandon": true})))
+        ),
+        Command::Show { message_id } => ("show", json!({"id": message_id})),
+        Command::Pending {
+            action,
+            pending_id,
+            task,
+            question,
+        } => {
+            let mut args = json!({"action": action});
+            if let Some(id) = pending_id {
+                args["id"] = id.into();
+            }
+            for (k, v) in [("task", task), ("question", question)] {
+                if let Some(v) = v {
+                    args[k] = v.into();
+                }
+            }
+            ("pending", args)
         }
-        ("pr", [state @ ("opened" | "pushed"), flags @ ..]) if !typed => {
-            Ok(("pr", pr_args(state, flags)?))
-        }
-        ("show", [id]) if !typed => {
-            let id: i64 = id.parse().map_err(|_| format!("not a message id: {id}"))?;
-            Ok(("show", json!({"id": id})))
-        }
-        _ => Err(format!("bad arguments for {verb}")),
-    }
+        Command::Answer {
+            pending_id,
+            answer,
+            note,
+            typed,
+        } => (
+            "answer",
+            json!({"id": pending_id, "answer": answer, "note": none(note), "typed": typed}),
+        ),
+        Command::Pr {
+            state,
+            repo,
+            pr,
+            head,
+            task,
+        } => (
+            "pr",
+            json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
+        ),
+        Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
+        Command::Config { action, key, value } => (
+            "config",
+            json!({"action": action, "key": key, "value": none(value)}),
+        ),
+    })
 }
 
 /// Send one request to the door and read its answer line.
@@ -230,16 +368,16 @@ fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     })
 }
 
-fn exit(code: i32) -> ExitCode {
+pub fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// `makiba dispatch|send|report|show|pr|close ...`.
-pub fn main(args: &[String]) -> ExitCode {
-    let (verb, request) = match parse(args) {
+/// A verb that goes over the door: send it and print the answer.
+pub fn main(c: Command) -> ExitCode {
+    let (verb, request) = match request(c) {
         Ok(r) => r,
         Err(e) => {
-            eprint!("makiba: {e}\n{USAGE}");
+            eprintln!("makiba: usage: {e}");
             return exit(ErrorKind::Usage.exit_code());
         }
     };
@@ -275,8 +413,10 @@ pub fn main(args: &[String]) -> ExitCode {
 mod tests {
     use super::*;
 
-    fn args(a: &[&str]) -> Vec<String> {
-        a.iter().map(|s| s.to_string()).collect()
+    fn req(a: &[&str]) -> Result<(&'static str, Value), String> {
+        let m = Makiba::try_parse_from(std::iter::once("makiba").chain(a.iter().copied()))
+            .map_err(|e| e.to_string())?;
+        request(m.verb)
     }
 
     /// `dispatch` reads the brief file itself and sends its content as `brief`.
@@ -286,7 +426,7 @@ mod tests {
         let f = dir.path().join("b.md");
         std::fs::write(&f, "do it\n").unwrap();
         let f = f.to_str().unwrap();
-        let (verb, v) = parse(&args(&[
+        let (verb, v) = req(&[
             "dispatch",
             "--kind",
             "code",
@@ -302,7 +442,7 @@ mod tests {
             "m",
             "--branch",
             "b",
-        ]))
+        ])
         .unwrap();
         assert_eq!(verb, "dispatch");
         assert_eq!(
@@ -310,26 +450,26 @@ mod tests {
             json!({"kind": "code", "task_id": "t", "title": "T", "brief": "do it\n",
                    "project": "p", "model": "m", "branch": "b"})
         );
-        assert!(parse(&args(&["dispatch", "--kind", "code", "--task-id", "t"])).is_err());
-        assert!(parse(&args(&["dispatch", "--kind"])).is_err());
-        assert!(parse(&args(&["dispatch", "--bogus", "x"])).is_err());
+        assert!(req(&["dispatch", "--kind", "code", "--task-id", "t"]).is_err());
+        assert!(req(&["dispatch", "--kind"]).is_err());
+        assert!(req(&["dispatch", "--bogus", "x"]).is_err());
     }
 
     /// `pr` sends its four flags, the PR number as a number, and refuses what is missing.
     #[test]
     fn pr_sends_its_flags_and_needs_all_four() {
         let head = "a".repeat(40);
-        let (verb, v) = parse(&args(&[
+        let (verb, v) = req(&[
             "pr", "pushed", "--repo", "o/n", "--pr", "7", "--head", &head, "--task", "t",
-        ]))
+        ])
         .unwrap();
         assert_eq!(verb, "pr");
         assert_eq!(
             v,
             json!({"state": "pushed", "repo": "o/n", "pr": 7, "head": head, "task": "t"})
         );
-        assert!(parse(&args(&["pr", "opened", "--repo", "o/n"])).is_err());
-        assert!(parse(&args(&["pr", "bogus", "--repo", "o/n"])).is_err());
-        assert!(parse(&args(&["pr", "opened", "--pr", "x"])).is_err());
+        assert!(req(&["pr", "opened", "--repo", "o/n"]).is_err());
+        assert!(req(&["pr", "bogus", "--repo", "o/n"]).is_err());
+        assert!(req(&["pr", "opened", "--pr", "x"]).is_err());
     }
 }
