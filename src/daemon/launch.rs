@@ -59,6 +59,8 @@ pub const UNSET: &[&str] = &[
     "GITHUB_TOKEN",
     "GH_ENTERPRISE_TOKEN",
     "GITHUB_ENTERPRISE_TOKEN",
+    // Bare mode turns skills off (Issue 182).
+    "CLAUDE_CODE_SIMPLE",
     "HC_SESSION",
     "HC_SOCKET",
     "HC_SCOPE",
@@ -327,6 +329,14 @@ impl Launch {
                     ));
                 }
             }
+        }
+        // The secretary's skills, on every launch of it, before its terminal exists (Issue 182).
+        // The test agent's tests leave the share folder at its default.
+        if agent_role == Role::Secretary
+            && agent.name() != "fake"
+            && let Err(e) = agents::place_skills()
+        {
+            return Outcome::Down(format!("the secretary's skills: {e}"));
         }
         let token = match super::door::issue_key(w, role, &row.name(), row.run_id, Some(&row.spawn))
         {

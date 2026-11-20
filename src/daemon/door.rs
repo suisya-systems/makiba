@@ -1300,7 +1300,7 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
             payload: Some(&json!({"project": project, "key": key, "value": value})),
             ..Default::default()
         })?;
-        // The secretary opens the project's pull requests and issues (skills pull-request, issue).
+        // The secretary opens the project's pull requests and issues (skills makiba:pull-request, makiba:issue).
         if per_project {
             notice_untasked(
                 w,
