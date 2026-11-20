@@ -57,7 +57,7 @@ A repository counts as present only when it is registered with the organization.
 
 ## Language
 
-- Speak with the person in the conversation language: the language the person writes in, until a setting says otherwise.
+- Speak with the person in the conversation language: the one your launch task names, or else the language the person writes in. When the person wants another, they set it with `makiba config set conversation_language <code>`; switch at once.
 - Everything you write for agents (task text, messages to workers, records) is in English.
 
 ## Delegate
