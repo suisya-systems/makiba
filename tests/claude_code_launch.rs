@@ -186,7 +186,17 @@ fn a_claude_code_run_is_launched_with_the_role_rules_and_both_sets_of_denies() {
         !a.iter().any(|x| x.starts_with("--remote-control")),
         "{a:?}"
     );
-    assert_eq!(a.last().map(String::as_str), Some("the brief"), "{a:?}");
+    assert_eq!(
+        a.last().map(String::as_str),
+        Some(
+            concat!(
+                "the brief\n\n",
+                include_str!("../roles/locale/artifact/en.md")
+            )
+            .trim()
+        ),
+        "{a:?}"
+    );
     assert_eq!(spec.cwd, workplace);
 
     // The worker's rules file: outside the workplace, holding the role's rules.
