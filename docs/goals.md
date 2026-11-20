@@ -36,8 +36,11 @@ name differs only in case (`Example-Org/Repo.md`) is reported as an error, not r
   repetition. **A clause higher up comes first.**
 - Every clause has at least one `- unmet if:` line (`*` for `-` and any case of `unmet if` work).
 - Other headings and text before the first clause are free and not read. A level-1 or level-2
-  heading ends the clause above it; a level-3 heading is part of the clause's text. Lines inside a
-  fenced code block are not read.
+  heading ends the clause above it; a level-3 heading is part of the clause's text. A line that
+  starts with three backticks (after spaces) opens or closes a block whose lines are not read; a
+  `~~~` fence is not one, and a longer backtick fence closes at the next line of three backticks
+  (the carried grammar). A clause heading inside a `~~~` fence is therefore read as a clause, and
+  a number it repeats is reported as an error, not skipped.
 - A heading that looks like a clause but is not one (`## G1` with no heading, `## G01 x`, `## G1x`,
   `## g2 x`) is an error.
 
