@@ -248,31 +248,37 @@ pub(super) fn fail(
         if !super::notify_gate::decide("worker_spawn_failed").send {
             return Ok(true);
         }
-        // The notice (spec 5.4): the event, the message, the pending delivery with no attempt.
-        let event = w.append_event(&NewEvent {
-            kind: "message_sent",
-            actor: Some("makibad"),
-            run_task_id: task,
-            ..Default::default()
-        })?;
         let body = format!(
             "Launch of {name} failed at stage {stage}: {why}. Its terminal is left for inspection."
         );
-        w.conn().execute(
-            "INSERT INTO messages (event_id, sender, recipient, kind, run_id, body)
-             VALUES (?1, 'makibad', ?2, 'notice', (SELECT id FROM runs WHERE task_id = ?3), ?4)",
-            params![event, AGENT_SECRETARY, task, body],
-        )?;
-        w.conn().execute(
-            "UPDATE events SET payload_json = json_object('message_id', ?1) WHERE id = ?2",
-            params![w.conn().last_insert_rowid(), event],
-        )?;
-        w.conn().execute(
-            "INSERT INTO event_deliveries (source_event_id, recipient) VALUES (?1, ?2)",
-            params![event, AGENT_SECRETARY],
-        )?;
+        notify_secretary(w, task, &body)?;
         Ok(true)
     })
+}
+
+/// The notice (spec 5.4) to the secretary: the event, the message (about `task`'s run, or none),
+/// the pending delivery with no attempt.
+pub(super) fn notify_secretary(w: &StateWriter, task: Option<&str>, body: &str) -> Result<()> {
+    let event = w.append_event(&NewEvent {
+        kind: "message_sent",
+        actor: Some("makibad"),
+        run_task_id: task,
+        ..Default::default()
+    })?;
+    w.conn().execute(
+        "INSERT INTO messages (event_id, sender, recipient, kind, run_id, body)
+         VALUES (?1, 'makibad', ?2, 'notice', (SELECT id FROM runs WHERE task_id = ?3), ?4)",
+        params![event, AGENT_SECRETARY, task, body],
+    )?;
+    w.conn().execute(
+        "UPDATE events SET payload_json = json_object('message_id', ?1) WHERE id = ?2",
+        params![w.conn().last_insert_rowid(), event],
+    )?;
+    w.conn().execute(
+        "INSERT INTO event_deliveries (source_event_id, recipient) VALUES (?1, ?2)",
+        params![event, AGENT_SECRETARY],
+    )?;
+    Ok(())
 }
 
 #[cfg(test)]
