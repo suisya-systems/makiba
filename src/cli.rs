@@ -88,7 +88,7 @@ fn person_key() -> Option<String> {
     (!key.is_empty()).then(|| key.to_string())
 }
 
-const USAGE: &str = "usage:\n  makiba dispatch --kind code|document --task-id <id> --title <t> --brief-file <f> [--project <slug>] [--model m] [--branch b]\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n";
+const USAGE: &str = "usage:\n  makiba dispatch --kind code|document --task-id <id> --title <t> --brief-file <f> [--project <slug>] [--model m] [--branch b]\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n  makiba pr opened|pushed --repo <owner/name> --pr <n> --head <oid> --task <task_id>\n";
 
 /// `dispatch`'s arguments: the flags with their values, the brief read from its file here (spec
 /// section 12), so the content travels over the door and `makibad` opens no path.
@@ -123,6 +123,35 @@ fn dispatch_args(rest: &[&str]) -> Result<Value, String> {
     Ok(Value::Object(args))
 }
 
+/// `pr`'s arguments: the state, then the four flags with their values.
+fn pr_args(state: &str, rest: &[&str]) -> Result<Value, String> {
+    let mut args = serde_json::Map::new();
+    args.insert("state".into(), state.into());
+    for pair in rest.chunks(2) {
+        let [flag, value] = pair else {
+            return Err(format!("{} needs a value", pair[0]));
+        };
+        match *flag {
+            "--repo" | "--head" | "--task" => {
+                args.insert(flag[2..].into(), (*value).into());
+            }
+            "--pr" => {
+                let n: i64 = value
+                    .parse()
+                    .map_err(|_| format!("not a pull request number: {value}"))?;
+                args.insert("pr".into(), n.into());
+            }
+            other => return Err(format!("no flag {other} for pr")),
+        }
+    }
+    for need in ["repo", "pr", "head", "task"] {
+        if !args.contains_key(need) {
+            return Err(format!("pr needs --{need}"));
+        }
+    }
+    Ok(Value::Object(args))
+}
+
 /// The request's verb and arguments, from the command line.
 fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
     let (verb, rest) = args.split_first().ok_or("no verb")?;
@@ -143,6 +172,9 @@ fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
             json!({"state": state, "task": task, "text": text}),
         )),
         ("dispatch", flags) if !typed => Ok(("dispatch", dispatch_args(flags)?)),
+        ("pr", [state @ ("opened" | "pushed"), flags @ ..]) if !typed => {
+            Ok(("pr", pr_args(state, flags)?))
+        }
         ("show", [id]) if !typed => {
             let id: i64 = id.parse().map_err(|_| format!("not a message id: {id}"))?;
             Ok(("show", json!({"id": id})))
@@ -186,7 +218,7 @@ fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// `makiba dispatch|send|report|show ...`.
+/// `makiba dispatch|send|report|show|pr ...`.
 pub fn main(args: &[String]) -> ExitCode {
     let (verb, request) = match parse(args) {
         Ok(r) => r,
@@ -265,5 +297,23 @@ mod tests {
         assert!(parse(&args(&["dispatch", "--kind", "code", "--task-id", "t"])).is_err());
         assert!(parse(&args(&["dispatch", "--kind"])).is_err());
         assert!(parse(&args(&["dispatch", "--bogus", "x"])).is_err());
+    }
+
+    /// `pr` sends its four flags, the PR number as a number, and refuses what is missing.
+    #[test]
+    fn pr_sends_its_flags_and_needs_all_four() {
+        let head = "a".repeat(40);
+        let (verb, v) = parse(&args(&[
+            "pr", "pushed", "--repo", "o/n", "--pr", "7", "--head", &head, "--task", "t",
+        ]))
+        .unwrap();
+        assert_eq!(verb, "pr");
+        assert_eq!(
+            v,
+            json!({"state": "pushed", "repo": "o/n", "pr": 7, "head": head, "task": "t"})
+        );
+        assert!(parse(&args(&["pr", "opened", "--repo", "o/n"])).is_err());
+        assert!(parse(&args(&["pr", "bogus", "--repo", "o/n"])).is_err());
+        assert!(parse(&args(&["pr", "opened", "--pr", "x"])).is_err());
     }
 }
