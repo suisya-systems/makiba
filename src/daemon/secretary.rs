@@ -58,6 +58,8 @@ struct Renewal {
     handover: String,
     age_s: f64,
     old: Option<String>,
+    /// `old` was recorded (it may be null: no secretary ran): the ending has begun.
+    ending: bool,
     new: Option<String>,
 }
 
@@ -98,7 +100,7 @@ impl Secretary {
             if self.decide(w, base)? {
                 self.decided = true;
                 if let Some(id) = up {
-                    finish(w, id, Ok(json!({"secretary": "decided"})))?;
+                    finish(w, id, Ok(json!({"secretary": "decided"})), None)?;
                 }
             }
             return Ok(());
@@ -185,7 +187,7 @@ impl Secretary {
                         payload: Some(&payload),
                         ..Default::default()
                     })?;
-                    finish(w, r.id, Ok(json!({"old": r.old, "new": new})))
+                    finish(w, r.id, Ok(json!({"old": r.old, "new": new})), None)
                 }),
                 Some((s, reason)) if s == "failed" => {
                     let why = format!(
@@ -193,10 +195,17 @@ impl Secretary {
                         reason.unwrap_or_default()
                     );
                     eprintln!("makibad: renewal of the secretary failed: {why}");
-                    finish(w, r.id, Err(why))
+                    // The launch stays named, so its handover is still the last one stored.
+                    let launch = json!({"old": r.old, "new": new});
+                    finish(w, r.id, Err(why), Some(launch))
                 }
                 Some(_) => Ok(()),
-                None => finish(w, r.id, Err("the new secretary's launch is gone".into())),
+                None => finish(
+                    w,
+                    r.id,
+                    Err("the new secretary's launch is gone".into()),
+                    None,
+                ),
             }?;
             return Ok(());
         }
@@ -204,7 +213,7 @@ impl Secretary {
             return Ok(());
         };
         let ours: Vec<&Terminal> = terminals.iter().filter(|t| self.is_ours(t)).collect();
-        if r.old.is_none() {
+        if !r.ending {
             // The secretary's own request waits for it to be idle or done; makibad's relaunch has
             // nothing to wait for.
             if r.actor != "makibad" {
@@ -212,7 +221,7 @@ impl Secretary {
                     let why =
                         "the secretary was not idle or done within 10 minutes; nothing was ended";
                     eprintln!("makibad: renewal of the secretary failed: {why}");
-                    return finish(w, r.id, Err(why.into()));
+                    return finish(w, r.id, Err(why.into()), None);
                 }
                 for t in ours.iter().filter(|t| t.alive) {
                     let state = base.get(&t.id).ok().and_then(|t| t.status).map(|s| s.state);
@@ -326,6 +335,7 @@ fn renewal(w: &StateWriter) -> Result<Option<Renewal>> {
             handover: args["handover"].as_str().unwrap_or_default().to_string(),
             age_s,
             old: text(&result["result"]["old"]),
+            ending: result["result"].get("old").is_some(),
             new: text(&result["result"]["new"]),
         }
     }))
@@ -343,15 +353,24 @@ fn progress(w: &StateWriter, id: i64, result: &Value) -> Result<()> {
     Ok(())
 }
 
-/// Finish a command: `done` with `result`, or `failed` (kind `internal`) with the reason.
-fn finish(w: &StateWriter, id: i64, r: std::result::Result<Value, String>) -> Result<()> {
+/// Finish a command: `done` with `result`, or `failed` (kind `internal`) with the reason; a failed
+/// renewal keeps its `launch` beside the error.
+fn finish(
+    w: &StateWriter,
+    id: i64,
+    r: std::result::Result<Value, String>,
+    launch: Option<Value>,
+) -> Result<()> {
     let (status, line, kind) = match r {
         Ok(v) => ("done", json!({"ok": true, "result": v}), None),
-        Err(m) => (
-            "failed",
-            json!({"ok": false, "error": {"kind": "internal", "message": m, "hint": ""}}),
-            Some("internal"),
-        ),
+        Err(m) => {
+            let mut line =
+                json!({"ok": false, "error": {"kind": "internal", "message": m, "hint": ""}});
+            if let Some(l) = launch {
+                line["result"] = l;
+            }
+            ("failed", line, Some("internal"))
+        }
     };
     w.conn().execute(
         "UPDATE commands SET status = ?1, result_json = ?2, error_kind = ?3,
@@ -541,6 +560,39 @@ mod tests {
             )
             .unwrap();
         assert_eq!((revoked, launches), (1, 1));
+    }
+
+    /// A renewal with no secretary before it (`old` null) goes on to the launch, and a failed
+    /// launch keeps its handover as the last one stored.
+    #[test]
+    fn a_renewal_with_no_secretary_launches_one_and_a_failure_keeps_its_handover() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO commands (actor, verb, args_json) VALUES ('person', 'renew', ?1)",
+                [json!({"handover": "the state"}).to_string()],
+            )
+            .unwrap();
+        let mut s = Secretary::from_env(dir.path());
+        let base = Stub::new();
+        for _ in 0..3 {
+            s.pass(&w, &base).unwrap();
+        }
+        let new = renewal(&w)
+            .unwrap()
+            .unwrap()
+            .new
+            .expect("no launch was added");
+        w.conn()
+            .execute(
+                "UPDATE run_launch SET stage = 'failed', failed_reason = 'x' WHERE spawn_id = ?1",
+                [&new],
+            )
+            .unwrap();
+        s.pass(&w, &base).unwrap();
+        assert!(renewal(&w).unwrap().is_none());
+        assert_eq!(last_handover(&w).unwrap().as_deref(), Some("the state"));
     }
 
     /// A brief over the limit is cut on a character boundary and says where the rest is.
