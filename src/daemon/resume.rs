@@ -51,7 +51,7 @@ pub(super) fn end_terminals(base: &dyn Base, spawn: &str) -> bool {
 pub(super) fn fail(
     w: &StateWriter,
     id: i64,
-    task: &str,
+    task: Option<&str>,
     spawn: &str,
     stage: &str,
     why: &str,
@@ -66,10 +66,10 @@ pub(super) fn fail(
 
 /// One try of the start pass. `true` once it is done; `false` while the base cannot list.
 pub fn pass(w: &StateWriter, base: &dyn Base) -> Result<bool> {
-    let rows: Vec<(i64, String, String, String)> = {
+    let rows: Vec<(i64, Option<String>, String, String)> = {
         let mut st = w.conn().prepare(
             "SELECT l.id, r.task_id, l.spawn_id, l.stage
-             FROM run_launch l JOIN runs r ON r.id = l.run_id
+             FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
              WHERE l.stage IN ('launched', 'dialog_passed') ORDER BY l.id",
         )?;
         st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
@@ -91,7 +91,7 @@ pub fn pass(w: &StateWriter, base: &dyn Base) -> Result<bool> {
             0 => format!("no terminal carries {TAG_SPAWN}={spawn} after a restart"),
             n => format!("{n} terminals carry {TAG_SPAWN}={spawn}"),
         };
-        fail(w, id, &task, &spawn, &stage, &why)?;
+        fail(w, id, task.as_deref(), &spawn, &stage, &why)?;
     }
     Ok(true)
 }

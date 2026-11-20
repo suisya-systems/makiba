@@ -6,6 +6,10 @@
 //! that carries no key, and the unset list of spec section 6.4. Then `worker_spawned` and stage
 //! `launched` are written in one transaction.
 //!
+//! A launch without a run (Issue 166, `add_launch`) takes the same steps from its row and role:
+//! its role's rules and settings, a terminal named `curator` or `secretary` without the
+//! `makiba.task_id` tag, and a key of its role with no run.
+//!
 //! A launch the base refused, once settled, fails by the path of M3-6 (Issue 124), as does one
 //! that cannot be prepared (prepare.rs): the run `failed` and the secretary told.
 //!
@@ -99,8 +103,10 @@ enum Outcome {
 
 struct Row {
     id: i64,
-    run_id: i64,
-    task: String,
+    /// `None` for a launch without a run (Issue 166), and `task` with it.
+    run_id: Option<i64>,
+    task: Option<String>,
+    role: String,
     spawn: String,
     agent: String,
     model: Option<String>,
@@ -129,10 +135,10 @@ impl Launch {
     pub fn pass(&self, w: &StateWriter, base: &dyn Base) -> Result<Vec<String>> {
         let rows: Vec<Row> = {
             let mut st = w.conn().prepare(
-                "SELECT l.id, r.id, r.task_id, l.spawn_id, l.agent, l.model, l.brief, l.worktree,
-                        l.conversation_id,
+                "SELECT l.id, r.id, r.task_id, l.role, l.spawn_id, l.agent, l.model, l.brief,
+                        l.worktree, l.conversation_id,
                         EXISTS (SELECT 1 FROM run_launch e WHERE e.run_id = l.run_id AND e.id < l.id)
-                 FROM run_launch l JOIN runs r ON r.id = l.run_id
+                 FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
                  WHERE l.stage = 'settings_ready' ORDER BY l.id",
             )?;
             st.query_map([], |r| {
@@ -140,13 +146,14 @@ impl Launch {
                     id: r.get(0)?,
                     run_id: r.get(1)?,
                     task: r.get(2)?,
-                    spawn: r.get(3)?,
-                    agent: r.get(4)?,
-                    model: r.get(5)?,
-                    brief: r.get(6)?,
-                    worktree: r.get(7)?,
-                    resume: r.get(8)?,
-                    relaunch: r.get(9)?,
+                    role: r.get(3)?,
+                    spawn: r.get(4)?,
+                    agent: r.get(5)?,
+                    model: r.get(6)?,
+                    brief: r.get(7)?,
+                    worktree: r.get(8)?,
+                    resume: r.get(9)?,
+                    relaunch: r.get(10)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -179,7 +186,7 @@ impl Launch {
                     if record(w, &row)? {
                         super::crash::point("launched");
                         self.lock().remove(&row.spawn);
-                        launched.push(row.task);
+                        launched.push(row.name());
                     } else {
                         // Failed meanwhile by somebody else (Issue 163): nothing runs for it,
                         // and the key this pass issued for it is revoked.
@@ -191,7 +198,8 @@ impl Launch {
                 }
                 Outcome::Down(why) => {
                     self.lock().remove(&row.spawn);
-                    super::resume::fail(w, row.id, &row.task, &row.spawn, "settings_ready", &why)?;
+                    let task = row.task.as_deref();
+                    super::resume::fail(w, row.id, task, &row.spawn, "settings_ready", &why)?;
                 }
                 Outcome::Unsure { hash, refused } => {
                     self.lock()
@@ -199,7 +207,8 @@ impl Launch {
                 }
                 Outcome::Later => {}
                 Outcome::Several(why) => {
-                    super::resume::fail(w, row.id, &row.task, &row.spawn, "settings_ready", &why)?;
+                    let task = row.task.as_deref();
+                    super::resume::fail(w, row.id, task, &row.spawn, "settings_ready", &why)?;
                 }
             }
         }
@@ -211,19 +220,19 @@ impl Launch {
     }
 
     /// The launch spec of `row` with `token` in its argv (spec sections 4, 6.3, 6.4).
-    fn spec(&self, row: &Row, agent: &dyn Agent, token: String) -> LaunchSpec {
+    fn spec(&self, row: &Row, role: Role, agent: &dyn Agent, token: String) -> LaunchSpec {
         let key_hash = super::door::sha256_hex(&token);
         let door = DoorAccess {
             address: self.door.clone(),
             token,
         };
-        let settings = self.settings.join(format!("{}.json", row.task));
-        let rules = agents::rules_path(Role::Worker);
+        let settings = settings_file(&self.settings, row.task.as_deref(), &row.role, &row.spawn);
+        let rules = agents::rules_path(role);
         // A first launch names its conversation (Issue 41); a resume names the stored one.
         let session = row.resume.is_none().then(|| agents::session_id(&row.spawn));
         let argv = agent.argv_with_session(
             &AgentLaunch {
-                role: Role::Worker,
+                role,
                 brief: Some(match row.resume {
                     Some(_) => RESUME_PROMPT,
                     None => &row.brief,
@@ -236,27 +245,31 @@ impl Launch {
             },
             session.as_deref(),
         );
-        let tags = BTreeMap::from([
-            (TAG_ROLE.to_string(), "worker".to_string()),
-            (TAG_TASK_ID.to_string(), row.task.clone()),
+        let mut tags = BTreeMap::from([
+            (TAG_ROLE.to_string(), row.role.clone()),
             (TAG_SPAWN.to_string(), row.spawn.clone()),
             (TAG_ORG.to_string(), self.org.clone()),
             (TAG_KEY.to_string(), key_hash),
         ]);
+        if let Some(task) = &row.task {
+            tags.insert(TAG_TASK_ID.to_string(), task.clone());
+        }
+        // No key goes into the environment. The role hooks find the entry point by
+        // MAKIBA_SHARE_DIR, as this process resolved it.
+        let mut env = BTreeMap::from([(
+            "MAKIBA_SHARE_DIR".to_string(),
+            crate::cli::share_dir().display().to_string(),
+        )]);
+        // Workers and the curator get an empty GH_CONFIG_DIR (spec section 6.4).
+        if role != Role::Secretary {
+            env.insert("GH_CONFIG_DIR".to_string(), String::new());
+        }
         LaunchSpec {
             argv,
             cwd: PathBuf::from(&row.worktree),
-            name: spec::worker_agent_id(&row.task),
+            name: row.name(),
             tags,
-            // Workers get an empty GH_CONFIG_DIR (spec section 6.4); no key goes here. The role
-            // hooks find the entry point by MAKIBA_SHARE_DIR, as this process resolved it.
-            env: BTreeMap::from([
-                ("GH_CONFIG_DIR".to_string(), String::new()),
-                (
-                    "MAKIBA_SHARE_DIR".to_string(),
-                    crate::cli::share_dir().display().to_string(),
-                ),
-            ]),
+            env,
             unset: UNSET.iter().map(|v| v.to_string()).collect(),
         }
     }
@@ -266,6 +279,9 @@ impl Launch {
     fn start(&self, w: &StateWriter, base: &dyn Base, row: &Row) -> Outcome {
         let Some(agent) = agents::by_name(&row.agent) else {
             return Outcome::Down(format!("no agent module named {:?}", row.agent));
+        };
+        let Some((role, agent_role)) = roles(&row.role) else {
+            return Outcome::Down(format!("no launch role named {:?}", row.role));
         };
         let Ok(terminals) = base.list() else {
             return Outcome::Later;
@@ -281,10 +297,12 @@ impl Launch {
         }
         // A relaunch ends the run's earlier terminals of this organization first: the shell a core
         // stop left in place of a kept one, or a failed resume's (both hold the name).
-        if row.relaunch {
+        if row.relaunch
+            && let Some(task) = &row.task
+        {
             for t in terminals.iter().filter(|t| {
                 t.tags.get(TAG_ORG) == Some(&self.org)
-                    && t.tags.get(TAG_TASK_ID) == Some(&row.task)
+                    && t.tags.get(TAG_TASK_ID) == Some(task)
                     && t.tags.get(TAG_SPAWN) != Some(&row.spawn)
             }) {
                 if let Err(e) = base.end(&t.id) {
@@ -295,19 +313,13 @@ impl Launch {
                 }
             }
         }
-        let agent_id = spec::worker_agent_id(&row.task);
-        let token = match super::door::issue_key(
-            w,
-            spec::Role::Worker,
-            &agent_id,
-            Some(row.run_id),
-            Some(&row.spawn),
-        ) {
+        let token = match super::door::issue_key(w, role, &row.name(), row.run_id, Some(&row.spawn))
+        {
             Ok(t) => t,
             Err(why) => return Outcome::Down(why),
         };
         let hash = super::door::sha256_hex(&token);
-        match base.launch(&self.spec(row, &*agent, token)) {
+        match base.launch(&self.spec(row, agent_role, &*agent, token)) {
             Ok(_) => {
                 // The child carries this key: the ones a dead process left are dead keys.
                 let _ = w.conn().execute(
@@ -400,11 +412,76 @@ fn record(w: &StateWriter, row: &Row) -> Result<bool> {
             kind: "worker_spawned",
             actor: Some("makibad"),
             payload: Some(&json!({"task_id": row.task, "spawn_id": row.spawn})),
-            run_task_id: Some(&row.task),
+            run_task_id: row.task.as_deref(),
             ..Default::default()
         })?;
         Ok(true)
     })
+}
+
+impl Row {
+    /// The terminal's name and the agent id (spec section 4): `w-<task_id>`, `curator`, `secretary`.
+    fn name(&self) -> String {
+        match &self.task {
+            Some(task) => spec::worker_agent_id(task),
+            None => self.role.clone(),
+        }
+    }
+}
+
+/// A launch's role as stored, as the door knows it and as the agent module does. `None` for a
+/// value the table does not allow.
+pub(super) fn roles(role: &str) -> Option<(spec::Role, Role)> {
+    match role {
+        "worker" => Some((spec::Role::Worker, Role::Worker)),
+        "curator" => Some((spec::Role::Curator, Role::Curator)),
+        "secretary" => Some((spec::Role::Secretary, Role::Secretary)),
+        _ => None,
+    }
+}
+
+/// The settings file of a launch (spec section 9): `<task_id>.json` for a run's, one per launch
+/// (`<role>-<spawn_id>.json`) for a launch without a run, so two of one role never share it.
+pub(super) fn settings_file(dir: &Path, task: Option<&str>, role: &str, spawn: &str) -> PathBuf {
+    match task {
+        Some(task) => dir.join(format!("{task}.json")),
+        None => dir.join(format!("{role}-{spawn}.json")),
+    }
+}
+
+/// A launch that belongs to no run (Issue 166), for `makibad`'s own code: the curator or the
+/// secretary, started in `folder` with `brief`, by the agent module `agent`. The row is `planned`;
+/// the passes take it on without a `run_taken` and outside `max_concurrent_workers`. Returns its
+/// spawn id.
+pub fn add_launch(
+    w: &StateWriter,
+    role: spec::Role,
+    folder: &Path,
+    brief: &str,
+    model: Option<&str>,
+    agent: &str,
+) -> std::result::Result<String, String> {
+    if !matches!(role, spec::Role::Curator | spec::Role::Secretary) {
+        return Err(format!("a {} launch belongs to a run", role.as_str()));
+    }
+    // The terminal starts there, whatever this process's own folder is.
+    let folder = std::path::absolute(folder).map_err(|e| format!("{}: {e}", folder.display()))?;
+    let spawn = super::door::random_key().map_err(|e| e.to_string())?[..32].to_string();
+    w.conn()
+        .execute(
+            "INSERT INTO run_launch (run_id, role, spawn_id, agent, model, brief, worktree)
+             VALUES (NULL, ?1, ?2, ?3, ?4, ?5, ?6)",
+            rusqlite::params![
+                role.as_str(),
+                spawn,
+                agent,
+                model,
+                brief,
+                folder.display().to_string()
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(spawn)
 }
 
 #[cfg(test)]
@@ -434,8 +511,9 @@ mod tests {
             .unwrap();
         let row = Row {
             id: 1,
-            run_id: 1,
-            task: "t1".into(),
+            run_id: Some(1),
+            task: Some("t1".into()),
+            role: "worker".into(),
             spawn: "s1".into(),
             agent: "fake".into(),
             model: None,

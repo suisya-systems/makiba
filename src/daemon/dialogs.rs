@@ -220,7 +220,9 @@ fn settled_form(screen: &[String]) -> Vec<String> {
 
 struct Row {
     id: i64,
-    task: String,
+    /// `None` for a launch without a run (Issue 166); `name` is then its role.
+    task: Option<String>,
+    name: String,
     spawn: String,
     agent: String,
 }
@@ -252,16 +254,17 @@ impl Dialogs {
     pub fn pass(&mut self, w: &StateWriter, base: &dyn Base) -> Result<()> {
         let rows: Vec<Row> = {
             let mut st = w.conn().prepare(
-                "SELECT l.id, r.task_id, l.spawn_id, l.agent
-                 FROM run_launch l JOIN runs r ON r.id = l.run_id
+                "SELECT l.id, r.task_id, COALESCE(r.task_id, l.role), l.spawn_id, l.agent
+                 FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
                  WHERE l.stage = 'launched' ORDER BY l.id",
             )?;
             st.query_map([], |r| {
                 Ok(Row {
                     id: r.get(0)?,
                     task: r.get(1)?,
-                    spawn: r.get(2)?,
-                    agent: r.get(3)?,
+                    name: r.get(2)?,
+                    spawn: r.get(3)?,
+                    agent: r.get(4)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -324,7 +327,7 @@ impl Dialogs {
                     if key_allowed(t, d) && base.get(&t.id).is_ok_and(|now| key_allowed(&now, d)) {
                         self.seen.remove(&row.spawn);
                         if let Err(e) = base.keys(&t.id, &[key]) {
-                            eprintln!("makibad: dialog key for {}: {e}", row.task);
+                            eprintln!("makibad: dialog key for {}: {e}", row.name);
                         }
                     }
                 }
@@ -347,7 +350,8 @@ fn passed(w: &StateWriter, id: i64) -> Result<bool> {
 /// Stage `failed` and `worker_spawn_failed`, together (spec section 10), with the run and the
 /// notice of M3-6. The terminal is left, unless the launch was failed meanwhile by somebody else.
 fn fail(w: &StateWriter, base: &dyn Base, row: &Row, why: &str, screen: &[String]) -> Result<()> {
-    if !super::verify::fail(w, row.id, &row.task, &row.spawn, "launched", why, screen)? {
+    let task = row.task.as_deref();
+    if !super::verify::fail(w, row.id, task, &row.spawn, "launched", why, screen)? {
         let _ = super::resume::end_terminals(base, &row.spawn);
     }
     Ok(())
