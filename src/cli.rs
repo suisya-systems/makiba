@@ -1,4 +1,4 @@
-//! The person's command (spec section 12): `makiba dispatch`, `send`, `report` and `show`. It talks to
+//! The person's command (spec section 12): `makiba dispatch`, `send`, `report`, `show`, `pr` and `close`. It talks to
 //! `makibad` over the person's socket only, with the content of the person key file as its key;
 //! with no file it sends no key. It never opens `state.db` (only `src/status_local.rs` does, for
 //! `status`), so it uses no database module.
@@ -88,7 +88,7 @@ fn person_key() -> Option<String> {
     (!key.is_empty()).then(|| key.to_string())
 }
 
-const USAGE: &str = "usage:\n  makiba dispatch --kind code|document --task-id <id> --title <t> --brief-file <f> [--project <slug>] [--model m] [--branch b]\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n  makiba pr opened|pushed --repo <owner/name> --pr <n> --head <oid> --task <task_id>\n";
+const USAGE: &str = "usage:\n  makiba dispatch --kind code|document --task-id <id> --title <t> --brief-file <f> [--project <slug>] [--model m] [--branch b]\n  makiba send <to> <text> [--typed]\n  makiba send <to> --file <f> [--typed]\n  makiba report start|done|blocked --task <task_id> <text>\n  makiba show <message id>\n  makiba pr opened|pushed --repo <owner/name> --pr <n> --head <oid> --task <task_id>\n  makiba close <task_id> [--abandon]\n";
 
 /// `dispatch`'s arguments: the flags with their values, the brief read from its file here (spec
 /// section 12), so the content travels over the door and `makibad` opens no path.
@@ -172,6 +172,10 @@ fn parse(args: &[String]) -> Result<(&'static str, Value), String> {
             json!({"state": state, "task": task, "text": text}),
         )),
         ("dispatch", flags) if !typed => Ok(("dispatch", dispatch_args(flags)?)),
+        ("close", [task]) if !typed => Ok(("close", json!({"task_id": task, "abandon": false}))),
+        ("close", [task, "--abandon"]) if !typed => {
+            Ok(("close", json!({"task_id": task, "abandon": true})))
+        }
         ("pr", [state @ ("opened" | "pushed"), flags @ ..]) if !typed => {
             Ok(("pr", pr_args(state, flags)?))
         }
@@ -218,7 +222,7 @@ fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
-/// `makiba dispatch|send|report|show|pr ...`.
+/// `makiba dispatch|send|report|show|pr|close ...`.
 pub fn main(args: &[String]) -> ExitCode {
     let (verb, request) = match parse(args) {
         Ok(r) => r,

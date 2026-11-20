@@ -7,7 +7,7 @@ fn main() -> ExitCode {
         Some("channel") => makiba::channel::main(&args[1..]),
         Some("hook") => makiba::hooks::main(&args[1..]),
         Some("status") => makiba::status_local::main(),
-        Some("dispatch" | "send" | "report" | "show" | "pr") => makiba::cli::main(&args),
+        Some("dispatch" | "send" | "report" | "show" | "pr" | "close") => makiba::cli::main(&args),
         Some("up") => makiba::up::main(&args[1..]),
         Some("down") => makiba::down::main(&args[1..]),
         _ => {
