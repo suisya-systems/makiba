@@ -37,10 +37,10 @@ For each failure you looked at in step 1, do one of these. The look back is not 
 
 ## 4. Record
 
-When there is something to record, save a raw note as the curate skill describes, with these differences:
+When there is something to record, save a raw note with mcp__makiba__note as the curate skill describes, with these differences:
 
-- Name: `raw/<YYYY-MM-DD>-delegation-<topic>.md`. The `delegation-` prefix tells it apart from the workers' notes.
-- First line `Task: <task_id>` of the task you looked back on.
+- `topic`: `delegation-<topic>`, so the file is `raw/<YYYY-MM-DD>-delegation-<topic>.md`. The `delegation-` prefix tells it apart from the workers' notes.
+- `task`: the task_id of the task you looked back on (`makibad` writes it as the first line `Task: <task_id>`).
 - The four headings: `## Facts`, `## Judgment`, `## Grounds`, `## Where it applies`. Add the check, issue number or reason of step 3 under `## Judgment`.
 
 Whether a pattern becomes a skill is decided by the curator's gates and the person (the curate skill), not here.

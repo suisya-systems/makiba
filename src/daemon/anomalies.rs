@@ -13,12 +13,13 @@
 //! (`messages` of kind `report_done` / `report_blocked`). The secretary has no run: its records are
 //! the events whose `role` is `secretary`, one terminal generation per `agents` row of
 //! `secretary`, and a renewal under way is a `renew` row of `commands` that is `accepted`, or
-//! `done` with the gone inside the time it took. Elapsed time is measured from persisted times and
-//! the `now` given; "after the last turn" is by event id. The time of a status is when it was
-//! recorded, which is when it changed (the monitor writes only changes).
+//! `done` with the gone inside the time it took, of the terminal it replaces. Elapsed time is
+//! measured from persisted times and the `now` given; "after the last turn" is by event id. The
+//! time of a status is when it was recorded, which is when it changed (the monitor writes only
+//! changes).
 //!
 //! Not here: the `pending` entry of `blocked_permission` (spec 7, the permission relay), delivery
-//! of the notices (M2-4) and the relaunch of the secretary (M6-5).
+//! of the notices (M2-4) and the relaunch of the secretary (secretary.rs, M6-5).
 
 use crate::db::{Result, StateWriter};
 use crate::spec::AGENT_SECRETARY;
@@ -495,7 +496,9 @@ fn secretary_scene(w: &StateWriter, launched: i64, spawn: Option<&str>) -> Resul
         params![launched, spawn],
         |r| r.get(0),
     )?;
-    // A gone inside a renewal (under way, or done and the gone came in while it took) is no gone.
+    // A gone inside a renewal (under way, or done and the gone came in while it took) is no gone,
+    // when it is the gone of the terminal the renewal replaces (`old` of its result, Issue 46): the
+    // replacement's own end is a gone.
     let gone: bool = c.query_row(
         &format!(
             "SELECT EXISTS (SELECT 1 FROM events e WHERE kind = 'terminal_gone'
@@ -503,7 +506,9 @@ fn secretary_scene(w: &StateWriter, launched: i64, spawn: Option<&str>) -> Resul
                AND NOT EXISTS (SELECT 1 FROM commands c
                  WHERE c.verb = 'renew' AND c.status IN ('accepted', 'done')
                    AND {} <= {at}
-                   AND (c.finished_at IS NULL OR {at} <= {})))",
+                   AND (c.finished_at IS NULL OR {at} <= {})
+                   AND json_extract(e.payload_json, '$.spawn_id')
+                       IS json_extract(c.result_json, '$.result.old')))",
             ms("c.received_at"),
             ms("c.finished_at")
         ),

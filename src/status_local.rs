@@ -131,8 +131,52 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
     text.push_str(&format!(
         "secretary: {}; attach with {}\n",
-        stage.as_deref().unwrap_or("not launched"),
+        secretary_state(&conn, stage.as_deref()),
         crate::base::attach_command(&session, crate::spec::AGENT_SECRETARY)
     ));
     Ok((text, fresh))
+}
+
+/// What the `secretary:` line says (Issue 46): a renewal under way, a secretary that is gone (and
+/// whether `makibad` still relaunches it), the last renewal's failure, or the newest launch's stage.
+fn secretary_state(conn: &Connection, stage: Option<&str>) -> String {
+    let one = |sql: &str| -> Option<String> { conn.query_row(sql, [], |r| r.get(0)).ok() };
+    if one("SELECT 'y' FROM commands WHERE verb = 'renew' AND status = 'accepted' LIMIT 1")
+        .is_some()
+    {
+        return format!("renewing (newest launch {})", stage.unwrap_or("none"));
+    }
+    // The same reads as makibad's secretary pass (`daemon::secretary::stopped`, `down`).
+    if one("SELECT 'y' FROM commands c
+         WHERE c.actor = 'makibad' AND c.verb = 'renew' AND c.status = 'rejected'
+           AND NOT EXISTS (SELECT 1 FROM run_launch l WHERE l.role = 'secretary'
+                             AND julianday(l.created_at) > julianday(c.received_at))")
+    .is_some()
+    {
+        return "gone: relaunched twice in 10 minutes and stopped; run makiba up".into();
+    }
+    let gone = one(
+        "SELECT kind FROM events WHERE kind IN ('anomaly_raised', 'anomaly_cleared')
+           AND json_extract(payload_json, '$.rule') = 'secretary_gone'
+           AND json_extract(payload_json, '$.generation') =
+               (SELECT max(id) FROM agents WHERE agent_id = 'secretary')
+         ORDER BY id DESC LIMIT 1",
+    );
+    // The newest renewal's failure, while no secretary was launched after it.
+    let failed = one(
+        "SELECT json_extract(c.result_json, '$.error.message') FROM commands c
+         WHERE c.id = (SELECT max(id) FROM commands WHERE verb = 'renew')
+           AND c.status = 'failed'
+           AND NOT EXISTS (SELECT 1 FROM run_launch l WHERE l.role = 'secretary'
+                             AND julianday(l.created_at) > julianday(c.finished_at))",
+    );
+    let failed = failed.map_or_else(String::new, |why| format!(" (last renewal failed: {why})"));
+    // As makibad's `down`: a launch `makiba up` failed after a stop of the base is not relaunched.
+    let failed_launch = one("SELECT 'y' FROM run_launch
+         WHERE id = (SELECT max(id) FROM run_launch WHERE role = 'secretary')
+           AND stage = 'failed' AND failed_reason IS NOT 'the base was stopped'");
+    if gone.as_deref() == Some("anomaly_raised") || failed_launch.is_some() {
+        return format!("gone{failed}; makibad relaunches it");
+    }
+    format!("{}{failed}", stage.unwrap_or("not launched"))
 }

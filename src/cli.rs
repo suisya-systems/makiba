@@ -231,6 +231,14 @@ pub enum Command {
         #[arg(long)]
         handover_file: PathBuf,
     },
+    /// Save a raw note for the curator, with the four headings.
+    Note {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        topic: String,
+        text: String,
+    },
     /// Organization and project settings.
     Config {
         #[arg(value_parser = ["get", "set"])]
@@ -339,6 +347,9 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
         ),
         Command::Push { task } => ("push", json!({"task": task})),
         Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
+        Command::Note { task, topic, text } => {
+            ("note", json!({"task": task, "topic": topic, "text": text}))
+        }
         Command::Config {
             action,
             key,
