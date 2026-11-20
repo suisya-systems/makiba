@@ -145,11 +145,20 @@ fn run_gh(gh: &str, args: &[&str], cancel: &AtomicBool) -> std::result::Result<S
         out
     });
     let deadline = Instant::now() + GH_TIMEOUT;
+    // The deadline and the cancel flag hold until the output is collected as well: a descendant
+    // may keep the pipe open after the child has gone.
+    let mut exited = None;
     let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) => {}
-            Err(e) => return Err(GhError::Failed(format!("cannot wait for {gh}: {e}"))),
+        if exited.is_none() {
+            match child.try_wait() {
+                Ok(s) => exited = s,
+                Err(e) => return Err(GhError::Failed(format!("cannot wait for {gh}: {e}"))),
+            }
+        }
+        if let Some(s) = exited
+            && reader.is_finished()
+        {
+            break s;
         }
         let stop = if cancel.load(Ordering::SeqCst) {
             Some(GhError::Cancelled)
@@ -159,7 +168,7 @@ fn run_gh(gh: &str, args: &[&str], cancel: &AtomicBool) -> std::result::Result<S
             None
         };
         if let Some(e) = stop {
-            // The reader is left: a grandchild may hold the pipe open.
+            // The reader is left: it ends when the pipe closes.
             let _ = child.kill();
             let _ = child.wait();
             return Err(e);
@@ -300,10 +309,24 @@ fn poll(
                 } else {
                     bad_since = None;
                     // A failed check with a sibling still running waits for the sibling.
-                    if s.pending_count == 0
-                        && !(s.status == "passed" && unfinished_runs(gh, repo, head, cancel))
-                    {
-                        return Some(Outcome::Concluded(s, attempts));
+                    if s.pending_count == 0 {
+                        if s.status != "passed" {
+                            return Some(Outcome::Concluded(s, attempts));
+                        }
+                        // The checks are read again once no workflow run is going: one that
+                        // started and failed meanwhile is in them, and it is the verdict.
+                        if !unfinished_runs(gh, repo, head, cancel) {
+                            match observe(gh, repo, head, cancel) {
+                                Ok(again) => {
+                                    let s = summarize(&again);
+                                    if s.pending_count == 0 && s.total > 0 {
+                                        return Some(Outcome::Concluded(s, attempts));
+                                    }
+                                }
+                                Err(GhError::Cancelled) => return None,
+                                Err(_) => {}
+                            }
+                        }
                     }
                     None
                 }
@@ -694,5 +717,68 @@ mod tests {
         for s in ["completed", "action_required", ""] {
             assert!(!run_unfinished(s), "{s}");
         }
+    }
+
+    /// A `gh` stand-in in a folder of its own: `body` is its shell script.
+    fn stand_in(body: &str) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gh");
+        std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let program = path.display().to_string();
+        (dir, program)
+    }
+
+    /// A workflow that starts and fails while the run list is read is in the checks read after
+    /// it: the verdict is not the green snapshot taken before.
+    #[test]
+    fn the_checks_are_read_again_once_no_workflow_run_is_going() {
+        let (dir, gh) = stand_in(
+            r#"d=$(dirname "$0")
+case "$3" in
+  *check-runs*) if [ -e "$d/late" ]; then echo '{"name":"late","status":"completed","conclusion":"failure"}'; fi
+                echo '{"name":"early","status":"completed","conclusion":"success"}' ;;
+  *actions/runs*) touch "$d/late"; echo completed ;;
+esac"#,
+        );
+        let _keep = dir;
+        let cancel = AtomicBool::new(false);
+        let out = poll(
+            &gh,
+            "o/n",
+            "abc",
+            Duration::from_millis(10),
+            Duration::from_secs(5),
+            &cancel,
+        );
+        match out {
+            Some(Outcome::Concluded(s, _)) => {
+                assert_eq!((s.status, s.fail_count, s.total), ("failed", 1, 2));
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A descendant that keeps the pipe open after `gh` exited does not hold a stop.
+    #[test]
+    fn a_stop_is_not_held_by_a_descendant_that_keeps_the_output_open() {
+        let (dir, gh) = stand_in(r#"sleep 30 & echo $! > "$(dirname "$0")/pid"; exit 0"#);
+        let cancel = Arc::new(AtomicBool::new(false));
+        let stopper = {
+            let cancel = Arc::clone(&cancel);
+            std::thread::spawn(move || {
+                std::thread::sleep(Duration::from_millis(300));
+                cancel.store(true, Ordering::SeqCst);
+            })
+        };
+        let started = Instant::now();
+        let r = run_gh(&gh, &["api"], &cancel);
+        assert!(matches!(r, Err(GhError::Cancelled)));
+        assert!(started.elapsed() < Duration::from_secs(10));
+        stopper.join().unwrap();
+        // The descendant is ended here so the test leaves no process behind.
+        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
+        let _ = Command::new("kill").arg(pid.trim()).status();
     }
 }
