@@ -62,6 +62,13 @@ pub fn person_key_path() -> PathBuf {
     })
 }
 
+/// `$MAKIBA_GATE_KEY`, default `gate.key` beside the person key (by default
+/// `${XDG_CONFIG_HOME:-~/.config}/makiba/gate.key`): the key makibad writes at start for the merge
+/// gate hook alone (spec section 3). Beside the person key, so whatever moves that one moves both.
+pub fn gate_key_path() -> PathBuf {
+    env_path("MAKIBA_GATE_KEY").unwrap_or_else(|| person_key_path().with_file_name("gate.key"))
+}
+
 /// `$MAKIBA_GOALS_DIR`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/goals`: the goal ledgers,
 /// `<owner>/<repo>.md` each (`docs/goals.md`).
 pub fn goals_dir() -> PathBuf {
@@ -255,6 +262,15 @@ pub enum Command {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Run the acceptance gate for a pull request at a head; merges nothing.
+    Gate {
+        #[arg(long)]
+        repo: String,
+        #[arg(long)]
+        pr: i64,
+        #[arg(long)]
+        head: String,
+    },
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -366,6 +382,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             "config",
             json!({"action": action, "key": key, "value": none(value), "project": none(project)}),
         ),
+        Command::Gate { repo, pr, head } => ("gate", json!({"repo": repo, "pr": pr, "head": head})),
     })
 }
 
@@ -387,8 +404,13 @@ fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let mut s = UnixStream::connect(&path)
         .map_err(|e| unavailable(format!("makibad is not running ({}: {e})", path.display())))?;
     let io = |e: std::io::Error| unavailable(format!("the door: {e}"));
-    s.set_read_timeout(Some(Duration::from_secs(30)))
-        .map_err(io)?;
+    // The gate reads GitHub and git: it may take as long as the hook waits for it.
+    let wait = if verb == "gate" {
+        crate::hooks::merge_gate::GATE_WAIT
+    } else {
+        Duration::from_secs(30)
+    };
+    s.set_read_timeout(Some(wait)).map_err(io)?;
     writeln!(s, "{req}").map_err(io)?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(io)?;

@@ -101,7 +101,7 @@ const READ_KEYS3: &[&str] = &[
     "repo:license:list",
     "repo:license:view",
 ];
-const GROUPS: &[&str] = &[
+pub(crate) const GROUPS: &[&str] = &[
     "pr",
     "issue",
     "repo",
@@ -320,7 +320,7 @@ fn classify_gh(text: &str) -> Vec<String> {
     out
 }
 
-fn takes_value(t: &str) -> bool {
+pub(crate) fn takes_value(t: &str) -> bool {
     matches!(
         t,
         "-R" | "--repo"
@@ -350,7 +350,7 @@ fn takes_value(t: &str) -> bool {
 }
 
 /// The first word from `idx` on that is not an option or an option's value.
-fn next_word(f: &[&str], idx: usize) -> Option<usize> {
+pub(crate) fn next_word(f: &[&str], idx: usize) -> Option<usize> {
     let mut j = idx;
     while j < f.len() {
         if f[j].starts_with('-') {
@@ -366,7 +366,7 @@ fn next_word(f: &[&str], idx: usize) -> Option<usize> {
 }
 
 /// `gh api` at `start`: refused unless it only reads.
-fn classify_api(f: &[&str], start: usize, line: &str) -> Vec<String> {
+pub(crate) fn classify_api(f: &[&str], start: usize, line: &str) -> Vec<String> {
     let opaque_re = Re::new(r"=[@$]");
     let long_field = Re::new(r"^(--raw-field|--field)=");
     let long_opaque = Re::new(r"=[^=]*=[@$]");

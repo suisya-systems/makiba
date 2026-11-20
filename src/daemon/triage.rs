@@ -297,7 +297,7 @@ pub fn owner_repo_from_url(url: &str) -> Option<String> {
 }
 
 /// The project's repository: its URL, else the `origin` of its clone.
-fn repo_of(slug: &str, url: Option<&str>, repos_dir: &Path) -> Option<String> {
+pub(crate) fn repo_of(slug: &str, url: Option<&str>, repos_dir: &Path) -> Option<String> {
     if let Some(r) = url.and_then(owner_repo_from_url) {
         return Some(r);
     }

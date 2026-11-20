@@ -13,7 +13,7 @@ You have `makibad` push the workers' commits (mcp__makiba__push) and you open th
 ## A worker reported done
 
 1. Read the report: what changed, the commit, how it was checked, what was not done, and the second-model review line (`CODEX_GATE: ...`) if the repository uses one.
-2. mcp__makiba__push with `task` (the task id). It answers `accepted`; end your turn. `makibad` pushes the run's branch from its worktree, never forced, and sends you a notice: the head it pushed, or why it did not (uncommitted changes, the worktree on another branch, origin moved, git's message for a missing credential). On a failure, deal with the cause (a worker's uncommitted work goes back to the worker with mcp__makiba__send) and push again.
+2. mcp__makiba__push with `task` (the task id). It answers `accepted`; end your turn. `makibad` pushes the run's branch from its worktree, never forced, and sends you a notice: the head it pushed, or why it did not (uncommitted changes, the worktree on another branch, origin moved, git's message for a missing credential). On a failure, deal with the cause (a worker's uncommitted work goes back to the worker with mcp__makiba__send) and push again. When the branch is to declare an acceptance test and the repository has no acceptance check of its own (no `.github/acceptance-check` on the base), have the worker report after its test commit alone (the commit with the `Acceptance-Test:` trailer, before the fix), push that with mcp__makiba__push, open and record the pull request at that head (steps 3 and 4) and wait for the CI notice: it must say failed, which is the evidence that the test failed before the fix. Then let the worker go on; when it reports done, push and record the new head as below. Without that failed run the merge gate refuses the merge.
 3. Once the notice names the head: `gh pr create --repo <owner>/<name> --head <branch> --base <base> --title "<title>" --body-file <file>`, the title and body in the project's artifact language (English unless your launch task or a later notice names another for the project; spec section 13). The body says what changed and why, how it was checked, and, when the review line is not `CODEX_GATE: passed` (or there is none), that the second-model review did not pass, with the line as it was.
 4. Record it: mcp__makiba__pr with `state` `opened`, `repo` (`owner/name`), `pr` (the number), `head` (the full 40-character commit id the push notice names) and `task` (the task id). End your turn.
 
@@ -21,9 +21,32 @@ You have `makibad` push the workers' commits (mcp__makiba__push) and you open th
 
 `makibad` sends you a notice when the checks of the watched head are decided, or when it cannot read them.
 
-- **Passed:** tell the person the pull request is green, with its link, quoting the notice (never a worker's own test run). Merge only on the person's word in the conversation: `gh pr merge <n> --repo <owner>/<name> --squash --match-head-commit <head>`. Never `--admin`, never a merge around a refusal. The merge approval mode and its gate are Issue 47; until then the person decides every merge.
+- **Passed:** what happens next depends on the merge approval mode (below). Quote the notice (never a worker's own test run).
 - **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push with mcp__makiba__push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
+
+## Merging
+
+The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
+
+- **`human`** (also when you do not know): tell the person the pull request is green, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
+- **`acceptance`:** merge a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
+
+Stop lines:
+
+1. The branch declares no acceptance test (no commit with an `Acceptance-Test:` trailer), unless every changed file is Markdown or under `docs/`.
+2. The head you would merge is not the head the CI notice was for.
+3. The change needs a decision the person has not made, or goes beyond the task's brief.
+4. The change cannot be undone by a revert: a release, a migration of stored data, a deletion outside the repository, a change of access or settings.
+5. The worker ran out of its review rounds or its time, or reported a blocker.
+6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
+7. The merge gate refused.
+
+The merge, in either mode, is this one command alone on one line, with the full 40-character head of the CI notice:
+
+`gh pr merge <n> --repo <owner>/<name> --squash --match-head-commit <head>`
+
+Your merge gate hook runs the acceptance gate in `makibad` before it lets the command run: the head and the passed CI must match, the test commit must be the first commit and unchanged since, and either the repository's own acceptance check passed at the head or the test failed in CI at the test commit and passed at the head. It refuses every other way to merge from a command line (another form of the merge command, a write to a `pulls/<n>/merge` path, a GraphQL merge, `curl` or `wget` to the GitHub API). Never try another way after a refusal, never `--admin`: tell the person. Write every GitHub CLI, `curl` or `wget` command plainly, as the command itself: no variable, substitution, glob or escape before its subcommand (for `gh api`, `curl` and `wget`, anywhere), a redirection as a word of its own, and not under another program that runs it (`xargs`, `ssh`, `flock`); the hook refuses what it cannot read with certainty. Text you only mention (a commit message, an `echo`, a `grep` pattern, a here-document fed to `cat`) is fine. The hook stops mistakes; what stops a merge around the gate is the repository's branch protection, which the person sets.
 
 ## New commits on an open pull request
 

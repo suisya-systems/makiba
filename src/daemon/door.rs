@@ -26,7 +26,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// The MCP server's one path.
@@ -167,10 +167,13 @@ fn status_of(r: &Response) -> Option<&'static str> {
     }
 }
 
-/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`).
+/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`, `gate`).
 pub fn has_tool(v: Verb) -> bool {
-    !matches!(v, Verb::Up | Verb::Down | Verb::Config)
+    !matches!(v, Verb::Up | Verb::Down | Verb::Config | Verb::Gate)
 }
+
+/// The actor of a request that carries the merge gate's key (spec section 3).
+pub const GATE_ACTOR: &str = "merge-gate";
 
 /// The tools a role is listed: its verbs (spec section 4) that have a tool.
 pub fn tools_of(role: Role) -> Vec<Verb> {
@@ -194,6 +197,8 @@ pub struct Door {
     /// The agent module `dispatch` gives a launch: `MAKIBA_LAUNCH_AGENT`, read when `makibad`
     /// starts, so no request can choose it.
     agent: String,
+    /// The SHA-256 of the merge gate's key, once it is written (spec section 3).
+    gate_key: OnceLock<String>,
 }
 
 impl Door {
@@ -202,7 +207,17 @@ impl Door {
             w: Mutex::new(w),
             base,
             agent,
+            gate_key: OnceLock::new(),
         }
+    }
+
+    /// The merge gate's key: its holder may ask `gate` and nothing else.
+    pub fn set_gate_key(&self, key: &str) {
+        let _ = self.gate_key.set(sha256_hex(key));
+    }
+
+    fn is_gate_key(&self, key: Option<&str>) -> bool {
+        matches!((key, self.gate_key.get()), (Some(k), Some(sha)) if !k.is_empty() && sha256_hex(k) == *sha)
     }
 
     fn writer(&self) -> std::sync::MutexGuard<'_, StateWriter> {
@@ -225,6 +240,23 @@ impl Door {
         tool: bool,
     ) -> Response {
         let w = self.writer();
+        if self.is_gate_key(key) {
+            if verb != Verb::Gate.as_str() {
+                let r = Err(refuse(
+                    ErrorKind::Denied,
+                    format!("{GATE_ACTOR} may only use gate"),
+                    "",
+                ));
+                let _ = record(&w, GATE_ACTOR, verb, &args, idem, &r);
+                return r;
+            }
+            if let Some(idem) = idem
+                && let Some(first) = replay(&w, GATE_ACTOR, idem).map_err(internal)?
+            {
+                return first;
+            }
+            return self.gate(w, GATE_ACTOR, &args, idem);
+        }
         let who = match key {
             Some(k) => caller(w.conn(), k).map_err(internal)?,
             None => None,
@@ -255,6 +287,9 @@ impl Door {
             ));
             let _ = record(&w, &actor, verb, &args, idem, &r);
             return r;
+        }
+        if v == Verb::Gate {
+            return self.gate(w, &actor, &args, idem);
         }
         if args.get("typed") == Some(&json!(true)) {
             // Typed sends are recorded before anything is typed, outside the verb's transaction.
@@ -1533,6 +1568,303 @@ fn allowed_owners(w: &StateWriter, actor: &str, action: &str, args: &Value) -> R
     Ok(shown(Some(&value)))
 }
 
+// ---- the acceptance gate (Issue 47) ------------------------------------------------------------
+
+/// What the gate reads from `state.db` for one PR.
+struct GateRows {
+    /// `(status, head_oid)` of the PR's latest `ci_completed`.
+    latest_ci: Option<(String, String)>,
+    /// The heads with a failed `ci_completed` for the PR.
+    failed: std::collections::BTreeSet<String>,
+    pin: Option<super::gate::Pin>,
+    projects: Vec<(String, Option<String>)>,
+    task: Option<String>,
+}
+
+fn same_pr(p: &Value, repo: &str, pr: i64) -> bool {
+    p["pr"].as_i64() == Some(pr)
+        && p["repo"]
+            .as_str()
+            .is_some_and(|r| r.eq_ignore_ascii_case(repo))
+}
+
+fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows> {
+    let c = w.conn();
+    let payloads = |kind: &str| -> rusqlite::Result<Vec<(i64, Value)>> {
+        let mut st =
+            c.prepare("SELECT id, payload_json FROM events WHERE kind = ?1 ORDER BY id")?;
+        let rows = st.query_map([kind], |r| {
+            Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, text) = row?;
+            if let Some(v) = text.and_then(|t| serde_json::from_str::<Value>(&t).ok())
+                && same_pr(&v, repo, pr)
+            {
+                out.push((id, v));
+            }
+        }
+        Ok(out)
+    };
+    let ci = payloads("ci_completed")?;
+    let text = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
+    let pin = payloads("acceptance_gate")?
+        .into_iter()
+        .find(|(_, v)| v["manifest_digest"].is_string())
+        .map(|(id, v)| super::gate::Pin {
+            id,
+            commit: text(&v, "manifest_commit"),
+            paths: v["paths"].clone(),
+            digest: text(&v, "manifest_digest"),
+        });
+    let projects = c
+        .prepare("SELECT slug, origin_url FROM projects WHERE status = 'active' ORDER BY slug")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let task = c
+        .query_row(
+            "SELECT r.task_id FROM pr_watches p JOIN runs r ON r.id = p.run_id
+             WHERE lower(p.repo) = lower(?1) AND p.pr = ?2 ORDER BY p.id DESC LIMIT 1",
+            params![repo, pr],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(GateRows {
+        latest_ci: ci
+            .last()
+            .map(|(_, v)| (text(v, "status"), text(v, "head_oid"))),
+        failed: ci
+            .iter()
+            .filter(|(_, v)| v["status"] == json!("failed"))
+            .map(|(_, v)| text(v, "head_oid"))
+            .collect(),
+        pin,
+        projects,
+        task,
+    })
+}
+
+/// `(repo, pr, head)` of a `gate` request.
+fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
+    let repo = str_arg(args, "repo")?;
+    let ok = |s: &str| {
+        !s.is_empty()
+            && s.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+    };
+    if !repo.split_once('/').is_some_and(|(o, n)| ok(o) && ok(n)) {
+        return Err(usage(format!("repo is owner/name, not {repo:?}")));
+    }
+    let pr = args["pr"]
+        .as_i64()
+        .filter(|n| *n > 0)
+        .ok_or_else(|| usage("the argument pr (a number) is missing"))?;
+    let head = str_arg(args, "head")?;
+    if head.len() != 40
+        || !head
+            .bytes()
+            .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase())
+    {
+        return Err(usage(
+            "head is the full 40-character commit id, in lowercase",
+        ));
+    }
+    Ok((repo.to_string(), pr, head.to_string()))
+}
+
+/// What the gate found outside the door's lock: refused before the git checks, or their verdict.
+enum Found {
+    Before(String),
+    Ran(super::gate::Verdict, bool),
+}
+
+/// The gate's reads of GitHub and git: no lock is held while they run.
+fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
+    use super::gate;
+    let program = super::gh::program();
+    let (url, base_branch, view_head) = match gate::pr_view(&program, repo, pr) {
+        Ok(v) => v,
+        Err(e) => return Found::Before(e.0),
+    };
+    if view_head != head {
+        return Found::Before(format!(
+            "the PR head is {}, not {}; wait for CI on the current head",
+            &view_head[..view_head.len().min(12)],
+            &head[..12]
+        ));
+    }
+    if rows
+        .latest_ci
+        .as_ref()
+        .map(|(s, h)| (s.as_str(), h.as_str()))
+        != Some(("passed", head))
+    {
+        let latest = rows
+            .latest_ci
+            .as_ref()
+            .map_or("none".to_string(), |(s, h)| {
+                format!("{s} at {}", &h[..h.len().min(12)])
+            });
+        return Found::Before(format!(
+            "no passed ci_completed for {repo}#{pr} at {} (latest: {latest}); record the head with the pr tool and wait for the CI notice. A repository without CI has no passed run: the person merges it in the GitHub web UI",
+            &head[..12]
+        ));
+    }
+    let repos = super::prepare::Places::from_env(Path::new("")).repos;
+    let Some(clone) = gate::clone_of(&rows.projects, &repos, &repo.to_lowercase()) else {
+        return Found::Before(format!(
+            "no project's repository in {} is {repo}",
+            repos.display()
+        ));
+    };
+    let (base, fetched) = match gate::fetch(&clone, &url, repo, pr, &base_branch) {
+        Ok(ids) => ids,
+        Err(e) => return Found::Before(e.0),
+    };
+    if fetched != head {
+        return Found::Before(format!(
+            "the PR head moved while fetching ({} -> {}); ask again",
+            &head[..12],
+            &fetched[..fetched.len().min(12)]
+        ));
+    }
+    let mut v = gate::Verdict {
+        base: base.clone(),
+        head: head.to_string(),
+        ..Default::default()
+    };
+    let mut ci = gate::Ci::new(&program);
+    let failed = |sha: &str| Ok(rows.failed.contains(sha));
+    if let Err(e) = gate::evaluate(
+        &clone,
+        &base,
+        head,
+        repo,
+        rows.pin.as_ref(),
+        &mut ci,
+        &failed,
+        &mut v,
+    ) {
+        v.result = "rejected".into();
+        v.reason = e.0;
+    }
+    let docs = v.result == "no_manifest" && gate::docs_only(&clone, &base, head);
+    Found::Ran(v, docs)
+}
+
+impl Door {
+    /// `gate` (spec section 12): the acceptance gate for one PR at one head. GitHub and git are
+    /// read with the door's lock released; the rows it judged from are read again, and its verdict
+    /// recorded, in one short transaction.
+    fn gate(
+        &self,
+        w: MutexGuard<'_, StateWriter>,
+        actor: &str,
+        args: &Value,
+        idem: Option<&str>,
+    ) -> Response {
+        let fail = |w: &StateWriter, r: Response| {
+            let _ = record(w, actor, "gate", args, idem, &r);
+            r
+        };
+        let (repo, pr, head) = match gate_args(args) {
+            Ok(a) => a,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        let rows = match gate_rows(&w, &repo, pr) {
+            Ok(r) => r,
+            Err(e) => return fail(&w, Err(internal(e))),
+        };
+        drop(w);
+        let found = gate_outside(&rows, &repo, pr, &head);
+        let w = self.writer();
+        if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+            return Err(internal(e));
+        }
+        let now = match gate_rows(&w, &repo, pr) {
+            Ok(r) => r,
+            Err(e) => {
+                let _ = w.rollback();
+                return fail(&w, Err(internal(e)));
+            }
+        };
+        let mode = super::gate::merge_approval_mode();
+        let (verdict, reason, allow, event) = match found {
+            Found::Before(why) => ("rejected".to_string(), why, false, None),
+            Found::Ran(mut v, docs) => {
+                // What changed while the gate ran: a new CI result, or a first pin of another test.
+                if now.latest_ci != rows.latest_ci {
+                    v.result = "rejected".into();
+                    v.reason = "the PR's CI result changed while the gate ran; ask again".into();
+                } else if rows.pin.is_none()
+                    && let Some(p) = &now.pin
+                    && Some(&p.digest) != v.manifest_digest.as_ref()
+                {
+                    v.result = "rejected".into();
+                    v.reason = "another verdict pinned a different test commit while the gate ran - ask the person".into();
+                }
+                let allow = v.result == "passed"
+                    || (v.result == "no_manifest" && (mode == "human" || docs));
+                let reason = if v.result == "no_manifest" && !allow {
+                    format!(
+                        "{}: a PR without a declared acceptance test needs the person under merge_approval_mode acceptance (only a docs-only change passes); the person merges it in the GitHub web UI",
+                        v.reason
+                    )
+                } else {
+                    v.reason.clone()
+                };
+                (v.result.clone(), reason, allow, Some(v))
+            }
+        };
+        if let Some(v) = &event {
+            let mut payload = json!({
+                "repo": repo, "pr": pr, "base": v.base, "head": v.head, "result": v.result,
+                "reason": v.reason, "mode": mode, "allow": allow,
+            });
+            if let Some(m) = &v.manifest_commit {
+                payload["manifest_commit"] = json!(m);
+                payload["paths"] = json!(v.paths);
+            }
+            if let Some(d) = &v.manifest_digest {
+                payload["manifest_digest"] = json!(d);
+            }
+            if let Some(t) = &now.task {
+                payload["task"] = json!(t);
+            }
+            let written = w.append_event(&NewEvent {
+                kind: "acceptance_gate",
+                actor: Some(actor),
+                payload: Some(&payload),
+                run_task_id: now.task.as_deref(),
+                ..Default::default()
+            });
+            if let Err(e) = written {
+                let _ = w.rollback();
+                return fail(
+                    &w,
+                    Err(internal(format!(
+                        "the verdict (this PR's pin) could not be recorded: {e}"
+                    ))),
+                );
+            }
+        }
+        let r: Response = Ok(json!({"verdict": verdict, "allow": allow, "reason": reason,
+                                    "mode": mode, "repo": repo, "pr": pr, "head": head}));
+        if !record(&w, actor, "gate", args, idem, &r) || w.conn().is_autocommit() {
+            let _ = w.rollback();
+            return Err(internal(
+                "the request could not be recorded; nothing was done",
+            ));
+        }
+        if let Err(e) = w.commit() {
+            let _ = w.rollback();
+            return Err(internal(e));
+        }
+        r
+    }
+}
+
 // ---- the entrances ----------------------------------------------------------------------------
 
 /// Where the door listens (spec section 2).
@@ -1541,6 +1873,8 @@ pub struct Config {
     pub socket: Option<PathBuf>,
     pub port: u16,
     pub person_key: PathBuf,
+    /// `$MAKIBA_GATE_KEY`: where the merge gate's key is written at start.
+    pub gate_key: PathBuf,
     /// `MAKIBA_LAUNCH_AGENT`: the agent module of the launches `dispatch` makes.
     pub agent: String,
 }
@@ -1560,6 +1894,7 @@ impl Config {
             },
             port: crate::cli::port()?,
             person_key: crate::cli::person_key_path(),
+            gate_key: crate::cli::gate_key_path(),
             agent: match std::env::var(LAUNCH_AGENT_ENV)
                 .ok()
                 .filter(|v| !v.is_empty())
@@ -1649,6 +1984,7 @@ pub fn start(cfg: &Config, db: &Path, base: Arc<dyn Base>, hub: Hub) -> Result<R
         addr,
     };
     let door = Arc::new(Door::new(w, base, cfg.agent.clone()));
+    door.set_gate_key(&super::person_key::rotate_gate_key(&cfg.gate_key)?);
     let d = Arc::clone(&door);
     if let Some(unix) = unix {
         std::thread::spawn(move || {

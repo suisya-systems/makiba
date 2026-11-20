@@ -16,6 +16,7 @@ pub mod deny_foreground_subagent;
 pub mod deny_no_verify;
 pub mod deny_push;
 pub mod deny_workers_delete;
+pub mod merge_gate;
 pub mod re;
 pub mod shell;
 pub mod worker_boundary;
@@ -31,6 +32,7 @@ const HOOKS: &[(&str, Hook)] = &[
     ("deny-workers-delete", deny_workers_delete::check),
     ("worker-boundary", worker_boundary::check),
     ("deny-foreground-subagent", deny_foreground_subagent::check),
+    ("merge-gate", merge_gate::check),
 ];
 
 /// A Bash command longer than this (in bytes) is refused unchecked: the command checks recurse
@@ -53,6 +55,12 @@ pub fn main(args: &[String]) -> ExitCode {
         eprintln!("usage: makiba hook <{}>", names.join("|"));
         return ExitCode::from(2);
     };
+    // The merge gate waits for makibad's acceptance gate, which reads GitHub and git.
+    let budget = if name == Some("merge-gate") {
+        merge_gate::GATE_WAIT + std::time::Duration::from_secs(5)
+    } else {
+        CHECK_BUDGET
+    };
     let mut raw = Vec::new();
     let verdict = match std::io::stdin().read_to_end(&mut raw) {
         Err(e) => Err(format!("cannot read the hook payload: {e}")),
@@ -73,11 +81,11 @@ pub fn main(args: &[String]) -> ExitCode {
             match started {
                 Err(e) => Err(format!("cannot start the check: {e}")),
                 // A panic drops the sender; a check that runs past the budget is not waited for.
-                Ok(_) => rx.recv_timeout(CHECK_BUDGET).unwrap_or_else(|e| {
+                Ok(_) => rx.recv_timeout(budget).unwrap_or_else(|e| {
                     Err(match e {
                         std::sync::mpsc::RecvTimeoutError::Timeout => format!(
                             "the check took longer than {} s; split the command",
-                            CHECK_BUDGET.as_secs()
+                            budget.as_secs()
                         ),
                         _ => "the check failed".into(),
                     })
