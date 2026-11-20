@@ -260,7 +260,8 @@ fn serve_until(
     // What the thread passes on: whether the subscription exists, then every event of it.
     enum Msg {
         Subscribed(Result<(), String>),
-        Event(BaseEvent),
+        /// An event and the time it was received, before the loop (which a lock may hold) sees it.
+        Event(BaseEvent, std::time::SystemTime),
     }
     let (tx, rx) = channel();
     let events_base = Arc::<dyn Base>::from(base);
@@ -301,7 +302,10 @@ fn serve_until(
             if let (true, Some(first)) = (ok, first) {
                 // The blocking read stays on this thread; the monitor gets what it yields.
                 for event in std::iter::once(first).chain(stream) {
-                    if tx.send(Msg::Event(event)).is_err() {
+                    if tx
+                        .send(Msg::Event(event, std::time::SystemTime::now()))
+                        .is_err()
+                    {
                         return;
                     }
                 }
@@ -336,7 +340,7 @@ fn serve_until(
             Ok(Msg::Subscribed(Ok(()))) => subscribed = true,
             Ok(Msg::Subscribed(Err(e))) => return Err(e),
             // Queued with its arrival time; written below, and again on later ticks if refused.
-            Ok(Msg::Event(e)) => monitor.push(&w, e),
+            Ok(Msg::Event(e, seen)) => monitor.push(&w, e, seen),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) if !subscribed => {
                 return Err("the subscription thread ended before it subscribed".into());

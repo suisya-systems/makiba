@@ -19,7 +19,7 @@ use crate::base::{BaseEvent, BlockKind, State, Terminal, TerminalEvent, Terminal
 use crate::db::writer::{NewEvent, StateWriter};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, VecDeque};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long an event the database refused is tried again before it is recorded as lost.
 pub const RETRY: Duration = Duration::from_secs(60);
@@ -143,13 +143,19 @@ impl Monitor {
                 .any(|q| matches!(q.event, BaseEvent::Resync(_)))
     }
 
-    /// Queue an event as it arrives, with its arrival time (read from SQLite, which takes no lock).
-    pub fn push(&mut self, w: &StateWriter, event: BaseEvent) {
+    /// Queue an event with `seen`, the time the subscription received it, formatted by SQLite
+    /// (which takes no lock for it).
+    pub fn push(&mut self, w: &StateWriter, event: BaseEvent, seen: SystemTime) {
+        let secs = seen
+            .duration_since(UNIX_EPOCH)
+            .map_or(0.0, |d| d.as_secs_f64());
         let at = w
             .conn()
-            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| {
-                r.get(0)
-            })
+            .query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', ?1, 'unixepoch')",
+                [secs],
+                |r| r.get(0),
+            )
             .ok();
         self.queue.push_back(Queued {
             event,
