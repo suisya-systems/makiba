@@ -77,7 +77,7 @@ impl Secretary {
                 return Ok(());
             }
             // Keys first: a failed end is tried again by the next pass.
-            w.transaction(|w| super::resume::revoke_keys(w, &spawn))?;
+            revoke_all(w)?;
             if let Err(e) = base.end(&t.id) {
                 eprintln!(
                     "makibad: cannot end the old secretary terminal {}: {e}",
@@ -86,6 +86,9 @@ impl Secretary {
                 return Ok(());
             }
         }
+        // No secretary runs: every secretary key left, its terminal gone or not, dies before a new
+        // one is issued.
+        revoke_all(w)?;
         if let Err(e) = super::launch::add_launch(
             w,
             spec::Role::Secretary,
@@ -103,5 +106,42 @@ impl Secretary {
 
     fn is_ours(&self, t: &Terminal) -> bool {
         t.name == spec::AGENT_SECRETARY && t.tags.get(TAG_ORG) == Some(&self.org)
+    }
+}
+
+/// Revoke every secretary key not yet revoked.
+fn revoke_all(w: &StateWriter) -> Result<()> {
+    w.conn().execute(
+        "UPDATE agents SET revoked_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE role = 'secretary' AND revoked_at IS NULL",
+        [],
+    )?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::stub::Stub;
+
+    /// A secretary key whose terminal is gone is revoked before the new launch is added.
+    #[test]
+    fn a_left_secretary_key_is_revoked_before_a_new_launch() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        super::super::door::issue_key(&w, spec::Role::Secretary, "secretary", None, Some("old"))
+            .unwrap();
+        let mut s = Secretary::from_env(dir.path());
+        s.pass(&w, &Stub::new()).unwrap();
+        let (revoked, launches): (i64, i64) = w
+            .conn()
+            .query_row(
+                "SELECT (SELECT count(*) FROM agents WHERE revoked_at IS NOT NULL),
+                        (SELECT count(*) FROM run_launch WHERE role = 'secretary')",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((revoked, launches), (1, 1));
     }
 }
