@@ -223,6 +223,8 @@ END;
 - `launched`, `dialog_passed`: a start pass runs before any launch, dialog or verify step of the process. Exactly one terminal with the tag: adopted; nothing is written, its key stays, and the dialog and verify steps take it on from its stage (the timeout still counts from its `worker_spawned`; a launch at `launched` that has its evidence in time is not failed by the timeout). None: failed by the path above (`worker_spawn_failed` with the stage, the run `failed`, the notice) with its keys revoked, in one transaction. Two or more: failed the same way; none of them is ended.
 - A process killed while `Base::launch` was in flight may find no terminal and launch again (Issue 122).
 
+A run can have more than one launch (Issue 41). `makiba up` adds a relaunch for each `suspended` run (section 12): a new row copying the newest row's `kind`, `agent`, `model`, `brief` and `worktree`, with a new `spawn_id`, at `worktree_ready` (the workplace is used as it is), already taken (`run_taken`), and with `conversation_id` set to the newest `verified` launch's when it has one. A row with a `conversation_id` before it is `verified` is a resume: the launch step passes it as `resume`. A first launch names its conversation instead: the agent module gets `session_id(spawn_id)`, a version 4 UUID made from the SHA-256 of the spawn id, and at `verified` the module's `conversation_id` is stored (a resume keeps the id it resumed). Before it issues a key, a relaunch ends every terminal carrying this organization's `makiba.org`, the run's `makiba.task_id` and another `makiba.spawn`: the shell herdr-core leaves in place of a kept terminal after a core stop, or a failed resume's terminal. A resume that fails on any path above does not fail its run: its keys are revoked and a fresh launch (no `conversation_id`, the same brief and workplace) is added in the same transaction. A verified relaunch makes its run `in_use`; a fresh one that fails makes it `failed`.
+
 ### 5.4 `messages`
 
 ```sql
@@ -321,6 +323,7 @@ pub trait Base: Send + Sync {
     fn end(&self, t: &TerminalRef) -> Result<(), BaseError>;         // kill and remove
     fn events(&self) -> Result<EventStream, BaseError>;              // its own connection; section 6.5
     fn start(&self) -> Result<(), BaseError>;                        // makiba up: start the base's own place if needed
+    fn stop(&self) -> Result<(), BaseError>;                         // makiba down --stop-base; refuses unless the base has it
     fn worker_denies(&self) -> BaseDenies;                           // commands, resolved paths and folders a role must not reach
 }
 
@@ -459,6 +462,10 @@ pub trait Agent: Send + Sync {
     /// Unsetting variables (section 6.4) is the base's job.
     fn argv(&self, launch: &AgentLaunch) -> Vec<String>;
 
+    /// As `argv`, naming the conversation `session` of a first launch where the program takes one
+    /// (Claude Code: `--session-id`); never for a resume. By default the same as `argv`.
+    fn argv_with_session(&self, launch: &AgentLaunch, session: Option<&str>) -> Vec<String>;
+
     /// The policy list of section 7. Each entry: how to recognize the dialog
     /// (whole option lines), which line to choose, and the status it is shown with.
     fn startup_dialogs(&self) -> &[DialogPolicy];
@@ -469,8 +476,9 @@ pub trait Agent: Send + Sync {
     /// The per-task settings file: sandbox write surface, the door, denies.
     fn write_task_settings(&self, path: &Path, task: &TaskSettings) -> io::Result<()>;
 
-    /// The id to pass back as `resume`, read after the first turn.
-    fn conversation_id(&self, worktree: &Path) -> Option<String>;
+    /// The id to pass back as `resume`, read after the first turn; `session` is the one named at
+    /// launch (section 5.3). Claude Code: that id (`--resume <id>` resumes it).
+    fn conversation_id(&self, worktree: &Path, session: &str) -> Option<String>;
 
     /// True when section 8's wrapper is safe to type as is.
     fn wraps_delivery(&self) -> bool;
@@ -535,7 +543,7 @@ Pure functions of (the run, its latest status record, recorded events, now). Eac
 | `blocked_permission` | status `blocked`, kind `permission` | secretary, as a `pending` entry of kind `prompt` (section 7) |
 | `blocked_auth` | status `blocked`, kind `auth` | secretary, marked as needing the person |
 | `error` | status `error` | secretary |
-| `gone` | `terminal_gone` with no `report_done` for the run | secretary; the run becomes `failed` |
+| `gone` | `terminal_gone` of the run's newest launch (or one with no `spawn_id`) with no `report_done` for the run | secretary; the run becomes `failed` |
 | `done_no_report` | status `done` for 120 s, no `report_done` or `report_blocked` since the last `terminal_turn` | secretary |
 | `no_status` | no status record 180 s after launch | secretary |
 | `secretary_gone` | `terminal_gone` for the terminal named `secretary` while no `makiba renew` is under way, or no status record 180 s after the secretary was launched | the person: the log and `makiba status` until stage 2 adds a way to notify the person. `makibad` relaunches the secretary itself (below) |
@@ -566,6 +574,8 @@ When the secretary's terminal is gone, `makibad` launches a new one by the path 
 | `renew` | `--handover-file <f>` | The secretary asks to be replaced. `makibad` stores the handover and launches a fresh secretary that resumes from it. | `renew`, the handover as the argument `handover` |
 | `config` | `get\|set <key> [<value>]` | Organization and project settings (`max_concurrent_workers`, `merge_approval_mode`, `conversation_language`, `artifact_language`). Person only. | none |
 | (none) | - | Returns the caller's unconfirmed messages, each wrapped, and confirms them (section 8). | `inbox` |
+
+`down` and `up` keep the work (Issue 41, carried from paddock's `org-suspend`, `org-resume` and `org-down`). Both run locally from the person's login shell, not over the door. `down` stops `makibad` (SIGTERM to the pid in `makibad.lock`, then waits for the lock), then records the state in one transaction: every run `in_use` or `review`, and every run with a launch past `planned` and not yet `verified` or `failed`, becomes `suspended`; those launches become `failed` with the reason `makiba down`; the worker keys of the suspended runs are revoked; the `org_sessions` row becomes `SUSPENDED` with the suspended task ids. Then it ends the terminals carrying this organization's `makiba.org`, checked by `down` itself: role `worker` always, `secretary` only with `--secretary` (its keys revoked too), nothing else; a terminal without the tag or with another organization's is never ended. `--stop-base` then stops the base (`server.stop`). A run that was in `review` comes back as `in_use`. `up`, when nothing listened at the base's socket before it started the base (a stopped core stopped its programs), suspends the runs at work the same way; then it adds a relaunch for every `suspended` run with no launch under way (section 5.3) and sets the session row `ACTIVE` before it starts `makibad`, whose passes launch them. A base stop that a running `makibad` saw and recorded as failed runs is not undone.
 
 For the person's command, `--brief-file`, `--file` and `--handover-file` are read by `makiba`, and the content travels over the door. The agents' tools take the text as an argument and have no path argument, so `makibad` never opens a path an agent names.
 
