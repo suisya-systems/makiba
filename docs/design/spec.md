@@ -292,7 +292,7 @@ Every message is an event (`message_sent`) plus one `event_deliveries` row for i
 
 ### 5.5 `pending`
 
-Replaces claude-org-ja's `.state/pending_decisions.json`. The logic of `tools/pending_decisions.py` is ported to Rust (M6-4); its store changes.
+Replaces claude-org-ja's `.state/pending_decisions.json`. The logic of `tools/pending_decisions.py` is ported to Rust (M6-4): `pending` and `answer` (section 12) and `secretary_still` (section 11); its store changes.
 
 ```sql
 CREATE TABLE pending (
@@ -609,7 +609,7 @@ Pure functions of (the run, its latest status record, recorded events, now). Eac
 | `done_no_report` | status `done` for 120 s, no `report_done` or `report_blocked` since the last `terminal_turn` | secretary |
 | `no_status` | no status record 180 s after launch | secretary |
 | `secretary_gone` | `terminal_gone` for the terminal named `secretary` while no `makiba renew` is under way, or no status record 180 s after the secretary was launched | the person: the log and `makiba status` until stage 2 adds a way to notify the person. `makibad` relaunches the secretary itself (below) |
-| `secretary_still` | any worker anomaly open, and the secretary's status unchanged for 600 s | the person (stage 2 adds a way to notify; until then, the log and `makiba status`) |
+| `secretary_still` | any worker anomaly open, and the secretary's status unchanged for 600 s; or a `pending` entry `open` (not `escalated`) for 600 s since its `created_at`, whatever the secretary's status | the person (stage 2 adds a way to notify; until then, the log and `makiba status`) |
 
 The three time values are first proposals taken from paddock (Q3, org-watch).
 
@@ -630,8 +630,8 @@ When the secretary's terminal is gone, `makibad` launches a new one by the path 
 | `send` | `<to> <text> [--typed]` or `<to> --file <f> [--typed]` | Queues a message, delivered by the channel; with `--typed`, typed into the recipient (sections 7 and 8). | `send`, the text as `text`, and `typed` |
 | `report` | `start\|done\|blocked --task <task_id> <text>` | Queues a report to the secretary and records the run's state. | `report` |
 | `show` | `<message id>` | Prints a message's full body. Only its sender and recipient may. | `show` |
-| `pending` | `add\|escalate\|withdraw\|list [<pending id>] [--task <task_id>] [--question <q>]` | Maintains the pending table for questions: `add` with `--task` and `--question`, `escalate` (open to escalated) and `withdraw` (open or escalated to withdrawn) with the pending id, `list` the open and escalated entries. The logic of `pending_decisions.py` comes with M6-4. | `pending`, the pending id as the integer `id` |
-| `answer` | `<pending id> yes\|no [--note <t>] [--typed]` | For a question: queues the answer to the worker (`--typed`: typed, section 7). For a prompt: section 7; until M6-8 nothing is typed: the screen is read again, and the answer is `stale` when the recorded prompt text is no longer on it and `internal` while it is. | `answer`, the pending id as the integer `id`, and `typed` |
+| `pending` | `add\|escalate\|withdraw\|list [<pending id>] [--task <task_id>] [--question <q>]` | Maintains the pending table for questions: `add` with `--task` and `--question`, `escalate` (open to escalated) and `withdraw` (open or escalated to withdrawn) with the pending id, `list` the open and escalated entries. `add` of a question its task already has open, word for word, returns that entry and adds none (an escalated, withdrawn or answered one does not count). | `pending`, the pending id as the integer `id` |
+| `answer` | `<pending id> yes\|no [--note <t>] [--typed]` | For a question: queues the answer, with the question it answers, to the worker (`--typed`: typed, section 7), and the entry becomes `answered`; an entry no longer open or escalated is `conflict`. For a prompt: section 7; until M6-8 nothing is typed: the screen is read again, and the answer is `stale` when the recorded prompt text is no longer on it and `internal` while it is. | `answer`, the pending id as the integer `id`, and `typed` |
 | `pr` | `opened\|pushed --repo <o/n> --pr <n> --head <oid> --task <task_id>` | Records the event and starts or replaces the CI watch (section 5.6). | `pr`, the number as the integer `pr` |
 | `renew` | `--handover-file <f>` | The secretary asks to be replaced. `makibad` stores the handover and launches a fresh secretary that resumes from it. Until M6-5 it is recorded and refused `internal`; nothing is stored. | `renew`, the handover as the argument `handover` |
 | `config` | `get\|set <key> [<value>]` | Organization and project settings (`max_concurrent_workers`, `merge_approval_mode`, `conversation_language`, `artifact_language`). Person only. | none |
