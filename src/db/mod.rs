@@ -129,7 +129,8 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         conn.execute_batch(SCHEMA)?;
     }
     // Databases made before org_sessions (version 2) and before event_deliveries (version 3).
-    let tx = conn.transaction()?;
+    // IMMEDIATE: it reads before it writes (see `StateWriter::begin`).
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
     if !has_table(&tx, "org_sessions")? {
         tx.execute_batch(&ddl_of("org_sessions"))?;
     }
