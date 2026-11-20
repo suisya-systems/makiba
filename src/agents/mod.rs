@@ -120,6 +120,31 @@ pub fn write_rules(role: Role) -> io::Result<()> {
     std::fs::write(path, rules)
 }
 
+// The files of the repository's `skills/`, carried in the binary (Issue 182; `build.rs`).
+include!(concat!(env!("OUT_DIR"), "/skills.rs"));
+
+/// The secretary's plugin folder, `<share>/plugins/makiba` (spec section 2): passed as
+/// `--plugin-dir`, its skills under `skills/<name>/` are `makiba:<name>` in the session.
+pub fn plugin_dir() -> PathBuf {
+    crate::cli::share_dir().join("plugins").join("makiba")
+}
+
+/// Write each skill file of the binary into the plugin folder unless it already holds it. Nothing
+/// else there is touched: a file the person added stays.
+// ponytail: a skill removed from `skills/` stays placed; record what was placed when one is removed.
+pub fn place_skills() -> io::Result<()> {
+    let skills = plugin_dir().join("skills");
+    for (rel, body) in SKILLS {
+        let path = skills.join(rel);
+        if std::fs::read(&path).is_ok_and(|b| b == *body) {
+            continue;
+        }
+        std::fs::create_dir_all(path.parent().unwrap_or(&path))?;
+        std::fs::write(path, body)?;
+    }
+    Ok(())
+}
+
 /// A path as a permission rule names it: `~/` as is, an absolute path in the `//` form.
 fn rule_path(p: &Path) -> String {
     let s = p.display().to_string();
