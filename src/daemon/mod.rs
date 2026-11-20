@@ -4,6 +4,7 @@
 
 pub mod anomalies;
 mod crash;
+pub mod curator;
 pub mod delivery;
 mod dialogs;
 pub mod dispatch;
@@ -289,6 +290,7 @@ fn serve_until(
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
     let prepare = Prepare::new(Places::from_env(dir), events_base.worker_denies());
     let launch = launch::Launch::new(dir, door_addr);
+    let mut curator = curator::Curator::from_env(dir);
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
@@ -346,6 +348,9 @@ fn serve_until(
             if resumed {
                 if let Err(e) = launch.pass(&w, &*events_base) {
                     eprintln!("makibad: launch: {e}");
+                }
+                if let Err(e) = curator.pass(&w, &*events_base) {
+                    eprintln!("makibad: curator: {e}");
                 }
                 // Before the dialogs: a launch they move on is looked at on a later tick.
                 if let Err(e) = verify.pass(&w, &*events_base) {
