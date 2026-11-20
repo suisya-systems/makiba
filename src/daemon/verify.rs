@@ -40,8 +40,9 @@ pub fn timeout_from_env() -> Duration {
 
 struct Row {
     id: i64,
-    run_id: i64,
-    task: String,
+    /// `None` for a launch without a run (Issue 166), and `task` with it.
+    run_id: Option<i64>,
+    task: Option<String>,
     spawn: String,
     stage: String,
     agent: String,
@@ -86,7 +87,7 @@ impl Verify {
                            (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
                             AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id),
                            l.created_at) AS launched
-                       FROM run_launch l JOIN runs r ON r.id = l.run_id
+                       FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
                        WHERE l.stage IN ('launched', 'dialog_passed'))
                  ORDER BY id",
             )?;
@@ -123,7 +124,8 @@ impl Verify {
                         self.timeout.as_millis()
                     );
                     let screen = screen_of(base, &row.spawn);
-                    if !fail(w, row.id, &row.task, &row.spawn, &row.stage, &why, &screen)? {
+                    let task = row.task.as_deref();
+                    if !fail(w, row.id, task, &row.spawn, &row.stage, &why, &screen)? {
                         let _ = super::resume::end_terminals(base, &row.spawn);
                     }
                 }
@@ -146,8 +148,8 @@ fn screen_of(base: &dyn Base, spawn: &str) -> Vec<String> {
         .unwrap_or_default()
 }
 
-/// `worker_spawn_verified`, stage `verified` and the run `in_use`, together; the conversation id
-/// when the agent module has one (a resumed launch keeps the id it resumed). Only over
+/// `worker_spawn_verified`, stage `verified` and the run `in_use` (when there is one), together;
+/// the conversation id when the agent module has one (a resumed launch keeps the id it resumed). Only over
 /// `dialog_passed` (Issue 163): `false`, and nothing written, when the launch was moved meanwhile.
 fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<bool> {
     let conversation = agents::by_name(&row.agent)
@@ -168,21 +170,23 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<bool> {
             kind: "worker_spawn_verified",
             actor: Some("makibad"),
             payload: Some(&json!({"task_id": row.task, "spawn_id": row.spawn, "event_id": event})),
-            run_task_id: Some(&row.task),
+            run_task_id: row.task.as_deref(),
             ..Default::default()
         })?;
         // ponytail: a run closed while its launch was under way is not brought back.
-        w.conn().execute(
-            "UPDATE runs SET status = 'in_use' WHERE id = ?1 AND status IN ('queued', 'suspended')",
-            [row.run_id],
-        )?;
+        if let Some(run) = row.run_id {
+            w.conn().execute(
+                "UPDATE runs SET status = 'in_use' WHERE id = ?1 AND status IN ('queued', 'suspended')",
+                [run],
+            )?;
+        }
         Ok(true)
     })
 }
 
 /// A launch that cannot be verified, at `stage`: `worker_spawn_failed` with `screen`, stage
-/// `failed`, the run `failed`, and a notice to the secretary if the gate sends it, together. The
-/// terminal is left.
+/// `failed`, the run `failed` (when there is one), and a notice to the secretary if the gate sends
+/// it, together. The terminal is left. `task` is `None` for a launch without a run (Issue 166).
 ///
 /// A resume of a `suspended` run (Issue 41: a launch with a conversation id before it is
 /// verified) does not fail its run: its keys are revoked and a fresh launch is added with the
@@ -192,7 +196,7 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<bool> {
 pub(super) fn fail(
     w: &StateWriter,
     id: i64,
-    task: &str,
+    task: Option<&str>,
     spawn: &str,
     stage: &str,
     why: &str,
@@ -200,12 +204,15 @@ pub(super) fn fail(
 ) -> Result<bool> {
     super::crash::hold("failed");
     w.transaction(|w| {
-        let resumed: bool = w.conn().query_row(
-            "SELECT l.conversation_id IS NOT NULL AND l.stage != 'verified' AND r.status = 'suspended'
-             FROM run_launch l JOIN runs r ON r.id = l.run_id WHERE l.id = ?1",
+        let resumed = w.conn().query_row(
+            "SELECT l.conversation_id IS NOT NULL AND l.stage != 'verified'
+                    AND COALESCE(r.status = 'suspended', 0),
+                    COALESCE(r.task_id, l.role)
+             FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id WHERE l.id = ?1",
             [id],
-            |r| r.get(0),
+            |r| Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?)),
         )?;
+        let (resumed, name) = resumed;
         let n = w.conn().execute(
             "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1 AND stage = ?3",
             params![id, why, stage],
@@ -222,7 +229,7 @@ pub(super) fn fail(
                 "reason": why,
                 "screen": screen.join("\n"),
             })),
-            run_task_id: Some(task),
+            run_task_id: task,
             ..Default::default()
         })?;
         if resumed {
@@ -230,12 +237,14 @@ pub(super) fn fail(
             super::launch::add_relaunch(w, id, None)?;
             return Ok(true);
         }
-        w.conn().execute(
-            "UPDATE runs SET status = 'failed', outcome_note = ?2,
-               completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE task_id = ?1 AND status IN ('queued', 'suspended')",
-            params![task, format!("launch failed: {why}")],
-        )?;
+        if let Some(task) = task {
+            w.conn().execute(
+                "UPDATE runs SET status = 'failed', outcome_note = ?2,
+                   completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE task_id = ?1 AND status IN ('queued', 'suspended')",
+                params![task, format!("launch failed: {why}")],
+            )?;
+        }
         if !super::notify_gate::decide("worker_spawn_failed").send {
             return Ok(true);
         }
@@ -243,11 +252,11 @@ pub(super) fn fail(
         let event = w.append_event(&NewEvent {
             kind: "message_sent",
             actor: Some("makibad"),
-            run_task_id: Some(task),
+            run_task_id: task,
             ..Default::default()
         })?;
         let body = format!(
-            "Launch of {task} failed at stage {stage}: {why}. Its terminal is left for inspection."
+            "Launch of {name} failed at stage {stage}: {why}. Its terminal is left for inspection."
         );
         w.conn().execute(
             "INSERT INTO messages (event_id, sender, recipient, kind, run_id, body)
@@ -450,7 +459,16 @@ mod tests {
     #[test]
     fn a_dialog_failure_fails_the_run_and_tells_the_secretary() {
         let (_d, w) = org("launched", 0);
-        fail(&w, 1, "t1", "s1", "launched", "an unknown dialog", &[]).unwrap();
+        fail(
+            &w,
+            1,
+            Some("t1"),
+            "s1",
+            "launched",
+            "an unknown dialog",
+            &[],
+        )
+        .unwrap();
         assert_eq!(one::<String>(&w, "SELECT status FROM runs"), "failed");
         assert_eq!(
             one::<i64>(

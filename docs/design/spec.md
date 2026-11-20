@@ -143,7 +143,7 @@ Migration v5 adds the launch identity (`src/db/schema_v5.sql`):
 ALTER TABLE agents ADD COLUMN spawn_id TEXT;
 ```
 
-A key is issued for each launch, so one row is one terminal generation of its agent. `spawn_id` is the launch's identity: the value of the terminal's `makiba.spawn` tag (`run_launch.spawn_id` for a worker, the fresh id of a launch for the secretary and the curator), written when the key is issued. It is null for a row whose terminal was launched without the tag (an earlier generation) and for the person's key. The anomaly pass (section 11) and the confirmation of a push (section 8) match terminals to rows by it.
+A key is issued for each launch, so one row is one terminal generation of its agent. `spawn_id` is the launch's identity: the value of the terminal's `makiba.spawn` tag, which is the launch's `run_launch.spawn_id` for every role (section 5.3), written when the key is issued. It is null for a row whose terminal was launched without the tag (an earlier generation) and for the person's key. The anomaly pass (section 11) and the confirmation of a push (section 8) match terminals to rows by it.
 
 ### 5.2 `commands`
 
@@ -169,7 +169,7 @@ CREATE INDEX idx_commands_status ON commands(status);
 
 ### 5.3 `run_launch`
 
-One row per launch attempt of a run. A run relaunched after the base stopped gets a second row.
+One row per launch attempt of a run, or of a launch that belongs to no run (the curator, the secretary; Issue 166, migration v7 below). A run relaunched after the base stopped gets a second row.
 
 ```sql
 CREATE TABLE run_launch (
@@ -190,6 +190,39 @@ CREATE TABLE run_launch (
 );
 CREATE INDEX idx_run_launch_run ON run_launch(run_id);
 ```
+
+Migration v7 (Issue 166) lets a launch belong to no run. SQLite cannot drop `NOT NULL`, so the table is rebuilt and its rows kept as worker launches:
+
+```sql
+CREATE TABLE run_launch_v7 (
+  id               INTEGER PRIMARY KEY AUTOINCREMENT,
+  run_id           INTEGER REFERENCES runs(id) ON DELETE CASCADE,  -- null: a launch without a run
+  role             TEXT NOT NULL DEFAULT 'worker' CHECK (role IN ('worker','curator','secretary')),
+  spawn_id         TEXT NOT NULL UNIQUE,
+  kind             TEXT NOT NULL DEFAULT 'code' CHECK (kind IN ('code','document')),
+  agent            TEXT NOT NULL,
+  model            TEXT,
+  brief            TEXT NOT NULL,
+  worktree         TEXT NOT NULL,         -- the workplace, or the folder of a launch without a run
+  conversation_id  TEXT,
+  stage            TEXT NOT NULL DEFAULT 'planned'
+                   CHECK (stage IN ('planned','worktree_ready','settings_ready','launched','dialog_passed','verified','failed')),
+  failed_reason    TEXT,
+  created_at       TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
+  verified_at      TEXT,
+  CHECK ((role = 'worker') = (run_id IS NOT NULL))
+);
+INSERT INTO run_launch_v7 (id, run_id, spawn_id, kind, agent, model, brief, worktree,
+                           conversation_id, stage, failed_reason, created_at, verified_at)
+SELECT id, run_id, spawn_id, kind, agent, model, brief, worktree,
+       conversation_id, stage, failed_reason, created_at, verified_at
+FROM run_launch;
+DROP TABLE run_launch;
+ALTER TABLE run_launch_v7 RENAME TO run_launch;
+CREATE INDEX idx_run_launch_run ON run_launch(run_id);
+```
+
+A launch without a run is added by `makibad`'s own code (`launch::add_launch`: role, folder, brief, model, agent module), never by a verb of the door. It is `planned` with `role` `curator` or `secretary` and its folder in `worktree`, and goes through the same stages as a worker's, from the row and its role: it needs no `run_taken` and is neither held to nor counted against `max_concurrent_workers`; at `planned` its folder is made (no worktree); the rules file and settings are its role's (section 9), the settings file one per launch (`<state>/settings/<role>-<spawn_id>.json`); the terminal is named by its agent id (`curator`, `secretary`) and carries the tags of section 6.3 without `makiba.task_id`; its key is issued for its role with no run (section 5.1); the startup dialogs and the verification are a worker's. `worker_spawned` and then `worker_spawn_verified` or `worker_spawn_failed` are written for it with no run and a null `task_id`. What a stage does to a run (its status, the failure of the run, the relaunch of a resume) it does only when the launch has one: a launch without a run that fails is recorded as failed, with the notice to the secretary (its `run_id` null).
 
 A launch is verified only by an observed first turn (Issue M3-6): at `dialog_passed`, once a `terminal_status` with state `working` or a `terminal_turn` carrying the launch's `spawn_id` is recorded (a record of another terminal of the task or the role never counts), `worker_spawn_verified`, stage `verified` with `verified_at` and `runs.status = 'in_use'` are written in one transaction, and `conversation_id` is read from the agent module (section 9). With no such record within the timeout (default 180 s, from the launch's `worker_spawned`; a launch still at `launched` included), `worker_spawn_failed`, stage `failed`, the run `failed` and a notice to the secretary are written in one transaction, and the terminal is left for inspection; a startup dialog that fails a launch (section 7) takes the same path. Migration v6 refuses any `worker_spawn_verified`, inserted or updated, whose payload's `event_id` does not name such a record of the same `spawn_id`:
 
@@ -401,15 +434,15 @@ Tags are the only record of which terminal belongs to which run. `state.db` hold
 | --- | --- | --- |
 | `makiba.role` | `secretary`, `worker`, `curator` | every terminal `makibad` launches |
 | `makiba.task_id` | the run's `task_id` | workers |
-| `makiba.spawn` | an id made at each launch: `run_launch.spawn_id` for a worker and the curator, a fresh one for each secretary launch | every terminal `makibad` launches |
+| `makiba.spawn` | an id made at each launch: the launch's `run_launch.spawn_id`, for every role (section 5.3) | every terminal `makibad` launches |
 | `makiba.org` | the state folder's absolute path | every terminal, so two organizations on one base do not adopt each other's terminals |
-| `makiba.key` | the SHA-256 of the key the terminal was started with, in lowercase hex (never the key) | workers; the secretary and the curator when M6 launches them with a key. A launch that adopts a terminal keeps the key whose hash it carries and revokes every other key of the spawn; a terminal without the tag (started before it existed) revokes none |
+| `makiba.key` | the SHA-256 of the key the terminal was started with, in lowercase hex (never the key) | every terminal `makibad` launches. A launch that adopts a terminal keeps the key whose hash it carries and revokes every other key of the spawn; a terminal without the tag (started before it existed) revokes none |
 
 On start and after every `Resync`, `makibad` lists terminals with `makiba.org=<its own>` and rebuilds its view from the tags.
 
 ### 6.4 Environment removed at launch
 
-For every agent, carried from paddock's templates (measured there, inventory L-N4): `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_TMPDIR`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`. Workers and the curator also get an empty `GH_CONFIG_DIR`. A worker launched by `makibad` gets `MAKIBA_SHARE_DIR` set to the share folder `makibad` resolved (absolute), so its role hooks run the entry point `makibad` linked there (section 2).
+For every agent, carried from paddock's templates (measured there, inventory L-N4): `CLAUDE_CODE_CHILD_SESSION`, `CLAUDE_CODE_SESSION_ID`, `CLAUDE_CODE_MESSAGING_SOCKET`, `CLAUDE_CODE_MESSAGING_TOKEN`, `CLAUDECODE`, `CLAUDE_CODE_SESSION_ATTENDED`, `CLAUDE_PID`, `CLAUDE_TMPDIR`, `GH_TOKEN`, `GITHUB_TOKEN`, `GH_ENTERPRISE_TOKEN`, `GITHUB_ENTERPRISE_TOKEN`. Workers and the curator also get an empty `GH_CONFIG_DIR`. Every agent launched by `makibad` gets `MAKIBA_SHARE_DIR` set to the share folder `makibad` resolved (absolute), so its role hooks run the entry point `makibad` linked there (section 2).
 
 The base adds its own (measured in paddock, inventory L-N2): `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`.
 
@@ -537,13 +570,13 @@ New:
 | `curator_started` | The curator was launched | `spawn_id` |
 | `run_taken` | A pass of `makibad` took a `queued` run within `max_concurrent_workers` (counted: runs `in_use` plus launches not yet `verified` or `failed`; oldest `dispatched_at` first). The launch steps start from it | `task_id`, `spawn_id` (of the run's newest `run_launch` row) |
 
-`worker_spawn_verified` carries `task_id`, `spawn_id` and `event_id`, the id of the `terminal_status` (`working`) or `terminal_turn` of that `spawn_id` that verified the launch (section 5.3); the database refuses it without one.
+`worker_spawned` and `worker_spawn_verified` carry `task_id` (null for a launch without a run, section 5.3) and `spawn_id`; `worker_spawn_verified` also carries `event_id`, the id of the `terminal_status` (`working`) or `terminal_turn` of that `spawn_id` that verified the launch (section 5.3); the database refuses it without one.
 
 In `base_resynced`, `reason` is `start` for the first `Resync` of a `makibad` process and `resync` for every later one (a `Resync` carries no cause of its own), and `terminals` is the number of terminals of this organization in the list. It is written last, after the view is rebuilt, so a reader that waits for it sees the result.
 
 In `terminal_status`, `terminal_turn` and `terminal_gone`, `role` is the value of the terminal's `makiba.role` tag (`secretary`, `worker` or `curator`), or null when the terminal has no such tag; for a removal it comes from the tags the monitor kept.
 
-In the same three kinds, `spawn_id` identifies the terminal across a restart of `makibad` (the base's terminal id is not stored, section 6.3). It is the value of the terminal's `makiba.spawn` tag as it is, or null when the terminal has no such tag; `makibad` never makes one up while observing or resyncing. The recovery of a restart reads the last status, the highest turn and whether a `terminal_gone` is recorded by task, role and `spawn_id` together, so two terminals of one role (the secretary before and after a renewal) never share a history. A record without `spawn_id` (null or absent) belongs to an earlier generation: only a terminal without the tag is matched against such records, and a terminal that has the tag never falls back to them. There is no migration. A run that is `in_use` and has no terminal gets a `terminal_gone` with reason `lost`, whose `spawn_id` is that of the run's latest `run_launch` row (null if there is none); whether a loss is recorded is asked for that identity, so an earlier launch's loss does not hide a later one's. Whoever launches a terminal must set the tag; the worker launch does (M3-4), the secretary's and the curator's do not exist yet (M6).
+In the same three kinds, `spawn_id` identifies the terminal across a restart of `makibad` (the base's terminal id is not stored, section 6.3). It is the value of the terminal's `makiba.spawn` tag as it is, or null when the terminal has no such tag; `makibad` never makes one up while observing or resyncing. The recovery of a restart reads the last status, the highest turn and whether a `terminal_gone` is recorded by task, role and `spawn_id` together, so two terminals of one role (the secretary before and after a renewal) never share a history. A record without `spawn_id` (null or absent) belongs to an earlier generation: only a terminal without the tag is matched against such records, and a terminal that has the tag never falls back to them. There is no migration. A run that is `in_use` and has no terminal gets a `terminal_gone` with reason `lost`, whose `spawn_id` is that of the run's latest `run_launch` row (null if there is none); whether a loss is recorded is asked for that identity, so an earlier launch's loss does not hide a later one's. Whoever launches a terminal must set the tag; every launch of section 5.3 does, a worker's and one without a run alike (M3-4, Issue 166).
 
 Dropped, because the thing they recorded no longer exists: `pr_watch_pane_started`, `context_handover_watch`, every kind the LLM dispatcher's loop wrote about itself.
 

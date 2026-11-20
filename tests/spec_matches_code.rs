@@ -375,10 +375,11 @@ fn section_5_sql_is_migration_v4() {
     }
     let spec_stmts = statements(&spec_sql);
     let file_stmts: BTreeSet<String> = statements(&format!(
-        "{};{};{}",
+        "{};{};{};{}",
         makiba::db::SCHEMA_V4,
         makiba::db::SCHEMA_V5,
-        makiba::db::SCHEMA_V6
+        makiba::db::SCHEMA_V6,
+        makiba::db::SCHEMA_V7
     ))
     .into_iter()
     .filter(|s| !(s == "BEGIN" || s == "COMMIT" || s.starts_with("INSERT INTO schema_migrations")))
