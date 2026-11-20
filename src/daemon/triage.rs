@@ -273,10 +273,17 @@ impl Fetch for GhFetch {
 
 /// `owner/repo`, lowercased, of a github.com URL (`https://github.com/o/r(.git)`,
 /// `git@github.com:o/r.git`, `ssh://git@github.com/o/r`), as the carried `_owner_repo_from_url`.
+/// The host must be `github.com` itself, not a name ending in it.
 pub fn owner_repo_from_url(url: &str) -> Option<String> {
     let s = url.trim().to_lowercase();
-    let i = s.find("github.com")?;
-    let rest = s[i + "github.com".len()..].strip_prefix([':', '/'])?;
+    let host = s
+        .strip_prefix("https://")
+        .or_else(|| s.strip_prefix("http://"))
+        .or_else(|| s.strip_prefix("ssh://"))
+        .or_else(|| s.strip_prefix("git://"))
+        .unwrap_or(&s);
+    let host = host.split_once('@').map_or(host, |(_, h)| h);
+    let rest = host.strip_prefix("github.com")?.strip_prefix([':', '/'])?;
     let mut parts = rest.trim_end_matches('/').splitn(3, '/');
     let owner = parts.next().filter(|p| !p.is_empty())?;
     let repo = parts.next()?;
@@ -601,6 +608,9 @@ mod tests {
             "/srv/repo",
             "https://gitlab.com/o/r",
             "https://github.com/o",
+            "https://notgithub.com/team/project.git",
+            "git@notgithub.com:team/project.git",
+            "https://github.com.evil.example/o/r",
         ] {
             assert_eq!(f(u), None, "{u}");
         }
