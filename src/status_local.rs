@@ -85,8 +85,9 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
         .ok();
     let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
     text.push_str(&format!(
-        "secretary: {}; attach with HC_SESSION={session} hc attach secretary\n",
-        stage.as_deref().unwrap_or("not launched")
+        "secretary: {}; attach with {}\n",
+        stage.as_deref().unwrap_or("not launched"),
+        crate::base::attach_command(&session, crate::spec::AGENT_SECRETARY)
     ));
     Ok((text, fresh))
 }
