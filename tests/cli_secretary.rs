@@ -181,16 +181,15 @@ fn each_verb_called_as_the_secretarys_tool_is_recorded_and_returns_a_result() {
     }
     for (verb, r) in &results {
         match *verb {
-            // Wired in M6-5: a recorded refusal that says so.
+            // Built in M6-5: accepted, and carried out by makibad.
             "renew" => {
-                let e = r.as_ref().unwrap_err();
-                assert_eq!(e.kind, ErrorKind::Internal, "{e:?}");
-                assert!(e.message.contains("M6-5"), "{e:?}");
+                let ok = r.as_ref().ok();
+                assert_eq!(ok, Some(&json!({"renewal": "accepted"})), "{r:?}");
             }
             _ => assert!(r.is_ok(), "{verb}: {r:?}"),
         }
     }
-    // `dispatch` and `close` return at `accepted`, renew is `failed`, the rest `done`.
+    // `dispatch`, `close` and `renew` return at `accepted`, the rest `done`.
     let status = |verb: &str| -> String {
         org.db()
             .query_row(
@@ -203,7 +202,7 @@ fn each_verb_called_as_the_secretarys_tool_is_recorded_and_returns_a_result() {
     };
     assert_eq!(status("dispatch"), "accepted");
     assert_eq!(status("close"), "accepted");
-    assert_eq!(status("renew"), "failed");
+    assert_eq!(status("renew"), "accepted");
     for verb in [
         "answer", "pr", "pending", "peek", "status", "send", "show", "inbox",
     ] {
@@ -652,7 +651,12 @@ fn every_exit_code_of_spec_section_3_is_produced() {
         (5, vec!["close", "t1"], vec![]),
         (6, vec!["pending", "list"], vec![("MAKIBA_DOOR", "none")]),
         (7, vec!["answer", &prompt, "yes"], vec![]),
-        (70, vec!["renew", "--handover-file", &file], vec![]),
+        (
+            70,
+            vec!["config", "set", "max_concurrent_workers", "3"],
+            vec![],
+        ),
+        (0, vec!["renew", "--handover-file", &file], vec![]),
     ];
     let mut seen = BTreeSet::new();
     for (want, args, extra) in &cases {
@@ -666,14 +670,22 @@ fn every_exit_code_of_spec_section_3_is_produced() {
         seen.insert(*want);
     }
     assert_eq!(seen, spec_exit_codes(&spec_md()));
-    // The usage error did not reach the door; the renew did and was recorded.
+    // The usage error did not reach the door; the config set did and failed; the renew was
+    // accepted (exit 0) and recorded, and makibad may have carried it on since.
     let c = Connection::open_with_flags(d.db_path(), OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
     let n = |sql: &str| c.query_row(sql, [], |r| r.get::<_, i64>(0)).unwrap();
     assert_eq!(n("SELECT COUNT(*) FROM runs WHERE task_id = 'c9'"), 0);
     assert_eq!(
         n(
-            "SELECT COUNT(*) FROM commands WHERE actor = 'person' AND verb = 'renew'
+            "SELECT COUNT(*) FROM commands WHERE actor = 'person' AND verb = 'config'
              AND status = 'failed' AND error_kind = 'internal'"
+        ),
+        1
+    );
+    assert_eq!(
+        n(
+            "SELECT COUNT(*) FROM commands WHERE actor = 'person' AND verb = 'renew'
+             AND status != 'rejected'"
         ),
         1
     );

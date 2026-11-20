@@ -463,6 +463,8 @@ fn record(
     let status = match (verb, r) {
         ("dispatch", Ok(_)) => Some("accepted"),
         ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
+        // `makibad`'s secretary pass carries a renewal out (Issue 46).
+        ("renew", Ok(_)) => Some("accepted"),
         _ => status_of(r),
     };
     match status {
@@ -486,16 +488,7 @@ fn run(
         Verb::Peek => peek(w, base, args),
         Verb::Pending => pending(w, args),
         Verb::Answer => answer(w, base, actor, args),
-        Verb::Renew => {
-            if str_arg(args, "handover")?.trim().is_empty() {
-                return Err(usage("the handover is not empty"));
-            }
-            Err(refuse(
-                ErrorKind::Internal,
-                "renew is wired in M6-5; nothing was stored and no secretary was launched",
-                "",
-            ))
-        }
+        Verb::Renew => renew(w, args),
         Verb::Send => {
             let to = str_arg(args, "to")?;
             let text = str_arg(args, "text")?;
@@ -520,6 +513,37 @@ fn run(
         Verb::Note => note(w, actor, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
+}
+
+/// `renew` (spec section 12, Issue 46): the handover is stored in the command's own row, which
+/// `makibad`'s secretary pass takes up. One renewal at a time.
+fn renew(w: &StateWriter, args: &Value) -> Response {
+    let handover = str_arg(args, "handover")?;
+    if handover.trim().is_empty() {
+        return Err(usage("the handover is empty"));
+    }
+    if handover.len() > super::secretary::HANDOVER_MAX {
+        return Err(usage(format!(
+            "the handover is over {} bytes",
+            super::secretary::HANDOVER_MAX
+        )));
+    }
+    let under_way: bool = w
+        .conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM commands WHERE verb = 'renew' AND status = 'accepted')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    if under_way {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            "a renewal of the secretary is under way",
+            "wait for it to finish (makiba status)",
+        ));
+    }
+    Ok(json!({"renewal": "accepted"}))
 }
 
 /// `status` (spec section 12): what the person's local `makiba status --json` prints, read from

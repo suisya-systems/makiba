@@ -174,6 +174,34 @@ pub(super) fn rebuild(
         append(w, "terminal_gone", task.as_deref(), &payload)?;
     }
 
+    // The secretary's newest verified launch with no terminal of ours, its key still live, and no
+    // gone recorded: it vanished while no monitor watched (Issue 46). A key revoked by `makiba
+    // down --secretary` or a renewal means it was ended on purpose.
+    let lost: Option<String> = w
+        .conn()
+        .query_row(
+            "SELECT l.spawn_id FROM run_launch l
+             WHERE l.id = (SELECT max(id) FROM run_launch WHERE role = 'secretary')
+               AND l.stage = 'verified'
+               AND EXISTS (SELECT 1 FROM agents a WHERE a.spawn_id = l.spawn_id
+                             AND a.revoked_at IS NULL)",
+            [],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(spawn) = lost.map(Some)
+        && !ours
+            .iter()
+            .any(|t| t.tags.get("makiba.spawn") == spawn.as_ref())
+        && !gone_recorded(w, &None, Some(&Some("secretary".into())), &spawn)?
+    {
+        let payload = json!({
+            "task_id": null, "role": "secretary", "spawn_id": spawn, "reason": "lost",
+            "exit_code": null,
+        });
+        append(w, "terminal_gone", None, &payload)?;
+    }
+
     for t in &ours {
         report_unknown(w, t)?;
     }

@@ -2,7 +2,8 @@
 //! exists, from the person's login shell: it refuses inside an agent, checks the Claude Code
 //! version, creates the person key, starts the base's own place and `makibad`, which it asks to
 //! launch the secretary unless `--no-secretary` (Issue 43): `makibad` holds the base and decides
-//! whether one already runs.
+//! whether one already runs. A `makibad` already running is asked by a `commands` row (actor
+//! `person`, verb `up`, `accepted`) that its secretary pass takes up (Issue 46).
 //!
 //! After `makiba down` or a stop of the base (Issue 41) it brings the work back before `makibad`
 //! starts: a base that was not running had its programs stopped, so the runs at work are suspended
@@ -174,7 +175,10 @@ fn run(secretary: bool) -> Result<(), Failure> {
     let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
     let the_base = base::connect_session_for_start(&session, Duration::from_secs(10));
     // Nothing listening at the base's socket: the base is stopped, and its programs with it.
-    let stopped = matches!(the_base.hello(), Err(BaseError::Unavailable(d)) if d.kind == "connect");
+    // With the stand-in (`MAKIBA_BASE=stub`, the switch makibad reads) the base makibad uses is not
+    // the one probed here, and the stand-in never stops.
+    let stopped = std::env::var("MAKIBA_BASE").as_deref() != Ok("stub")
+        && matches!(the_base.hello(), Err(BaseError::Unavailable(d)) if d.kind == "connect");
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
@@ -206,8 +210,23 @@ fn run(secretary: bool) -> Result<(), Failure> {
     }
     if daemon_running(&dir)? {
         println!("makibad: already running");
-        // ponytail: a running makibad is not asked again; `makiba down` and `up` launch one.
-        println!("secretary: left to the running makibad (see makiba status)");
+        if secretary {
+            // The running makibad's secretary pass takes the row up (Issue 46): it launches one
+            // unless one runs, as at its start.
+            let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
+            w.conn()
+                .execute(
+                    "INSERT INTO commands (actor, verb, args_json, status)
+                     VALUES ('person', 'up', '{\"secretary\":true}', 'accepted')",
+                    [],
+                )
+                .map_err(|e| internal(e.into()))?;
+            println!(
+                "secretary: asked of the running makibad, launched unless one runs (see makiba status)"
+            );
+        } else {
+            println!("secretary: not asked (--no-secretary)");
+        }
     } else {
         start_daemon(&dir, secretary)?;
         println!("makibad: started");
