@@ -39,6 +39,7 @@ const V4_TABLES: &[(&str, &[&str])] = &[
         &[
             "id",
             "run_id",
+            "role",
             "spawn_id",
             "kind",
             "agent",
@@ -177,7 +178,7 @@ fn fresh_database_is_at_v4_with_every_table() {
             r.get(0)
         })
         .unwrap();
-    assert_eq!(max, 6);
+    assert_eq!(max, 7);
     for (table, columns) in V4_TABLES {
         let got = names(
             &conn,
@@ -199,7 +200,7 @@ fn migrate_twice_changes_nothing() {
         .unwrap()
         .map(Result::unwrap)
         .collect();
-    assert_eq!(versions, [1, 2, 3, 4, 5, 6]);
+    assert_eq!(versions, [1, 2, 3, 4, 5, 6, 7]);
 }
 
 #[test]

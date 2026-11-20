@@ -17,7 +17,7 @@
 //! - (Owner) The workplace path is read from `run_launch.worktree`; `Places::workplace` computes
 //!   it, for the dispatch verb to use when it makes the row.
 
-use crate::agents::{self, Agent, Role, TaskSettings};
+use crate::agents::{self, Agent, TaskSettings};
 use crate::base::BaseDenies;
 use crate::db::Result;
 use crate::db::writer::StateWriter;
@@ -74,7 +74,9 @@ pub struct Prepare {
 
 struct Launch {
     id: i64,
-    task: String,
+    /// `None`: a launch without a run (Issue 166); `project` and `default_branch` are empty then.
+    task: Option<String>,
+    role: String,
     project: String,
     default_branch: String,
     branch: Option<String>,
@@ -98,27 +100,30 @@ impl Prepare {
     pub fn pass(&self, w: &StateWriter) -> Result<Vec<String>> {
         let launches: Vec<Launch> = {
             let mut st = w.conn().prepare(
-                "SELECT l.id, r.task_id, p.slug, COALESCE(p.default_branch, 'main'),
+                "SELECT l.id, r.task_id, l.role, COALESCE(p.slug, ''),
+                        COALESCE(p.default_branch, 'main'),
                         r.branch, l.kind, l.agent, l.stage, l.worktree, l.spawn_id
-                 FROM run_launch l JOIN runs r ON r.id = l.run_id
-                 JOIN projects p ON p.id = r.project_id
+                 FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
+                 LEFT JOIN projects p ON p.id = r.project_id
                  WHERE l.stage IN ('planned', 'worktree_ready')
-                   AND EXISTS (SELECT 1 FROM events e WHERE e.kind = 'run_taken'
-                               AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id)
+                   AND (l.run_id IS NULL
+                        OR EXISTS (SELECT 1 FROM events e WHERE e.kind = 'run_taken'
+                                   AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id))
                  ORDER BY l.id",
             )?;
             st.query_map([], |r| {
                 Ok(Launch {
                     id: r.get(0)?,
                     task: r.get(1)?,
-                    project: r.get(2)?,
-                    default_branch: r.get(3)?,
-                    branch: r.get(4)?,
-                    kind: r.get(5)?,
-                    agent: r.get(6)?,
-                    stage: r.get(7)?,
-                    worktree: r.get(8)?,
-                    spawn: r.get(9)?,
+                    role: r.get(2)?,
+                    project: r.get(3)?,
+                    default_branch: r.get(4)?,
+                    branch: r.get(5)?,
+                    kind: r.get(6)?,
+                    agent: r.get(7)?,
+                    stage: r.get(8)?,
+                    worktree: r.get(9)?,
+                    spawn: r.get(10)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -126,7 +131,7 @@ impl Prepare {
         let mut ready = Vec::new();
         for l in launches {
             match self.prepare(w, &l) {
-                Ok(true) => ready.push(l.task),
+                Ok(true) => ready.push(l.task.unwrap_or(l.role)),
                 // Moved by somebody else (a close, `makiba down`): left as it is (Issue 163).
                 Ok(false) => {}
                 Err(why) => {
@@ -137,7 +142,8 @@ impl Prepare {
                         |r| r.get(0),
                     )?;
                     if matches!(stage.as_str(), "planned" | "worktree_ready") {
-                        super::verify::fail(w, l.id, &l.task, &l.spawn, &stage, &why, &[])?;
+                        let task = l.task.as_deref();
+                        super::verify::fail(w, l.id, task, &l.spawn, &stage, &why, &[])?;
                     }
                 }
             }
@@ -149,15 +155,19 @@ impl Prepare {
     fn prepare(&self, w: &StateWriter, l: &Launch) -> std::result::Result<bool, String> {
         let db = |e: crate::db::Error| e.to_string();
         let one = |s: &str| !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\']);
-        if !one(&l.task) || !one(&l.project) {
-            return Err(format!(
-                "task id or project is not a plain name: {:?}",
-                l.task
-            ));
+        if let Some(task) = &l.task
+            && (!one(task) || !one(&l.project))
+        {
+            return Err(format!("task id or project is not a plain name: {task:?}"));
         }
+        let (_, role) = super::launch::roles(&l.role)
+            .ok_or_else(|| format!("no launch role named {:?}", l.role))?;
         let workplace = PathBuf::from(&l.worktree);
         if l.stage == "planned" {
-            if l.kind == "document" {
+            // A launch without a run starts in its folder (Issue 166); a document task in its own.
+            if l.task.is_none() {
+                std::fs::create_dir_all(&workplace).map_err(|e| e.to_string())?;
+            } else if l.kind == "document" {
                 std::fs::create_dir_all(workplace.join("out")).map_err(|e| e.to_string())?;
             } else {
                 self.add_worktree(l, &workplace)?;
@@ -200,13 +210,13 @@ impl Prepare {
         if agent.name() != "fake" {
             agents::on_path("claude")
                 .ok_or("no `claude` program on PATH, where `makiba up` checked it")?;
-            agents::write_rules(Role::Worker).map_err(|e| format!("the rules file: {e}"))?;
+            agents::write_rules(role).map_err(|e| format!("the rules file: {e}"))?;
             agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
         // The worktree is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
         let mcp_json = absolute(vec![workplace.join(".mcp.json")])?;
         let settings = TaskSettings {
-            role: Some(Role::Worker),
+            role: Some(role),
             write_dirs: vec![workplace, std::env::temp_dir()],
             deny_dirs: absolute([&self.denies.resolved[..], &self.denies.folders[..]].concat())?,
             deny_files: absolute(vec![
@@ -220,7 +230,12 @@ impl Prepare {
         };
         agent
             .write_task_settings(
-                &self.places.settings.join(format!("{}.json", l.task)),
+                &super::launch::settings_file(
+                    &self.places.settings,
+                    l.task.as_deref(),
+                    &l.role,
+                    &l.spawn,
+                ),
                 &settings,
             )
             .map_err(|e| e.to_string())?;
@@ -274,10 +289,8 @@ impl Prepare {
                 l.project
             )
         })?;
-        let branch = l
-            .branch
-            .clone()
-            .unwrap_or_else(|| format!("makiba/{}", l.task));
+        let task = l.task.as_deref().unwrap_or_default();
+        let branch = l.branch.clone().unwrap_or_else(|| format!("makiba/{task}"));
         if path.exists() {
             return Self::check_existing(&repo, path, &branch);
         }
@@ -392,7 +405,8 @@ mod tests {
         };
         let l = Launch {
             id: 1,
-            task: "t".into(),
+            task: Some("t".into()),
+            role: "worker".into(),
             project: "p".into(),
             default_branch: "main".into(),
             branch: None,
@@ -427,7 +441,8 @@ mod tests {
         };
         let l = Launch {
             id: 1,
-            task: "t".into(),
+            task: Some("t".into()),
+            role: "worker".into(),
             project: "p".into(),
             default_branch: "main".into(),
             branch: None,
