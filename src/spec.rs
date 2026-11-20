@@ -57,6 +57,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "command_received",
     "pr_opened",
     "fix_pushed",
+    "branch_pushed",
     "ci_watch_started",
     "ci_watch_failed",
     "run_closed",
@@ -157,6 +158,7 @@ pub enum Verb {
     Renew,
     Config,
     Inbox,
+    Push,
 }
 
 impl Verb {
@@ -176,6 +178,7 @@ impl Verb {
         Verb::Renew,
         Verb::Config,
         Verb::Inbox,
+        Verb::Push,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -195,6 +198,7 @@ impl Verb {
             Verb::Renew => "renew",
             Verb::Config => "config",
             Verb::Inbox => "inbox",
+            Verb::Push => "push",
         }
     }
 }
@@ -235,7 +239,7 @@ impl Role {
         use Verb::*;
         match self {
             Role::Secretary => &[
-                Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox,
+                Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox, Push,
             ],
             Role::Worker | Role::Curator => &[Report, Send, Show, Inbox],
             Role::Person => Verb::ALL,

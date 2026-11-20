@@ -19,6 +19,7 @@ pub mod person_key;
 pub mod prepare;
 mod prompts;
 pub mod prwatch;
+mod push;
 mod recover;
 mod resume;
 pub mod secretary;
@@ -326,6 +327,7 @@ fn serve_until(
     let mut triage =
         triage::Triage::from_env(Places::from_env(dir).repos, dispatch::capacity_from_env());
     let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
+    let mut push = push::Push::new(Places::from_env(dir));
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     let mut resumed = false;
@@ -365,6 +367,9 @@ fn serve_until(
             // after that pass is (they share this thread), and before any pass starts more work.
             if let Err(e) = close.pass(&w, &*events_base) {
                 eprintln!("makibad: close: {e}");
+            }
+            if let Err(e) = push.pass(&w) {
+                eprintln!("makibad: push: {e}");
             }
             if let Err(e) = anomalies.pass(&w) {
                 eprintln!("makibad: anomaly pass failed: {e}");
