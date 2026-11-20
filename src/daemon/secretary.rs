@@ -394,10 +394,12 @@ fn insert(
             Some("conflict"),
         ),
     };
+    // One statement, so a renewal the door accepted meanwhile is seen: one at a time.
     w.conn().execute(
         "INSERT INTO commands (actor, verb, args_json, status, result_json, error_kind, finished_at)
-         VALUES ('makibad', 'renew', ?1, ?2, ?3, ?4,
-                 CASE WHEN ?2 != 'accepted' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END)",
+         SELECT 'makibad', 'renew', ?1, ?2, ?3, ?4,
+                CASE WHEN ?2 != 'accepted' THEN strftime('%Y-%m-%dT%H:%M:%fZ','now') END
+         WHERE NOT EXISTS (SELECT 1 FROM commands WHERE verb = 'renew' AND status = 'accepted')",
         params![args.to_string(), status, line.to_string(), kind],
     )?;
     Ok(())

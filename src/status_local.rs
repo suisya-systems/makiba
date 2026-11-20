@@ -162,15 +162,17 @@ fn secretary_state(conn: &Connection, stage: Option<&str>) -> String {
                (SELECT max(id) FROM agents WHERE agent_id = 'secretary')
          ORDER BY id DESC LIMIT 1",
     );
+    // The newest renewal's failure, while no secretary was launched after it.
+    let failed = one(
+        "SELECT json_extract(c.result_json, '$.error.message') FROM commands c
+         WHERE c.id = (SELECT max(id) FROM commands WHERE verb = 'renew')
+           AND c.status = 'failed'
+           AND NOT EXISTS (SELECT 1 FROM run_launch l WHERE l.role = 'secretary'
+                             AND julianday(l.created_at) > julianday(c.finished_at))",
+    );
+    let failed = failed.map_or_else(String::new, |why| format!(" (last renewal failed: {why})"));
     if gone.as_deref() == Some("anomaly_raised") || stage == Some("failed") {
-        let failed = one(
-            "SELECT json_extract(result_json, '$.error.message') FROM commands
-             WHERE verb = 'renew' AND status = 'failed' ORDER BY id DESC LIMIT 1",
-        );
-        return match failed {
-            Some(why) => format!("gone (last renewal failed: {why}); makibad relaunches it"),
-            None => "gone; makibad relaunches it".into(),
-        };
+        return format!("gone{failed}; makibad relaunches it");
     }
-    stage.unwrap_or("not launched").to_string()
+    format!("{}{failed}", stage.unwrap_or("not launched"))
 }
