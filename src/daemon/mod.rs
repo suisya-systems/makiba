@@ -204,6 +204,26 @@ fn serve(
     )
 }
 
+/// Open `state.db`. Another process opening it at the same moment (the door's request, a test)
+/// can make the open itself answer "database is locked" before the busy timeout applies, so a
+/// busy answer is tried again for a few seconds.
+fn open_state(path: &Path) -> Result<StateWriter, String> {
+    let until = Instant::now() + Duration::from_secs(10);
+    loop {
+        match StateWriter::open(path) {
+            Err(crate::db::Error::Sqlite(rusqlite::Error::SqliteFailure(e, _)))
+                if matches!(
+                    e.code,
+                    rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked
+                ) && Instant::now() < until =>
+            {
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            other => return other.map_err(|e| e.to_string()),
+        }
+    }
+}
+
 fn serve_until(
     dir: &Path,
     connect: &dyn Fn() -> Box<dyn Base>,
@@ -217,7 +237,7 @@ fn serve_until(
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(|e| e.to_string())?;
     }
-    let w = StateWriter::open(&dir.join("state.db")).map_err(|e| e.to_string())?;
+    let w = open_state(&dir.join("state.db"))?;
     let base = connect();
     // Not subscribed yet: the row says so, and the heartbeat already runs.
     w.conn()

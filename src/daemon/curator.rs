@@ -13,6 +13,7 @@ use crate::base::{Base, Terminal};
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::{self, TAG_ORG, TAG_ROLE, TAG_SPAWN};
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::io;
 use std::path::{Path, PathBuf};
@@ -20,7 +21,7 @@ use std::time::{Duration, Instant};
 
 /// Raw notes at which the curator is launched (the carried `RAW_THRESHOLD`).
 pub const RAW_THRESHOLD: usize = 5;
-/// The curator's time limit (the owner's decision, Issue 39), from its `worker_spawned`.
+/// The curator's time limit (the owner's decision, Issue 39), from its verification.
 pub const TIMEOUT: Duration = Duration::from_secs(30 * 60);
 /// The test seam that sets the time limit in milliseconds (spec section 2).
 pub const TIMEOUT_ENV: &str = "MAKIBA_CURATOR_TIMEOUT_MS";
@@ -234,17 +235,25 @@ impl Curator {
         self.timeout.as_millis() as i64
     }
 
-    /// Milliseconds since the launch `spawn` was launched (its `worker_spawned`, else its row).
+    /// Milliseconds the curator of launch `spawn` has run: since it was verified; for a failed
+    /// launch (its terminal is left), since `worker_spawned`. `None` while the launch is still
+    /// under way: verification has its own time limit (verify.rs), and a slow start must not use
+    /// up the curator's.
     fn age_ms(&self, w: &StateWriter, spawn: &str) -> Result<Option<i64>> {
-        Ok(w.conn().query_row(
-            "SELECT CAST((julianday('now') - julianday(COALESCE(
-                      (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
-                       AND json_extract(e.payload_json, '$.spawn_id') = ?1),
-                      (SELECT created_at FROM run_launch WHERE spawn_id = ?1)))) * 86400000
-                    AS INTEGER)",
-            [spawn],
-            |r| r.get(0),
-        )?)
+        Ok(w.conn()
+            .query_row(
+                "SELECT CAST((julianday('now') - julianday(CASE l.stage
+                        WHEN 'verified' THEN l.verified_at
+                        WHEN 'failed' THEN COALESCE(
+                          (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
+                           AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id),
+                          l.created_at) END)) * 86400000 AS INTEGER)
+                 FROM run_launch l WHERE l.spawn_id = ?1",
+                [spawn],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten())
     }
 }
 
