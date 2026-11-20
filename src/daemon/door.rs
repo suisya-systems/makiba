@@ -306,16 +306,26 @@ impl Door {
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
         }
+        // A saved note is a file outside the transaction: it goes when its record does.
+        let unsave = || {
+            if let (Verb::Note, Ok(saved)) = (v, &r)
+                && let Some(file) = saved["file"].as_str()
+            {
+                let _ = std::fs::remove_file(super::curator::knowledge_dir().join(file));
+            }
+        };
         // A verb's writes stand only with their record: without it a retry would repeat them.
         // A transaction SQLite rolled back by itself (a full disk) is gone: nothing was done.
         if !record(&w, &actor, verb, &args, idem, &r) || w.conn().is_autocommit() {
             let _ = w.rollback();
+            unsave();
             return Err(internal(
                 "the request could not be recorded; nothing was done",
             ));
         }
         if let Err(e) = w.commit() {
             let _ = w.rollback();
+            unsave();
             return Err(internal(e));
         }
         r
@@ -449,11 +459,14 @@ fn record(
     idem: Option<&str>,
     r: &Response,
 ) -> bool {
-    // `dispatch` and `close` return at `accepted` and finish later (spec section 5.2); a close
-    // of a run closed already is `done` again.
+    // `dispatch`, `close` and `push` return at `accepted` and finish later (spec section 5.2); a
+    // close of a run closed already is `done` again.
     let status = match (verb, r) {
         ("dispatch" | "project", Ok(_)) => Some("accepted"),
         ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
+        // `makibad`'s secretary pass carries a renewal out (Issue 46).
+        ("renew", Ok(_)) => Some("accepted"),
+        ("push", Ok(_)) => Some("accepted"),
         _ => status_of(r),
     };
     match status {
@@ -477,16 +490,7 @@ fn run(
         Verb::Peek => peek(w, base, args),
         Verb::Pending => pending(w, args),
         Verb::Answer => answer(w, base, actor, args),
-        Verb::Renew => {
-            if str_arg(args, "handover")?.trim().is_empty() {
-                return Err(usage("the handover is not empty"));
-            }
-            Err(refuse(
-                ErrorKind::Internal,
-                "renew is wired in M6-5; nothing was stored and no secretary was launched",
-                "",
-            ))
-        }
+        Verb::Renew => renew(w, args),
         Verb::Send => {
             let to = str_arg(args, "to")?;
             let text = str_arg(args, "text")?;
@@ -508,6 +512,8 @@ fn run(
         }
         Verb::Config => config(w, actor, args),
         Verb::Pr => pr(w, args),
+        Verb::Note => note(w, actor, args),
+        Verb::Push => push(w, args),
         Verb::Project => {
             let slug = str_arg(args, "slug")?;
             plain_name("slug", slug)?;
@@ -515,6 +521,37 @@ fn run(
         }
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
+}
+
+/// `renew` (spec section 12, Issue 46): the handover is stored in the command's own row, which
+/// `makibad`'s secretary pass takes up. One renewal at a time.
+fn renew(w: &StateWriter, args: &Value) -> Response {
+    let handover = str_arg(args, "handover")?;
+    if handover.trim().is_empty() {
+        return Err(usage("the handover is empty"));
+    }
+    if handover.len() > super::secretary::HANDOVER_MAX {
+        return Err(usage(format!(
+            "the handover is over {} bytes",
+            super::secretary::HANDOVER_MAX
+        )));
+    }
+    let under_way: bool = w
+        .conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM commands WHERE verb = 'renew' AND status = 'accepted')",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(internal)?;
+    if under_way {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            "a renewal of the secretary is under way",
+            "wait for it to finish (makiba status)",
+        ));
+    }
+    Ok(json!({"renewal": "accepted"}))
 }
 
 /// `status` (spec section 12): what the person's local `makiba status --json` prints, read from
@@ -1226,6 +1263,138 @@ fn pr(w: &StateWriter, args: &Value) -> Response {
     Ok(json!({"watch_id": r.watch_id, "status": r.status}))
 }
 
+/// The four headings of a raw note (skills/curate, roles/curator).
+const NOTE_HEADINGS: [&str; 4] = [
+    "## Facts",
+    "## Judgment",
+    "## Grounds",
+    "## Where it applies",
+];
+
+/// `note` (spec section 12, Issue 189): the secretary's raw note, saved by `makibad` as
+/// `<knowledge>/raw/<date>-<topic>[-n].md` with `Task: <task_id>` first. The same idem returns
+/// the first file through the door's replay.
+// ponytail: makibad dying between the file's publication and the commit leaves the note without
+// its record, so a retry of the same idem saves a second copy (never a lost note). A stored
+// intent reconciled at start would close it.
+fn note(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let task = str_arg(args, "task")?;
+    let topic = str_arg(args, "topic")?;
+    let text = str_arg(args, "text")?;
+    let kebab = topic.len() <= 64
+        && topic.split('-').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+    if !kebab {
+        return Err(usage(format!(
+            "topic is English kebab-case (a-z, 0-9, single dashes, at most 64), not {topic:?}"
+        )));
+    }
+    let missing: Vec<&str> = NOTE_HEADINGS
+        .into_iter()
+        .filter(|h| !text.lines().any(|l| l.trim_end() == *h))
+        .collect();
+    if !missing.is_empty() {
+        return Err(usage(format!(
+            "a raw note has the four headings {}; missing: {}",
+            NOTE_HEADINGS.join(", "),
+            missing.join(", ")
+        )));
+    }
+    if !run_exists(w, task)? {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    let date: String = w
+        .conn()
+        .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+        .map_err(internal)?;
+    let mut body = format!("Task: {task}\n\n{text}");
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    let raw = super::curator::knowledge_dir().join("raw");
+    let name = save_note(&raw, &format!("{date}-{topic}"), &body)
+        .map_err(|e| internal(format!("cannot save the note in {}: {e}", raw.display())))?;
+    let file = format!("raw/{name}");
+    let payload = json!({"task_id": task, "file": file});
+    if let Err(e) = w.append_event(&NewEvent {
+        kind: "raw_note_saved",
+        actor: Some(actor),
+        payload: Some(&payload),
+        run_task_id: Some(task),
+        ..Default::default()
+    }) {
+        let _ = std::fs::remove_file(raw.join(&name));
+        return Err(internal(e));
+    }
+    Ok(json!({"file": file}))
+}
+
+/// Write `body` whole to a staging file (a dot name, which the curator's count skips), then
+/// publish it under the first free `<stem>.md`, `<stem>-2.md`, ... by a hard link, which never
+/// replaces a file. A name in `raw/archive/` is not free. Returns the name.
+fn save_note(raw: &Path, stem: &str, body: &str) -> std::io::Result<String> {
+    std::fs::create_dir_all(raw)?;
+    let staged = raw.join(format!(".note-{}", random_key()?));
+    std::fs::write(&staged, body)?;
+    let r = publish_note(raw, stem, &staged);
+    let _ = std::fs::remove_file(&staged);
+    r
+}
+
+fn publish_note(raw: &Path, stem: &str, staged: &Path) -> std::io::Result<String> {
+    let archived = |name: &str| raw.join("archive").join(name).try_exists();
+    for n in 1..=1000 {
+        let name = match n {
+            1 => format!("{stem}.md"),
+            n => format!("{stem}-{n}.md"),
+        };
+        if archived(&name)? {
+            continue;
+        }
+        match std::fs::hard_link(staged, raw.join(&name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+        // The curator moved `raw/<name>` to the archive between the check and the link.
+        if archived(&name)? {
+            let _ = std::fs::remove_file(raw.join(&name));
+            continue;
+        }
+        return Ok(name);
+    }
+    Err(std::io::Error::other(format!("no free name for {stem}")))
+}
+
+/// `push` (Issue 190): accepted for a run that has a code worktree; `makibad` pushes it on a
+/// thread of its own (push.rs) and ends the command `done` or `failed` with a notice.
+fn push(w: &StateWriter, args: &Value) -> Response {
+    let task = str_arg(args, "task")?;
+    let worktree: Option<Option<String>> = w
+        .conn()
+        .query_row(
+            "SELECT (SELECT worktree FROM run_launch WHERE run_id = r.id AND kind = 'code'
+                     ORDER BY id DESC LIMIT 1)
+             FROM runs r WHERE r.task_id = ?1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    match worktree {
+        None => Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), "")),
+        Some(None) => Err(refuse(
+            ErrorKind::Conflict,
+            format!("task {task:?} has no code worktree to push"),
+            "",
+        )),
+        Some(Some(_)) => Ok(json!({"task": task, "status": "accepted"})),
+    }
+}
+
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let id = args
         .get("id")
@@ -1747,6 +1916,11 @@ fn tool(v: Verb) -> Value {
             ]),
             &["state", "repo", "pr", "head", "task"],
         ),
+        Verb::Push => (
+            "Have makibad push a worker's branch: the run's worktree, on its branch, clean, pushed as its head to the same branch at origin, never forced. Answers accepted; a notice tells you the head pushed (then record it with pr) or why it failed.",
+            Map::from_iter([("task".into(), text.clone())]),
+            &["task"],
+        ),
         Verb::Inbox => (
             "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",
             Map::new(),
@@ -1812,6 +1986,15 @@ fn tool(v: Verb) -> Value {
             Map::from_iter([("handover".into(), text.clone())]),
             &["handover"],
         ),
+        Verb::Note => (
+            "Save a raw note for the curator: makibad writes it to <knowledge>/raw/<date>-<topic>[-n].md with the line Task: <task> first. topic is English kebab-case; text must have the four headings ## Facts, ## Judgment, ## Grounds, ## Where it applies. Returns the file.",
+            Map::from_iter([
+                ("task".into(), text.clone()),
+                ("topic".into(), text.clone()),
+                ("text".into(), text.clone()),
+            ]),
+            &["task", "topic", "text"],
+        ),
         Verb::Project => (
             "Register a project and have makibad clone its GitHub repository, or fetch it and fast-forward its default branch when the clone exists. repo is OWNER/NAME only. Answers accepted; a notice says when it is done or why it failed. Dispatch into the project after that notice.",
             Map::from_iter([("slug".into(), text.clone()), ("repo".into(), text.clone())]),
@@ -1828,4 +2011,33 @@ fn tool(v: Verb) -> Value {
         "description": description,
         "inputSchema": {"type": "object", "properties": props, "required": required},
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_note;
+
+    #[test]
+    fn a_note_takes_the_first_name_free_in_raw_and_in_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("raw");
+        std::fs::create_dir_all(raw.join("archive")).unwrap();
+        std::fs::write(raw.join("archive/d-t.md"), "old").unwrap();
+        std::fs::write(raw.join("d-t-2.md"), "kept").unwrap();
+        assert_eq!(save_note(&raw, "d-t", "new\n").unwrap(), "d-t-3.md");
+        assert_eq!(
+            std::fs::read_to_string(raw.join("d-t-2.md")).unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(raw.join("d-t-3.md")).unwrap(),
+            "new\n"
+        );
+        // The staging file is gone.
+        let names: Vec<_> = std::fs::read_dir(&raw)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.iter().all(|n| !n.starts_with('.')), "{names:?}");
+    }
 }

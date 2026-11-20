@@ -21,6 +21,7 @@ pub mod prepare;
 mod project;
 mod prompts;
 pub mod prwatch;
+mod push;
 mod recover;
 mod resume;
 pub mod secretary;
@@ -322,9 +323,9 @@ fn serve_until(
     let prepare = Prepare::new(Places::from_env(dir), events_base.worker_denies());
     let launch = launch::Launch::new(dir, door_addr);
     let mut curator = curator::Curator::from_env(dir);
-    // `makiba up` asks for the secretary (Issue 43); read once, at start.
-    let mut secretary = (std::env::var(secretary::SECRETARY_ENV).as_deref() == Ok("1"))
-        .then(|| secretary::Secretary::from_env(dir));
+    // `makiba up` asks for the secretary (Issue 43), read once, at start; renewals and relaunches
+    // (Issue 46) run whatever it says.
+    let mut secretary = secretary::Secretary::from_env(dir);
     let mut dialogs = dialogs::Dialogs::new();
     let mut prompts = prompts::Prompts::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
@@ -333,6 +334,7 @@ fn serve_until(
         triage::Triage::from_env(Places::from_env(dir).repos, dispatch::capacity_from_env());
     let mut projects = project::Projects::from_env(Places::from_env(dir).repos);
     let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
+    let mut push = push::Push::new(Places::from_env(dir));
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     // The subscription is recorded once; a refused write is tried again on the next tick.
@@ -376,6 +378,9 @@ fn serve_until(
             if let Err(e) = close.pass(&w, &*events_base) {
                 eprintln!("makibad: close: {e}");
             }
+            if let Err(e) = push.pass(&w) {
+                eprintln!("makibad: push: {e}");
+            }
             if let Err(e) = anomalies.pass(&w) {
                 eprintln!("makibad: anomaly pass failed: {e}");
             }
@@ -399,7 +404,7 @@ fn serve_until(
                 if let Err(e) = curator.pass(&w, &*events_base) {
                     eprintln!("makibad: curator: {e}");
                 }
-                if let Some(Err(e)) = secretary.as_mut().map(|s| s.pass(&w, &*events_base)) {
+                if let Err(e) = secretary.pass(&w, &*events_base) {
                     eprintln!("makibad: secretary: {e}");
                 }
                 // Before the dialogs: a launch they move on is looked at on a later tick.

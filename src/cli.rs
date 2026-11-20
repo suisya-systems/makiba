@@ -220,11 +220,24 @@ pub enum Command {
         #[arg(long)]
         task: String,
     },
+    /// Have makibad push a worker's branch, never forced.
+    Push {
+        #[arg(long)]
+        task: String,
+    },
     /// Ask for a fresh secretary that resumes from the handover.
     Renew {
         /// Read here; its content travels over the door.
         #[arg(long)]
         handover_file: PathBuf,
+    },
+    /// Save a raw note for the curator, with the four headings.
+    Note {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        topic: String,
+        text: String,
     },
     /// Register a project and have makibad clone or fetch its GitHub repository.
     Project {
@@ -338,8 +351,12 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             "pr",
             json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
         ),
+        Command::Push { task } => ("push", json!({"task": task})),
         Command::Project { slug, repo } => ("project", json!({"slug": slug, "repo": repo})),
         Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
+        Command::Note { task, topic, text } => {
+            ("note", json!({"task": task, "topic": topic, "text": text}))
+        }
         Command::Config {
             action,
             key,

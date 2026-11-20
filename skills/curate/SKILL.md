@@ -10,16 +10,17 @@ Growth through skills: workers' lessons become raw notes, the curator merges the
 
 The knowledge folder is `$MAKIBA_KNOWLEDGE_DIR`, by default `~/makiba-knowledge` (spec section 2): `raw/`, `raw/archive/`, `curated/`, `skill-candidates.md`.
 
-**Precondition:** your sandbox must let you write in the knowledge folder (Issue 183). Until it does, give the person the note and the path to save it at.
+You save a raw note with mcp__makiba__note: `makibad` writes the file under `raw/`, never you.
+
+**Precondition for the candidate decision only:** your sandbox must let you edit `skill-candidates.md` (Issue 183). Until it does, give the person the decision and the entry to write it in.
 
 ## A raw note
 
 A worker may end its done report with a note under the four headings `## Facts`, `## Judgment`, `## Grounds`, `## Where it applies`. A report with no note needs nothing. When it has one, save it **before** you close that worker: `makibad` counts the raw notes when a close is recorded, so a note written after the close is not counted until the next one.
 
-- Path: `<knowledge>/raw/<YYYY-MM-DD>-<topic>.md`, `<topic>` in English kebab-case.
-- First line `Task: <task_id>`, then a blank line, then the note as the worker wrote it. The curator counts different tasks by this line.
-- All four headings must be there; a note missing one goes back to the worker (mcp__makiba__send), not into `raw/`.
-- Never overwrite: if the name is taken in `raw/` or `raw/archive/`, add `-2`, `-3`, and so on.
+- Call mcp__makiba__note with `task` the worker's task_id, `topic` in English kebab-case, `text` the note as the worker wrote it, and an `idem` of your own (a retry with the same `idem` saves nothing new).
+- `makibad` writes `<knowledge>/raw/<YYYY-MM-DD>-<topic>.md` (with `-2`, `-3`, and so on when the name is taken in `raw/` or `raw/archive/`; it never overwrites), first line `Task: <task_id>`, then a blank line, then the note. The curator counts different tasks by this line. The answer names the file.
+- All four headings must be there; the verb refuses a note missing one (`usage`), and that note goes back to the worker (mcp__makiba__send).
 - Never edit a note once saved.
 
 ## The curator

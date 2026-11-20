@@ -57,12 +57,14 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "command_received",
     "pr_opened",
     "fix_pushed",
+    "branch_pushed",
     "ci_watch_started",
     "ci_watch_failed",
     "run_closed",
     "secretary_renewed",
     "curator_started",
     "run_taken",
+    "raw_note_saved",
     "observation_lost",
     "config_set",
 ];
@@ -159,6 +161,8 @@ pub enum Verb {
     Renew,
     Config,
     Inbox,
+    Note,
+    Push,
     Project,
 }
 
@@ -179,6 +183,8 @@ impl Verb {
         Verb::Renew,
         Verb::Config,
         Verb::Inbox,
+        Verb::Note,
+        Verb::Push,
         Verb::Project,
     ];
 
@@ -199,6 +205,8 @@ impl Verb {
             Verb::Renew => "renew",
             Verb::Config => "config",
             Verb::Inbox => "inbox",
+            Verb::Note => "note",
+            Verb::Push => "push",
             Verb::Project => "project",
         }
     }
@@ -240,8 +248,8 @@ impl Role {
         use Verb::*;
         match self {
             Role::Secretary => &[
-                Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox,
-                Project,
+                Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox, Note,
+                Push, Project,
             ],
             Role::Worker | Role::Curator => &[Report, Send, Show, Inbox],
             Role::Person => Verb::ALL,
