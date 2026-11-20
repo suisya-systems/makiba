@@ -2,8 +2,9 @@
 //!
 //! After a close (`run_closed`, written by the door) the raw notes of the knowledge folder are
 //! counted; at `RAW_THRESHOLD` a launch of the curator that belongs to no run is added
-//! (`launch::add_launch`, Issue 166), one at a time. A curator terminal past its time limit is
-//! ended, its key revoked and the secretary told. Spec sections 2, 5.3 and 10.
+//! (`launch::add_launch`, Issue 166), one at a time. A curator that sent its report to the
+//! secretary is ended and its key revoked (Issue 177); one past its time limit is ended, its key
+//! revoked and the secretary told. Spec sections 2, 5.3 and 10.
 //!
 //! The base is the truth for "one at a time": a curator terminal of this organization, or a
 //! curator launch not yet verified, means no second launch, so a restarted `makibad` needs no
@@ -30,7 +31,7 @@ pub const KNOWLEDGE_ENV: &str = "MAKIBA_KNOWLEDGE_DIR";
 /// How often a pass runs at most.
 const EVERY: Duration = Duration::from_secs(1);
 
-const BRIEF: &str = "Run one curation cycle over the notes in this folder (raw/ and raw/archive/) as your rules say. When it is done, send the result to the secretary with send (there is no task, so not report), then stop.";
+const BRIEF: &str = "Run one curation cycle over the notes in this folder (raw/ and raw/archive/) as your rules say. When it is done, send the result to the secretary with send (there is no task, so not report), once, as your last step: that send ends your terminal.";
 
 /// `$MAKIBA_KNOWLEDGE_DIR`, default `~/makiba-knowledge`.
 pub fn knowledge_dir() -> PathBuf {
@@ -204,11 +205,21 @@ impl Curator {
         Ok(())
     }
 
-    /// A curator terminal that is finished (its program exited, the base keeps it and its name) or
-    /// past the time limit is ended, its key revoked; the second with a notice to the secretary.
+    /// A curator terminal that reported (its keys revoked first), is finished (its program exited,
+    /// the base keeps it and its name) or is past the time limit is ended, its key revoked; only
+    /// the last with a notice to the secretary.
     /// Returns whether it is gone. A failed end is tried again by the next pass.
     fn settle(&self, w: &StateWriter, base: &dyn Base, t: &Terminal) -> Result<bool> {
         let spawn = t.tags.get(TAG_SPAWN).cloned().unwrap_or_default();
+        if t.alive && self.reported(w, &spawn)? {
+            // Keys first: a failed end is tried again by the next pass, the report still there.
+            w.transaction(|w| super::resume::revoke_keys(w, &spawn))?;
+            if let Err(e) = base.end(&t.id) {
+                eprintln!("makibad: cannot end the curator terminal {}: {e}", t.id.0);
+                return Ok(false);
+            }
+            return Ok(true);
+        }
         let past = t.alive && self.age_ms(w, &spawn)?.is_some_and(|a| a >= self.limit());
         if t.alive && !past {
             return Ok(false);
@@ -229,6 +240,21 @@ impl Curator {
             Ok(())
         })?;
         Ok(true)
+    }
+
+    /// Whether the curator of launch `spawn` sent its report (Issue 177): a message of the curator
+    /// to the secretary recorded since the launch was added (its key is issued after that), once
+    /// the launch is `verified` or `failed`, so the end is never taken for a failed start. One
+    /// curator runs at a time, so a message since its launch is its own.
+    fn reported(&self, w: &StateWriter, spawn: &str) -> Result<bool> {
+        Ok(w.conn().query_row(
+            "SELECT EXISTS (SELECT 1 FROM run_launch l, messages m JOIN events e ON e.id = m.event_id
+                            WHERE l.spawn_id = ?1 AND l.stage IN ('verified', 'failed')
+                              AND m.sender = ?2 AND m.recipient = ?3 AND m.kind = 'message'
+                              AND e.occurred_at >= l.created_at)",
+            [spawn, spec::AGENT_CURATOR, spec::AGENT_SECRETARY],
+            |r| r.get(0),
+        )?)
     }
 
     fn limit(&self) -> i64 {
