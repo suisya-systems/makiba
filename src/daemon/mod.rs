@@ -56,7 +56,7 @@ pub fn state_dir() -> PathBuf {
 /// The base this process uses: the stand-in when `MAKIBA_BASE=stub` (tests; its first `Resync`
 /// comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`), otherwise the real one, scoped to this state
 /// folder so two organizations on one base do not adopt each other's terminals.
-fn connect_base(state: &Path) -> Box<dyn Base> {
+pub(crate) fn connect_base(state: &Path) -> Box<dyn Base> {
     if std::env::var("MAKIBA_BASE").as_deref() == Ok("stub") {
         let ms = std::env::var("MAKIBA_STUB_SUBSCRIBE_DELAY_MS")
             .ok()
@@ -173,17 +173,42 @@ pub fn run_with(
     serve(dir, connect, delivery, None)
 }
 
+/// As `run`, until `stop` is set as well as on a signal (a daemon in a test's own process).
+pub fn run_until(
+    dir: &Path,
+    connect: &dyn Fn() -> Box<dyn Base>,
+    stop: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let delivery = Delivery::new(Box::new(delivery::NoChannel));
+    serve_until(dir, connect, delivery, None, stop)
+}
+
 /// As `run_with`, and with `door`, the door opened once the base has answered.
 fn serve(
     dir: &Path,
     connect: &dyn Fn() -> Box<dyn Base>,
+    delivery: Delivery,
+    door: Option<(door::Config, crate::channel::Hub)>,
+) -> Result<(), String> {
+    serve_until(
+        dir,
+        connect,
+        delivery,
+        door,
+        Arc::new(AtomicBool::new(false)),
+    )
+}
+
+fn serve_until(
+    dir: &Path,
+    connect: &dyn Fn() -> Box<dyn Base>,
     mut delivery: Delivery,
     door: Option<(door::Config, crate::channel::Hub)>,
+    stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = take_lock(dir)?;
     crash::arm(dir);
-    let stop = Arc::new(AtomicBool::new(false));
     for sig in [signal_hook::consts::SIGTERM, signal_hook::consts::SIGINT] {
         signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(|e| e.to_string())?;
     }

@@ -45,6 +45,9 @@ impl Agent for Fake {
             "--mcp-config".into(),
             super::mcp_config(launch.door),
         ];
+        // A resume runs the steps file its conversation id names (in the workplace) before the
+        // script: an id with no such file is a resume that fails (the agent exits at once).
+        argv.extend(launch.resume.map(|id| format!("steps:{id}")));
         argv.extend(self.script.iter().cloned());
         argv
     }
@@ -80,8 +83,11 @@ impl Agent for Fake {
         super::write_sandbox_settings(path, task)
     }
 
-    fn conversation_id(&self, _worktree: &Path) -> Option<String> {
-        None
+    /// What `.fake-conversation` in the workplace says, if anything.
+    fn conversation_id(&self, worktree: &Path, _session: &str) -> Option<String> {
+        let id = std::fs::read_to_string(worktree.join(".fake-conversation")).ok()?;
+        let id = id.trim();
+        (!id.is_empty()).then(|| id.to_string())
     }
 
     fn wraps_delivery(&self) -> bool {

@@ -203,5 +203,13 @@ pub trait Base: Send + Sync {
     fn events(&self) -> Result<EventStream, BaseError>;
     /// Makiba up: start the base's own place if needed.
     fn start(&self) -> Result<(), BaseError>;
+    /// `makiba down --stop-base`: stop the base's own place. A base that cannot be stopped refuses.
+    fn stop(&self) -> Result<(), BaseError> {
+        Err(BaseError::Other(Detail {
+            kind: "stop".into(),
+            message: format!("the base {} cannot be stopped by makiba", self.name()),
+            hint: None,
+        }))
+    }
     fn worker_denies(&self) -> BaseDenies;
 }

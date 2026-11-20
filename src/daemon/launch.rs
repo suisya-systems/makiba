@@ -102,6 +102,10 @@ struct Row {
     model: Option<String>,
     brief: String,
     worktree: String,
+    /// Set on a launch that resumes a conversation (`makiba up`, Issue 41).
+    resume: Option<String>,
+    /// Whether the run had an earlier launch: a relaunch first ends the run's old terminals.
+    relaunch: bool,
 }
 
 impl Launch {
@@ -121,7 +125,9 @@ impl Launch {
     pub fn pass(&self, w: &StateWriter, base: &dyn Base) -> Result<Vec<String>> {
         let rows: Vec<Row> = {
             let mut st = w.conn().prepare(
-                "SELECT l.id, r.id, r.task_id, l.spawn_id, l.agent, l.model, l.brief, l.worktree
+                "SELECT l.id, r.id, r.task_id, l.spawn_id, l.agent, l.model, l.brief, l.worktree,
+                        l.conversation_id,
+                        EXISTS (SELECT 1 FROM run_launch e WHERE e.run_id = l.run_id AND e.id < l.id)
                  FROM run_launch l JOIN runs r ON r.id = l.run_id
                  WHERE l.stage = 'settings_ready' ORDER BY l.id",
             )?;
@@ -135,6 +141,8 @@ impl Launch {
                     model: r.get(5)?,
                     brief: r.get(6)?,
                     worktree: r.get(7)?,
+                    resume: r.get(8)?,
+                    relaunch: r.get(9)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -186,15 +194,20 @@ impl Launch {
         };
         let settings = self.settings.join(format!("{}.json", row.task));
         let rules = agents::rules_path(Role::Worker);
-        let argv = agent.argv(&AgentLaunch {
-            role: Role::Worker,
-            brief: Some(&row.brief),
-            rules_file: &rules,
-            settings_file: &settings,
-            model: row.model.as_deref(),
-            resume: None,
-            door: &door,
-        });
+        // A first launch names its conversation (Issue 41); a resume names the stored one.
+        let session = row.resume.is_none().then(|| agents::session_id(&row.spawn));
+        let argv = agent.argv_with_session(
+            &AgentLaunch {
+                role: Role::Worker,
+                brief: Some(&row.brief),
+                rules_file: &rules,
+                settings_file: &settings,
+                model: row.model.as_deref(),
+                resume: row.resume.as_deref(),
+                door: &door,
+            },
+            session.as_deref(),
+        );
         let tags = BTreeMap::from([
             (TAG_ROLE.to_string(), "worker".to_string()),
             (TAG_TASK_ID.to_string(), row.task.clone()),
@@ -237,6 +250,22 @@ impl Launch {
             0 => {}
             1 => return adopt(w, row, ours[0]),
             n => return Outcome::Several(format!("{n} terminals carry {TAG_SPAWN}={}", row.spawn)),
+        }
+        // A relaunch ends the run's earlier terminals of this organization first: the shell a core
+        // stop left in place of a kept one, or a failed resume's (both hold the name).
+        if row.relaunch {
+            for t in terminals.iter().filter(|t| {
+                t.tags.get(TAG_ORG) == Some(&self.org)
+                    && t.tags.get(TAG_TASK_ID) == Some(&row.task)
+                    && t.tags.get(TAG_SPAWN) != Some(&row.spawn)
+            }) {
+                if let Err(e) = base.end(&t.id) {
+                    return Outcome::Down(format!(
+                        "cannot end the earlier terminal {}: {e}",
+                        t.id.0
+                    ));
+                }
+            }
         }
         let agent_id = spec::worker_agent_id(&row.task);
         let token = match super::door::issue_key(
@@ -298,6 +327,35 @@ fn adopt(w: &StateWriter, row: &Row, t: &Terminal) -> Outcome {
     Outcome::Up
 }
 
+/// A new launch of the run of launch `from`, by `makiba up` or after a resume that was not
+/// verified (Issue 41): the same kind, agent, model, brief and workplace, a new spawn id, at
+/// `worktree_ready` (the workplace is used as it is), resuming `conversation` when given, and taken
+/// (`run_taken`). Returns its spawn id.
+pub fn add_relaunch(w: &StateWriter, from: i64, conversation: Option<&str>) -> Result<String> {
+    w.conn().execute(
+        "INSERT INTO run_launch (run_id, spawn_id, kind, agent, model, brief, worktree,
+                                 conversation_id, stage)
+         SELECT run_id, lower(hex(randomblob(16))), kind, agent, model, brief, worktree, ?2,
+                'worktree_ready'
+         FROM run_launch WHERE id = ?1",
+        rusqlite::params![from, conversation],
+    )?;
+    let (spawn, task): (String, String) = w.conn().query_row(
+        "SELECT l.spawn_id, r.task_id FROM run_launch l JOIN runs r ON r.id = l.run_id
+         WHERE l.id = last_insert_rowid()",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    w.append_event(&NewEvent {
+        kind: "run_taken",
+        actor: Some("makibad"),
+        payload: Some(&json!({"task_id": task, "spawn_id": spawn})),
+        run_task_id: Some(&task),
+        ..Default::default()
+    })?;
+    Ok(spawn)
+}
+
 /// `worker_spawned` and stage `launched`, together.
 fn record(w: &StateWriter, row: &Row) -> Result<()> {
     w.transaction(|w| {
@@ -350,6 +408,8 @@ mod tests {
             model: None,
             brief: "b".into(),
             worktree: "/w".into(),
+            resume: None,
+            relaunch: false,
         };
         (dir, w, row)
     }

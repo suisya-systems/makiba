@@ -412,10 +412,16 @@ fn run_scene(w: &StateWriter, run: i64) -> Result<RunScene> {
                 kind: p["kind"].as_str().map(String::from),
             }
         });
+    // Only a gone of the newest launch's terminal (or one recorded without an identity): an
+    // earlier terminal ended while its replacement runs is no gone of the run (Issue 41).
     let gone: bool = c.query_row(
         &format!(
             "SELECT EXISTS (SELECT 1 FROM events
-             WHERE run_id = ?1 AND kind = 'terminal_gone' AND {at} >= ?2)"
+             WHERE run_id = ?1 AND kind = 'terminal_gone' AND {at} >= ?2
+               AND (json_extract(payload_json, '$.spawn_id') IS NULL
+                    OR json_extract(payload_json, '$.spawn_id') IS
+                       (SELECT spawn_id FROM run_launch WHERE run_id = ?1
+                        ORDER BY id DESC LIMIT 1)))"
         ),
         params![run, since],
         |r| r.get(0),

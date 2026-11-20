@@ -414,6 +414,10 @@ impl Base for Herdr {
             ))
         }
     }
+    /// `server.stop`: the core and its programs stop (`makiba down --stop-base`).
+    fn stop(&self) -> Result<(), BaseError> {
+        self.call("server.stop", json!({})).map(drop)
+    }
     fn worker_denies(&self) -> BaseDenies {
         super::worker_denies()
     }
