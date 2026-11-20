@@ -155,8 +155,8 @@ const WRAPPERS: &[&str] = &[
 /// Programs that run code or a program given in their arguments.
 const RUNNERS: &[&str] = &[
     "sh", "bash", "zsh", "dash", "ksh", "fish", "python", "python3", "py", "node", "perl", "ruby",
-    "php", "lua", "sed", "awk", "gawk", "less", "rg", "find", "eval", "source", ".", "watch",
-    "script", "parallel", "make", "just", "npx", "uvx",
+    "php", "lua", "sed", "awk", "gawk", "less", "find", "eval", "source", ".", "watch", "script",
+    "parallel", "make", "just", "npx", "uvx",
 ];
 
 /// The program's own name: the last part of a path, without `.exe`, lowercased.
@@ -170,11 +170,23 @@ fn opaque(word: &str) -> bool {
     word.contains(['$', '`'])
 }
 
-/// The words of a segment from its command word on, wrappers and assignments skipped.
+/// A redirection word: `>f`, `2>>f`, `&>f`, `<f`, or the operator alone (its target follows).
+fn redirection(w: &str) -> Option<bool> {
+    let rest = w.trim_start_matches(|c: char| c.is_ascii_digit() || c == '&');
+    let op = rest.trim_start_matches(['<', '>', '&', '|']);
+    rest.starts_with(['<', '>']).then_some(op.is_empty())
+}
+
+/// The words of a segment from its command word on, wrappers, assignments and redirections
+/// skipped (a redirection may come before the program).
 fn command_words(words: &[String]) -> &[String] {
     let mut i = 0;
     while i < words.len() {
         let w = &words[i];
+        if let Some(alone) = redirection(w) {
+            i += if alone { 2 } else { 1 };
+            continue;
+        }
         let assignment = w.split_once('=').is_some_and(|(n, _)| {
             !n.is_empty() && n.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
         });
@@ -263,6 +275,9 @@ fn refused_segment(variant: &str, segment: &str, seg_mentions: bool) -> Option<S
             .iter()
             .any(|a| a.to_lowercase().contains("api.github.com"))
             .then(|| format!("{p} to the GitHub API")),
+        // ripgrep runs a program only with --pre; its pattern is a mention.
+        "rg" => (mentions && args.iter().any(|a| a == "--pre" || a.starts_with("--pre=")))
+            .then(|| "rg --pre runs a program, with the word merge".to_string()),
         _ if RUNNERS.contains(&p.as_str()) => {
             let gh_word = regex::Regex::new(r"(?i)(^|[^a-z0-9_.-])gh(\.exe)?([^a-z0-9_-]|$)")
                 .expect("pattern");
