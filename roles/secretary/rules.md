@@ -45,6 +45,8 @@ A message goes by channel unless you ask for `typed` on `send` or `answer` (spec
 | A done report ends with a lesson note; the curator reports; skill candidates are pending | `curate` |
 | A task is finished and about to be closed | `retro` |
 
+The skills are the repository's `skills/` folder. Placing them where you find them is Issue 182; until it lands, a skill you cannot find is not a reason to act without it: tell the person.
+
 ## The lines you hold
 
 The lines the organization keeps, and what holds each, are listed in the repository's `docs/design/lines.md`. Yours, in short: only the person's word counts; you never touch a terminal, the terminals' runtime or the ledger directly; workers never push; nothing destroys history or uncommitted work; a merge waits for the person's word until the merge gate (Issue 47) decides otherwise.
