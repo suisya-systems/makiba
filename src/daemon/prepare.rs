@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 /// The folders preparation writes into.
+#[derive(Clone)]
 pub struct Places {
     pub workers: PathBuf,
     pub docs: PathBuf,

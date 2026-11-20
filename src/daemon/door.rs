@@ -458,13 +458,14 @@ fn record(
     idem: Option<&str>,
     r: &Response,
 ) -> bool {
-    // `dispatch` and `close` return at `accepted` and finish later (spec section 5.2); a close
-    // of a run closed already is `done` again.
+    // `dispatch`, `close` and `push` return at `accepted` and finish later (spec section 5.2); a
+    // close of a run closed already is `done` again.
     let status = match (verb, r) {
         ("dispatch", Ok(_)) => Some("accepted"),
         ("close", Ok(v)) if v.get("closed").is_none() => Some("accepted"),
         // `makibad`'s secretary pass carries a renewal out (Issue 46).
         ("renew", Ok(_)) => Some("accepted"),
+        ("push", Ok(_)) => Some("accepted"),
         _ => status_of(r),
     };
     match status {
@@ -511,6 +512,7 @@ fn run(
         Verb::Config => config(w, actor, args),
         Verb::Pr => pr(w, args),
         Verb::Note => note(w, actor, args),
+        Verb::Push => push(w, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
 }
@@ -1354,6 +1356,32 @@ fn publish_note(raw: &Path, stem: &str, staged: &Path) -> std::io::Result<String
     Err(std::io::Error::other(format!("no free name for {stem}")))
 }
 
+/// `push` (Issue 190): accepted for a run that has a code worktree; `makibad` pushes it on a
+/// thread of its own (push.rs) and ends the command `done` or `failed` with a notice.
+fn push(w: &StateWriter, args: &Value) -> Response {
+    let task = str_arg(args, "task")?;
+    let worktree: Option<Option<String>> = w
+        .conn()
+        .query_row(
+            "SELECT (SELECT worktree FROM run_launch WHERE run_id = r.id AND kind = 'code'
+                     ORDER BY id DESC LIMIT 1)
+             FROM runs r WHERE r.task_id = ?1",
+            [task],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?;
+    match worktree {
+        None => Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), "")),
+        Some(None) => Err(refuse(
+            ErrorKind::Conflict,
+            format!("task {task:?} has no code worktree to push"),
+            "",
+        )),
+        Some(Some(_)) => Ok(json!({"task": task, "status": "accepted"})),
+    }
+}
+
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let id = args
         .get("id")
@@ -1839,6 +1867,11 @@ fn tool(v: Verb) -> Value {
                 ("task".into(), text.clone()),
             ]),
             &["state", "repo", "pr", "head", "task"],
+        ),
+        Verb::Push => (
+            "Have makibad push a worker's branch: the run's worktree, on its branch, clean, pushed as its head to the same branch at origin, never forced. Answers accepted; a notice tells you the head pushed (then record it with pr) or why it failed.",
+            Map::from_iter([("task".into(), text.clone())]),
+            &["task"],
         ),
         Verb::Inbox => (
             "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",
