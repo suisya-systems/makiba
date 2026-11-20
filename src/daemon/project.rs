@@ -66,8 +66,11 @@ fn parse_repo(s: &str) -> Option<(&str, &str)> {
 }
 
 /// The value of `allowed_repo_owners` as stored: owners, lowercased, comma-joined; `None` when
-/// one of them is not an owner name.
+/// one of them is not an owner name. An empty value allows no owner again.
 pub fn owners_value(v: &str) -> Option<String> {
+    if v.trim().is_empty() {
+        return Some(String::new());
+    }
     let owners: Vec<String> = v
         .split(',')
         .map(|o| o.trim().to_ascii_lowercase())
@@ -353,20 +356,13 @@ fn fetch(
             Some(&dest),
             &["fetch", "--no-recurse-submodules", "--prune", "origin"],
         )?;
-        // The remote's own default branch; a clone made by hand may not record it yet.
-        let remote_head = || {
-            git.run(
-                Some(&dest),
-                &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
-            )
-        };
-        let default = match remote_head() {
-            Ok(r) => r,
-            Err(_) => {
-                git.run(Some(&dest), &["remote", "set-head", "origin", "--auto"])?;
-                remote_head()?
-            }
-        };
+        // The remote's own default branch, asked anew: a fetch does not move origin/HEAD, and a
+        // clone made by hand may not record it at all.
+        git.run(Some(&dest), &["remote", "set-head", "origin", "--auto"])?;
+        let default = git.run(
+            Some(&dest),
+            &["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+        )?;
         let default = default.strip_prefix("origin/").unwrap_or(&default);
         let head = git.run(Some(&dest), &["symbolic-ref", "--short", "HEAD"])?;
         if default != head {
@@ -526,6 +522,7 @@ mod tests {
         }
         assert_eq!(owners_value("Acme, other").as_deref(), Some("acme,other"));
         assert_eq!(owners_value("acme,"), None);
+        assert_eq!(owners_value(" ").as_deref(), Some(""));
         assert_eq!(owners_value("a/b"), None);
     }
 }
