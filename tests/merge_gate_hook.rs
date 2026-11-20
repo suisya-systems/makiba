@@ -24,6 +24,24 @@ fn a_redirection_before_the_program_does_not_hide_a_merge() {
 }
 
 #[test]
+fn a_quoted_word_with_blanks_before_the_program_stays_one_word() {
+    for cmd in [
+        format!("NOTE=\"two words\" gh pr {M} 7 --repo o/r --squash"),
+        format!("NOTE='a b c' gh pr {M} 7"),
+        format!("NOTE=a\\ b gh pr {M} 7"),
+        format!("2>\"/tmp/a file\" gh pr {M} 7"),
+        format!("env NOTE=\"x y\" gh pr {M} 7"),
+    ] {
+        assert!(parse(&cmd).is_err(), "not refused: {cmd:?}");
+    }
+    // A quoted argument with blanks is still one argument: a mention passes.
+    assert_eq!(
+        parse(&format!("git commit -m \"gh pr {M} 7 is gated\"")),
+        Ok(None)
+    );
+}
+
+#[test]
 fn a_ripgrep_pattern_is_a_mention_and_its_pre_option_is_not() {
     for cmd in [
         format!("rg 'gh pr {M}' skills/"),

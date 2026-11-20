@@ -250,6 +250,40 @@ fn refused(command: &str) -> Option<String> {
     None
 }
 
+/// The words of `text` as the shell splits them: blanks inside quotes or after a backslash do not
+/// split, and the quotes and backslashes are then removed (`NOTE="two words" gh` is two words).
+/// An unclosed quote runs to the end.
+fn shell_words(text: &str) -> Vec<String> {
+    let (mut words, mut word, mut quote, mut any) = (Vec::new(), String::new(), None, false);
+    let mut chars = text.chars();
+    while let Some(c) = chars.next() {
+        match (quote, c) {
+            (None, '\'' | '"') => {
+                quote = Some(c);
+                any = true;
+            }
+            (Some(q), _) if c == q => quote = None,
+            (None | Some('"'), '\\') => {
+                if let Some(next) = chars.next() {
+                    word.push(next);
+                }
+                any = true;
+            }
+            (None, _) if c.is_whitespace() => {
+                if any || !word.is_empty() {
+                    words.push(std::mem::take(&mut word));
+                }
+                any = false;
+            }
+            _ => word.push(c),
+        }
+    }
+    if any || !word.is_empty() {
+        words.push(word);
+    }
+    words
+}
+
 /// One segment's words, quotes removed: why it is refused, if it is.
 fn refused_segment(variant: &str, segment: &str, seg_mentions: bool) -> Option<String> {
     let text: String = variant
@@ -257,8 +291,8 @@ fn refused_segment(variant: &str, segment: &str, seg_mentions: bool) -> Option<S
         .filter(|c| !matches!(c, '"' | '\'' | '\\'))
         .collect();
     let mentions = seg_mentions || mentions_merge(&text);
-    let words: Vec<String> = text
-        .split_whitespace()
+    let words: Vec<String> = shell_words(variant)
+        .into_iter()
         .map(|w| w.trim_start_matches(['(', '{']).to_string())
         .filter(|w| !w.is_empty())
         .collect();
