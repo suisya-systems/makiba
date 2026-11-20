@@ -64,6 +64,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "curator_started",
     "run_taken",
     "raw_note_saved",
+    "observation_lost",
     "config_set",
 ];
 
