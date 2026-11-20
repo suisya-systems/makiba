@@ -18,6 +18,7 @@ mod monitor;
 pub mod notify_gate;
 pub mod person_key;
 pub mod prepare;
+mod project;
 mod prompts;
 pub mod prwatch;
 mod push;
@@ -331,6 +332,7 @@ fn serve_until(
     let mut prwatch = prwatch::PrWatch::from_env();
     let mut triage =
         triage::Triage::from_env(Places::from_env(dir).repos, dispatch::capacity_from_env());
+    let mut projects = project::Projects::from_env(Places::from_env(dir).repos);
     let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
     let mut push = push::Push::new(Places::from_env(dir));
     let mut next_beat = Instant::now() + HEARTBEAT;
@@ -419,6 +421,9 @@ fn serve_until(
             if let Err(e) = prwatch.pass(&w) {
                 eprintln!("makibad: pr watch: {e}");
             }
+            if let Err(e) = projects.pass(&w) {
+                eprintln!("makibad: project: {e}");
+            }
             if let Err(e) = triage.pass(&w) {
                 eprintln!("makibad: triage: {e}");
             }
@@ -441,6 +446,7 @@ fn serve_until(
     // A stop: end the pollers (their `gh` children too), say so, release the lock, leave no pid behind.
     drop(prwatch);
     drop(triage);
+    drop(projects);
     event(&w, "dispatcher_stopped", &info.name, &info.version).map_err(|e| e.to_string())?;
     w.conn()
         .execute("UPDATE dispatcher SET subscribed = 0 WHERE id = 1", [])
