@@ -107,7 +107,13 @@ impl Verify {
         };
         for row in rows {
             match row.evidence {
-                Some(event) if row.stage == "dialog_passed" => verified(w, &row, event)?,
+                Some(event) if row.stage == "dialog_passed" => {
+                    let applied = verified(w, &row, event)?;
+                    if !applied {
+                        // Failed or suspended meanwhile (Issue 163): nothing runs for it.
+                        let _ = super::resume::end_terminals(base, &row.spawn);
+                    }
+                }
                 // Seen working in time, still at `launched` (a restart came after the timeout):
                 // the dialog step moves it on (Issue M3-7).
                 Some(_) => {}
@@ -117,7 +123,9 @@ impl Verify {
                         self.timeout.as_millis()
                     );
                     let screen = screen_of(base, &row.spawn);
-                    fail(w, row.id, &row.task, &row.spawn, &row.stage, &why, &screen)?;
+                    if !fail(w, row.id, &row.task, &row.spawn, &row.stage, &why, &screen)? {
+                        let _ = super::resume::end_terminals(base, &row.spawn);
+                    }
                 }
                 _ => {}
             }
@@ -139,11 +147,23 @@ fn screen_of(base: &dyn Base, spawn: &str) -> Vec<String> {
 }
 
 /// `worker_spawn_verified`, stage `verified` and the run `in_use`, together; the conversation id
-/// when the agent module has one (a resumed launch keeps the id it resumed).
-fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<()> {
+/// when the agent module has one (a resumed launch keeps the id it resumed). Only over
+/// `dialog_passed` (Issue 163): `false`, and nothing written, when the launch was moved meanwhile.
+fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<bool> {
     let conversation = agents::by_name(&row.agent)
         .and_then(|a| a.conversation_id(Path::new(&row.worktree), &agents::session_id(&row.spawn)));
+    super::crash::hold("verified");
     w.transaction(|w| {
+        let n = w.conn().execute(
+            "UPDATE run_launch SET stage = 'verified',
+               conversation_id = COALESCE(conversation_id, ?2),
+               verified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1 AND stage = 'dialog_passed'",
+            params![row.id, conversation],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
         w.append_event(&NewEvent {
             kind: "worker_spawn_verified",
             actor: Some("makibad"),
@@ -151,19 +171,12 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<()> {
             run_task_id: Some(&row.task),
             ..Default::default()
         })?;
-        w.conn().execute(
-            "UPDATE run_launch SET stage = 'verified',
-               conversation_id = COALESCE(conversation_id, ?2),
-               verified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = ?1",
-            params![row.id, conversation],
-        )?;
         // ponytail: a run closed while its launch was under way is not brought back.
         w.conn().execute(
             "UPDATE runs SET status = 'in_use' WHERE id = ?1 AND status IN ('queued', 'suspended')",
             [row.run_id],
         )?;
-        Ok(())
+        Ok(true)
     })
 }
 
@@ -174,6 +187,8 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<()> {
 /// A resume of a `suspended` run (Issue 41: a launch with a conversation id before it is
 /// verified) does not fail its run: its keys are revoked and a fresh launch is added with the
 /// same brief and workplace, and the relaunch ends the terminal left here.
+///
+/// Only over `stage` (Issue 163): `false`, and nothing written, when the launch was moved meanwhile.
 pub(super) fn fail(
     w: &StateWriter,
     id: i64,
@@ -182,8 +197,22 @@ pub(super) fn fail(
     stage: &str,
     why: &str,
     screen: &[String],
-) -> Result<()> {
+) -> Result<bool> {
+    super::crash::hold("failed");
     w.transaction(|w| {
+        let resumed: bool = w.conn().query_row(
+            "SELECT l.conversation_id IS NOT NULL AND l.stage != 'verified' AND r.status = 'suspended'
+             FROM run_launch l JOIN runs r ON r.id = l.run_id WHERE l.id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let n = w.conn().execute(
+            "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1 AND stage = ?3",
+            params![id, why, stage],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
         w.append_event(&NewEvent {
             kind: "worker_spawn_failed",
             actor: Some("makibad"),
@@ -196,20 +225,10 @@ pub(super) fn fail(
             run_task_id: Some(task),
             ..Default::default()
         })?;
-        let resumed: bool = w.conn().query_row(
-            "SELECT l.conversation_id IS NOT NULL AND l.stage != 'verified' AND r.status = 'suspended'
-             FROM run_launch l JOIN runs r ON r.id = l.run_id WHERE l.id = ?1",
-            [id],
-            |r| r.get(0),
-        )?;
-        w.conn().execute(
-            "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1",
-            params![id, why],
-        )?;
         if resumed {
             super::resume::revoke_keys(w, spawn)?;
             super::launch::add_relaunch(w, id, None)?;
-            return Ok(());
+            return Ok(true);
         }
         w.conn().execute(
             "UPDATE runs SET status = 'failed', outcome_note = ?2,
@@ -218,7 +237,7 @@ pub(super) fn fail(
             params![task, format!("launch failed: {why}")],
         )?;
         if !super::notify_gate::decide("worker_spawn_failed").send {
-            return Ok(());
+            return Ok(true);
         }
         // The notice (spec 5.4): the event, the message, the pending delivery with no attempt.
         let event = w.append_event(&NewEvent {
@@ -243,7 +262,7 @@ pub(super) fn fail(
             "INSERT INTO event_deliveries (source_event_id, recipient) VALUES (?1, ?2)",
             params![event, AGENT_SECRETARY],
         )?;
-        Ok(())
+        Ok(true)
     })
 }
 

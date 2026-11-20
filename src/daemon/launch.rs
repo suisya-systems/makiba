@@ -151,6 +151,19 @@ impl Launch {
             })?
             .collect::<std::result::Result<_, _>>()?
         };
+        // A launch this process started and has not recorded, failed meanwhile by somebody else
+        // (Issue 163): its terminal is ended once the base can list.
+        let gone: Vec<String> = self
+            .lock()
+            .keys()
+            .filter(|s| !rows.iter().any(|r| &r.spawn == *s))
+            .cloned()
+            .collect();
+        for spawn in gone {
+            if super::resume::end_terminals(base, &spawn) {
+                self.lock().remove(&spawn);
+            }
+        }
         let mut launched = Vec::new();
         for row in rows {
             let pending = self.lock().get(&row.spawn).cloned();
@@ -163,10 +176,18 @@ impl Launch {
             match outcome {
                 Outcome::Up => {
                     self.lock().insert(row.spawn.clone(), Pending::Up);
-                    record(w, &row)?;
-                    super::crash::point("launched");
-                    self.lock().remove(&row.spawn);
-                    launched.push(row.task);
+                    if record(w, &row)? {
+                        super::crash::point("launched");
+                        self.lock().remove(&row.spawn);
+                        launched.push(row.task);
+                    } else {
+                        // Failed meanwhile by somebody else (Issue 163): nothing runs for it,
+                        // and the key this pass issued for it is revoked.
+                        super::resume::revoke_keys(w, &row.spawn)?;
+                        if super::resume::end_terminals(base, &row.spawn) {
+                            self.lock().remove(&row.spawn);
+                        }
+                    }
                 }
                 Outcome::Down(why) => {
                     self.lock().remove(&row.spawn);
@@ -363,9 +384,18 @@ pub fn add_relaunch(w: &StateWriter, from: i64, conversation: Option<&str>) -> R
     Ok(spawn)
 }
 
-/// `worker_spawned` and stage `launched`, together.
-fn record(w: &StateWriter, row: &Row) -> Result<()> {
+/// `worker_spawned` and stage `launched`, together, only over `settings_ready` (Issue 163):
+/// `false`, and nothing written, when the launch was moved meanwhile.
+fn record(w: &StateWriter, row: &Row) -> Result<bool> {
+    super::crash::hold("launched");
     w.transaction(|w| {
+        let n = w.conn().execute(
+            "UPDATE run_launch SET stage = 'launched' WHERE id = ?1 AND stage = 'settings_ready'",
+            [row.id],
+        )?;
+        if n == 0 {
+            return Ok(false);
+        }
         w.append_event(&NewEvent {
             kind: "worker_spawned",
             actor: Some("makibad"),
@@ -373,11 +403,7 @@ fn record(w: &StateWriter, row: &Row) -> Result<()> {
             run_task_id: Some(&row.task),
             ..Default::default()
         })?;
-        w.conn().execute(
-            "UPDATE run_launch SET stage = 'launched' WHERE id = ?1",
-            [row.id],
-        )?;
-        Ok(())
+        Ok(true)
     })
 }
 

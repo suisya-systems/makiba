@@ -91,7 +91,8 @@ impl Prepare {
     }
 
     /// One pass: moves every taken launch still `planned` or `worktree_ready` as far as it goes.
-    /// Returns the task ids that reached `settings_ready`. A launch that cannot be prepared goes
+    /// Returns the task ids that reached `settings_ready`. Each stage is written only over the one
+    /// read (Issue 163): a launch moved meanwhile by somebody else is left as it is. A launch that cannot be prepared goes
     /// through the failure path of M3-6 (Issue 124): `worker_spawn_failed` with the stage and the
     /// reason, the launch and its run `failed`, and a notice to the secretary, in one transaction.
     pub fn pass(&self, w: &StateWriter) -> Result<Vec<String>> {
@@ -125,7 +126,9 @@ impl Prepare {
         let mut ready = Vec::new();
         for l in launches {
             match self.prepare(w, &l) {
-                Ok(()) => ready.push(l.task),
+                Ok(true) => ready.push(l.task),
+                // Moved by somebody else (a close, `makiba down`): left as it is (Issue 163).
+                Ok(false) => {}
                 Err(why) => {
                     // The stage it got to: `prepare` may have moved it past the one read.
                     let stage: String = w.conn().query_row(
@@ -133,14 +136,17 @@ impl Prepare {
                         [l.id],
                         |r| r.get(0),
                     )?;
-                    super::verify::fail(w, l.id, &l.task, &l.spawn, &stage, &why, &[])?;
+                    if matches!(stage.as_str(), "planned" | "worktree_ready") {
+                        super::verify::fail(w, l.id, &l.task, &l.spawn, &stage, &why, &[])?;
+                    }
                 }
             }
         }
         Ok(ready)
     }
 
-    fn prepare(&self, w: &StateWriter, l: &Launch) -> std::result::Result<(), String> {
+    /// `Ok(false)`: a stage update found the launch moved by somebody else; nothing more is done.
+    fn prepare(&self, w: &StateWriter, l: &Launch) -> std::result::Result<bool, String> {
         let db = |e: crate::db::Error| e.to_string();
         let one = |s: &str| !s.is_empty() && s != "." && s != ".." && !s.contains(['/', '\\']);
         if !one(&l.task) || !one(&l.project) {
@@ -156,12 +162,18 @@ impl Prepare {
             } else {
                 self.add_worktree(l, &workplace)?;
             }
-            w.conn()
+            super::crash::hold("worktree_ready");
+            let n = w
+                .conn()
                 .execute(
-                    "UPDATE run_launch SET stage = 'worktree_ready' WHERE id = ?1",
+                    "UPDATE run_launch SET stage = 'worktree_ready'
+                     WHERE id = ?1 AND stage = 'planned'",
                     [l.id],
                 )
                 .map_err(|e| db(e.into()))?;
+            if n == 0 {
+                return Ok(false);
+            }
             super::crash::point("worktree_ready");
         }
         let agent: Box<dyn Agent> = agents::by_name(&l.agent)
@@ -212,14 +224,20 @@ impl Prepare {
                 &settings,
             )
             .map_err(|e| e.to_string())?;
-        w.conn()
+        super::crash::hold("settings_ready");
+        let n = w
+            .conn()
             .execute(
-                "UPDATE run_launch SET stage = 'settings_ready' WHERE id = ?1",
+                "UPDATE run_launch SET stage = 'settings_ready'
+                 WHERE id = ?1 AND stage = 'worktree_ready'",
                 [l.id],
             )
             .map_err(|e| db(e.into()))?;
+        if n == 0 {
+            return Ok(false);
+        }
         super::crash::point("settings_ready");
-        Ok(())
+        Ok(true)
     }
 
     /// A pass cut short before the stage was written leaves the worktree behind: it is kept only
