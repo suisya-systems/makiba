@@ -23,8 +23,31 @@ pub(super) fn revoke_keys(w: &StateWriter, spawn: &str) -> Result<()> {
     Ok(())
 }
 
+/// End every terminal carrying the launch's `makiba.spawn`: a pass found its launch failed or
+/// suspended by somebody else while it worked on it (Issue 163), so nothing runs for it. Best
+/// effort: an error is printed. `false` when the base could not list.
+pub(super) fn end_terminals(base: &dyn Base, spawn: &str) -> bool {
+    let terminals = match base.list() {
+        Ok(ts) => ts,
+        Err(e) => {
+            eprintln!("makibad: cannot list to end the terminal of {spawn}: {e}");
+            return false;
+        }
+    };
+    for t in terminals
+        .iter()
+        .filter(|t| t.tags.get(TAG_SPAWN).map(String::as_str) == Some(spawn))
+    {
+        if let Err(e) = base.end(&t.id) {
+            eprintln!("makibad: cannot end {}: {e}", t.id.0);
+        }
+    }
+    true
+}
+
 /// A launch at `stage` whose terminal cannot be adopted: failed by the path of M3-6 and its keys
-/// revoked, in one transaction. No terminal is ended.
+/// revoked, in one transaction. No terminal is ended. Nothing is written for a launch no longer at
+/// `stage` (Issue 163).
 pub(super) fn fail(
     w: &StateWriter,
     id: i64,
@@ -34,8 +57,10 @@ pub(super) fn fail(
     why: &str,
 ) -> Result<()> {
     w.transaction(|w| {
-        super::verify::fail(w, id, task, spawn, stage, why, &[])?;
-        revoke_keys(w, spawn)
+        if super::verify::fail(w, id, task, spawn, stage, why, &[])? {
+            revoke_keys(w, spawn)?;
+        }
+        Ok(())
     })
 }
 

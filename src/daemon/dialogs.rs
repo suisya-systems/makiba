@@ -281,12 +281,12 @@ impl Dialogs {
                 .find(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn))
             else {
                 let why = format!("no terminal carries {TAG_SPAWN}={}", row.spawn);
-                fail(w, &row, &why, &[])?;
+                fail(w, base, &row, &why, &[])?;
                 continue;
             };
             if !t.alive {
                 let screen = base.read(&t.id, 0).unwrap_or_default();
-                fail(w, &row, "the terminal ended at startup", &screen)?;
+                fail(w, base, &row, "the terminal ended at startup", &screen)?;
                 continue;
             }
             let policies = agents::by_name(&row.agent)
@@ -295,8 +295,12 @@ impl Dialogs {
             if let Some(s) = &t.status
                 && !policies.iter().any(|d| shown_with(d, s))
             {
-                passed(w, row.id)?;
-                super::crash::point("dialog_passed");
+                if passed(w, row.id)? {
+                    super::crash::point("dialog_passed");
+                } else {
+                    // Failed meanwhile by somebody else (Issue 163): nothing runs for it.
+                    let _ = super::resume::end_terminals(base, &row.spawn);
+                }
                 continue;
             }
             let Ok(screen) = base.read(&t.id, 0) else {
@@ -310,7 +314,7 @@ impl Dialogs {
             }
             match decision {
                 Decision::Wait(_) => {}
-                Decision::Unknown(why) => fail(w, &row, &why, &screen)?,
+                Decision::Unknown(why) => fail(w, base, &row, &why, &screen)?,
                 Decision::Key { dialog, key } => {
                     // The rule for the dialog shown (a status shown with another dialog: wait),
                     // and again on a fresh look: the status may have changed since the list.
@@ -330,18 +334,23 @@ impl Dialogs {
     }
 }
 
-fn passed(w: &StateWriter, id: i64) -> Result<()> {
-    w.conn().execute(
-        "UPDATE run_launch SET stage = 'dialog_passed' WHERE id = ?1",
+/// Stage `dialog_passed`, only over `launched` (Issue 163): `false` when the launch was moved.
+fn passed(w: &StateWriter, id: i64) -> Result<bool> {
+    super::crash::hold("dialog_passed");
+    let n = w.conn().execute(
+        "UPDATE run_launch SET stage = 'dialog_passed' WHERE id = ?1 AND stage = 'launched'",
         [id],
     )?;
-    Ok(())
+    Ok(n > 0)
 }
 
 /// Stage `failed` and `worker_spawn_failed`, together (spec section 10), with the run and the
-/// notice of M3-6. The terminal is left.
-fn fail(w: &StateWriter, row: &Row, why: &str, screen: &[String]) -> Result<()> {
-    super::verify::fail(w, row.id, &row.task, &row.spawn, "launched", why, screen)
+/// notice of M3-6. The terminal is left, unless the launch was failed meanwhile by somebody else.
+fn fail(w: &StateWriter, base: &dyn Base, row: &Row, why: &str, screen: &[String]) -> Result<()> {
+    if !super::verify::fail(w, row.id, &row.task, &row.spawn, "launched", why, screen)? {
+        let _ = super::resume::end_terminals(base, &row.spawn);
+    }
+    Ok(())
 }
 
 #[cfg(test)]
