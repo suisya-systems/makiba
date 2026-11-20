@@ -9,6 +9,7 @@ pub mod delivery;
 mod dialogs;
 pub mod dispatch;
 pub mod door;
+mod gh;
 pub mod inbox;
 pub mod launch;
 mod monitor;
@@ -18,6 +19,7 @@ pub mod prepare;
 pub mod prwatch;
 mod recover;
 mod resume;
+mod triage;
 mod verify;
 
 use self::anomalies::Anomalies;
@@ -293,6 +295,8 @@ fn serve_until(
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
+    let mut triage =
+        triage::Triage::from_env(Places::from_env(dir).repos, dispatch::capacity_from_env());
     let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
@@ -365,6 +369,9 @@ fn serve_until(
             if let Err(e) = prwatch.pass(&w) {
                 eprintln!("makibad: pr watch: {e}");
             }
+            if let Err(e) = triage.pass(&w) {
+                eprintln!("makibad: triage: {e}");
+            }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");
             }
@@ -380,6 +387,7 @@ fn serve_until(
 
     // A stop: end the pollers (their `gh` children too), say so, release the lock, leave no pid behind.
     drop(prwatch);
+    drop(triage);
     event(&w, "dispatcher_stopped", &info.name, &info.version).map_err(|e| e.to_string())?;
     w.conn()
         .execute("UPDATE dispatcher SET subscribed = 0 WHERE id = 1", [])

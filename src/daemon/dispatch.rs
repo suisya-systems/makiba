@@ -29,6 +29,24 @@ pub fn capacity_from_env() -> usize {
 const TAKEN: &str = "EXISTS (SELECT 1 FROM events e WHERE e.kind = 'run_taken'
                       AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id)";
 
+/// The runs counted against `max_concurrent_workers`: `in_use`, or `queued` / `suspended` with a
+/// taken launch not yet `verified` or `failed`.
+pub fn busy(w: &StateWriter) -> Result<usize> {
+    // A run counts once, however it is counted. Only a run still `queued` or `in_use` can be
+    // waiting on a launch (ponytail: a launch left open on a run that ended is not counted).
+    let n: i64 = w.conn().query_row(
+        &format!(
+            "SELECT count(*) FROM runs r WHERE r.status = 'in_use'
+             OR (r.status IN ('queued', 'suspended')
+             AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
+                         AND l.stage NOT IN ('verified', 'failed') AND {TAKEN}))"
+        ),
+        [],
+        |r| r.get(0),
+    )?;
+    Ok(n as usize)
+}
+
 pub struct Dispatch {
     capacity: usize,
 }
@@ -50,19 +68,7 @@ impl Dispatch {
     }
 
     fn take_one(&self, w: &StateWriter) -> Result<Option<String>> {
-        // A run counts once, however it is counted. Only a run still `queued` or `in_use` can be
-        // waiting on a launch (ponytail: a launch left open on a run that ended is not counted).
-        let busy: i64 = w.conn().query_row(
-            &format!(
-                "SELECT count(*) FROM runs r WHERE r.status = 'in_use'
-                 OR (r.status IN ('queued', 'suspended')
-                 AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
-                             AND l.stage NOT IN ('verified', 'failed') AND {TAKEN}))"
-            ),
-            [],
-            |r| r.get(0),
-        )?;
-        if busy >= self.capacity as i64 {
+        if busy(w)? >= self.capacity {
             return Ok(None);
         }
         // The oldest queued run whose newest launch is `planned` and not taken yet.

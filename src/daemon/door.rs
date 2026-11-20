@@ -597,6 +597,15 @@ pub(super) fn notice(
     message_row(w, "makibad", recipient, "notice", Some(task), body)
 }
 
+/// A notice of `makibad` to `recipient` about no task (the triage scan, Issue 40).
+pub(super) fn notice_untasked(
+    w: &StateWriter,
+    recipient: &str,
+    body: &str,
+) -> crate::db::Result<i64> {
+    message_row(w, "makibad", recipient, "notice", None, body)
+}
+
 fn message_row(
     w: &StateWriter,
     sender: &str,
