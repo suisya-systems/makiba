@@ -54,6 +54,8 @@ Test seam of a restart (M3-7): a debug build of `makibad` reads `<state>/makibad
 
 Test seam of `makiba up`: `HC_BIN` is the `hc` program it runs as `hc server start` (default `hc`); a test points it at a stand-in.
 
+Test seam of the triage scan (Issue 40): `MAKIBA_TRIAGE_INTERVAL_MS` is the least time between two scans in milliseconds (default 1800000, 30 minutes), read when `makibad` starts; the scan reads GitHub through `MAKIBA_GH` as the PR watches do (section 5.6). Nothing in the role files, `makiba up` or any launch sets it.
+
 Test seam of the door: with `MAKIBA_DOOR=none` `makibad` opens no Unix socket (it says so in its log) and serves the port as usual, and the person's `makiba` fails at once saying the socket is off; nothing in the role files, `makiba up` or any launch sets it.
 
 Nothing is written into a target repository: no rules file, no settings file (paddock Q10, Q12).
@@ -571,6 +573,8 @@ New:
 | `curator_started` | The curator was launched | `spawn_id` |
 | `run_taken` | A pass of `makibad` took a `queued` run within `max_concurrent_workers` (counted: runs `in_use` plus launches not yet `verified` or `failed`; oldest `dispatched_at` first). The launch steps start from it | `task_id`, `spawn_id` (of the run's newest `run_launch` row) |
 
+`work_discovery_scanned` (Issue 40) is written by the triage pass of `makibad`. A scan is due when a `run_closed` is newer than the `through_close_id` of the newest scan whose `status` is not `error`, and the newest scan of any status is at least `MAKIBA_TRIAGE_INTERVAL_MS` old, both read from `events`; a close inside the interval waits for its end. The scan (`src/work_discovery/`) runs on a thread of its own over the active projects; a project's GitHub repository is its `origin_url`, else the `origin` remote of its clone in the repositories folder (section 2), else it is reported as having none. It reads with `gh issue list` and `gh pr list --repo github.com/<owner>/<repo>` (open Issues, open PRs, recent merges and, for one repository, the merged PRs and closed Issues the effort model learns from); free capacity is `max_concurrent_workers` minus the runs `dispatch` counts. No model is called: candidates are ordered by the goal clause their Issue names (`docs/goals.md`). Payload: `trigger` (`close`), `status` (`candidates_found`, `no_candidates` or `error`), `through_close_id` (the newest `run_closed` id when the scan started), `candidate_refs` (`owner/repo#N`, sorted, comma-joined), `diagnostics` (`unset:<owner/repo>`, `error:<owner/repo>` and `norepo:<project>`, sorted, comma-joined), `candidate_count`, `truncated_count`, `free_workers`, `repos`, `notified`, `error`. When the scan did not fail, found something, and its `candidate_refs` or `diagnostics` differ from those of the newest event with `notified` true, a `notice` to the secretary lists the candidates with their clauses and qualifiers and the diagnostics not in that notice; the event, the message, its `message_sent` and the delivery row are written in one transaction.
+
 `worker_spawned` and `worker_spawn_verified` carry `task_id` (null for a launch without a run, section 5.3) and `spawn_id`; `worker_spawn_verified` also carries `event_id`, the id of the `terminal_status` (`working`) or `terminal_turn` of that `spawn_id` that verified the launch (section 5.3); the database refuses it without one.
 
 In `base_resynced`, `reason` is `start` for the first `Resync` of a `makibad` process and `resync` for every later one (a `Resync` carries no cause of its own), and `terminals` is the number of terminals of this organization in the list. It is written last, after the view is rebuilt, so a reader that waits for it sees the result.
@@ -675,6 +679,6 @@ tests/test_*.py        tests of the Python development tools only (below)
 
 An Issue's acceptance test is one file `tests/<name>.rs`; the rule the acceptance checker applies to it is in `docs/acceptance-check.md` (M0-1). The crates the package may use are listed in plan.md section 5.1.
 
-Threads, not an async runtime. `makibad` runs a thread per long-lived job (the socket door, the agents' port, the base's event subscription, the pass that delivers messages and checks anomalies, the PR watches) and a thread per open connection. A rusqlite connection is not shared between threads; how the writers to `state.db` are arranged is decided in M2-1. Every blocking read carries a timeout.
+Threads, not an async runtime. `makibad` runs a thread per long-lived job (the socket door, the agents' port, the base's event subscription, the pass that delivers messages and checks anomalies, the PR watches, the triage scan) and a thread per open connection. A rusqlite connection is not shared between threads; how the writers to `state.db` are arranged is decided in M2-1. Every blocking read carries a timeout.
 
 Python remains only for development tools, which run in CI or by a person and are never installed: `tools/*.py` (the Issue generator and the checks of incidents and language), `scripts/probes/`, and their tests `tests/test_*.py`.
