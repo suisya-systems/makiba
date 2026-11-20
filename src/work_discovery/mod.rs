@@ -18,8 +18,8 @@ pub mod refs;
 
 use effort::{compute_priority, estimate_effort, milestone_title};
 use refs::{
-    QualRef, classify_q, cross_keyword_refs, dependency_text, has_block_label, is_home_disp,
-    label_names, pr_close_refs, pr_referenced_refs, ref_to_disp, ref_to_json,
+    Canon, QualRef, canon_repo, classify_q, cross_keyword_refs, dependency_text, has_block_label,
+    is_home_disp, label_names, pr_close_refs, pr_referenced_refs, ref_to_disp, ref_to_json,
     unparsed_dependency_line,
 };
 use serde_json::{Map, Value, json};
@@ -530,6 +530,7 @@ struct Ctx<'a> {
     collapse: Option<&'a str>,
     effort_model: Option<&'a Value>,
     base_done: BTreeMap<QualRef, Done>,
+    canon: Canon,
 }
 
 fn disp_repo(repo: Option<&str>, collapse: Option<&str>) -> Value {
@@ -541,7 +542,7 @@ fn disp_repo(repo: Option<&str>, collapse: Option<&str>) -> Value {
 }
 
 fn build_candidate(issue: &Value, home: Option<&str>, x: &Ctx) -> Option<Map<String, Value>> {
-    let (blocked, open_blocking, all) = classify_q(issue, home, &x.open);
+    let (blocked, open_blocking, all) = classify_q(issue, home, &x.open, &x.canon);
     if blocked {
         return None;
     }
@@ -688,6 +689,11 @@ pub fn scan_repos(
         collapse: collapse_repo,
         effort_model,
         base_done: BTreeMap::new(),
+        canon: bundles
+            .iter()
+            .filter_map(|b| b.repo.clone())
+            .map(|r| (r.to_lowercase(), r))
+            .collect(),
     };
     let mut raw_done: Vec<BTreeMap<QualRef, Done>> = Vec::new();
     let mut base_branch_scan = Vec::new();
@@ -717,11 +723,12 @@ pub fn scan_repos(
             x.referenced
                 .extend(closed.union(&referenced).map(|&n| (repo.clone(), n)));
             for (r, n) in cross_keyword_refs(&text, true) {
+                let r = canon_repo(r, &x.canon);
                 x.closed.insert((Some(r.clone()), n));
                 x.referenced.insert((Some(r), n));
             }
             for (r, n) in cross_keyword_refs(&text, false) {
-                x.referenced.insert((Some(r), n));
+                x.referenced.insert((Some(canon_repo(r, &x.canon)), n));
             }
         }
         let base = b.base_branch.as_deref().map(str::trim).unwrap_or("");
@@ -740,15 +747,9 @@ pub fn scan_repos(
     }
 
     // A closing keyword keeps the author's casing; fold it onto the scanned repository it names.
-    let canonical: HashMap<String, String> = x
-        .scanned
-        .iter()
-        .flatten()
-        .map(|r| (r.to_lowercase(), r.clone()))
-        .collect();
     for done in raw_done {
         for ((repo, n), info) in done {
-            let repo = repo.map(|r| canonical.get(&r.to_lowercase()).cloned().unwrap_or(r));
+            let repo = repo.map(|r| canon_repo(r, &x.canon));
             let r = (repo, n);
             if x.base_done.get(&r).is_none_or(|p| info.key > p.key) {
                 x.base_done.insert(r, info);
@@ -813,7 +814,7 @@ pub fn scan_repos(
                     "repo": disp_repo(repo, collapse_repo), "issue": number, "line": line,
                 }));
             }
-            let (blocked, open_blocking, _) = classify_q(issue, repo, &x.open);
+            let (blocked, open_blocking, _) = classify_q(issue, repo, &x.open, &x.canon);
             if blocked {
                 excluded_blocked.push(json!({
                     "repo": disp_repo(repo, collapse_repo),

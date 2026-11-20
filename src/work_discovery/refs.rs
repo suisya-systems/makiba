@@ -8,7 +8,7 @@
 
 use regex::Regex;
 use serde_json::Value;
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::sync::LazyLock;
 
 macro_rules! re {
@@ -118,15 +118,22 @@ fn keyword_lead_runs<'a>(text: &'a str, keyword: &Regex) -> Vec<&'a str> {
     out
 }
 
-/// The home `#N` of a run; a `#N` right after a word char or `/` (`owner/repo#N`) is not one.
+/// The home `#N` of a run; a `#N` right after a word char or `/`, or inside a cross ref
+/// (`owner/repo-#N`, a repository name may end in `-` or `.`), is not one.
 fn home_refs(run: &str) -> Vec<i64> {
+    let cross: Vec<(usize, usize)> = CROSS_REF_TOKEN
+        .find_iter(run)
+        .map(|m| (m.start(), m.end()))
+        .collect();
     ISSUE_REF
         .captures_iter(run)
         .filter(|c| {
-            run[..c.get(0).unwrap().start()]
+            let start = c.get(0).unwrap().start();
+            run[..start]
                 .chars()
                 .next_back()
                 .is_none_or(|p| !(p.is_alphanumeric() || p == '_' || p == '/'))
+                && !cross.iter().any(|&(s, e)| s <= start && start < e)
         })
         .filter_map(|c| c[1].parse().ok())
         .collect()
@@ -304,14 +311,27 @@ pub fn issue_blocking_refs_q(issue: &Value, home_repo: Option<&str>) -> Vec<Qual
     refs
 }
 
+/// Scanned repositories by their lowercased name: GitHub names are case-insensitive, so a ref
+/// written `Owner/Repo#5` is the scanned `owner/repo`'s #5.
+pub(crate) type Canon = HashMap<String, String>;
+
+pub(crate) fn canon_repo(repo: String, canon: &Canon) -> String {
+    canon.get(&repo.to_lowercase()).cloned().unwrap_or(repo)
+}
+
 /// `(blocked, open blockers, all blockers)`: a blocker is open when it is in `open`; a closed
 /// one, or one in a repository not scanned, is resolved.
 pub(crate) fn classify_q(
     issue: &Value,
     home_repo: Option<&str>,
     open: &HashSet<QualRef>,
+    canon: &Canon,
 ) -> (bool, Vec<QualRef>, Vec<QualRef>) {
-    let all = issue_blocking_refs_q(issue, home_repo);
+    let mut all: Vec<QualRef> = issue_blocking_refs_q(issue, home_repo)
+        .into_iter()
+        .map(|(r, n)| (r.map(|r| canon_repo(r, canon)), n))
+        .collect();
+    ref_sort(&mut all);
     let open_blocking: Vec<QualRef> = all.iter().filter(|r| open.contains(*r)).cloned().collect();
     if has_block_label(issue) || !open_blocking.is_empty() {
         return (true, open_blocking, all);
@@ -322,7 +342,7 @@ pub(crate) fn classify_q(
 /// Single-repo form: `("resolved" | "blocked", open blocking numbers)`.
 pub fn classify_dependency(issue: &Value, open_refs: &[i64]) -> (String, Vec<i64>) {
     let open: HashSet<QualRef> = open_refs.iter().map(|&n| (None, n)).collect();
-    let (blocked, open_blocking, _) = classify_q(issue, None, &open);
+    let (blocked, open_blocking, _) = classify_q(issue, None, &open, &Canon::new());
     let status = if blocked { "blocked" } else { "resolved" };
     (
         status.to_string(),
