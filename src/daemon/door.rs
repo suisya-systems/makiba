@@ -340,16 +340,26 @@ impl Door {
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
         }
+        // A saved note is a file outside the transaction: it goes when its record does.
+        let unsave = || {
+            if let (Verb::Note, Ok(saved)) = (v, &r)
+                && let Some(file) = saved["file"].as_str()
+            {
+                let _ = std::fs::remove_file(super::curator::knowledge_dir().join(file));
+            }
+        };
         // A verb's writes stand only with their record: without it a retry would repeat them.
         // A transaction SQLite rolled back by itself (a full disk) is gone: nothing was done.
         if !record(&w, &actor, verb, &args, idem, &r) || w.conn().is_autocommit() {
             let _ = w.rollback();
+            unsave();
             return Err(internal(
                 "the request could not be recorded; nothing was done",
             ));
         }
         if let Err(e) = w.commit() {
             let _ = w.rollback();
+            unsave();
             return Err(internal(e));
         }
         r
@@ -542,6 +552,7 @@ fn run(
         }
         Verb::Config => config(w, actor, args),
         Verb::Pr => pr(w, args),
+        Verb::Note => note(w, actor, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
 }
@@ -1246,6 +1257,112 @@ fn pr(w: &StateWriter, args: &Value) -> Response {
     }
     let r = super::prwatch::register(w, kind, task, repo, number, head).map_err(internal)?;
     Ok(json!({"watch_id": r.watch_id, "status": r.status}))
+}
+
+/// The four headings of a raw note (skills/curate, roles/curator).
+const NOTE_HEADINGS: [&str; 4] = [
+    "## Facts",
+    "## Judgment",
+    "## Grounds",
+    "## Where it applies",
+];
+
+/// `note` (spec section 12, Issue 189): the secretary's raw note, saved by `makibad` as
+/// `<knowledge>/raw/<date>-<topic>[-n].md` with `Task: <task_id>` first. The same idem returns
+/// the first file through the door's replay.
+// ponytail: makibad dying between the file's publication and the commit leaves the note without
+// its record, so a retry of the same idem saves a second copy (never a lost note). A stored
+// intent reconciled at start would close it.
+fn note(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let task = str_arg(args, "task")?;
+    let topic = str_arg(args, "topic")?;
+    let text = str_arg(args, "text")?;
+    let kebab = topic.len() <= 64
+        && topic.split('-').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+    if !kebab {
+        return Err(usage(format!(
+            "topic is English kebab-case (a-z, 0-9, single dashes, at most 64), not {topic:?}"
+        )));
+    }
+    let missing: Vec<&str> = NOTE_HEADINGS
+        .into_iter()
+        .filter(|h| !text.lines().any(|l| l.trim_end() == *h))
+        .collect();
+    if !missing.is_empty() {
+        return Err(usage(format!(
+            "a raw note has the four headings {}; missing: {}",
+            NOTE_HEADINGS.join(", "),
+            missing.join(", ")
+        )));
+    }
+    if !run_exists(w, task)? {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    let date: String = w
+        .conn()
+        .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+        .map_err(internal)?;
+    let mut body = format!("Task: {task}\n\n{text}");
+    if !body.ends_with('\n') {
+        body.push('\n');
+    }
+    let raw = super::curator::knowledge_dir().join("raw");
+    let name = save_note(&raw, &format!("{date}-{topic}"), &body)
+        .map_err(|e| internal(format!("cannot save the note in {}: {e}", raw.display())))?;
+    let file = format!("raw/{name}");
+    let payload = json!({"task_id": task, "file": file});
+    if let Err(e) = w.append_event(&NewEvent {
+        kind: "raw_note_saved",
+        actor: Some(actor),
+        payload: Some(&payload),
+        run_task_id: Some(task),
+        ..Default::default()
+    }) {
+        let _ = std::fs::remove_file(raw.join(&name));
+        return Err(internal(e));
+    }
+    Ok(json!({"file": file}))
+}
+
+/// Write `body` whole to a staging file (a dot name, which the curator's count skips), then
+/// publish it under the first free `<stem>.md`, `<stem>-2.md`, ... by a hard link, which never
+/// replaces a file. A name in `raw/archive/` is not free. Returns the name.
+fn save_note(raw: &Path, stem: &str, body: &str) -> std::io::Result<String> {
+    std::fs::create_dir_all(raw)?;
+    let staged = raw.join(format!(".note-{}", random_key()?));
+    std::fs::write(&staged, body)?;
+    let r = publish_note(raw, stem, &staged);
+    let _ = std::fs::remove_file(&staged);
+    r
+}
+
+fn publish_note(raw: &Path, stem: &str, staged: &Path) -> std::io::Result<String> {
+    let archived = |name: &str| raw.join("archive").join(name).try_exists();
+    for n in 1..=1000 {
+        let name = match n {
+            1 => format!("{stem}.md"),
+            n => format!("{stem}-{n}.md"),
+        };
+        if archived(&name)? {
+            continue;
+        }
+        match std::fs::hard_link(staged, raw.join(&name)) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(e) => return Err(e),
+        }
+        // The curator moved `raw/<name>` to the archive between the check and the link.
+        if archived(&name)? {
+            let _ = std::fs::remove_file(raw.join(&name));
+            continue;
+        }
+        return Ok(name);
+    }
+    Err(std::io::Error::other(format!("no free name for {stem}")))
 }
 
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
@@ -2100,6 +2217,15 @@ fn tool(v: Verb) -> Value {
             Map::from_iter([("handover".into(), text.clone())]),
             &["handover"],
         ),
+        Verb::Note => (
+            "Save a raw note for the curator: makibad writes it to <knowledge>/raw/<date>-<topic>[-n].md with the line Task: <task> first. topic is English kebab-case; text must have the four headings ## Facts, ## Judgment, ## Grounds, ## Where it applies. Returns the file.",
+            Map::from_iter([
+                ("task".into(), text.clone()),
+                ("topic".into(), text.clone()),
+                ("text".into(), text.clone()),
+            ]),
+            &["task", "topic", "text"],
+        ),
         _ => ("Not built yet.", Map::new(), &[]),
     };
     props.insert(
@@ -2111,4 +2237,33 @@ fn tool(v: Verb) -> Value {
         "description": description,
         "inputSchema": {"type": "object", "properties": props, "required": required},
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::save_note;
+
+    #[test]
+    fn a_note_takes_the_first_name_free_in_raw_and_in_the_archive() {
+        let dir = tempfile::tempdir().unwrap();
+        let raw = dir.path().join("raw");
+        std::fs::create_dir_all(raw.join("archive")).unwrap();
+        std::fs::write(raw.join("archive/d-t.md"), "old").unwrap();
+        std::fs::write(raw.join("d-t-2.md"), "kept").unwrap();
+        assert_eq!(save_note(&raw, "d-t", "new\n").unwrap(), "d-t-3.md");
+        assert_eq!(
+            std::fs::read_to_string(raw.join("d-t-2.md")).unwrap(),
+            "kept"
+        );
+        assert_eq!(
+            std::fs::read_to_string(raw.join("d-t-3.md")).unwrap(),
+            "new\n"
+        );
+        // The staging file is gone.
+        let names: Vec<_> = std::fs::read_dir(&raw)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert!(names.iter().all(|n| !n.starts_with('.')), "{names:?}");
+    }
 }
