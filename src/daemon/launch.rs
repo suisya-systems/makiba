@@ -62,6 +62,10 @@ pub const UNSET: &[&str] = &[
     "HC_TERMINAL_SOCKET",
 ];
 
+/// What a resumed worker is given in place of its brief (Issue 41): the conversation already holds
+/// the task, and the brief again reads as a second request.
+pub const RESUME_PROMPT: &str = "The organization was restarted. Go on with the task you were working on in this conversation. If it is already done and reported, do nothing and do not report again.";
+
 pub struct Launch {
     org: String,
     settings: PathBuf,
@@ -199,7 +203,10 @@ impl Launch {
         let argv = agent.argv_with_session(
             &AgentLaunch {
                 role: Role::Worker,
-                brief: Some(&row.brief),
+                brief: Some(match row.resume {
+                    Some(_) => RESUME_PROMPT,
+                    None => &row.brief,
+                }),
                 rules_file: &rules,
                 settings_file: &settings,
                 model: row.model.as_deref(),
