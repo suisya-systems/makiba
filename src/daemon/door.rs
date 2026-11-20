@@ -648,8 +648,8 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
 }
 
 /// `close` (spec section 12), the gate of Issue 36: refused without a `report_done` unless
-/// `abandon`; a run closed already is `done` again. Ending the terminal and removing the working
-/// folder are Issue 37's.
+/// `abandon`; a run closed already is `done` again. A launch under way is failed. Ending the
+/// terminal and removing the working folder are Issue 37's.
 fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let task = str_arg(args, "task_id")?;
     let abandon = args.get("abandon") == Some(&json!(true));
@@ -688,6 +688,12 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "UPDATE runs SET status = ?1, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?2",
             params![status, run],
+        )?;
+        // A launch under way would start a worker for a closed run (as `down` fails them).
+        w.conn().execute(
+            "UPDATE run_launch SET stage = 'failed', failed_reason = 'makiba close'
+             WHERE run_id = ?1 AND stage NOT IN ('verified', 'failed')",
+            [run],
         )?;
         w.append_event(&NewEvent {
             kind: "run_closed",
