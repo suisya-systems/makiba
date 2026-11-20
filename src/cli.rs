@@ -239,6 +239,9 @@ pub enum Command {
         action: String,
         key: String,
         value: Option<String>,
+        /// The project of a project's setting (`artifact_language`).
+        #[arg(long)]
+        project: Option<String>,
     },
     /// Run the acceptance gate for a pull request at a head; merges nothing.
     Gate {
@@ -346,9 +349,14 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
         ),
         Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
-        Command::Config { action, key, value } => (
+        Command::Config {
+            action,
+            key,
+            value,
+            project,
+        } => (
             "config",
-            json!({"action": action, "key": key, "value": none(value)}),
+            json!({"action": action, "key": key, "value": none(value), "project": none(project)}),
         ),
         Command::Gate { repo, pr, head } => ("gate", json!({"repo": repo, "pr": pr, "head": head})),
     })

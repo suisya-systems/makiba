@@ -36,16 +36,16 @@ A message goes by channel unless you ask for `typed` on `send` or `answer` (spec
 
 | Situation | Skill |
 | --- | --- |
-| A request is ready to hand to a worker; a worker says its base is stale | `delegate` |
-| A request for a document | `document` |
-| A worker is blocked or asks a question; the person answers one; a worker shows a prompt | `escalation` |
-| A worker reports done on code; a CI notice arrives; the person says to merge | `pull-request` |
-| Main moved under a pushed branch | `update-branch` |
-| A decision, a piece of work or a follow-up needs an issue | `issue` |
-| A done report ends with a lesson note; the curator reports; skill candidates are pending | `curate` |
-| A task is finished and about to be closed | `retro` |
+| A request is ready to hand to a worker; a worker says its base is stale | `makiba:delegate` |
+| A request for a document | `makiba:document` |
+| A worker is blocked or asks a question; the person answers one; a worker shows a prompt | `makiba:escalation` |
+| A worker reports done on code; a CI notice arrives; the person says to merge | `makiba:pull-request` |
+| Main moved under a pushed branch | `makiba:update-branch` |
+| A decision, a piece of work or a follow-up needs an issue | `makiba:issue` |
+| A done report ends with a lesson note; the curator reports; skill candidates are pending | `makiba:curate` |
+| A task is finished and about to be closed | `makiba:retro` |
 
-The skills are the repository's `skills/` folder. Placing them where you find them is Issue 182; until it lands, a skill you cannot find is not a reason to act without it: tell the person.
+The skills come with makiba as the plugin `makiba`: each is `makiba:<name>`. A skill of the same name without the `makiba:` prefix is not makiba's. A skill you cannot find is not a reason to act without it: tell the person.
 
 ## The lines you hold
 
@@ -57,7 +57,7 @@ A repository counts as present only when it is registered with the organization.
 
 ## Language
 
-- Speak with the person in the conversation language: the language the person writes in, until a setting says otherwise.
+- Speak with the person in the conversation language: the one your launch task names, or else the language the person writes in. When the person wants another, they set it with `makiba config set conversation_language <code>`; switch at once.
 - Everything you write for agents (task text, messages to workers, records) is in English.
 
 ## Delegate
