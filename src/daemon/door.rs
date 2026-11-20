@@ -592,8 +592,8 @@ fn id_arg(args: &Value) -> Result<i64, DoorError> {
         .ok_or_else(|| usage("the argument id (a pending id) is missing"))
 }
 
-/// `pending` (spec section 12): the table of questions kept by hand. The logic of
-/// `pending_decisions.py` is M6-4's.
+/// `pending` (spec section 12): the table of questions kept by hand, the logic of claude-org-ja's
+/// `pending_decisions.py` on the `pending` table.
 fn pending(w: &StateWriter, args: &Value) -> Response {
     let c = w.conn();
     match str_arg(args, "action")? {
@@ -605,6 +605,21 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
             }
             if !run_exists(w, task)? {
                 return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+            }
+            // The same question of the same task, still open, is that entry (pending_decisions.py
+            // `append`); once escalated, withdrawn or answered, it opens a new one.
+            let open: Option<i64> = c
+                .query_row(
+                    "SELECT p.id FROM pending p JOIN runs r ON r.id = p.run_id
+                     WHERE r.task_id = ?1 AND p.kind = 'question' AND p.question = ?2
+                       AND p.status = 'open' ORDER BY p.id LIMIT 1",
+                    params![task, q],
+                    |r| r.get(0),
+                )
+                .optional()
+                .map_err(internal)?;
+            if let Some(id) = open {
+                return Ok(json!({"id": id, "status": "open"}));
             }
             c.execute(
                 "INSERT INTO pending (run_id, kind, question)
@@ -714,17 +729,17 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
         .get("note")
         .and_then(Value::as_str)
         .filter(|n| !n.is_empty());
-    let row: Option<(String, String, Option<String>)> = w
+    let row: Option<(String, String, Option<String>, String)> = w
         .conn()
         .query_row(
-            "SELECT p.kind, p.status, r.task_id FROM pending p
+            "SELECT p.kind, p.status, r.task_id, p.question FROM pending p
              LEFT JOIN runs r ON r.id = p.run_id WHERE p.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((kind, status, task)) = row else {
+    let Some((kind, status, task, question)) = row else {
         return Err(refuse(
             ErrorKind::NotFound,
             format!("no pending entry {id}"),
@@ -748,7 +763,8 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
     if kind == "prompt" {
         return Ok(None);
     }
-    let mut body = format!("Answer to pending entry {id}: {answer}");
+    // The question goes with the answer: two answers of one task are told apart.
+    let mut body = format!("Answer to pending entry {id} ({question}): {answer}");
     if let Some(note) = note {
         body.push_str(&format!("\nNote: {note}"));
     }

@@ -161,13 +161,23 @@ pub fn run_rules(s: &RunScene, now: i64) -> Vec<Rule> {
 }
 
 /// The rules that hold for the secretary at `now`; `worker_anomaly` is whether any worker anomaly
-/// is open.
-pub fn secretary_rules(s: &SecretaryScene, worker_anomaly: bool, now: i64) -> Vec<Rule> {
+/// is open, `open_entry_at` when the oldest `pending` entry still `open` was created.
+pub fn secretary_rules(
+    s: &SecretaryScene,
+    worker_anomaly: bool,
+    open_entry_at: Option<i64>,
+    now: i64,
+) -> Vec<Rule> {
     let mut out = Vec::new();
     if s.gone || (s.status_at.is_none() && now - s.launched >= SECRETARY_NO_STATUS_MS) {
         out.push(Rule::SecretaryGone);
     }
-    if worker_anomaly && now - s.status_at.unwrap_or(s.launched) >= SECRETARY_STILL_MS {
+    // An open entry waits on the secretary (`escalated` waits on the person): carried from
+    // `pending_decisions.py` `list_pending_older_than`, by the entry's age alone.
+    let open_entry = open_entry_at.is_some_and(|at| now - at >= SECRETARY_STILL_MS);
+    if open_entry
+        || (worker_anomaly && now - s.status_at.unwrap_or(s.launched) >= SECRETARY_STILL_MS)
+    {
         out.push(Rule::SecretaryStill);
     }
     out
@@ -369,7 +379,15 @@ fn evaluate(w: &StateWriter, open: &HashSet<Subject>, now: i64) -> Result<Vec<Su
         .optional()?;
     if let Some((generation, launched, spawn)) = latest {
         let scene = secretary_scene(w, launched, spawn.as_deref())?;
-        for rule in secretary_rules(&scene, worker_anomaly, now) {
+        let open_entry_at: Option<i64> = w.conn().query_row(
+            &format!(
+                "SELECT MIN({}) FROM pending WHERE status = 'open'",
+                ms("created_at")
+            ),
+            [],
+            |r| r.get(0),
+        )?;
+        for rule in secretary_rules(&scene, worker_anomaly, open_entry_at, now) {
             out.push(Subject {
                 task: None,
                 rule,
