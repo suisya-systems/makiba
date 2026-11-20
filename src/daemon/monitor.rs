@@ -5,14 +5,35 @@
 //! The monitor lives as long as the daemon and is fed every `BaseEvent` of the subscription. It
 //! keeps, per terminal, the tags and whether it exited (a removal carries only an id), the last
 //! status that was written and the last turn that was written. A status identical to the last
-//! written one is not written again; the record is updated only after the write succeeded, so a
-//! failed write is tried again by the next event. A `Resync` rebuilds that memory from what is
-//! recorded and reconciles it with the base's list (`recover.rs`, M2-5).
+//! written one is not written again; the record is updated only after the write succeeded.
+//! A `Resync` rebuilds that memory from what is recorded and reconciles it with the base's list
+//! (`recover.rs`, M2-5).
+//!
+//! An event is queued when it arrives, with the time it arrived, and written in arrival order.
+//! One the database refused stays at the head of the queue and is tried again on every tick, with
+//! its arrival time as `occurred_at`, for the retry window (`RETRY`, Issue 181); after it the event
+//! is dropped, said in the log and recorded as `observation_lost` once the database takes writes.
+//! A `Resync` is never dropped.
 
 use crate::base::{BaseEvent, BlockKind, State, Terminal, TerminalEvent, TerminalRef};
 use crate::db::writer::{NewEvent, StateWriter};
 use serde_json::{Value, json};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::time::{Duration, Instant};
+
+/// How long an event the database refused is tried again before it is recorded as lost.
+pub const RETRY: Duration = Duration::from_secs(60);
+/// The test seam that sets the retry window in milliseconds (spec section 10).
+pub const RETRY_ENV: &str = "MAKIBA_WRITE_RETRY_MS";
+
+/// The retry window: the seam when it holds a number, otherwise `RETRY`.
+pub fn retry_from_env() -> Duration {
+    std::env::var(RETRY_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .map(Duration::from_millis)
+        .unwrap_or(RETRY)
+}
 
 /// The last status written for a terminal: what is compared, nothing else.
 pub(super) type Written = (State, Option<BlockKind>, Option<String>);
@@ -29,6 +50,15 @@ pub(super) struct Memory {
     pub(super) tracked: HashMap<TerminalRef, Tracked>,
     status: HashMap<TerminalRef, Written>,
     turn: HashMap<TerminalRef, u64>,
+    /// The arrival time of the event being written: its records' `occurred_at`.
+    at: Option<String>,
+}
+
+/// An event waiting to be written: its arrival time, and when it was first refused.
+struct Queued {
+    event: BaseEvent,
+    at: Option<String>,
+    refused: Option<Instant>,
 }
 
 pub struct Monitor {
@@ -36,8 +66,11 @@ pub struct Monitor {
     mem: Memory,
     /// A `Resync` has been handled: the next is not the start.
     started: bool,
-    /// A `Resync` whose handling failed: tried again before the next event.
-    retry: Option<Vec<Terminal>>,
+    /// The events not yet written, oldest first.
+    queue: VecDeque<Queued>,
+    /// `observation_lost` payloads not yet written.
+    lost: Vec<Value>,
+    window: Duration,
 }
 
 /// The identity of a terminal in the records: its `makiba.spawn` tag as it is, `None` without one.
@@ -87,29 +120,95 @@ pub(super) fn parse_kind(s: &str) -> Option<BlockKind> {
 }
 
 impl Monitor {
-    /// `org` is the value of `makiba.org` of this daemon's own organization.
+    /// `org` is the value of `makiba.org` of this daemon's own organization; the retry window is
+    /// read from the environment (`retry_from_env`).
     pub fn new(org: &str) -> Monitor {
+        let window = retry_from_env();
         Monitor {
             org: org.into(),
             mem: Memory::default(),
             started: false,
-            retry: None,
+            queue: VecDeque::new(),
+            lost: Vec::new(),
+            window,
         }
     }
 
-    /// A `Resync` has been handled and none is waiting to be tried again: the view is built.
+    /// A `Resync` has been handled and none is waiting: the view is built.
     pub fn reconciled(&self) -> bool {
-        self.started && self.retry.is_none()
+        self.started
+            && !self
+                .queue
+                .iter()
+                .any(|q| matches!(q.event, BaseEvent::Resync(_)))
     }
 
-    pub fn handle(&mut self, w: &StateWriter, event: BaseEvent) -> crate::db::Result<()> {
-        // A newer Resync replaces one that failed; any other event goes after it.
-        if let Some(list) = self.retry.take()
-            && !matches!(event, BaseEvent::Resync(_))
-            && let Err(e) = self.resync(w, list)
-        {
-            eprintln!("makibad: cannot rebuild the view: {e}");
+    /// Queue an event as it arrives, with its arrival time (read from SQLite, which takes no lock).
+    pub fn push(&mut self, w: &StateWriter, event: BaseEvent) {
+        let at = w
+            .conn()
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now')", [], |r| {
+                r.get(0)
+            })
+            .ok();
+        self.queue.push_back(Queued {
+            event,
+            at,
+            refused: None,
+        });
+    }
+
+    /// Write what is queued, in order, until the database refuses one; called on every tick.
+    pub fn drain(&mut self, w: &StateWriter) {
+        self.write_lost(w);
+        while let Some(q) = self.queue.front() {
+            let event = q.event.clone();
+            self.mem.at = q.at.clone();
+            let result = self.handle(w, event);
+            self.mem.at = None;
+            let Err(e) = result else {
+                self.queue.pop_front();
+                continue;
+            };
+            let q = self.queue.front_mut().expect("the head was just tried");
+            let first = q.refused.is_none();
+            let since = *q.refused.get_or_insert_with(Instant::now);
+            if !matches!(q.event, BaseEvent::Resync(_)) && since.elapsed() >= self.window {
+                let q = self.queue.pop_front().expect("the head was just tried");
+                eprintln!(
+                    "makibad: lost a terminal event after {} ms of retries: {e}",
+                    since.elapsed().as_millis()
+                );
+                let lost = self.mem.unwritten(&self.org, &q.event);
+                self.lost
+                    .extend(lost.into_iter().map(|(kind, task, role, spawn)| {
+                        json!({
+                            "kind": kind, "task_id": task, "role": role, "spawn_id": spawn,
+                            "observed_at": q.at, "error": e.to_string(),
+                        })
+                    }));
+                continue;
+            }
+            if first {
+                eprintln!("makibad: cannot record a terminal event (tried again): {e}");
+            }
+            break;
         }
+        self.write_lost(w);
+    }
+
+    /// The losses recorded so far, each once; one the database refuses waits for the next tick.
+    fn write_lost(&mut self, w: &StateWriter) {
+        while let Some(p) = self.lost.first() {
+            let task = p["task_id"].as_str().map(str::to_string);
+            if append(w, "observation_lost", task.as_deref(), p).is_err() {
+                return;
+            }
+            self.lost.remove(0);
+        }
+    }
+
+    pub(super) fn handle(&mut self, w: &StateWriter, event: BaseEvent) -> crate::db::Result<()> {
         match event {
             BaseEvent::Resync(list) => self.resync(w, list),
             BaseEvent::Event(TerminalEvent::Created(t) | TerminalEvent::StatusChanged(t)) => {
@@ -130,21 +229,14 @@ impl Monitor {
     }
 
     /// Rebuild the view from `list` in one transaction (`recover.rs`). The memory changes only
-    /// when it commits; on a failure the list is kept and tried again before the next event.
+    /// when it commits; on a failure the `Resync` stays queued.
     fn resync(&mut self, w: &StateWriter, list: Vec<Terminal>) -> crate::db::Result<()> {
         let reason = if self.started { "resync" } else { "start" };
         let mut mem = self.mem.clone();
-        match w.transaction(|w| super::recover::rebuild(w, &self.org, &mut mem, &list, reason)) {
-            Ok(()) => {
-                self.mem = mem;
-                self.started = true;
-                Ok(())
-            }
-            Err(e) => {
-                self.retry = Some(list);
-                Err(e)
-            }
-        }
+        w.transaction(|w| super::recover::rebuild(w, &self.org, &mut mem, &list, reason))?;
+        self.mem = mem;
+        self.started = true;
+        Ok(())
     }
 }
 
@@ -202,7 +294,13 @@ impl Memory {
                     "task_id": task, "role": role, "spawn_id": spawn,
                     "state": state_name(s.state), "kind": s.kind.map(kind_name), "msg": s.msg,
                 });
-                append(w, "terminal_status", task.as_deref(), &payload)?;
+                append_at(
+                    w,
+                    "terminal_status",
+                    task.as_deref(),
+                    &payload,
+                    self.at.as_deref(),
+                )?;
                 self.status.insert(t.id.clone(), now);
             }
         }
@@ -213,7 +311,13 @@ impl Memory {
             let payload = json!({
                 "task_id": task, "role": role, "spawn_id": spawn, "turn": turn,
             });
-            append(w, "terminal_turn", task.as_deref(), &payload)?;
+            append_at(
+                w,
+                "terminal_turn",
+                task.as_deref(),
+                &payload,
+                self.at.as_deref(),
+            )?;
             self.turn.insert(t.id.clone(), turn);
         }
         Ok(())
@@ -241,9 +345,69 @@ impl Memory {
             "task_id": task, "role": role, "spawn_id": spawn, "reason": reason,
             "exit_code": exit_code.flatten(),
         });
-        append(w, "terminal_gone", task.as_deref(), &payload)?;
+        append_at(
+            w,
+            "terminal_gone",
+            task.as_deref(),
+            &payload,
+            self.at.as_deref(),
+        )?;
         tracked.exited = true;
         Ok(())
+    }
+}
+
+/// Kind, task, role and spawn of a record.
+type Lost = (&'static str, Option<String>, Option<String>, Option<String>);
+
+impl Memory {
+    /// The records an event would still write, as `observe` and `gone` decide them.
+    fn unwritten(&self, org: &str, event: &BaseEvent) -> Vec<Lost> {
+        let ident = |tags: &BTreeMap<String, String>| {
+            (
+                tags.get("makiba.task_id").cloned(),
+                tags.get("makiba.role").cloned(),
+                spawn_of(tags),
+            )
+        };
+        let mut out = Vec::new();
+        let gone = |id: &TerminalRef, out: &mut Vec<Lost>| {
+            if let Some(tr) = self.tracked.get(id).filter(|tr| !tr.exited) {
+                let (task, role, spawn) = ident(&tr.tags);
+                out.push(("terminal_gone", task, role, spawn));
+            }
+        };
+        match event {
+            BaseEvent::Resync(_) => {}
+            BaseEvent::Event(TerminalEvent::Removed(id)) => gone(id, &mut out),
+            BaseEvent::Event(
+                TerminalEvent::Created(t)
+                | TerminalEvent::StatusChanged(t)
+                | TerminalEvent::Exited(t),
+            ) => {
+                if !mine(org, &t.tags) {
+                    return out;
+                }
+                let (task, role, spawn) = ident(&t.tags);
+                if let Some(s) = &t.status
+                    && self.status.get(&t.id) != Some(&(s.state, s.kind, s.msg.clone()))
+                {
+                    out.push(("terminal_status", task.clone(), role.clone(), spawn.clone()));
+                }
+                if let Some(turn) = t.turn
+                    && turn > self.turn.get(&t.id).copied().unwrap_or(0)
+                {
+                    out.push(("terminal_turn", task.clone(), role.clone(), spawn.clone()));
+                }
+                if matches!(event, BaseEvent::Event(TerminalEvent::Exited(_))) {
+                    match self.tracked.get(&t.id) {
+                        Some(_) => gone(&t.id, &mut out),
+                        None => out.push(("terminal_gone", task, role, spawn)),
+                    }
+                }
+            }
+        }
+        out
     }
 }
 
@@ -253,10 +417,22 @@ pub(super) fn append(
     task: Option<&str>,
     payload: &Value,
 ) -> crate::db::Result<()> {
+    append_at(w, kind, task, payload, None)
+}
+
+/// As `append`, at `at` (now when `None`).
+fn append_at(
+    w: &StateWriter,
+    kind: &str,
+    task: Option<&str>,
+    payload: &Value,
+    at: Option<&str>,
+) -> crate::db::Result<()> {
     w.append_event(&NewEvent {
         kind,
         actor: Some("makibad"),
         payload: Some(payload),
+        occurred_at: at,
         run_task_id: task,
         ..Default::default()
     })

@@ -326,35 +326,38 @@ fn serve_until(
     let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
+    // The subscription is recorded once; a refused write is tried again on the next tick.
+    let mut started_recorded = false;
     let mut resumed = false;
     while !stop.load(Ordering::SeqCst) {
         match rx.recv_timeout(TICK) {
-            Ok(Msg::Subscribed(Ok(()))) => {
-                w.transaction(|w| {
-                    w.conn()
-                        .execute(
-                            "UPDATE dispatcher SET subscribed = 1, base_version = ?1 WHERE id = 1",
-                            [&info.version],
-                        )
-                        .map_err(crate::db::Error::from)?;
-                    event(w, "dispatcher_started", &info.name, &info.version)
-                })
-                .map_err(|e| e.to_string())?;
-                subscribed = true;
-            }
+            Ok(Msg::Subscribed(Ok(()))) => subscribed = true,
             Ok(Msg::Subscribed(Err(e))) => return Err(e),
-            Ok(Msg::Event(e)) => {
-                // A failed write is reported and the daemon goes on: the monitor keeps its
-                // record of what was written, so the next event tries again.
-                if let Err(e) = monitor.handle(&w, e) {
-                    eprintln!("makibad: cannot record a terminal event: {e}");
-                }
-            }
+            // Queued with its arrival time; written below, and again on later ticks if refused.
+            Ok(Msg::Event(e)) => monitor.push(&w, e),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) if !subscribed => {
                 return Err("the subscription thread ended before it subscribed".into());
             }
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
+        }
+        if subscribed && !started_recorded {
+            match w.transaction(|w| {
+                w.conn()
+                    .execute(
+                        "UPDATE dispatcher SET subscribed = 1, base_version = ?1 WHERE id = 1",
+                        [&info.version],
+                    )
+                    .map_err(crate::db::Error::from)?;
+                event(w, "dispatcher_started", &info.name, &info.version)
+            }) {
+                Ok(()) => started_recorded = true,
+                Err(e) => eprintln!("makibad: cannot record the subscription: {e}"),
+            }
+        }
+        // Not before the subscription is recorded: the first Resync's records come after it.
+        if started_recorded {
+            monitor.drain(&w);
         }
         // The rules and the delivery read what is committed: not before the first Resync is
         // reconciled. Order: recover, monitor, then anomalies and delivery.
@@ -411,9 +414,12 @@ fn serve_until(
                 eprintln!("makibad: wake: {e}");
             }
         }
+        // A refused heartbeat is said and tried again on the next tick: a lock must not end the watch.
         if Instant::now() >= next_beat {
-            beat(&w)?;
-            next_beat = Instant::now() + HEARTBEAT;
+            match beat(&w) {
+                Ok(()) => next_beat = Instant::now() + HEARTBEAT,
+                Err(e) => eprintln!("makibad: cannot write the heartbeat: {e}"),
+            }
         }
     }
 
