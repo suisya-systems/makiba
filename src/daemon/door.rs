@@ -754,48 +754,94 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
 }
 
 /// `answer` (spec sections 7 and 12). A question: its answer is queued to the worker and the
-/// entry is answered, in the caller's transaction. A prompt: the screen is read again; nothing is
-/// typed until M6-8 (`stale` when the recorded prompt is gone, `internal` while it is there).
+/// entry is answered, in the caller's transaction. A prompt (M6-8): exactly one key, and only
+/// while the same episode's prompt is on a fresh read of the screen; any difference is `stale`
+/// and nothing is pressed.
 fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Response {
     if let Some(q) = question(w, args)? {
         let id = store_message(w, actor, &q.to, "message", Some(&q.task), &q.body)?;
         return q.answered(w, actor, id);
     }
     let id = id_arg(args)?;
-    let (task, text): (String, Option<String>) = w
+    let answer = str_arg(args, "answer")?;
+    let (task, sum, created): (String, Option<String>, String) = w
         .conn()
         .query_row(
-            "SELECT r.task_id, p.prompt_text FROM pending p JOIN runs r ON r.id = p.run_id
-             WHERE p.id = ?1",
+            "SELECT r.task_id, p.prompt_sum, p.created_at FROM pending p
+             JOIN runs r ON r.id = p.run_id WHERE p.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(internal)?;
-    let text = text.unwrap_or_default();
-    let shown = match super::delivery::find_terminal(base, &worker_agent_id(&task)) {
-        Ok(Some(t)) => base
-            .read(&t.id, PEEK_MAX as usize)
-            .map_err(|e| refuse(ErrorKind::Unavailable, format!("the base: {e}"), ""))?
-            .join("\n"),
-        Ok(None) => String::new(),
-        Err(e) => return Err(refuse(ErrorKind::Unavailable, format!("the base: {e}"), "")),
-    };
-    if text.trim().is_empty() || !shown.contains(text.trim()) {
-        return Err(refuse(
+    let stale = |why: String| {
+        refuse(
             ErrorKind::Stale,
-            format!(
-                "the prompt of pending entry {id} is no longer on {task}'s screen; nothing was typed"
-            ),
-            "list the pending entries again",
-        ));
+            format!("pending entry {id}: {why}; nothing was typed"),
+            "list the pending entries again (an entry whose prompt changed can be withdrawn; \
+             makibad then records the prompt shown now)",
+        )
+    };
+    let base_err =
+        |e: crate::base::BaseError| refuse(ErrorKind::Unavailable, format!("the base: {e}"), "");
+    let Some(sum) = sum else {
+        return Err(stale("it holds no recognized prompt".into()));
+    };
+    // The same episode: the launch is the one recorded, and no status came since the entry.
+    let scene = super::prompts::scene(w, &task).map_err(internal)?;
+    let Some(scene) = scene.filter(|s| s.blocked_since.as_ref().is_some_and(|at| *at <= created))
+    else {
+        return Err(stale(format!("{task} is no longer blocked on that prompt")));
+    };
+    let t = match super::delivery::find_terminal(base, &worker_agent_id(&task)) {
+        Ok(Some(t)) if super::prompts::blocked_terminal(&t, &scene.spawn) => t,
+        Ok(_) => {
+            return Err(stale(format!(
+                "{task}'s terminal is not blocked on that prompt"
+            )));
+        }
+        Err(e) => return Err(base_err(e)),
+    };
+    let screen = base.read(&t.id, 0).map_err(base_err)?;
+    let agent = crate::agents::by_name(&scene.agent)
+        .ok_or_else(|| internal(format!("no agent module {:?}", scene.agent)))?;
+    let Some(view) = agent
+        .recognize_prompt(&screen)
+        .filter(|v| sha256_hex(&v.text) == sum)
+    else {
+        return Err(stale(format!(
+            "the prompt on {task}'s screen is not the one recorded"
+        )));
+    };
+    let key = if answer == "yes" {
+        view.yes_key
+    } else {
+        view.no_key
+    };
+    base.keys(&t.id, &[key]).map_err(base_err)?;
+    let changed = w
+        .conn()
+        .execute(
+            "UPDATE pending SET status = 'answered', answer = ?1, answered_by = ?2,
+               answered_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?3 AND status IN ('open','escalated')",
+            params![answer, actor, id],
+        )
+        .map_err(internal)?;
+    if changed != 1 {
+        return Err(internal(format!(
+            "pending entry {id} changed while it was answered"
+        )));
     }
-    Err(refuse(
-        ErrorKind::Internal,
-        format!(
-            "the prompt of pending entry {id} is still shown; prompts are answered from M6-8, nothing was typed"
-        ),
-        "",
-    ))
+    let payload = json!({"pending_id": id, "prompt_sum": sum, "key": key});
+    w.append_event(&NewEvent {
+        kind: "prompt_answered",
+        actor: Some(actor),
+        payload: Some(&payload),
+        run_task_id: Some(&task),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    Ok(json!({"id": id, "status": "answered", "key": key}))
 }
 
 /// A name that becomes a path component and part of an agent id: `[A-Za-z0-9._-]`, not starting
@@ -1641,7 +1687,7 @@ fn tool(v: Verb) -> Value {
             &["action"],
         ),
         Verb::Answer => (
-            "Answer a pending entry yes or no. A question's answer goes to its worker (typed: typed into its terminal); a permission prompt is answered from M6-8.",
+            "Answer a pending entry yes or no. A question's answer goes to its worker (typed: typed into its terminal); a permission prompt gets one key (yes: the one-time yes, no: escape), only while the recorded prompt is still on the screen.",
             Map::from_iter([
                 ("id".into(), json!({"type": "integer"})),
                 (
