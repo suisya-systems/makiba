@@ -23,6 +23,12 @@ pub fn connect_as(socket: &Path, timeout: Duration, org: &str) -> Box<dyn Base> 
     Box::new(herdr::Herdr::new(socket.to_path_buf(), timeout).for_organization(org))
 }
 
+/// What the person runs to attach to the terminal named `name` of the base's place `session`
+/// (`makiba status`, Issue 43).
+pub fn attach_command(session: &str, name: &str) -> String {
+    format!("HC_SESSION={session} hc attach {name}")
+}
+
 /// The real base of `session`, which `Base::start` can start (`makiba up`).
 pub fn connect_session_for_start(session: &str, timeout: Duration) -> Box<dyn Base> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);

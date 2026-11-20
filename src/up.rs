@@ -1,7 +1,8 @@
 //! `makiba up` (spec section 12): start the base cleanly. It runs locally, before `makibad`
 //! exists, from the person's login shell: it refuses inside an agent, checks the Claude Code
-//! version, creates the person key, starts the base's own place and `makibad`. The secretary is
-//! M6-2: `up` starts none and says so.
+//! version, creates the person key, starts the base's own place and `makibad`, which it asks to
+//! launch the secretary unless `--no-secretary` (Issue 43): `makibad` holds the base and decides
+//! whether one already runs.
 //!
 //! After `makiba down` or a stop of the base (Issue 41) it brings the work back before `makibad`
 //! starts: a base that was not running had its programs stopped, so the runs at work are suspended
@@ -85,8 +86,8 @@ pub(crate) fn daemon_running(dir: &Path) -> Result<bool, Failure> {
 }
 
 /// Start `makiba daemon` detached, with the variables of section 6.4 removed, and wait until it
-/// has subscribed to the base.
-fn start_daemon(dir: &Path) -> Result<(), Failure> {
+/// has subscribed to the base. With `secretary` it launches the secretary unless one runs.
+fn start_daemon(dir: &Path, secretary: bool) -> Result<(), Failure> {
     use std::os::unix::process::CommandExt;
     let exe = std::env::current_exe().map_err(unavailable("cannot find makiba"))?;
     let log = OpenOptions::new()
@@ -95,8 +96,13 @@ fn start_daemon(dir: &Path) -> Result<(), Failure> {
         .open(dir.join("makibad.log"))
         .map_err(unavailable("cannot open makibad.log"))?;
     let mut cmd = Command::new(exe);
-    cmd.arg("daemon")
-        .stdin(Stdio::null())
+    cmd.arg("daemon");
+    if secretary {
+        cmd.env(daemon::secretary::SECRETARY_ENV, "1");
+    } else {
+        cmd.env_remove(daemon::secretary::SECRETARY_ENV);
+    }
+    cmd.stdin(Stdio::null())
         .stdout(log.try_clone().map_err(unavailable("makibad.log"))?)
         .stderr(log)
         .process_group(0);
@@ -146,7 +152,7 @@ fn start_daemon(dir: &Path) -> Result<(), Failure> {
     ))
 }
 
-fn run() -> Result<(), Failure> {
+fn run(secretary: bool) -> Result<(), Failure> {
     if let Some(v) = agent_variable() {
         return Err((
             ErrorKind::Denied,
@@ -172,9 +178,18 @@ fn run() -> Result<(), Failure> {
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
+    // A stopped core left a shell in place of a kept secretary terminal: its launch is failed, so
+    // `makibad` ends that terminal and launches a new secretary.
     if stopped {
         let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
         crate::down::suspend(&w).map_err(internal)?;
+        w.conn()
+            .execute(
+                "UPDATE run_launch SET stage = 'failed', failed_reason = 'the base was stopped'
+                 WHERE role = 'secretary' AND stage != 'failed'",
+                [],
+            )
+            .map_err(|e| internal(e.into()))?;
     }
     the_base.start().map_err(|e| {
         (
@@ -191,12 +206,20 @@ fn run() -> Result<(), Failure> {
     }
     if daemon_running(&dir)? {
         println!("makibad: already running");
+        // ponytail: a running makibad is not asked again; `makiba down` and `up` launch one.
+        println!("secretary: left to the running makibad (see makiba status)");
     } else {
-        start_daemon(&dir)?;
+        start_daemon(&dir, secretary)?;
         println!("makibad: started");
+        println!(
+            "secretary: {} (see makiba status)",
+            if secretary {
+                "launching unless one runs"
+            } else {
+                "not started (--no-secretary)"
+            }
+        );
     }
-    // ponytail: the secretary is M6-2; `--no-secretary` has nothing to switch off until then.
-    println!("secretary: not started (M6-2)");
     Ok(())
 }
 
@@ -240,7 +263,7 @@ pub fn main(args: &[String]) -> ExitCode {
         eprint!("makiba: bad arguments for up\n{USAGE}");
         return ExitCode::from(ErrorKind::Usage.exit_code() as u8);
     }
-    match run() {
+    match run(!args.iter().any(|a| a == "--no-secretary")) {
         Ok(()) => ExitCode::SUCCESS,
         Err((kind, message)) => {
             eprintln!("makiba: {}: {message}", kind.as_str());
