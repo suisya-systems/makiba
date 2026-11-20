@@ -20,6 +20,7 @@ use rusqlite::{OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::io::Read;
+use std::os::unix::process::CommandExt;
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -128,8 +129,10 @@ enum GhError {
 
 /// Run `gh args`, give its stdout. The child is killed at the timeout and when `cancel` is set.
 fn run_gh(gh: &str, args: &[&str], cancel: &AtomicBool) -> std::result::Result<String, GhError> {
+    // A process group of its own, so that what the program started goes with it when it is ended.
     let mut child = Command::new(gh)
         .args(args)
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -168,9 +171,15 @@ fn run_gh(gh: &str, args: &[&str], cancel: &AtomicBool) -> std::result::Result<S
             None
         };
         if let Some(e) = stop {
-            // The reader is left: it ends when the pipe closes.
+            // The whole group: a descendant that holds the pipe would hold the reader too.
+            // SAFETY: a signal to the group of a child this function started.
+            unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
             let _ = child.kill();
             let _ = child.wait();
+            std::thread::sleep(SLICE);
+            if reader.is_finished() {
+                let _ = reader.join();
+            }
             return Err(e);
         }
         std::thread::sleep(SLICE);
@@ -777,8 +786,21 @@ esac"#,
         assert!(matches!(r, Err(GhError::Cancelled)));
         assert!(started.elapsed() < Duration::from_secs(10));
         stopper.join().unwrap();
-        // The descendant is ended here so the test leaves no process behind.
-        let pid = std::fs::read_to_string(dir.path().join("pid")).unwrap();
-        let _ = Command::new("kill").arg(pid.trim()).status();
+        // The descendant went with it: no process is left behind.
+        let pid: i32 = std::fs::read_to_string(dir.path().join("pid"))
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only asks whether the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_ne!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "the descendant is still there"
+        );
     }
 }
