@@ -14,6 +14,7 @@ mod monitor;
 pub mod notify_gate;
 pub mod person_key;
 pub mod prepare;
+pub mod prwatch;
 mod recover;
 mod resume;
 mod verify;
@@ -290,6 +291,7 @@ fn serve_until(
     let launch = launch::Launch::new(dir, door_addr);
     let mut dialogs = dialogs::Dialogs::new();
     let mut verify = verify::Verify::new(verify::timeout_from_env());
+    let mut prwatch = prwatch::PrWatch::from_env();
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     let mut resumed = false;
@@ -353,6 +355,9 @@ fn serve_until(
                     eprintln!("makibad: dialogs: {e}");
                 }
             }
+            if let Err(e) = prwatch.pass(&w) {
+                eprintln!("makibad: pr watch: {e}");
+            }
             if let Err(e) = delivery.pass(&w) {
                 eprintln!("makibad: delivery: {e}");
             }
@@ -366,7 +371,8 @@ fn serve_until(
         }
     }
 
-    // A stop: say so, release the lock, leave no pid behind.
+    // A stop: end the pollers (their `gh` children too), say so, release the lock, leave no pid behind.
+    drop(prwatch);
     event(&w, "dispatcher_stopped", &info.name, &info.version).map_err(|e| e.to_string())?;
     w.conn()
         .execute("UPDATE dispatcher SET subscribed = 0 WHERE id = 1", [])

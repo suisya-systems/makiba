@@ -450,6 +450,7 @@ fn run(w: &StateWriter, agent: &str, actor: &str, role: Role, v: Verb, args: &Va
             Ok(json!({"messages": messages, "more": b.more}))
         }
         Verb::Config => config(args),
+        Verb::Pr => pr(w, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
 }
@@ -706,6 +707,46 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
     };
     store().map_err(internal)?;
     Ok(json!({"task_id": task, "status": status}))
+}
+
+/// `pr opened|pushed` (spec section 12): the event, the older watches of the PR `superseded`
+/// and the watch of the new head, as `prwatch::register` does in one transaction.
+fn pr(w: &StateWriter, args: &Value) -> Response {
+    let state = str_arg(args, "state")?;
+    let kind = match state {
+        "opened" => "pr_opened",
+        "pushed" => "fix_pushed",
+        _ => return Err(usage(format!("state is opened or pushed, not {state:?}"))),
+    };
+    let repo = str_arg(args, "repo")?;
+    let repo_ok = repo.split_once('/').is_some_and(|(o, n)| {
+        let part = |s: &str| {
+            !s.is_empty()
+                && s.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._-".contains(c))
+        };
+        part(o) && part(n)
+    });
+    if !repo_ok {
+        return Err(usage(format!("repo is owner/name, not {repo:?}")));
+    }
+    let number = args
+        .get("pr")
+        .and_then(Value::as_i64)
+        .filter(|n| *n > 0)
+        .ok_or_else(|| usage("the argument pr (a pull request number) is missing"))?;
+    let head = str_arg(args, "head")?;
+    if head.len() != 40 || !head.chars().all(|c| matches!(c, '0'..='9' | 'a'..='f')) {
+        return Err(usage(format!(
+            "head is a full commit id (40 lowercase hex), not {head:?}"
+        )));
+    }
+    let task = str_arg(args, "task")?;
+    if !run_exists(w, task)? {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    let r = super::prwatch::register(w, kind, task, repo, number, head).map_err(internal)?;
+    Ok(json!({"watch_id": r.watch_id, "status": r.status}))
 }
 
 fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
@@ -1119,6 +1160,20 @@ fn tool(v: Verb) -> Value {
             "The full body of a message you sent or received, by its id.",
             Map::from_iter([("id".into(), json!({"type": "integer"}))]),
             &["id"],
+        ),
+        Verb::Pr => (
+            "Record that a pull request was opened or a fix pushed, and have makibad watch the CI of that head. A new head replaces the watch of the older one.",
+            Map::from_iter([
+                (
+                    "state".into(),
+                    json!({"type": "string", "enum": ["opened", "pushed"]}),
+                ),
+                ("repo".into(), text.clone()),
+                ("pr".into(), json!({"type": "integer"})),
+                ("head".into(), text.clone()),
+                ("task".into(), text.clone()),
+            ]),
+            &["state", "repo", "pr", "head", "task"],
         ),
         Verb::Inbox => (
             "Your unconfirmed messages, each in its wrapper, oldest first. Reading them confirms them.",
