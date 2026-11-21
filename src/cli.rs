@@ -206,7 +206,8 @@ pub enum Command {
     },
     /// A message's full body.
     Show { message_id: i64 },
-    /// Keep the pending table of questions: add (--task, --question), escalate, withdraw, list.
+    /// Keep the pending table of questions: add (--task, --question and the context), escalate,
+    /// withdraw, list. An entry is escalated only with all five parts of its context.
     Pending {
         #[arg(value_parser = ["add", "escalate", "withdraw", "list"])]
         action: String,
@@ -215,6 +216,21 @@ pub enum Command {
         task: Option<String>,
         #[arg(long)]
         question: Option<String>,
+        /// Why the question is asked.
+        #[arg(long)]
+        background: Option<String>,
+        /// What yes leads to.
+        #[arg(long)]
+        if_yes: Option<String>,
+        /// What no leads to.
+        #[arg(long)]
+        if_no: Option<String>,
+        /// The recommendation; it may say there is none.
+        #[arg(long)]
+        recommend: Option<String>,
+        /// The reason for the recommendation.
+        #[arg(long)]
+        why: Option<String>,
     },
     /// Answer a pending entry yes or no.
     Answer {
@@ -453,12 +469,25 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             pending_id,
             task,
             question,
+            background,
+            if_yes,
+            if_no,
+            recommend,
+            why,
         } => {
             let mut args = json!({"action": action});
             if let Some(id) = pending_id {
                 args["id"] = id.into();
             }
-            for (k, v) in [("task", task), ("question", question)] {
+            for (k, v) in [
+                ("task", task),
+                ("question", question),
+                ("background", background),
+                ("if_yes", if_yes),
+                ("if_no", if_no),
+                ("recommend", recommend),
+                ("why", why),
+            ] {
                 if let Some(v) = v {
                     args[k] = v.into();
                 }
