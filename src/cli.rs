@@ -116,6 +116,7 @@ fn person_key() -> Option<String> {
 #[derive(Parser, Debug)]
 #[command(
     name = "makiba",
+    version,
     about = "An organization where the person talks to one secretary.",
     arg_required_else_help = true,
     disable_help_subcommand = true

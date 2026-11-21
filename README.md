@@ -7,6 +7,8 @@ makiba is under active development and is not usable yet; M0 and M1 are done and
 The terminals run on herdr-core, behind one module so that it can be replaced.
 The plan is in [docs/design/plan.md](docs/design/plan.md); how a pull request proves it is test-first is in [docs/acceptance-check.md](docs/acceptance-check.md).
 
+Install it with the command in [docs/installing.md](docs/installing.md).
+
 ## License
 
 makiba is released under the MIT License; see [LICENSE](LICENSE).
