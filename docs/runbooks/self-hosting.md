@@ -29,7 +29,7 @@ Where the code at this commit has no way to do what the Issue says:
 
 - **No verb runs the triage scan on request.** `makibad` runs it after a close (a `run_closed` event newer than the last scan that did not fail) and at most once per 30 minutes (`MAKIBA_TRIAGE_INTERVAL_MS`, read when `makibad` starts; spec section 10, `src/daemon/triage.rs`). So `triage` dispatches one small `document` task in the organization and closes it; the close is what makes the scan due. If a scan ran less than 30 minutes before, the script says so and waits for the interval to pass.
 - **The scan's answer is an event and a notice.** `triage` reads the event `work_discovery_scanned` read-only; the notice is a row of `messages` from `makibad` to `secretary`. `makiba status` also prints `next work:` (the candidate count, the recommended one, or why there is none).
-- **`makiba up` refuses to run inside an agent** (any `CLAUDE*` variable, or `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`). The secretary is an agent, so every stage is typed by the person in a login shell, and each script refuses at once when it finds such a variable.
+- **`makiba up` refuses to run inside an agent** (any `CLAUDE*` variable, or `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`; `HC_BIN`, which names the `hc` program, is allowed). The secretary is an agent, so every stage is typed by the person in a login shell, and each script refuses at once when it finds such a variable.
 - **The goal ledger is the operator's copy.** The scan reads `<goals dir>/suisya-systems/makiba.md`, not the repository's file. The ledger of the repository holds the clauses of Issue 50's `## Goal clause` list (`issues/M7-1.md`); the script prints how many clauses the placed ledger has and refuses when it lacks the clause the Issue names, so a ledger that has not landed shows before the scan and not as "no candidate".
 - **Two read surfaces are not in every build.** A `range` verb (pull request 257) and a `review` verb (pull request 261) may not have landed. The scripts look for each in `makiba --help`, print what a present one adds and print `skipped` for an absent one; the runbook uses neither, and nothing is approved or reviewed by it.
 
@@ -109,7 +109,7 @@ The rehearsal moves every one of these into `${TMPDIR:-/tmp}/makiba-rehearsal-XX
 
 | What you see | Meaning | Do |
 | --- | --- | --- |
-| `REFUSED: a CLAUDE* or HC_* variable is set` | this shell is inside an agent or a terminal of the base | open a plain login shell; do not unset the variable by hand |
+| `REFUSED: a CLAUDE* or HC_SESSION/HC_SOCKET/HC_SCOPE/HC_TERMINAL_* variable is set` | this shell is inside an agent or a terminal of the base | open a plain login shell; do not unset the variable by hand |
 | `makiba: unavailable: Claude Code version ...` (from `up`) | the version of `claude` is outside the supported range | stop; the owner decides (`docs/upgrading-claude-code.md`) |
 | other failures of `up` | see the table of `docs/runbooks/first-worker.md` section 3 | read `makibad.log` in the state folder |
 | `REFUSED: the ... ledger has no clause G<n>` | the ledger does not hold the clause Issue 50 names (the clause list of the repository has not landed, pull request 260 at the time of writing) | land it, pull main, then `register --replace-ledger` |
@@ -127,7 +127,7 @@ The rehearsal moves every one of these into `${TMPDIR:-/tmp}/makiba-rehearsal-XX
 
 ## 8. Cleanup
 
-Nothing of the real run is cleaned: the project, the clone and the ledger are what the run was for, and section 1 lists what stays. Leave the organization running or stop it with `makiba down` (add `--stop-base` to stop the core), as the owner wants. After a rehearsal that failed, its scratch place is kept for inspection and its processes are stopped; `bash scripts/runbooks/self-hosting.sh cleanup` removes it.
+Nothing of the real run is cleaned: the project, the clone and the ledger are what the run was for, and section 1 lists what stays. Leave the organization running or stop it with `makiba down` (add `--stop-base` to stop the core), as the owner wants. After a rehearsal that failed, its scratch place is kept for inspection and its organization is stopped (if it cannot be stopped, the place is kept, the stage fails and the line to stop it by hand is printed); `bash scripts/runbooks/self-hosting.sh cleanup` removes it.
 
 ## 9. Results (filled in by the secretary)
 

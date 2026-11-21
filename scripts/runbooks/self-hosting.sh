@@ -58,7 +58,9 @@ open_results() {
 
 # ---- preconditions (runbook section 5) ----
 
-not_in_agent() { ! env | grep -qE '^(CLAUDE|HC_)'; }
+# The variables `makiba up` refuses (src/up.rs): any CLAUDE*, and the base's own session variables.
+# HC_BIN, which names the hc program, is not one of them.
+not_in_agent() { ! env | grep -qE '^(CLAUDE|HC_SESSION=|HC_SOCKET=|HC_SCOPE=|HC_TERMINAL_ID=|HC_TERMINAL_SOCKET=)'; }
 git_new_enough() { local v; v=$(git --version | awk '{print $3}'); [ "$(printf '%s\n2.38\n' "$v" | sort -V | head -n 1)" = 2.38 ]; }
 gh_login() { env -u GH_TOKEN -u GITHUB_TOKEN -u GH_ENTERPRISE_TOKEN -u GITHUB_ENTERPRISE_TOKEN gh auth status -h github.com; }
 py_sqlite() { python3 -I -c 'import sqlite3; assert sqlite3.connect(":memory:").execute("SELECT json_extract(?, ?)", ("{\"a\": 1}", "$.a")).fetchone()[0] == 1'; }
@@ -121,7 +123,7 @@ real_places() {
 preflight() { # preflight <real|scratch>
   local mode=$1
   say "== preconditions ($mode)"
-  must "not inside an agent" "a CLAUDE* or HC_* variable is set: this shell is inside an agent" "open a plain login shell on the host and run the line again" not_in_agent
+  must "not inside an agent" "a CLAUDE* or HC_SESSION/HC_SOCKET/HC_SCOPE/HC_TERMINAL_* variable is set: this shell is inside an agent" "open a plain login shell on the host and run the line again" not_in_agent
   for c in git python3 gh cargo "${HC_BIN:-hc}" claude; do
     must "$c on PATH" "$c is not on PATH" "install it, or put it on PATH" have "$c"
   done
@@ -270,18 +272,24 @@ scan_report() {
 $row
 EOF
   check scan INFO "status=$st repos=$repos candidate_count=$n candidate_refs=$refs diagnostics=$diag error=$err"
-  if [ "$st" = candidates_found ] && [ "${n:-0}" -gt 0 ] && printf '%s' "$repos" | grep -q "$GH_REPO" \
-    && ! printf '%s' "$diag" | grep -qE "(unset|error):$GH_REPO"; then
-    check dod-2-triage-returns-candidates PASS "$n candidates from $repos"
-  else
-    check dod-2-triage-returns-candidates FAIL "see the scan line above; runbook section 8 table 'If it differs'"
-  fi
-  local ref num k=0
+  # candidate_count is the total over every scanned project: only the refs of makiba count here.
+  local ref num k=0 mine=""
   for ref in $(printf '%s' "$refs" | tr ',' ' '); do
+    case "$ref" in "$GH_REPO#"*) mine="$mine $ref" ;; esac
+  done
+  local mine_n; mine_n=$(printf '%s\n' $mine | grep -c . || true)
+  if [ "$st" = candidates_found ] && [ "$mine_n" -gt 0 ] && printf '%s' "$repos" | grep -q "$GH_REPO" \
+    && ! printf '%s' "$diag" | grep -qE "(unset|error):$GH_REPO"; then
+    check dod-2-triage-returns-candidates PASS "$mine_n candidates of $GH_REPO (scan total $n)"
+  else
+    check dod-2-triage-returns-candidates FAIL "no candidate of $GH_REPO (scan total $n); see the scan line above and the table of runbook section 7"
+  fi
+  for ref in $mine; do
     [ "$k" -lt 2 ] || break
     num=${ref##*#}; k=$((k + 1))
     say "+ gh issue view $num --repo $GH_REPO --json state"
-    check "candidate-$num-is-open" INFO "$(gh issue view "$num" --repo "$GH_REPO" --json state -q .state 2>&1 | head -n 1)"
+    local state; state=$(gh issue view "$num" --repo "$GH_REPO" --json state -q .state 2>&1 | head -n 1)
+    if [ "$state" = OPEN ]; then check "candidate-$num-is-open" PASS "$ref is OPEN"; else check "candidate-$num-is-open" FAIL "$ref: $state"; fi
   done
   say "== the notice to the secretary"
   sq "SELECT id, body FROM messages WHERE sender = 'makibad' AND body LIKE 'Triage after a close:%' ORDER BY id DESC LIMIT 1" | tee -a "$RESULT" || true
@@ -364,10 +372,23 @@ EOF
   unset MAKIBA_BASE MAKIBA_LAUNCH_AGENT MAKIBA_FAKE_AGENT
 }
 
+# stop_org: ends the organization of this shell's environment (makiba down). 0: no makibad of it is alive
+# afterwards (a failing down with nothing alive is the case "nothing was running"); 1: makibad is still alive.
+stop_org() {
+  local pid
+  "$MK" down --secretary --stop-base >/dev/null 2>&1 || true
+  pid=$("$MK" status 2>/dev/null | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p')
+  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+    sleep 3
+    if kill -0 "$pid" 2>/dev/null; then return 1; fi
+  fi
+  return 0
+}
+
 # Stops only the organization whose environment this shell holds (the scratch one), then keeps the evidence.
 scratch_down() {
   say "== stopping the scratch organization"
-  "$MK" down --secretary --stop-base >/dev/null 2>&1 || say "  (down said it had nothing to stop)"
+  if ! stop_org; then check scratch-shutdown FAIL "makibad of the scratch place still runs after makiba down; the place is kept so you can retry: . $SCRATCH_RUN/env.sh; $MK down --secretary --stop-base"; fi
   if [ -f "$(db_path)" ]; then
     sq "SELECT id, occurred_at, kind, actor FROM events ORDER BY id" > "${RESULT%.txt}-events.txt" 2>/dev/null || true
     sq "SELECT id, sender, recipient, kind, substr(body, 1, 300) FROM messages ORDER BY id" > "${RESULT%.txt}-messages.txt" 2>/dev/null || true
@@ -405,11 +426,12 @@ stage_cleanup() {
     say "  found $d"
     if [ "$DRY" = 1 ]; then plan "source $d/env.sh, run: $MK down --secretary --stop-base, then remove $d"; continue; fi
     # shellcheck source=/dev/null
-    ( . "$d/env.sh" && "$MK" down --secretary --stop-base >/dev/null 2>&1 ) || say "  (nothing to stop in $d)"
-    remove_scratch "$d"
+    if ( . "$d/env.sh" && stop_org ); then remove_scratch "$d"
+    else check "cleanup-$(basename "$d")" FAIL "makibad of $d still runs (or its env.sh cannot be read); the place is kept: . $d/env.sh; $MK down --secretary --stop-base, then run cleanup again"; fi
   done
   if [ "$found" = 0 ]; then say "  no scratch place left: nothing to do"; fi
-  if [ "$DRY" = 1 ]; then plan "report done"; else check cleanup PASS "done; running it again is safe"; fi
+  if [ "$DRY" = 1 ]; then plan "report done"
+  elif [ "$FAILS" -eq 0 ]; then check cleanup PASS "done; running it again is safe"; fi
 }
 
 # ---- go ----
@@ -423,7 +445,8 @@ on_exit() {
     if [ "$rc" -eq 0 ] && [ "$FAILS" -eq 0 ]; then remove_scratch "$SCRATCH_RUN"
     else say "scratch place kept for inspection: $SCRATCH_RUN (the cleanup stage removes it)"; fi
   fi
-  return "$rc"
+  if [ "$FAILS" -gt 0 ] && [ "$rc" -eq 0 ]; then rc=1; fi
+  exit "$rc"
 }
 trap on_exit EXIT
 trap 'exit 130' INT TERM
