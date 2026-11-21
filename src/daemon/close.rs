@@ -42,10 +42,8 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
 }
 
 /// Why the run's work tree at `path` holds work a removal would lose, if it does: uncommitted
-/// changes (untracked files included, whatever git's settings say), or unpushed commits, that is
-/// commits reachable from HEAD or the run's `branch` and from none of the project repository's
-/// `refs/remotes/origin/*` (Issue 241: judged from the clone, which the worker cannot write); in a
-/// repository with no remote every commit counts. A work tree without a repository of its own, or
+/// changes (untracked files included, whatever git's settings say), a submodule checked out, or
+/// unpushed commits (`unpushed`). A work tree without a repository of its own, or
 /// one git cannot read, counts as unsaved. The run's repository is only read (`run_repo`).
 pub(super) fn unsaved(gitdir: &Path, path: &Path, repo: &Path, branch: &str) -> Option<String> {
     let shown = path.display();
@@ -72,6 +70,15 @@ pub(super) fn unsaved(gitdir: &Path, path: &Path, repo: &Path, branch: &str) -> 
         }
         Ok(_) => {}
     }
+    unpushed(gitdir, path, repo, branch)
+}
+
+/// Unpushed commits of the run's repository: commits reachable from HEAD, the run's `branch` or
+/// any local branch or tag, and from none of the project repository's `refs/remotes/origin/*`
+/// (Issue 241: judged from the clone, which the worker cannot write); in a repository with no
+/// remote every commit counts. Read without the work tree, which may be gone.
+fn unpushed(gitdir: &Path, path: &Path, repo: &Path, branch: &str) -> Option<String> {
+    let shown = path.display();
     let tip = format!("refs/heads/{branch}");
     let count = run_repo::at_origin(repo)
         .and_then(|saved| run_repo::count_not(gitdir, path, &["HEAD", &tip], &saved));
@@ -239,13 +246,21 @@ impl Close {
             &self.places.workers
         };
         match path.symlink_metadata() {
-            // Gone already (a restart after the removal): the run's git folder goes too.
+            // Gone (a restart after the removal, or removed by hand): the run's git folder goes
+            // too, once its commits are saved or kept as with a work tree.
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return if kind == "document" {
-                    Ok(())
-                } else {
-                    run_repo::remove_under(&git_root, &gitdir)
-                };
+                if kind == "document" {
+                    return Ok(());
+                }
+                if gitdir.join("HEAD").is_file() {
+                    if !j.abandon
+                        && let Some(why) = unpushed(&gitdir, path, &repo, &j.branch)
+                    {
+                        return Err(why);
+                    }
+                    keep(&gitdir, path, &repo, j)?;
+                }
+                return run_repo::remove_under(&git_root, &gitdir);
             }
             Err(e) => return Err(format!("{}: {e}", path.display())),
             Ok(_) => {}
@@ -291,11 +306,12 @@ impl Close {
     }
 }
 
-/// The run's branch and a HEAD off it, kept in the project's repository before the run's own
-/// repository goes: the branch as `refs/heads/<branch>` when the clone has none or it moves
-/// forward, else as `refs/makiba/closed/<task>/<commit>`, and a HEAD that the branch does not
-/// hold as `refs/makiba/closed/<task>/<commit>` (one ref per commit, so two workplaces of the run
-/// never overwrite each other's). Each is checked in the clone; the hand-over ref goes.
+/// The run's commits, kept in the project's repository before the run's own repository goes: the
+/// branch as `refs/heads/<branch>` when the clone has none or it moves forward, else as
+/// `refs/makiba/closed/<task>/<commit>`, and HEAD and every other local branch or tag that holds a
+/// commit nothing kept holds as `refs/makiba/closed/<task>/<commit>` (one ref per commit, so two
+/// workplaces of the run never overwrite each other's). Each is checked in the clone; the
+/// hand-over ref goes.
 fn keep(gitdir: &Path, real: &Path, repo: &Path, j: &Job) -> std::result::Result<(), String> {
     let closed = |c: &str| format!("refs/makiba/closed/{}/{c}", j.task);
     let tip = run_repo::commit(gitdir, real, &format!("refs/heads/{}", j.branch));
@@ -307,13 +323,26 @@ fn keep(gitdir: &Path, real: &Path, repo: &Path, j: &Job) -> std::result::Result
         }
         kept.push(tip.clone());
     }
-    if let Some(head) = run_repo::commit(gitdir, real, "HEAD") {
-        let held = tip.as_deref().is_some_and(|t| {
-            run_repo::read(gitdir, real, &["merge-base", "--is-ancestor", &head, t]).is_ok()
-        });
+    let others = run_repo::read(
+        gitdir,
+        real,
+        &[
+            "for-each-ref",
+            "--format=%(objectname)",
+            "refs/heads",
+            "refs/tags",
+        ],
+    )?;
+    for r in std::iter::once("HEAD").chain(others.lines()) {
+        let Some(c) = run_repo::commit(gitdir, real, r) else {
+            continue;
+        };
+        let held = kept
+            .iter()
+            .any(|k| run_repo::read(gitdir, real, &["merge-base", "--is-ancestor", &c, k]).is_ok());
         if !held {
-            run_repo::deliver(gitdir, real, repo, &head, &closed(&head), true)?;
-            kept.push(head);
+            run_repo::deliver(gitdir, real, repo, &c, &closed(&c), true)?;
+            kept.push(c);
         }
     }
     for c in &kept {

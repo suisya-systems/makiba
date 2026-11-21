@@ -155,7 +155,8 @@ pub fn at_origin(repo: &Path) -> Result<Vec<String>, String> {
         .collect())
 }
 
-/// The commits reachable from `revs` of the run (a missing one skipped) and from none of `not`.
+/// The commits reachable from `revs` of the run (a missing one skipped) or from any of its local
+/// branches and tags, and from none of `not`.
 pub fn count_not(
     gitdir: &Path,
     workplace: &Path,
@@ -169,7 +170,14 @@ pub fn count_not(
         .chain(not.iter().map(|r| format!("{r}\n")))
         .collect();
     let mut child = git(gitdir, workplace)
-        .args(["rev-list", "--count", "--ignore-missing", "--stdin"])
+        .args([
+            "rev-list",
+            "--count",
+            "--ignore-missing",
+            "--branches",
+            "--tags",
+            "--stdin",
+        ])
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
