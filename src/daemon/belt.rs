@@ -712,7 +712,8 @@ fn dispatch(
 }
 
 /// Put the next tasks of every active range in while there is room (belt.md 3.4), and end a range
-/// whose budget is spent and whose tasks are all closed, or that has nothing left (`used_up`).
+/// whose budget is spent and whose tasks are all closed, or that has nothing left (`used_up`;
+/// a candidate waiting for a dependency or that could not be read whole keeps it open).
 /// Called inside the caller's transaction. Returns the task ids dispatched.
 pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
     let capacity = super::dispatch::capacity_from_env();
@@ -752,7 +753,7 @@ pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
             && count(
                 w,
                 "SELECT count(*) FROM range_candidates WHERE range_id = ?1
-                   AND left_out_why LIKE 'waits_for%'",
+                   AND (left_out_why LIKE 'waits_for%' OR left_out_why LIKE 'unreadable%')",
                 [id],
             )? == 0
         {
@@ -1944,6 +1945,57 @@ mod tests {
         let why = |n: i64| c.iter().find(|c| c.issue == n).unwrap().why.clone();
         assert_eq!(why(5), None);
         assert_eq!(why(6).as_deref(), Some("follow_up (ask)"));
+    }
+
+    /// A range whose only candidate could not be read whole is not used up: it waits for a read.
+    #[test]
+    fn an_unreadable_candidate_keeps_the_range_open() {
+        let (_dir, w) = org();
+        let id = range(
+            &w,
+            "secretary",
+            Role::Secretary,
+            &json!({"action": "propose", "project": "p", "issues": [1], "at_once": 1,
+                    "budget_tasks": 1, "brief_head": "h"}),
+        )
+        .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        w.conn()
+            .execute("UPDATE ranges SET status = 'active' WHERE id = ?1", [id])
+            .unwrap();
+        let activation = event(
+            &w,
+            "range_approved",
+            "person",
+            None,
+            json!({"range_id": id}),
+        )
+        .unwrap();
+        let read = event(
+            &w,
+            "range_read",
+            "makibad",
+            None,
+            json!({"range_id": id, "complete": true, "activation": activation}),
+        )
+        .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO range_candidates (range_id, read_id, position, issue, title, body,
+                   admitted, left_out_why)
+                 VALUES (?1, ?2, 0, 1, 't', '', 0, 'unreadable (too large to read whole)')",
+                params![id, read],
+            )
+            .unwrap();
+        assert!(fill(&w, "fake").unwrap().is_empty());
+        let status: String = w
+            .conn()
+            .query_row("SELECT status FROM ranges WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "active");
     }
 
     #[test]
