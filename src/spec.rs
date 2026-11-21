@@ -169,6 +169,7 @@ pub enum Verb {
     Project,
     Update,
     Candidate,
+    Events,
 }
 
 impl Verb {
@@ -194,6 +195,7 @@ impl Verb {
         Verb::Project,
         Verb::Update,
         Verb::Candidate,
+        Verb::Events,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -219,6 +221,7 @@ impl Verb {
             Verb::Project => "project",
             Verb::Update => "update",
             Verb::Candidate => "candidate",
+            Verb::Events => "events",
         }
     }
 }
