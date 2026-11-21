@@ -295,7 +295,8 @@ impl Close {
         {
             return Err(why);
         }
-        if run_repo::is_run(&gitdir, &real) {
+        // The git folder decides, not the work tree's `.git` file, which the worker can delete.
+        if gitdir.join("HEAD").is_file() {
             keep(&gitdir, &real, &repo, j)?;
         }
         run_repo::remove_under(top, &real)?;
