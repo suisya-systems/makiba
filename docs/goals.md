@@ -47,7 +47,7 @@ name differs only in case (`Example-Org/Repo.md`) is reported as an error, not r
 ## How candidates are ordered
 
 1. An Issue names the clause it serves itself: under a `## Goal clause` heading, the first list
-   line `- G<number> ...` (as in makiba's own Issues: `- G7 It runs its own development`). Only the
+   line `- G<number> ...` (as in makiba's own Issues: `- G9 It runs its own development`). Only the
    Issue's body is read, not its comments.
 2. Candidates are ordered by that clause (those naming `G1` first), and within one clause by the
    carried order (priority label, follow-up of a recent merge, parallelizable when workers are

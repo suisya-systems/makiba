@@ -9,35 +9,52 @@ The reason makiba exists. Everything below serves it.
 - unmet if: renewing the secretary loses an open pending entry or a running task
 - unmet if: a skill or a rules file tells the person to open a worker's terminal
 
-## G2 Past incidents do not come back
+## G2 The flow of work does not wait for the person's turn
+The person hands over a range of work once; inside it the next task goes in by itself.
+- unmet if: after a task ends, nothing is put in until the person picks the next one
+- unmet if: one task waiting for the person's answer stops other tasks from being put in
+- unmet if: the person cannot see what is flowing and what could be put in without asking the secretary
+
+## G3 Past incidents do not come back
 Every row of docs/design/incidents.md is guarded by a test.
 - unmet if: a row of the incident table names no test, or names a test file that does not exist
 - unmet if: a test named in the incident table fails
 
-## G3 No model touches a terminal or the ledger directly
+## G4 No model touches a terminal or the ledger directly
 - unmet if: a skill or a rules file names a terminal tool or runs the base's command (hc)
 - unmet if: a worker, the curator or the secretary can run the base's command or reach its socket
 - unmet if: a request with no key is accepted at the door, or the person key can be read from inside an agent's sandbox
 - unmet if: an agent's token can be read from inside that agent's own sandbox (its Bash)
 - unmet if: any role other than the dispatcher can write state.db
 
-## G4 Dispatch and close record what was observed
+## G5 What must not happen is stopped by something outside the agent
+The list is docs/design/lines.md: each thing that must not happen, with what holds it.
+- unmet if: an item of the list names nothing that holds it, or is marked open
+- unmet if: an item is held only by a sentence in the rules or by the agent's own reading of a command's text
+- unmet if: a holder that needs a setting by the person (for example a rule on the default branch) is not set and makiba does not say so
+
+## G6 Dispatch and close record what was observed
 - unmet if: a path exists that records a launch as verified without an observed first turn
 - unmet if: stopping the dispatcher part-way leaves a second terminal or a stranded run
 - unmet if: a run can be closed before its done report without an explicit abandon
 
-## G5 The watch does not stop, and if it stops it shows
+## G7 The watch does not stop, and if it stops it shows
 - unmet if: nothing shows that the dispatcher has stopped
 - unmet if: a terminal event is missed after the base restarts
 - unmet if: a message to the secretary can be lost
 - unmet if: a message is typed twice without the dispatcher having died in between
 
-## G6 The base is a part that can be replaced, and an update of it does not break makiba
+## G8 The base is a part that can be replaced, and an update of it does not break makiba
 - unmet if: the base's version is not pinned
 - unmet if: code outside src/base/ names the base
 - unmet if: the base supplies rules to agents or sends notices to the person
 - unmet if: no test checks the operations and fields makiba uses against the base's own definition of them
 
-## G7 It runs its own development
+## G9 It runs its own development
 - unmet if: makiba's development still runs on claude-org-ja
 - unmet if: an Issue of milestones M0 to M6 is open
+
+## G10 It installs as one binary
+- unmet if: using makiba needs a build from source
+- unmet if: no binary per supported system and no way to install it are published
+- unmet if: moving to a new version needs a reinstall by hand
