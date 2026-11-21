@@ -135,6 +135,16 @@ impl Drop for Snapshot {
     }
 }
 
+/// Remove `p` in the snapshot's tree: a link or a file itself (never what it names), a folder
+/// with what is under it.
+fn remove_in(tree: &Path, p: &Path) -> Result<(), String> {
+    match p.symlink_metadata() {
+        Err(_) => Ok(()),
+        Ok(m) if m.is_dir() => run_repo::remove_under(tree, p),
+        Ok(_) => std::fs::remove_file(p).map_err(|e| format!("{}: {e}", p.display())),
+    }
+}
+
 fn plain(s: &str) -> bool {
     !s.is_empty()
         && !s.starts_with('-')
@@ -220,10 +230,7 @@ pub fn snapshot(
         ));
     }
     for d in [".claude", ".codex"] {
-        let p = snap.tree.join(d);
-        if p.symlink_metadata().is_ok() {
-            run_repo::remove_under(&snap.tree, &p)?;
-        }
+        remove_in(&snap.tree, &snap.tree.join(d))?;
     }
     let mut diff = run_repo::git(&gitdir, workplace);
     diff.args([
@@ -241,8 +248,17 @@ pub fn snapshot(
             String::from_utf8_lossy(&d.stderr).trim()
         ));
     }
-    let write = |name: &str, bytes: &[u8]| {
-        std::fs::write(snap.tree.join(name), bytes).map_err(|e| format!("{name}: {e}"))
+    // The tree is the worker's: a path of these names there (a link out of the folder, say) is
+    // removed, and the file is made new, never written through what was there.
+    let write = |name: &str, bytes: &[u8]| -> Result<(), String> {
+        let p = snap.tree.join(name);
+        remove_in(&snap.tree, &p)?;
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&p)
+            .and_then(|mut f| f.write_all(bytes))
+            .map_err(|e| format!("{name}: {e}"))
     };
     write(DIFF_FILE, &d.stdout)?;
     if let Some(n) = note {
@@ -268,6 +284,8 @@ fn bounded(mut c: Command, input: Option<&str>, bound: Duration) -> Result<Ran, 
     })
     .stdout(Stdio::piped())
     .stderr(Stdio::piped());
+    // Its own process group, so that a stop at the bound ends what it started too.
+    std::os::unix::process::CommandExt::process_group(&mut c, 0);
     let mut child = c.spawn().map_err(|e| e.to_string())?;
     if let (Some(text), Some(mut stdin)) = (input, child.stdin.take()) {
         let text = text.to_string();
@@ -275,14 +293,18 @@ fn bounded(mut c: Command, input: Option<&str>, bound: Duration) -> Result<Ran, 
             let _ = stdin.write_all(text.as_bytes());
         });
     }
+    // Each pipe is read on a thread that hands its text over a channel: a descendant still holding
+    // the pipe cannot keep the round waiting past the bound.
     let pipe = |r: Option<Box<dyn Read + Send>>| {
+        let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut s = Vec::new();
             if let Some(mut r) = r {
                 let _ = r.read_to_end(&mut s);
             }
-            String::from_utf8_lossy(&s).into_owned()
-        })
+            let _ = tx.send(String::from_utf8_lossy(&s).into_owned());
+        });
+        rx
     };
     let out = pipe(
         child
@@ -301,17 +323,25 @@ fn bounded(mut c: Command, input: Option<&str>, bound: Duration) -> Result<Ran, 
         match child.try_wait().map_err(|e| e.to_string())? {
             Some(s) => break (Some(s), false),
             None if Instant::now() >= until => {
-                let _ = child.kill();
+                // SAFETY: a signal to the process group this function made for the child.
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
                 let _ = child.wait();
                 break (None, true);
             }
             None => std::thread::sleep(Duration::from_millis(50)),
         }
     };
+    // The group is ended either way: nothing the reader started outlives the round.
+    // SAFETY: as above; the group is gone or holds only the reader's descendants.
+    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+    let rest = |rx: std::sync::mpsc::Receiver<String>| {
+        rx.recv_timeout(until.saturating_duration_since(Instant::now()) + Duration::from_secs(5))
+            .unwrap_or_default()
+    };
     Ok(Ran {
         ok: status.is_some_and(|s| s.success()),
-        out: out.join().unwrap_or_default(),
-        err: err.join().unwrap_or_default(),
+        out: rest(out),
+        err: rest(err),
         timed_out,
     })
 }
@@ -562,14 +592,14 @@ pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answe
         Err(why) => why.clone(),
     };
     let Some(same) = &plan.same else {
-        return Answer {
+        return withheld(Answer {
             established: false,
             reader: "none".into(),
             fallback_reason: None,
             reason: Some(fallback_reason),
             findings: None,
             text: String::new(),
-        };
+        });
     };
     let mut a = match run_same(same, places, snap, design) {
         Ok((ran, read)) => judge(FRESH.into(), &ran, read),
@@ -586,22 +616,36 @@ pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answe
     withheld(a)
 }
 
-/// An answer with a token shape or a key's content in it comes back empty, not established.
-fn withheld(mut a: Answer) -> Answer {
+/// What in `text` must not leave makibad: a token shape of the secret scanner or a key's content.
+pub fn secret_in(text: &str) -> Option<String> {
     let keys: Vec<String> = [crate::cli::person_key_path(), crate::cli::gate_key_path()]
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .map(|k| k.trim().to_string())
         .filter(|k| k.len() >= 16)
         .collect();
-    let hit = crate::hooks::git_hook::find(a.text.as_bytes())
+    crate::hooks::git_hook::find(text.as_bytes())
         .map(|(shape, _)| shape.to_string())
         .or_else(|| {
             keys.iter()
-                .any(|k| a.text.contains(k.as_str()))
+                .any(|k| text.contains(k.as_str()))
                 .then(|| "a makiba key".to_string())
-        });
-    if let Some(shape) = hit {
+        })
+}
+
+/// A diagnostic string as it may be returned: replaced when it carries a secret.
+pub fn scrub(text: String) -> String {
+    match secret_in(&text) {
+        Some(shape) => format!("(withheld: it carried {shape})"),
+        None => text,
+    }
+}
+
+/// An answer with a secret in it comes back empty, not established; its diagnostics are scrubbed.
+fn withheld(mut a: Answer) -> Answer {
+    a.fallback_reason = a.fallback_reason.map(scrub);
+    a.reason = a.reason.map(scrub);
+    if let Some(shape) = secret_in(&a.text) {
         a.established = false;
         a.reason = Some(format!("the answer was withheld: it carried {shape}"));
         a.findings = None;

@@ -2,6 +2,10 @@
 //! of its review for the reported head, recorded by the door (not the worker's words), in a
 //! `worker_reported` event on the read surface and in the line the secretary is told.
 //!
+//! Also the regressions of the diff review's round 1: a committed link cannot make makibad write
+//! outside the snapshot, a secret in a reader's error is withheld, and a review no reader could
+//! run is not reported stale.
+//!
 //! The helpers are those of `tests/review_gate.rs` (the declared test, not changed after its
 //! commit).
 //!
@@ -351,4 +355,61 @@ fn a_document_tasks_done_report_records_no_review() {
     o.done().unwrap();
     assert!(o.events("worker_reported").is_empty());
     assert_eq!(o.told(), "all done");
+}
+
+/// Review round 1, P1: a link committed under the snapshot's file names is not written through.
+#[test]
+fn a_committed_link_under_a_snapshot_name_is_not_written_through() {
+    let o = org("rr6", "code");
+    let outside = o.state.join("outside.txt");
+    std::fs::write(&outside, "untouched\n").unwrap();
+    for name in ["MAKIBA_REVIEW.diff", "MAKIBA_DESIGN.md"] {
+        std::os::unix::fs::symlink(&outside, o.worktree.join(name)).unwrap();
+        git(&o.worktree, &["add", name]);
+    }
+    git(&o.worktree, &["commit", "-q", "-m", "links"]);
+    assert_eq!(o.diff().unwrap()["verdict"], "passed");
+    assert_eq!(o.design().unwrap()["verdict"], "passed");
+    assert_eq!(std::fs::read_to_string(&outside).unwrap(), "untouched\n");
+}
+
+/// Review round 1, P2: a secret in a reader's error output does not come back in the reasons.
+#[test]
+fn a_secret_in_a_readers_error_is_withheld() {
+    let o = org("rr7", "code");
+    o.commit("a.txt");
+    stand_in(&o.other, 0, r#"cat "$MAKIBA_PERSON_KEY" >&2; exit 1"#);
+    let v = o.diff().unwrap();
+    assert_eq!(v["reader"], "fresh-session", "{v}");
+    assert!(!v.to_string().contains(PERSON_KEY), "{v}");
+}
+
+/// Review round 1, P2: a review no reader could run keeps its verdict at the done report.
+#[test]
+fn a_review_no_reader_could_run_is_not_reported_stale() {
+    let o = org("rr8", "code");
+    o.commit("a.txt");
+    let door = Door::new(
+        StateWriter::open(&o.state.join("state.db")).unwrap(),
+        Arc::new(Stub::new()),
+        "fake".into(),
+    )
+    .with_review_programs(
+        o.state.join("bin/nowhere/codex"),
+        o.state.join("bin/nowhere/claude"),
+    );
+    let v = door
+        .handle(
+            Some(&o.worker),
+            "review",
+            json!({"kind": "diff"}),
+            None,
+            true,
+        )
+        .unwrap();
+    assert_eq!(v["reader"], "none", "{v}");
+    o.done().unwrap();
+    let r = o.recorded();
+    assert_eq!(r["state"], "not-established", "{r}");
+    assert!(!r["reason"].as_str().unwrap_or_default().is_empty(), "{r}");
 }

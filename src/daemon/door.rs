@@ -2473,7 +2473,9 @@ fn review_state(w: &StateWriter, actor: &str, task: &str) -> Result<Option<Value
     let last: Option<Value> = last.and_then(|t| serde_json::from_str(&t).ok());
     let state = match &last {
         None => "none",
-        Some(l) if l["head"].as_str() != head.as_deref() => "stale",
+        // Stale only when the review names a head and it is another; a review that ran on no
+        // head (no reader could start) keeps its own verdict and reason.
+        Some(l) if l["head"].is_string() && l["head"].as_str() != head.as_deref() => "stale",
         Some(l) => l["verdict"].as_str().unwrap_or("not-established"),
     };
     let mut r = json!({"state": state, "head": head});
@@ -2634,6 +2636,7 @@ impl Door {
         let base_answer = |verdict: &str, reader: &str, reason: &str| json!({"verdict": verdict, "kind": mode, "reader": reader, "reason": reason});
         if let Some(why) = plan.none() {
             let w = self.writer();
+            let why = super::review::scrub(why);
             return fail(&w, Ok(base_answer("not-established", "none", &why)));
         }
         let snap = match super::review::snapshot(
