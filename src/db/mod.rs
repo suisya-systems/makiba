@@ -3,8 +3,8 @@
 //! The SQL is carried from claude-org-ja and kept as SQL: `schema.sql` is v1 to v3, `schema_v4.sql`
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
 //! `schema_v5.sql` adds the launch identity to `agents`, `schema_v6.sql` the triggers that keep a
-//! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run. `open` opens a database with the
-//! project's pragmas and `migrate` brings it to v7.
+//! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt. `open` opens a
+//! database with the project's pragmas and `migrate` brings it to v8.
 
 use std::fmt;
 use std::path::Path;
@@ -28,6 +28,8 @@ pub const SCHEMA_V5: &str = include_str!("schema_v5.sql");
 pub const SCHEMA_V6: &str = include_str!("schema_v6.sql");
 /// v7: `run_launch.role` and a nullable `run_launch.run_id`, a launch without a run.
 pub const SCHEMA_V7: &str = include_str!("schema_v7.sql");
+/// v8: `ranges`, `range_candidates` and `runs.range_id`, the belt (Issue 257).
+pub const SCHEMA_V8: &str = include_str!("schema_v8.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -119,7 +121,7 @@ fn ddl_of(table: &str) -> String {
     ddl
 }
 
-/// Bring a database to v7: apply v3 to an empty one, upgrade an older one in place, then add v4 to v7.
+/// Bring a database to v8: apply v3 to an empty one, upgrade an older one in place, then add v4 to v8.
 /// Idempotent. Refuses to run inside a transaction, where it could not leave the caller's writes alone.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     if !conn.is_autocommit() {
@@ -168,8 +170,13 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         return Err(e.into());
     }
-    // v5 to v7, the same way.
-    for (version, script) in [(5, SCHEMA_V5), (6, SCHEMA_V6), (7, SCHEMA_V7)] {
+    // v5 to v8, the same way.
+    for (version, script) in [
+        (5, SCHEMA_V5),
+        (6, SCHEMA_V6),
+        (7, SCHEMA_V7),
+        (8, SCHEMA_V8),
+    ] {
         let done: i64 = conn.query_row(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
             [version],
