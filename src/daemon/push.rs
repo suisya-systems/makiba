@@ -23,6 +23,7 @@
 use super::prepare::Places;
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
+use crate::hooks::git_hook::find;
 use crate::spec::AGENT_SECRETARY;
 use serde_json::json;
 use std::collections::HashSet;
@@ -74,6 +75,7 @@ fn git(dir: &Path, args: &[&str]) -> std::result::Result<String, String> {
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
@@ -94,6 +96,7 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> std::result::Result<bool, String
         .arg("-C")
         .arg(dir)
         .args(["merge-base", "--is-ancestor", a, b])
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .stdin(Stdio::null())
         .output()
         .map_err(|e| format!("cannot run git: {e}"))?;
@@ -116,13 +119,154 @@ fn work(places: &Places, j: &Job) -> Outcome {
     }
 }
 
-/// The commit first, so no branch name can read as a force (`+`).
+/// The commit first, so no branch name can read as a force (`+`). Scanned first (Issue 231); no
+/// tag follows.
 fn push_head(dir: &Path, head: &str, branch: &str) -> std::result::Result<(), String> {
+    scan(dir, head)?;
     git(
         dir,
-        &["push", "origin", &format!("{head}:refs/heads/{branch}")],
+        &[
+            "push",
+            "--no-follow-tags",
+            "origin",
+            &format!("{head}:refs/heads/{branch}"),
+        ],
     )
     .map(drop)
+}
+
+/// `git` for a command whose arguments hold origin's URL: git's message without the arguments,
+/// which could carry a credential.
+fn remote(dir: &Path, args: &[&str]) -> std::result::Result<String, String> {
+    git(dir, args).map_err(|e| {
+        let why = e
+            .strip_prefix(&format!("git {}: ", args.join(" ")))
+            .unwrap_or("");
+        format!(
+            "origin cannot be read ({why}), so the outgoing commits cannot be scanned; nothing \
+             was pushed"
+        )
+    })
+}
+
+/// Issue 231: what pushing `head` would send (every object it reaches that no branch or tag of
+/// the remote reaches, as the remote itself says), read with the pre-commit hook's scanner: each
+/// new blob raw and each new commit's message. A match refuses naming the commit, the file, the
+/// line and the shape, never the text. Anything that cannot be read refuses too.
+fn scan(dir: &Path, head: &str) -> std::result::Result<(), String> {
+    let urls = remote(dir, &["remote", "get-url", "--push", "--all", "origin"])?;
+    let mut urls = urls.lines();
+    let (Some(url), None) = (urls.next(), urls.next()) else {
+        return Err(
+            "origin has more than one push URL, so the outgoing commits cannot be \
+                    scanned against one remote; nothing was pushed"
+                .into(),
+        );
+    };
+    // `push origin` connects to `url` as it is; `ls-remote <url>` would rewrite it once more.
+    if remote(dir, &["ls-remote", "--get-url", url])? != url {
+        return Err(
+            "origin's push URL is rewritten again by a url insteadOf rule, so the remote \
+                    the scan would read is not the one pushed to; nothing was pushed"
+                .into(),
+        );
+    }
+    let refs = remote(dir, &["ls-remote", "--heads", "--tags", url])?;
+    let mut range = vec!["--ignore-missing", head, "--not"];
+    range.extend(refs.lines().filter_map(|l| l.split_whitespace().next()));
+    let objects = git(dir, &[&["rev-list", "--objects"], &range[..]].concat())?;
+    let Some((oid, path, shape, line)) = first_match(dir, &objects)? else {
+        return Ok(());
+    };
+    let refuse = "a secret must not reach the remote, so nothing was pushed. A person who finds it \
+                  a false positive pushes the branch with their own git; once the remote has it, \
+                  push goes on";
+    match path {
+        None => Err(format!(
+            "the message of commit {oid} holds a line shaped like {shape} (line {line}); {refuse}"
+        )),
+        Some(path) => {
+            // The oldest new commit that brings the blob in; a merge's own content too (`-m`).
+            let log = [
+                &["log", "-m", "--format=%H", "--find-object", &oid][..],
+                &range[..],
+            ]
+            .concat();
+            let commit = git(dir, &log)
+                .ok()
+                .and_then(|l| l.lines().last().map(str::to_string))
+                .map_or("a new commit".to_string(), |c| format!("commit {c}"));
+            Err(format!(
+                "{commit} adds {path}, which holds a line shaped like {shape} (line {line}); \
+                 {refuse}"
+            ))
+        }
+    }
+}
+
+/// An object's id, its path (none for a commit), the shape and the line.
+type Match = (String, Option<String>, &'static str, usize);
+
+/// The first object of `objects` (`rev-list --objects` lines: an id, and a path for a tree or a
+/// blob) whose blob, or commit message, holds a token shape. One `cat-file --batch` reads them,
+/// one at a time.
+fn first_match(dir: &Path, objects: &str) -> std::result::Result<Option<Match>, String> {
+    use std::io::{BufRead, BufReader, Read, Write};
+    let mut child = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["cat-file", "--batch"])
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    let ids: String = objects
+        .lines()
+        .map(|l| format!("{}\n", l.split(' ').next().unwrap_or_default()))
+        .collect();
+    let mut stdin = child.stdin.take().ok_or("git cat-file has no input")?;
+    let writer = std::thread::spawn(move || stdin.write_all(ids.as_bytes()));
+    let mut out = BufReader::new(child.stdout.take().ok_or("git cat-file has no output")?);
+    let mut read = || -> std::result::Result<Option<Match>, String> {
+        for l in objects.lines() {
+            let (oid, path) = l.split_once(' ').map_or((l, None), |(o, p)| (o, Some(p)));
+            let mut header = String::new();
+            out.read_line(&mut header)
+                .map_err(|e| format!("cannot read git cat-file: {e}"))?;
+            let parts: Vec<&str> = header.split_whitespace().collect();
+            let [_, kind, size] = parts[..] else {
+                return Err(format!("cannot read object {oid}: {}", header.trim()));
+            };
+            let size: usize = size
+                .parse()
+                .map_err(|_| format!("cannot read object {oid}: {}", header.trim()))?;
+            let mut body = vec![0; size + 1];
+            out.read_exact(&mut body)
+                .map_err(|e| format!("cannot read object {oid}: {e}"))?;
+            body.pop();
+            let hit = match kind {
+                "blob" => find(&body),
+                "commit" => body
+                    .windows(2)
+                    .position(|w| w == b"\n\n")
+                    .and_then(|at| find(&body[at + 2..])),
+                _ => None,
+            };
+            if let Some((shape, line)) = hit {
+                let path = (kind == "blob").then(|| path.unwrap_or_default().to_string());
+                return Ok(Some((oid.to_string(), path, shape, line)));
+            }
+        }
+        Ok(None)
+    };
+    let found = read();
+    drop(out);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = writer.join();
+    found
 }
 
 /// The path of `name` in the worktree's git folder exists (a merge or another operation under way).
