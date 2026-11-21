@@ -205,19 +205,81 @@ fn pending(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     let mut out = rows(
         conn,
         "SELECT p.id, r.task_id, p.kind, p.question, p.status, p.created_at,
-                p.prompt_text IS NOT NULL AS screen
+                p.prompt_text IS NOT NULL AS screen, p.context_json
          FROM pending p LEFT JOIN runs r ON r.id = p.run_id
          WHERE p.status IN ('open', 'escalated') ORDER BY p.id",
         [],
     )?;
     for p in &mut out {
         let m = p.as_object_mut().expect("a row is an object");
-        if m.remove("screen") == Some(json!(1)) {
+        let screen = m.remove("screen") == Some(json!(1));
+        if screen {
             let first = m["question"].as_str().unwrap_or_default();
             m["question"] = json!(first.lines().next().unwrap_or_default());
         }
+        let stored = m.remove("context_json").unwrap_or_default();
+        m.insert("context".into(), context(&stored, screen));
     }
     Ok(out)
+}
+
+/// The context of a pending entry (Issue 255): each of its five parts, null when not set, and
+/// all null for an entry made from a screen, which shows its first line only.
+fn context(stored: &Value, screen: bool) -> Value {
+    let stored: Value = serde_json::from_str(stored.as_str().unwrap_or("{}")).unwrap_or_default();
+    let parts = crate::daemon::door::CONTEXT_PARTS.map(|part| {
+        let v = match &stored[part] {
+            Value::String(t) if !screen => json!(t),
+            _ => Value::Null,
+        };
+        (part.to_string(), v)
+    });
+    Value::Object(parts.into_iter().collect())
+}
+
+/// The text lines of the open and escalated entries (Issue 255): each with its context in short
+/// form, the first line of each part, masked as `--json` is.
+fn pending_text(conn: &Connection) -> String {
+    let rows = pending(conn).unwrap_or_default();
+    if rows.is_empty() {
+        return "pending: none\n".into();
+    }
+    let first = |v: &Value| {
+        v.as_str()
+            .unwrap_or("-")
+            .lines()
+            .next()
+            .unwrap_or("")
+            .to_string()
+    };
+    let mut text = String::from("pending:\n");
+    for p in &rows {
+        text.push_str(&format!(
+            "  #{} {} (task {}): {}\n",
+            p["id"],
+            first(&p["status"]),
+            first(&p["task_id"]),
+            first(&p["question"])
+        ));
+        let c = &p["context"];
+        for (part, label) in [
+            ("background", "background"),
+            ("if_yes", "if yes"),
+            ("if_no", "if no"),
+        ] {
+            if !c[part].is_null() {
+                text.push_str(&format!("    {label}: {}\n", first(&c[part])));
+            }
+        }
+        if !c["recommend"].is_null() || !c["why"].is_null() {
+            text.push_str(&format!(
+                "    recommend: {} - {}\n",
+                first(&c["recommend"]),
+                first(&c["why"])
+            ));
+        }
+    }
+    Mask::new(conn).text(&text)
 }
 
 /// The CI watches under way.
@@ -427,8 +489,9 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     let (Some(beat), Some(age)) = (beat, age) else {
         return Ok((
             format!(
-                "makibad: no heartbeat has ever been written\n{}",
-                projects_text(&conn)
+                "makibad: no heartbeat has ever been written\n{}{}",
+                projects_text(&conn),
+                pending_text(&conn)
             ),
             false,
         ));
@@ -457,6 +520,7 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
         crate::base::attach_command(&session, crate::spec::AGENT_SECRETARY)
     ));
     text.push_str(&projects_text(&conn));
+    text.push_str(&pending_text(&conn));
     Ok((text, fresh))
 }
 

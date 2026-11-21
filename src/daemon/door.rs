@@ -752,34 +752,44 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
             if q.trim().is_empty() {
                 return Err(usage("the question is not empty"));
             }
+            let context = context_arg(args)?;
             if !run_exists(w, task)? {
                 return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
             }
             // The same question of the same task, still open, is that entry (pending_decisions.py
-            // `append`); once escalated, withdrawn or answered, it opens a new one.
+            // `append`); once escalated, withdrawn or answered, it opens a new one. An entry made
+            // from a screen is never it. The parts given are written into its context (Issue 255).
             let open: Option<i64> = c
                 .query_row(
                     "SELECT p.id FROM pending p JOIN runs r ON r.id = p.run_id
                      WHERE r.task_id = ?1 AND p.kind = 'question' AND p.question = ?2
-                       AND p.status = 'open' ORDER BY p.id LIMIT 1",
+                       AND p.status = 'open' AND p.prompt_text IS NULL ORDER BY p.id LIMIT 1",
                     params![task, q],
                     |r| r.get(0),
                 )
                 .optional()
                 .map_err(internal)?;
             if let Some(id) = open {
+                c.execute(
+                    "UPDATE pending SET context_json = json_patch(context_json, ?1) WHERE id = ?2",
+                    params![context.to_string(), id],
+                )
+                .map_err(internal)?;
                 return Ok(json!({"id": id, "status": "open"}));
             }
             c.execute(
-                "INSERT INTO pending (run_id, kind, question)
-                 VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'question', ?2)",
-                params![task, q],
+                "INSERT INTO pending (run_id, kind, question, context_json)
+                 VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'question', ?2, ?3)",
+                params![task, q, context.to_string()],
             )
             .map_err(internal)?;
             Ok(json!({"id": c.last_insert_rowid(), "status": "open"}))
         }
         action @ ("escalate" | "withdraw") => {
             let id = id_arg(args)?;
+            if action == "escalate" {
+                missing_context(c, id)?;
+            }
             let (to, from) = if action == "escalate" {
                 ("escalated", "('open')")
             } else {
@@ -833,6 +843,58 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
             "action is add, escalate, withdraw or list, not {other:?}"
         ))),
     }
+}
+
+/// The parts of a pending entry's context (Issue 255), each required to escalate an entry made
+/// by `add`.
+pub const CONTEXT_PARTS: [&str; 5] = ["background", "if_yes", "if_no", "recommend", "why"];
+
+/// The context parts `add` was given, not blank, as one object.
+fn context_arg(args: &Value) -> Result<Value, DoorError> {
+    let mut m = Map::new();
+    for part in CONTEXT_PARTS {
+        match args.get(part) {
+            None | Some(Value::Null) => {}
+            Some(Value::String(t)) if t.trim().is_empty() => {}
+            Some(Value::String(t)) => {
+                m.insert(part.into(), json!(t));
+            }
+            Some(_) => return Err(usage(format!("the argument {part} is text"))),
+        }
+    }
+    Ok(Value::Object(m))
+}
+
+/// Refuses to escalate an entry made by `add` whose context lacks a part, naming those parts.
+/// An entry made from a screen (`prompt_text`) is not checked: its screen is its context.
+fn missing_context(c: &Connection, id: i64) -> Result<(), DoorError> {
+    let row: Option<(bool, String)> = c
+        .query_row(
+            "SELECT prompt_text IS NOT NULL, context_json FROM pending WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    let Some((false, context)) = row else {
+        return Ok(());
+    };
+    let context: Value = serde_json::from_str(&context).unwrap_or_default();
+    let missing: Vec<&str> = CONTEXT_PARTS
+        .into_iter()
+        .filter(|p| context[*p].as_str().is_none_or(|t| t.trim().is_empty()))
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    Err(refuse(
+        ErrorKind::Usage,
+        format!(
+            "pending entry {id} cannot be escalated without its context: {} is missing",
+            missing.join(", ")
+        ),
+        "add them with pending add (the same task and question)",
+    ))
 }
 
 /// A question an `answer` names, ready to be sent to its worker.
@@ -3117,16 +3179,20 @@ fn tool(v: Verb) -> Value {
             &["task_id"],
         ),
         Verb::Pending => (
-            "Keep the pending table of questions: add (task, question), escalate or withdraw (id), list.",
-            Map::from_iter([
-                (
-                    "action".into(),
-                    json!({"type": "string", "enum": ["add", "escalate", "withdraw", "list"]}),
-                ),
-                ("id".into(), json!({"type": "integer"})),
-                ("task".into(), text.clone()),
-                ("question".into(), text.clone()),
-            ]),
+            "Keep the pending table of questions: add (task, question, and its context: background, if_yes, if_no, recommend, why), escalate or withdraw (id), list. An entry is escalated only with all five parts; recommend may say there is none, with the reason in why. add of the same open question fills in the parts given.",
+            Map::from_iter(
+                [
+                    (
+                        "action".into(),
+                        json!({"type": "string", "enum": ["add", "escalate", "withdraw", "list"]}),
+                    ),
+                    ("id".into(), json!({"type": "integer"})),
+                    ("task".into(), text.clone()),
+                    ("question".into(), text.clone()),
+                ]
+                .into_iter()
+                .chain(CONTEXT_PARTS.map(|p| (p.into(), text.clone()))),
+            ),
             &["action"],
         ),
         Verb::Answer => (
@@ -3199,7 +3265,7 @@ fn tool(v: Verb) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{curator_at_work, save_note};
+    use super::{CONTEXT_PARTS, Verb, curator_at_work, json, save_note, tool};
 
     #[test]
     fn a_curator_key_not_revoked_means_the_curator_is_at_work() {
@@ -3241,5 +3307,25 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(names.iter().all(|n| !n.starts_with('.')), "{names:?}");
+    }
+
+    /// The `pending` tool offers the five context parts as optional text (Issue 255).
+    #[test]
+    fn the_pending_tool_takes_the_context_parts() {
+        let t = tool(Verb::Pending);
+        for part in CONTEXT_PARTS {
+            assert_eq!(
+                t["inputSchema"]["properties"][part],
+                json!({"type": "string"}),
+                "{t}"
+            );
+            assert!(
+                !t["inputSchema"]["required"]
+                    .as_array()
+                    .unwrap()
+                    .contains(&json!(part)),
+                "{t}"
+            );
+        }
     }
 }
