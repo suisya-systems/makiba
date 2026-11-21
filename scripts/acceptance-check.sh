@@ -116,8 +116,14 @@ done <<<"$paths"
 tests=$(printf '%s' "$tests" | sed '/^$/d')
 [ -n "$tests" ] || no "no declared path is a test target; declare at least one that fails at the test commit"
 
-run_rs() { # run_rs <tree> <name>: output in $work/out, Cargo's exit status returned
-  (cd "$1" && export CARGO_TERM_COLOR=never && cargo fetch --locked && cargo test --locked --test "$2") >"$work/out" 2>&1
+# Each worktree builds into its own target/, whatever the environment or a cargo config file says:
+# one folder shared by the two worktrees (or by two runs) lets cargo reuse a build made from the
+# other's sources (Issue #232). Python tests get no target folder from the checker at all.
+unset CARGO_TARGET_DIR CARGO_BUILD_TARGET_DIR CARGO_BUILD_BUILD_DIR
+run_rs() { # run_rs <tree> <name> <where>: output in $work/out, Cargo's exit status returned
+  echo "acceptance-check: building $2 at $3 in target folder $1/target"
+  (cd "$1" && export CARGO_TERM_COLOR=never CARGO_TARGET_DIR="$1/target" CARGO_BUILD_BUILD_DIR="$1/target" &&
+    cargo fetch --locked && cargo test --locked --test "$2") >"$work/out" 2>&1
 }
 ran() { sed -n 's/^running \([0-9][0-9]*\) tests\{0,1\}$/\1/p' "$work/out" | head -1; }
 while read -r kind t n; do
@@ -136,7 +142,7 @@ while read -r kind t n; do
     fi
     continue
   fi
-  run_rs "$work/t" "$n"; rc=$?
+  run_rs "$work/t" "$n" "the test commit"; rc=$?
   if grep -qF "error: could not compile \`makiba\` (test \"$n\")" "$work/out"; then
     echo "acceptance-check: $t does not compile at the test commit (expected: counts as failing)"
   elif [ "$(ran)" = 0 ]; then
@@ -148,7 +154,7 @@ while read -r kind t n; do
   else
     no "could not run $t at the test commit $first:"; sed 's/^/  /' "$work/out" | tail -20
   fi
-  run_rs "$work/h" "$n"; rc=$?
+  run_rs "$work/h" "$n" head; rc=$?
   res=$(grep '^test result: ' "$work/out" | head -1)
   if [ "$rc" -ne 0 ]; then
     no "$t fails at head $head:"; sed 's/^/  /' "$work/out" | tail -20
