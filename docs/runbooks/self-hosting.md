@@ -14,7 +14,7 @@ Shows (Issue 50, definition of done):
 
 Where the code at this commit has no way to do what the Issue says, and what this runbook does instead:
 
-- **`makiba status` does not list projects.** It prints the heartbeat, `subscribed` and the secretary's line only (`src/status_local.rs`; `--json` the same). A separate Issue, "`makiba status` lists the registered projects" (test-first), makes it do so. Until that Issue lands, section 6 reads the `projects` row of `state.db` with a read-only query and the results say so. When it has landed, run `makiba status` in section 6 as well and record its project line.
+- **`makiba status` does not list projects.** It prints the heartbeat, `subscribed` and the secretary's line only (`src/status_local.rs`; `--json` the same). Issue 227, "`makiba status` lists the registered projects" (test-first), makes it do so. Until Issue 227 lands, section 6 reads the `projects` row of `state.db` with a read-only query and the results say so. When it has landed, run `makiba status` in section 6 as well and record its project line.
 - **No verb runs the triage scan on request.** `makibad` runs it after a close (a `run_closed` event newer than the last scan that did not fail) and at most once per 30 minutes (`MAKIBA_TRIAGE_INTERVAL_MS`, read when `makibad` starts; spec section 10, `src/daemon/triage.rs`). A verb for it is a separate Issue (the owner's decision). Section 8 therefore dispatches one small `document` task in the organization and closes it; the close is what makes the scan due.
 - **The scan's answer is a notice to the secretary and an event.** There is no command that prints it. Section 8 reads the event `work_discovery_scanned` read-only; the notice is a row of `messages` from `makibad` to `secretary`.
 - **`makiba up` refuses to run inside an agent** (any `CLAUDE*` variable, or `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`). The secretary is an agent, so the steps marked "the person types" are typed by the person in a login shell.
@@ -131,7 +131,7 @@ sq "SELECT body FROM messages WHERE sender = 'makibad' AND body LIKE 'Project ma
 git -C "${MAKIBA_REPOS_DIR:-$HOME/makiba-repos}/makiba" log --oneline -1
 ```
 
-Look at: `makiba|https://github.com/suisya-systems/makiba|main|active`; the notice `Project makiba (suisya-systems/makiba) is cloned: main is at <sha>. You may dispatch into it.`; the clone's newest commit is that `<sha>`. Until the Issue "`makiba status` lists the registered projects" lands, this query is the check, and the results say so; after it lands, `"$MK" status` shows the project and that line is recorded too.
+Look at: `makiba|https://github.com/suisya-systems/makiba|main|active`; the notice `Project makiba (suisya-systems/makiba) is cloned: main is at <sha>. You may dispatch into it.`; the clone's newest commit is that `<sha>`. Until Issue 227 ("`makiba status` lists the registered projects") lands, this query is the check, and the results say so; after it lands, `"$MK" status` shows the project and that line is recorded too.
 
 If it differs:
 
@@ -264,8 +264,8 @@ Leave this empty until the run.
 | Pending list empty, `check_incidents.py` exit 0 (precondition 7, DoD 3) | | | |
 | `config set allowed_repo_owners` | | | |
 | `project makiba suisya-systems/makiba` accepted, command `done` (`action`) | | | |
-| `projects` row (query of section 6, DoD 1 until the status Issue lands) | | | |
-| `makiba status` shows the project (after the status Issue lands) | | | |
+| `projects` row (query of section 6, DoD 1 until Issue 227 lands) | | | |
+| `makiba status` shows the project (after Issue 227 lands) | | | |
 | Clone at the notice's head | | | |
 | Ledger copied; `diff` with the repository | | | |
 | Document task: dispatch, done report, `close`, `run_closed` | | | |
