@@ -234,9 +234,11 @@ fn the_hooks_path_is_absolute_outside_the_worktree_and_denied_for_write() {
     let _d = org.start(Path::new(MAKIBA));
     let wt = org.prepared("t2");
     let hooks = git(&wt, &["config", "--get", "core.hooksPath"]);
-    assert_eq!(
-        hooks,
-        git(&org.repo, &["config", "--get", "core.hooksPath"])
+    // The clone's own hooks path is the person's (Issue 236): makibad sets none there.
+    assert!(
+        !git_out(&org.repo, &["config", "--get", "core.hooksPath"])
+            .status
+            .success()
     );
     let hooks = PathBuf::from(hooks);
     assert!(hooks.is_absolute(), "{}", hooks.display());

@@ -91,10 +91,14 @@ pub fn merge_approval_mode() -> &'static str {
 
 // ---- git -----------------------------------------------------------------------------------------
 
+/// No git the gate runs in the clone runs a hook (Issue 236).
+const HOOKS_OFF: &str = super::run_repo::HOOKS_OFF;
+
 fn git(repo: &Path, args: &[&str]) -> Result<String, Reject> {
     let out = Command::new("git")
         .arg("-C")
         .arg(repo)
+        .args(["-c", HOOKS_OFF])
         .args(args)
         .stdin(Stdio::null())
         .output()
@@ -113,6 +117,7 @@ fn git_ok(repo: &Path, args: &[&str]) -> bool {
     Command::new("git")
         .arg("-C")
         .arg(repo)
+        .args(["-c", HOOKS_OFF])
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -686,6 +691,8 @@ pub fn fetch(
         &[
             "-C",
             &dir,
+            "-c",
+            HOOKS_OFF,
             "fetch",
             "--no-tags",
             "--quiet",

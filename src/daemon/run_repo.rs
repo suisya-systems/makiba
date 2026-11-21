@@ -12,6 +12,11 @@
 //! worker can write), with no optional lock, no fsmonitor and no submodule recursion (a worker's
 //! submodule's own configuration is never run). A head leaves the run only by `deliver`: a push
 //! from the run into the clone, whose own receive-pack does the writing.
+//!
+//! No git `makibad` runs, on the run or on the clone, runs a hook (`core.hooksPath=/dev/null`,
+//! Issue 236): a project's own hook is code the person or a worker wrote, and `makibad` runs
+//! unsandboxed with the person's credentials. The worker's own git runs them, after the secret
+//! scanner, from the folder `create` records.
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -47,10 +52,15 @@ pub fn git(gitdir: &Path, workplace: &Path) -> Command {
             "core.fsmonitor=false",
             "-c",
             "submodule.recurse=false",
+            "-c",
+            HOOKS_OFF,
         ])
         .stdin(Stdio::null());
     c
 }
+
+/// The configuration that runs no hook, for every git `makibad` runs (Issue 236).
+pub const HOOKS_OFF: &str = "core.hooksPath=/dev/null";
 
 /// Run `cmd`: its trimmed output, or git's message after `what`.
 pub fn out(mut cmd: Command, what: &str) -> Result<String, String> {
@@ -135,6 +145,8 @@ pub fn deliver(
         "-q",
         "--no-verify",
         "--no-recurse-submodules",
+        // The clone's receive-pack is a process of its own: `-c` on the push does not reach it.
+        "--receive-pack=git -c core.hooksPath=/dev/null receive-pack",
     ])
     .arg(&repo)
     .arg(&spec);
@@ -144,7 +156,7 @@ pub fn deliver(
 /// The ids of the clone's `refs/remotes/origin/*`: what the clone last saw at origin.
 pub fn at_origin(repo: &Path) -> Result<Vec<String>, String> {
     let mut c = Command::new("git");
-    c.arg("-C").arg(repo).args([
+    c.arg("-C").arg(repo).args(["-c", HOOKS_OFF]).args([
         "for-each-ref",
         "--format=%(objectname)",
         "refs/remotes/origin",
@@ -202,8 +214,9 @@ pub fn count_not(
 }
 
 /// Make the run's repository at `gitdir` and its work tree `workplace` on a new `branch` at the
-/// commit `start` of the clone `repo`, with `hooks` as its hooks path. The `.git` file is written
-/// last: a workplace without one is a preparation cut short.
+/// commit `start` of the clone `repo`, with `hooks` as its hooks path and the project's own hooks
+/// folder recorded as `git_hook::PROJECT_KEY` (`project_hooks`). The `.git` file is written last:
+/// a workplace without one is a preparation cut short.
 pub fn create(
     repo: &Path,
     gitdir: &Path,
@@ -214,9 +227,14 @@ pub fn create(
 ) -> Result<(), String> {
     let clone = |args: &[&str]| {
         let mut c = Command::new("git");
-        c.arg("-C").arg(repo).args(args).stdin(Stdio::null());
+        c.arg("-C")
+            .arg(repo)
+            .args(["-c", HOOKS_OFF])
+            .args(args)
+            .stdin(Stdio::null());
         out(c, &format!("git {}", args.join(" ")))
     };
+    let project_hooks = project_hooks(repo, hooks)?;
     let repo = std::path::absolute(repo).map_err(|e| format!("{}: {e}", repo.display()))?;
     let objects = clone(&[
         "rev-parse",
@@ -242,10 +260,12 @@ pub fn create(
     .map_err(|e| format!("the run's alternates: {e}"))?;
     let repo_s = repo.to_string_lossy();
     let hooks_s = hooks.to_string_lossy();
+    // `git init` without a work tree wrote `core.bare = true`: replaced, not added beside it.
+    read(gitdir, workplace, &["config", "core.bare", "false"])?;
     let mut config = vec![
-        ("core.bare", "false".to_string()),
         ("core.logAllRefUpdates", "true".to_string()),
         ("core.hooksPath", hooks_s.into_owned()),
+        (crate::hooks::git_hook::PROJECT_KEY, project_hooks),
         ("remote.origin.url", repo_s.into_owned()),
         (
             "remote.origin.fetch",
@@ -286,6 +306,42 @@ pub fn create(
         format!("gitdir: {}\n", gitdir.display()),
     )
     .map_err(|e| format!("{}: {e}", workplace.display()))
+}
+
+/// The hooks folder the clone `repo` would use without `makibad`: the last `core.hooksPath` it
+/// reads that is not the scanner's folder `scanner` (expanded as git does, `~/` with this
+/// process's home; a relative one kept, for the hook's work tree), or else its `hooks` folder.
+/// Read without `HOOKS_OFF`, whose value would be the last.
+pub fn project_hooks(repo: &Path, scanner: &Path) -> Result<String, String> {
+    let mut c = Command::new("git");
+    c.arg("-C")
+        .arg(repo)
+        .args(["config", "--path", "--get-all", "core.hooksPath"])
+        .stdin(Stdio::null());
+    let o = c.output().map_err(|e| format!("cannot run git: {e}"))?;
+    // Status 1: no value is set.
+    if !o.status.success() && o.status.code() != Some(1) {
+        return Err(format!(
+            "reading the clone's core.hooksPath: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ));
+    }
+    let set = String::from_utf8_lossy(&o.stdout).into_owned();
+    if let Some(p) = set.lines().rev().find(|p| Path::new(p) != scanner) {
+        return Ok(p.to_string());
+    }
+    let mut c = Command::new("git");
+    c.arg("-C").arg(repo).args([
+        "-c",
+        HOOKS_OFF,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-common-dir",
+    ]);
+    Ok(Path::new(&out(c, "reading the clone's git folder")?)
+        .join("hooks")
+        .to_string_lossy()
+        .into_owned())
 }
 
 /// Remove `path`, which must be strictly under `top` (both resolved); nothing when it is gone.

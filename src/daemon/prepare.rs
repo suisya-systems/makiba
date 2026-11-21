@@ -9,8 +9,8 @@
 //! 2 and 9, Issue 134). The stage
 //! moves `planned`, `worktree_ready`, `settings_ready`, each recorded before the next step, and
 //! a launch already past a stage is not touched for it. Nothing is written inside a worktree
-//! after it is made; a code launch sets the project clone's and the run's hooks path to the
-//! secret scanner's (Issue 136).
+//! after it is made; a code launch sets the run's hooks path to the secret scanner's (Issue 136),
+//! whose scripts then run the project's own hooks (Issue 236), and leaves the clone's own.
 //!
 //! Reading of the Issue where the spec is silent (reported to the secretary):
 //! - (Owner) The project's own repository is `$MAKIBA_REPOS_DIR/<project>` (default
@@ -235,7 +235,7 @@ impl Prepare {
             agents::write_rules(role).map_err(|e| format!("the rules file: {e}"))?;
             agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
-        // The secret scanner (Issue 136): the clone's hooks path, outside the write surface.
+        // The secret scanner (Issue 136): the run's hooks path, outside the write surface.
         let mut deny_write_dirs = vec![crate::cli::share_dir()];
         // The workplace is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
         let mut write_dirs = vec![workplace.clone()];
@@ -243,7 +243,7 @@ impl Prepare {
         if let Some(task) = l.task.as_deref().filter(|_| l.kind != "document") {
             let repo = self.places.repos.join(&l.project);
             deny_write_dirs.push(self.install_scanner(&repo)?);
-            // The configuration naming that hooks path, by makiba's own entry (Issue 140).
+            // The clone's configuration, by makiba's own entry (Issue 140).
             deny_write_files.push(repo.join(".git").join("config"));
             // The run's own repository (Issue 241): every launch, a resume's too, is checked.
             let gitdir = run_repo::dir(&self.places.settings, task);
@@ -254,6 +254,7 @@ impl Prepare {
                     gitdir.display()
                 ));
             }
+            say_project_hooks(task, &gitdir, &workplace);
             // Its objects and refs are the worker's to write; its configuration is not.
             deny_write_files.push(gitdir.join("config"));
             write_dirs.push(gitdir);
@@ -327,16 +328,17 @@ impl Prepare {
         Ok(true)
     }
 
-    /// The secret scanner's git hooks (Issue 136) in `<state>/git-hooks`, absolute, and the
-    /// project clone's `core.hooksPath` set to that folder, so that every worktree of the clone
-    /// runs them (the person's own commits in the clone too). A clone with per-worktree
-    /// configuration is refused: a worktree's own file could set another hooks path. Returns the
-    /// folder, for the run's settings to deny for write.
+    /// The secret scanner's git hooks (Issue 136) in `<state>/git-hooks`, absolute, which a code
+    /// run's `core.hooksPath` names (`run_repo::create`). The project clone's own hooks path is the
+    /// person's (Issue 236): one that is still the scanner's folder, set before Issue 236, is unset,
+    /// and the log says that a local value it replaced is lost. A clone with per-worktree
+    /// configuration is refused. Returns the folder, for the run's settings to deny for write.
     fn install_scanner(&self, repo: &Path) -> std::result::Result<PathBuf, String> {
         let git = |args: &[&str]| {
             Command::new("git")
                 .arg("-C")
                 .arg(repo)
+                .args(["-c", run_repo::HOOKS_OFF])
                 .args(args)
                 .output()
                 .map_err(|e| e.to_string())
@@ -358,16 +360,20 @@ impl Prepare {
         crate::hooks::git_hook::install(&dir, &exe)
             .map_err(|e| format!("the secret scanner's hooks in {}: {e}", dir.display()))?;
         let want = dir.to_string_lossy().into_owned();
-        let now = git(&["config", "--get", "core.hooksPath"])?;
-        if String::from_utf8_lossy(&now.stdout).trim_end_matches('\n') != want {
-            let set = git(&["config", "core.hooksPath", &want])?;
-            if !set.status.success() {
+        let local = git(&["config", "--local", "--get", "core.hooksPath"])?;
+        if String::from_utf8_lossy(&local.stdout).trim_end_matches('\n') == want {
+            let unset = git(&["config", "--local", "--unset-all", "core.hooksPath"])?;
+            if !unset.status.success() {
                 return Err(format!(
-                    "cannot set core.hooksPath in {}: {}",
+                    "cannot unset core.hooksPath in {}: {}",
                     repo.display(),
-                    String::from_utf8_lossy(&set.stderr).trim()
+                    String::from_utf8_lossy(&unset.stderr).trim()
                 ));
             }
+            eprintln!(
+                "makibad: {}: core.hooksPath no longer names the secret scanner, which runs in each code run (Issue 236); a local core.hooksPath set before makiba cannot be recovered: set it again and dispatch again",
+                repo.display()
+            );
         }
         Ok(dir)
     }
@@ -432,6 +438,32 @@ impl Prepare {
             &l.default_branch,
             &self.hooks_dir()?,
         )
+    }
+}
+
+/// Say in the log which of the project's own hooks the run's scanner scripts run (Issue 236): the
+/// executable ones named by the run's `git_hook::PROJECT_KEY`, a relative folder read in the
+/// workplace as git would.
+fn say_project_hooks(task: &str, gitdir: &Path, workplace: &Path) {
+    use crate::hooks::git_hook::{FORWARDED, NAMES, PROJECT_KEY};
+    use std::os::unix::fs::PermissionsExt;
+    let Ok(dir) = run_repo::read(gitdir, workplace, &["config", "--get", PROJECT_KEY]) else {
+        return;
+    };
+    let names: Vec<&str> = NAMES
+        .iter()
+        .chain(FORWARDED.iter())
+        .copied()
+        .filter(|n| {
+            std::fs::metadata(workplace.join(&dir).join(n))
+                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+        .collect();
+    if !names.is_empty() {
+        eprintln!(
+            "makibad: {task}: the project's own hooks in {dir} ({}) run after the secret scan",
+            names.join(", ")
+        );
     }
 }
 
