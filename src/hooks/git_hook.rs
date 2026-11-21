@@ -1,11 +1,13 @@
-//! `makiba hook pre-commit|pre-merge-commit|pre-applypatch|commit-msg` (Issue 136, line L-K12):
+//! `makiba hook pre-commit|pre-merge-commit|pre-applypatch|commit-msg|applypatch-msg`
+//! (Issue 136, line L-K12):
 //! the git hooks that keep a token-shaped line out of the history. `makibad` points the project
 //! clone's `core.hooksPath` at a folder of its own whose scripts run these (see `install`).
 //!
 //! Unlike the Claude Code hooks of this module's parent these are run by git: they read no JSON
 //! payload. The first three read every blob the index would commit that differs from `HEAD`, as
 //! raw bytes from the object store (no diff text, so attributes, text conversion and binary
-//! detection change nothing); `commit-msg` reads the message file git names. A match refuses
+//! detection change nothing); `commit-msg` and `applypatch-msg` (`git am`) read the message file
+//! git names. A match refuses
 //! (exit 1) naming the file, the line and the shape, never the matched text. Anything that cannot
 //! be read refuses too.
 
@@ -14,11 +16,12 @@ use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
 
 /// The git hooks of the scanner, by the names git runs them.
-pub const NAMES: [&str; 4] = [
+pub const NAMES: [&str; 5] = [
     "pre-commit",
     "pre-merge-commit",
     "pre-applypatch",
     "commit-msg",
+    "applypatch-msg",
 ];
 
 /// The fixed list of token shapes: a name and a pattern each.
@@ -104,7 +107,7 @@ fn staged() -> Result<Vec<(String, String)>, String> {
 }
 
 fn check(name: &str, args: &[String]) -> Result<(), String> {
-    let found = if name == "commit-msg" {
+    let found = if name == "commit-msg" || name == "applypatch-msg" {
         let file = args.first().ok_or("git named no message file")?;
         let text = std::fs::read(file).map_err(|e| format!("cannot read {file}: {e}"))?;
         find(&text).map(|(shape, line)| ("the commit message".to_string(), shape, line))
