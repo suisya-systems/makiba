@@ -385,3 +385,12 @@ impl Base for Real {
         BaseDenies::default()
     }
 }
+
+/// A code run's workplace as `makibad` prepares it (Issue 241): a repository of the run's own,
+/// its git folder `<state>/git/<task>`, borrowing the objects of the project clone `repo`, on a
+/// new `branch` from `main`.
+pub fn run_workplace(state: &Path, repo: &Path, workplace: &Path, task: &str, branch: &str) {
+    let gitdir = makiba::daemon::run_repo::dir(&state.join("settings"), task);
+    let hooks = state.join("git-hooks");
+    makiba::daemon::run_repo::create(repo, &gitdir, workplace, branch, "main", &hooks).unwrap();
+}

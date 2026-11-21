@@ -208,12 +208,21 @@ fn a_prepared_worktree_is_clean_listed_and_holds_only_the_projects_files() {
         ),
         ""
     );
+    // Issue 241: the run has a repository of its own, not a worktree of the project's.
     let listed = git(&org.repo, &["worktree", "list", "--porcelain"]);
     assert!(
-        listed
+        !listed
             .lines()
             .any(|l| l == format!("worktree {}", worktree.display())),
         "{listed}"
+    );
+    assert_eq!(
+        git(
+            &worktree,
+            &["rev-parse", "--path-format=absolute", "--git-dir"]
+        )
+        .trim(),
+        org.root.join("state/git/t1").display().to_string()
     );
 
     let mut on_disk = BTreeSet::new();
