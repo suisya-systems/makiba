@@ -69,6 +69,15 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "skill_candidate_decided",
     "observation_lost",
     "config_set",
+    "range_proposed",
+    "range_approved",
+    "range_paused",
+    "range_resumed",
+    "range_ended",
+    "range_read",
+    "belt_dispatched",
+    "belt_skipped",
+    "belt_stopped",
 ];
 
 /// The exit code of a request that was done or accepted.
@@ -170,6 +179,7 @@ pub enum Verb {
     Update,
     Candidate,
     Events,
+    Range,
 }
 
 impl Verb {
@@ -196,6 +206,7 @@ impl Verb {
         Verb::Update,
         Verb::Candidate,
         Verb::Events,
+        Verb::Range,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -222,6 +233,7 @@ impl Verb {
             Verb::Update => "update",
             Verb::Candidate => "candidate",
             Verb::Events => "events",
+            Verb::Range => "range",
         }
     }
 }
@@ -263,7 +275,7 @@ impl Role {
         match self {
             Role::Secretary => &[
                 Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox, Note,
-                Push, Project, Update, Candidate,
+                Push, Project, Update, Candidate, Range,
             ],
             Role::Worker | Role::Curator => &[Report, Send, Show, Inbox],
             Role::Person => Verb::ALL,

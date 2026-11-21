@@ -85,6 +85,7 @@ pub fn read(path: &Path) -> Result<Value, String> {
         "runs": runs(&conn).map_err(sql)?, "terminals": terminals(&conn).map_err(sql)?,
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?});
+    v["ranges"] = Value::Array(crate::daemon::belt::read_ranges(&conn).map_err(sql)?);
     Mask::new(&conn).value(&mut v);
     Ok(v)
 }
