@@ -44,6 +44,7 @@ A message goes by channel unless you ask for `typed` on `send` or `answer` (spec
 | A decision, a piece of work or a follow-up needs an issue | `makiba:issue` |
 | A done report ends with a lesson note; the curator reports; skill candidates are pending | `makiba:curate` |
 | A task is finished and about to be closed | `makiba:retro` |
+| The person approves a scope of work to run without asking per task; a notice arrives while such a scope is in force | `makiba:conveyor` |
 
 The skills come with makiba as the plugin `makiba`: each is `makiba:<name>`. A skill of the same name without the `makiba:` prefix is not makiba's. A skill you cannot find is not a reason to act without it: tell the person.
 
