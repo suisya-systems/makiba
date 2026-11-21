@@ -1,6 +1,6 @@
 # What was not moved
 
-Status: DRAFT for the owner, 2026-11-22 (Issue #53, M7-4). Every mark below is a recommendation by the writer. None is a decision until the owner has read it and said so.
+Status: decided by the owner on 2026-11-22 (Issue #53, M7-4). The owner read all thirty marks and kept each as the writer recommended it. The marks below are decisions, not recommendations.
 
 claude-org-ja is stopped at M7-3 ([plan.md](plan.md) section 4.1). This list is every feature of it that makiba does not have, so that each gets a decision and none is lost in silence.
 
@@ -10,10 +10,10 @@ claude-org-ja is stopped at M7-3 ([plan.md](plan.md) section 4.1). This list is 
 | --- | --- |
 | build | makiba should have it. It is not planned in any milestone, or is planned only as a line in a design note. |
 | drop | makiba should not have it. The reason says what makes it unnecessary or harmful here. |
-| later | makiba should have it, but not before a named stage. The stage, or the open Issue that already holds it, is written. When there is no Issue, none is invented: the entry says "no Issue yet". |
+| later | makiba should have it, but not before a named stage. The stage, or the open Issue that already holds it, is written. Each build and later entry names its Issue. |
 
-- The mark on each entry is the writer's recommendation, with one line of reason. The owner decides. Until then, nothing here changes any plan, milestone or Issue.
-- Where the owner changes a mark, the entry is edited in place and the date of the decision is added to it.
+- The mark on each entry is the owner's decision of 2026-11-22, with the writer's one line of reason. Each build and later entry names the Issue that holds it.
+- A later change of a mark is edited in place, and the date of the change is added to the entry.
 - paddock is not on this list. It continues as a lightweight organization beside makiba ([plan.md](plan.md) section 4.1). A file makiba copied from paddock is makiba's own from then on and is not a feature left behind. No entry marks paddock or any feature of it as dropped. rondo, cadenza and continuo are frozen by the owner's decision and are not claude-org-ja features; a claude-org-ja item that only serves rondo is marked on its own merits.
 - Sources read, all in `/home/happy_ryo/work/org/claude-org-ja`: `README.md`, `CLAUDE.md`, `docs/non-goals.md`, `.claude/skills/*/SKILL.md` (26 skills), `.claude/rules/`, `.dispatcher/` and its `references/`, `.hooks/`, `tools/` (about 120 files), `dashboard/`, `docker/`, `docs/design/`, `docs/contracts/`, `docs/operations/`, `registry/`, `scripts/`. Against them: makiba's `docs/design/` (plan, spec, belt, lines, incidents), `roles/`, `skills/`, `src/` and `issues/`.
 
@@ -29,7 +29,7 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: a browser board of the organization (projects, runs, workers, pending decisions), refreshed on request.
 - In claude-org-ja: `dashboard/` (`server.py`, `app.js`, `index.html`, `org_state_converter.py`), `.claude/skills/org-dashboard/`, `tools/stop_dashboard.py`.
 - Nearest in makiba: the read surface, `makiba status --json` and `makiba events --json` (spec section 12), built so that a screen can sit on it without reading the tables.
-- Mark: **later**, the screen of Issue #169 (belt.md section 8, step 5).
+- Mark: **later**, Issue #169, the screen (belt.md section 8, step 5).
 - Reason: wanted by the person, but only as a read over the read surface; claude-org-ja's board read `.state` files that makiba does not write.
 
 **N2. The cockpit.**
@@ -43,21 +43,21 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: an OS notification and a sound when a worker needs the person (approval, decision, CI failed, done), so the person is called back without watching.
 - In claude-org-ja: `docs/design/attention-notification.md`, `.claude/skills/org-attention-start/`, `.claude/skills/org-attention-stop/`, `tools/templates/attention.example.json`, `docs/operations/attention-watch.md`, `tools/secretary_queue_watcher.py`.
 - Nearest in makiba: none. plan.md section 4 lists "notifications" as out, "each a later plan". The base sends no notices of its own, so the contact stays the secretary.
-- Mark: **later**, after #169; no Issue yet.
+- Mark: **later**, after #169; Issue #272.
 - Reason: wanted, but it must be fed by `makibad`'s pending entries and sent as the secretary's call, not as a worker's, to keep one contact; that needs its own design.
 
 **N4. Metrics report.**
 - Does: a read-only report of runs, events, PRs and CI over a period, as Markdown or JSON, for the team and the owner.
 - In claude-org-ja: `tools/org_metrics_report.py`.
 - Nearest in makiba: `makiba events --json` holds the rows a report would read.
-- Mark: **later**, once the read surface of #168 and the screen #169 have run for a while; no Issue yet.
+- Mark: **later**, once the read surface of #168 and the screen #169 have run for a while; Issue #273.
 - Reason: it is a pure read over events, so it can wait until there are weeks of makiba's own events to report on.
 
 **N5. Defense report and the defense register.**
 - Does: counts how often each registered defense stopped something, so a defense that never fires can be questioned.
 - In claude-org-ja: `docs/operations/defense-register.md`, `tools/defense_report.py`.
 - Nearest in makiba: `docs/design/lines.md` (what holds each line) and `docs/design/incidents.md` (the incident for each test). They are a register without a count.
-- Mark: **later**, with N4; no Issue yet.
+- Mark: **later**, with N4; Issue #274.
 - Reason: the count needs an event for each stop; whether makiba's hooks record one is not yet checked.
 
 **N6. Direct attach to a pane.**
@@ -73,7 +73,7 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: a watcher notices that the secretary's (and the dispatcher's) context is large, and runs handover, `/clear` and resume without being asked.
 - In claude-org-ja: `docs/design/context-auto-handover.md`, `tools/context_handover_watch.py`, `tools/context_record.py`, `.hooks/context-record.sh`.
 - Nearest in makiba: `makiba renew --handover-file` (M6-5), which the secretary calls itself, and `makibad` launches a fresh secretary without typing into it.
-- Mark: **later**, after M7-2 shows how often the secretary fills up; no Issue yet.
+- Mark: **later**, after M7-2 shows how often the secretary fills up; Issue #275.
 - Reason: the manual renewal exists; whether to automate it is a measurement the week of self-hosting gives.
 
 **N8. Handover and resume of the dispatcher.**
@@ -118,7 +118,7 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: a hook reminds the secretary to open the record before agreeing with a premise the person states (Issue #1192 of claude-org-ja).
 - In claude-org-ja: `tools/premise_check.py`, `.hooks/remind-verify-premise.sh`.
 - Nearest in makiba: none found in `roles/secretary/rules.md`.
-- Mark: **build**, as one rule in the secretary's rules; no Issue yet.
+- Mark: **build**, as one rule in the secretary's rules; Issue #269.
 - Reason: the incident that made it (agreeing without opening a record already read) is about the secretary, which makiba still has, and a rule costs a paragraph.
 
 **N14. The capability gate for a new backend.**
@@ -141,23 +141,24 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: decides whether a work pattern becomes a skill (recommended, candidate only, or a note) and, when the queue is long, audits skills for retirement, duplicates and owners.
 - In claude-org-ja: `.claude/skills/skill-eligibility-check/`, `.claude/skills/skill-audit/`, `knowledge/skill-candidates.md`.
 - Nearest in makiba: the curator's rules and `skills/curate/SKILL.md` record candidates, and `makiba candidate` records the person's decision (Issue #191). The eligibility judgment and the audit are not written.
-- Mark: **later**, when the candidate queue or the skill count is large enough to need it (claude-org-ja's own thresholds were 5 pending and 20 skills); no Issue yet.
+- Mark: **later**, when the candidate queue or the skill count is large enough to need it (claude-org-ja's own thresholds were 5 pending and 20 skills); Issue #276.
 - Reason: makiba has none of either yet; the queue exists, the volume does not.
 
 **N17. Creating a work-skill from an approved pattern.**
 - Does: when a completed task's pattern is judged worth keeping, a skill is written under `.claude/skills/` so the next worker starts with it.
 - In claude-org-ja: `.claude/skills/org-retro/` (the work-skill decision), `.claude/skills/skill-eligibility-check/`, work-skills under `.claude/skills/`.
 - Nearest in makiba: `makiba candidate <pattern> into-<skill>` marks that a pattern goes into a skill; the skill itself is written by hand in a pull request.
-- Mark: **later**, after N16; no Issue yet.
+- Mark: **later**, after N16; Issue #277.
 - Reason: a skill is code that every later worker reads, so it goes through a pull request; automation can follow once candidates are approved reliably.
 
 **N18. Knowledge notes already written.**
 - Does: the curated and raw notes of what claude-org-ja learned (codex behaviour, sandbox, delegation, and others).
 - In claude-org-ja: `knowledge/curated/`, `knowledge/raw/`.
 - Nearest in makiba: the curator writes `<knowledge>/raw` and `curated` for new work (spec sections 2 and 12); the old notes are Japanese and are not copied.
-- Mark: **build**, as a review pass at M7-3 that translates and moves the notes that still hold; no Issue yet.
-- Reason: this is learned content that the carried tools and rules do not replace.
-- Also in this pass (recommendation): compare claude-org-ja's `docs/contracts/knowledge-curation-contract.md` with `roles/curator/rules.md` and `skills/curate/SKILL.md`. The writer found these rules of the contract that makiba's curator rules and skill lack, as the rules to carry:
+- Mark: **build**, as a review pass before M7-3; Issue #270.
+- What the pass is: not a copy of the notes and not a translation of all of them. Each note is either dropped (it is about a layer makiba lacks, or code or a test already holds it) or carried to a named place: a rule in `roles/`, a skill, an incident row with a test, or a curated note. The pass leaves a short record of what was done with each note.
+- Reason: what the old notes learned is worth keeping only where it changes what makiba does; copying them would keep the layers makiba dropped.
+- Also in this pass: compare claude-org-ja's `docs/contracts/knowledge-curation-contract.md` with `roles/curator/rules.md` and `skills/curate/SKILL.md`. These rules of the contract are missing from makiba's curator rules and skill, and are listed as the rules to carry:
   - a. Edit policy of curated notes: the curator may restructure, merge or delete sections, in or out of a cycle, with one invariant: no silent removal of substantive content.
   - b. A `deferred` status for a candidate the person holds: not terminal, revisited later, not counted toward the batch question. `makiba candidate` takes only approved, rejected and into-<skill>.
   - c. A pattern that returns: new notes merge into an existing pending entry instead of a duplicate, and the contract says what happens when the pattern returns after a terminal status.
@@ -169,7 +170,7 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: writes or revises a project's goal ledger by asking the person what they aim at and what would show it unmet, proposes clauses from the README and the open Issues, and validates the file.
 - In claude-org-ja: `.claude/skills/goal-setup/`, `tools/work_discovery_goals.py validate`.
 - Nearest in makiba: the ledger format and its validator are ported (`src/work_discovery/goals.rs`, `docs/goals.md`); there is no skill that holds the dialogue.
-- Mark: **build**, needed at M7-3, which moves the ledgers and registers new projects; no Issue yet.
+- Mark: **build**, needed at M7-3, which moves the ledgers and registers new projects; Issue #271.
 - Reason: without it the person edits ledger files by hand.
 
 **N20. Curation notes of the dispatcher's threshold and archive.**
@@ -229,14 +230,14 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Does: PowerShell installers and watchers, cp932 handling, WezTerm as the Windows backend.
 - In claude-org-ja: `scripts/install.ps1`, `tools/pr-watch.ps1`, the Windows notes in `CLAUDE.md`.
 - Nearest in makiba: none; plan.md section 7 lists "the Windows layers" as not carried, and the base is run on Linux and macOS.
-- Mark: **later**, only if herdr-core supports Windows and a person needs it; no Issue yet.
+- Mark: **later**, only if herdr-core supports Windows and a person needs it; Issue #278.
 - Reason: a platform is a measurement of the base first, which is not made.
 
 **N28. Docker distribution.**
 - Does: an image and compose files that run the organization in a container, with a sandbox canary, an opt-in for Docker inside workers, multi-architecture builds and a published image for a small server.
 - In claude-org-ja: `docker/` (`Dockerfile`, `compose.yaml`, `compose.docker-optin.yaml`, `entrypoint.sh`, `install-herdr.sh`, `managed-settings.json`, `sandbox-canary.sh`, `README.md`), `docs/design/org-docker-distribution.md`.
 - Nearest in makiba: the single binary of #62 for installation. plan.md section 4 lists "Docker distribution and the server installation" as out, "each a later plan".
-- Mark: **later**, after #62 and M7-3; no Issue yet.
+- Mark: **later**, after #62 and M7-3; Issue #279.
 - Reason: wanted for a server install, but it depends on the release being a binary first.
 
 **N29. Packaging as an app, and herdr-app mods.**
