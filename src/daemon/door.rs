@@ -1227,9 +1227,17 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     if !run_exists(w, task)? {
         return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
     }
-    if state == "done" && role == Role::Worker {
+    // A code task's done report carries the state of its review, recorded by the door (Issue 135).
+    let review = if state == "done" && role == Role::Worker {
         last_review_clear(w, actor)?;
-    }
+        review_state(w, actor, task)?
+    } else {
+        None
+    };
+    let body = match &review {
+        Some(r) => format!("{text}\n\n[makiba] {}", review_line(r)),
+        None => text.to_string(),
+    };
     let kind = format!("report_{state}");
     let id = store_message(
         w,
@@ -1237,8 +1245,19 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
         crate::spec::AGENT_SECRETARY,
         &kind,
         Some(task),
-        text,
+        &body,
     )?;
+    if let Some(r) = &review {
+        let payload = json!({"task": task, "state": state, "review": r});
+        w.append_event(&NewEvent {
+            kind: "worker_reported",
+            actor: Some(actor),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })
+        .map_err(internal)?;
+    }
     if state == "done" {
         w.conn()
             .execute(
@@ -2355,6 +2374,83 @@ fn last_review_clear(w: &StateWriter, actor: &str) -> Result<(), DoorError> {
             "fix them, commit, and call review again; or report blocked with the findings",
         )),
         _ => Ok(()),
+    }
+}
+
+/// The review state of a code task's reported head: `passed`, `not-established`, `none` (no diff
+/// review) or `stale` (the last one read an older head), with the reader and the heads. `None` for
+/// a task that is not a code run with a repository of its own.
+fn review_state(w: &StateWriter, actor: &str, task: &str) -> Result<Option<Value>, DoorError> {
+    let Ok(run) = review_run(w, task) else {
+        return Ok(None);
+    };
+    let state_dir = w
+        .conn()
+        .path()
+        .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let places = super::prepare::Places::from_env(&state_dir);
+    let gitdir = super::run_repo::dir(&places.settings, task);
+    if run.kind != "code" || !super::run_repo::is_run(&gitdir, &run.workplace) {
+        return Ok(None);
+    }
+    let head = super::run_repo::commit(&gitdir, &run.workplace, "HEAD");
+    let last: Option<String> = w
+        .conn()
+        .query_row(
+            "SELECT json_extract(result_json, '$.result') FROM commands
+             WHERE verb = 'review' AND actor = ?1 AND status = 'done'
+               AND json_extract(result_json, '$.result.kind') = 'diff'
+             ORDER BY id DESC LIMIT 1",
+            [actor],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?
+        .flatten();
+    let last: Option<Value> = last.and_then(|t| serde_json::from_str(&t).ok());
+    let state = match &last {
+        None => "none",
+        Some(l) if l["head"].as_str() != head.as_deref() => "stale",
+        Some(l) => l["verdict"].as_str().unwrap_or("not-established"),
+    };
+    let mut r = json!({"state": state, "head": head});
+    if let Some(l) = &last {
+        for k in ["reader", "round", "allowed", "findings", "reason"] {
+            if !l[k].is_null() {
+                r[k] = l[k].clone();
+            }
+        }
+        r["reviewed_head"] = l["head"].clone();
+    }
+    Ok(Some(r))
+}
+
+/// The line the secretary reads under a done report.
+fn review_line(r: &Value) -> String {
+    let short = |v: &Value| {
+        v.as_str()
+            .map(|s| s[..s.len().min(12)].to_string())
+            .unwrap_or_default()
+    };
+    let head = short(&r["head"]);
+    match r["state"].as_str().unwrap_or_default() {
+        "passed" => format!(
+            "review of {head}: passed by {} (round {} of {}), findings {}",
+            r["reader"].as_str().unwrap_or("?"),
+            r["round"],
+            r["allowed"],
+            r["findings"]
+        ),
+        "none" => format!("review of {head}: none (no diff review was run)"),
+        "stale" => format!(
+            "review of {head}: stale (the last diff review read {})",
+            short(&r["reviewed_head"])
+        ),
+        _ => format!(
+            "review of {head}: not established ({})",
+            r["reason"].as_str().unwrap_or("no reason")
+        ),
     }
 }
 
