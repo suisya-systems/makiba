@@ -464,6 +464,7 @@ fn built(role: agents::Role) -> Value {
         deny_files: vec!["/org/state.db".into(), "/org/person.key".into()],
         deny_write_dirs: vec!["/org/share".into()],
         deny_write_files: vec!["/org/workplace/.mcp.json".into()],
+        allowed_hosts: None,
     };
     agents::by_name("claude_code")
         .unwrap()

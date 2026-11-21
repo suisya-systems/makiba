@@ -71,6 +71,9 @@ pub struct TaskSettings {
     pub deny_write_files: Vec<PathBuf>,
     /// The role whose `roles/<role>/settings.json` the file is written on top of (Issue 134).
     pub role: Option<Role>,
+    /// `Some`: the strict network allow-list with exactly these hosts (Issue 244), and GitHub's
+    /// hosts denied; `None`: the role's network as it is.
+    pub allowed_hosts: Option<Vec<String>>,
 }
 
 /// The role files of `roles/`, carried in the binary: the rules and the settings (Issue 134).
@@ -270,6 +273,10 @@ pub fn mcp_config(door: &DoorAccess) -> String {
     .to_string()
 }
 
+/// GitHub's hosts, denied to a strict launch even when another settings source lists them: a
+/// worker writes to GitHub only through `makibad` (Issue 244, line L-K2).
+pub const GITHUB_HOSTS: [&str; 2] = ["github.com", "*.github.com"];
+
 /// The per-task settings file both modules write: the role's settings when `task` names a role,
 /// with sandbox on and no way around it, the write surface of `task`, and its denies added, for
 /// Bash by the sandbox and for the Read and Edit tools (which run outside it) by permission
@@ -328,6 +335,17 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
     add(&mut fs["denyWrite"], denied);
     add(&mut fs["denyWrite"], shown(&task.deny_write_dirs));
     add(&mut fs["denyWrite"], shown(&task.deny_write_files));
+    if let Some(hosts) = &task.allowed_hosts {
+        // A host outside the list is refused in every permission mode, with no prompt; a
+        // project's own settings cannot add one under it.
+        let net = &mut settings["sandbox"]["network"];
+        net["strictAllowlist"] = true.into();
+        net["allowedDomains"] = hosts.clone().into();
+        add(
+            &mut net["deniedDomains"],
+            GITHUB_HOSTS.iter().map(|h| h.to_string()).collect(),
+        );
+    }
     std::fs::write(path, format!("{settings}\n"))
 }
 

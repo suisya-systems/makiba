@@ -275,6 +275,10 @@ pub enum Command {
         slug: String,
         /// OWNER/NAME of a GitHub repository.
         repo: String,
+        /// The network hosts its workers may reach, comma-separated (the person only; never
+        /// github.com). Unset: the list stays as it is.
+        #[arg(long)]
+        hosts: Option<String>,
     },
     /// Organization and project settings.
     Config {
@@ -282,7 +286,7 @@ pub enum Command {
         action: String,
         key: String,
         value: Option<String>,
-        /// The project of a project's setting (`artifact_language`).
+        /// The project of a project's setting (`artifact_language`, `network_hosts`).
         #[arg(long)]
         project: Option<String>,
     },
@@ -395,7 +399,13 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
         ),
         Command::Push { task } => ("push", json!({"task": task})),
-        Command::Project { slug, repo } => ("project", json!({"slug": slug, "repo": repo})),
+        Command::Project { slug, repo, hosts } => {
+            let mut args = json!({"slug": slug, "repo": repo});
+            if let Some(h) = hosts {
+                args["hosts"] = h.into();
+            }
+            ("project", args)
+        }
         Command::Update { task, base } => ("update", json!({"task": task, "base": base})),
         Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
         Command::Note { task, topic, text } => {
