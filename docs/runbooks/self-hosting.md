@@ -1,35 +1,89 @@
 # Runbook: makiba in its own organization (M7-1, Issue 50)
 
-This is the written procedure for the three checks of Issue 50: makiba registered as a project of the organization that runs it, its goal ledger placed, and the triage scan run over its open Issues. It is run on a host, by the secretary with the person at the keyboard where a step says so, and the result goes into section 10. The owner closes Issue 50 on that record. Nothing here runs by itself; there is no test for it (the Issue is checked by a person).
+This is the procedure for the three checks of Issue 50: makiba registered as a project of the organization that runs it, its goal ledger placed, and the triage scan run over its open Issues. It is run on the host, in the person's login shell, one line per stage. The result goes into section 9; the owner closes Issue 50 on that record. There is no test for it (the Issue is checked by a person).
 
-Unlike `docs/runbooks/first-worker.md`, this run is meant for the person's real organization: its default places. Section 4 is an optional rehearsal of the same steps in a scratch place first. Whether to rehearse is the owner's choice on the day.
+The person types five short lines (section 3) and reads what they print. Everything long, every wait and every check lives in `scripts/runbooks/self-hosting.sh`, which prints what it is about to do, refuses to go on when a precondition is missing (and says how to fix it), and writes a results file the secretary reads. It reads `state.db` read-only, never edits `~/.claude.json`, and deletes only what it created.
 
-## 1. What this run shows, and what the code cannot do
+## 1. What cannot be undone (read this before `register` and `triage`)
+
+`rehearse` writes none of this in the person's real places. `register` and `triage` do. Afterwards, in the default places, these stay and no verb removes them:
+
+- **The `projects` row of `makiba` and its events.** There is no verb that unregisters a project, and no code sets `projects.status` to anything but `active`. The `project` command's row, the `config_set` event of `allowed_repo_owners`, the `run_closed` of the close, the `work_discovery_scanned` event and every other event of the run stay in `state.db`; `events` is append-only. (`allowed_repo_owners` and `network_hosts` can be set again, which is another event; the first one stays.)
+- **The notices delivered to the secretary.** The notice that the project is cloned, the triage notice and the close's notices are `messages` rows with delivery rows. A delivered notice has been pushed into the secretary's session.
+- **The trust entries.** The document task's worker (and the secretary, when `up` starts it) is a real Claude Code launch. Each dialog `makibad` answers adds an entry for the workplace's path to `~/.claude.json`, and Claude Code keeps a transcript folder for that path under `~/.claude/projects/`. The rehearsal leaves such entries too, for its scratch path. Do not edit `~/.claude.json` by hand.
+- **The network list of the project.** Workers of makiba reach only the hosts listed for it (section 5); that list is a setting with its own event.
+
+What can be removed by hand afterwards, if the owner wants: the clone `~/makiba-repos/makiba` (only while no worktree of it is in use), the ledger copy, and the document task's `out/` folder. The scripts remove none of them.
+
+`register` and `triage` ask once, print what they are about to change, and need a typed `yes` (or `--yes`).
+
+## 2. What this run shows, and what the code still cannot do
 
 Shows (Issue 50, definition of done):
 
-1. The project `makiba` is registered (section 6, until the Issue below lands: see the first point of the next list).
-2. The triage scan returns candidates from makiba's open Issues (section 8).
-3. `tools/check_incidents.py` passes with an empty pending list (section 5, precondition 7).
+1. The project `makiba` is registered: `makiba status` lists it (`projects:` section). Issue 227 landed; the old read of the `projects` row is no longer needed.
+2. The triage scan returns candidates from makiba's open Issues (the `work_discovery_scanned` event, and `next work:` in `makiba status`).
+3. `tools/check_incidents.py` passes with an empty pending list (a precondition of every stage).
 
-Where the code at this commit has no way to do what the Issue says, and what this runbook does instead:
+Where the code at this commit has no way to do what the Issue says:
 
-- **`makiba status` does not list projects.** It prints the heartbeat, `subscribed` and the secretary's line only (`src/status_local.rs`; `--json` the same). Issue 227, "`makiba status` lists the registered projects" (test-first), makes it do so. Until Issue 227 lands, section 6 reads the `projects` row of `state.db` with a read-only query and the results say so. When it has landed, run `makiba status` in section 6 as well and record its project line.
-- **No verb runs the triage scan on request.** `makibad` runs it after a close (a `run_closed` event newer than the last scan that did not fail) and at most once per 30 minutes (`MAKIBA_TRIAGE_INTERVAL_MS`, read when `makibad` starts; spec section 10, `src/daemon/triage.rs`). A verb for it is a separate Issue (the owner's decision). Section 8 therefore dispatches one small `document` task in the organization and closes it; the close is what makes the scan due.
-- **The scan's answer is a notice to the secretary and an event.** There is no command that prints it. Section 8 reads the event `work_discovery_scanned` read-only; the notice is a row of `messages` from `makibad` to `secretary`.
-- **`makiba up` refuses to run inside an agent** (any `CLAUDE*` variable, or `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`). The secretary is an agent, so the steps marked "the person types" are typed by the person in a login shell.
+- **No verb runs the triage scan on request.** `makibad` runs it after a close (a `run_closed` event newer than the last scan that did not fail) and at most once per 30 minutes (`MAKIBA_TRIAGE_INTERVAL_MS`, read when `makibad` starts; spec section 10, `src/daemon/triage.rs`). So `triage` dispatches one small `document` task in the organization and closes it; the close is what makes the scan due. If a scan ran less than 30 minutes before, the script says so and waits for the interval to pass.
+- **The scan's answer is an event and a notice.** `triage` reads the event `work_discovery_scanned` read-only; the notice is a row of `messages` from `makibad` to `secretary`. `makiba status` also prints `next work:` (the candidate count, the recommended one, or why there is none).
+- **`makiba up` refuses to run inside an agent** (any `CLAUDE*` variable, or `HC_SESSION`, `HC_SOCKET`, `HC_SCOPE`, `HC_TERMINAL_ID`, `HC_TERMINAL_SOCKET`; `HC_BIN`, which names the `hc` program, is allowed). The secretary is an agent, so every stage is typed by the person in a login shell, and each script refuses at once when it finds such a variable.
+- **The goal ledger is the operator's copy.** The scan reads `<goals dir>/suisya-systems/makiba.md`, not the repository's file. The ledger of the repository holds the clauses of Issue 50's `## Goal clause` list (`issues/M7-1.md`); the script prints how many clauses the placed ledger has and refuses when it lacks the clause the Issue names, so a ledger that has not landed shows before the scan and not as "no candidate".
+- **Two read surfaces are not in every build.** A `range` verb (pull request 257) and a `review` verb (pull request 261) may not have landed. The scripts look for each in `makiba --help`, print what a present one adds and print `skipped` for an absent one; the runbook uses neither, and nothing is approved or reviewed by it.
 
-## 2. What cannot be undone
+## 3. The lines to type
 
-Read this before section 6. In the default places, these stay after the run, and no verb removes them:
+In a login shell on the host (not inside an agent), in the repository, at the commit the owner means to run:
 
-- **The `projects` row of `makiba` and its events.** There is no verb that unregisters a project, and no code sets `projects.status` to anything but `active`. The `project` command's row, the `config_set` event of `allowed_repo_owners`, the `run_closed` of the close, the `work_discovery_scanned` event and every other event of the run stay in `state.db`; `events` is append-only. (`allowed_repo_owners` can be set empty again, which is another event; the first one stays.)
-- **The notices delivered to the secretary.** The notice that the project is cloned, the triage notice, and the close's notices are `messages` rows with delivery rows. A delivered notice has been pushed into the secretary's session.
-- **The trust entries.** The document task's worker is a real Claude Code launch. Each dialog `makibad` answers adds an entry for the workplace's path to `~/.claude.json`, and Claude Code keeps a transcript folder for that path under `~/.claude/projects/`. Do not edit `~/.claude.json` by hand.
+| Stage | The line | What it does | Real places written |
+| --- | --- | --- | --- |
+| Check | `bash scripts/runbooks/self-hosting.sh check` | The preconditions of section 4, an incremental `cargo build` of this commit (unless `MK=<path>` names a binary), the ledger clause count. Changes nothing. | none (a results file in `.runbook-results/`) |
+| Rehearsal | `bash scripts/runbooks/self-hosting.sh rehearse` | Everything below, `register` then `triage`, in a scratch place that has its own state, person key, door, port, base session, clone and ledger. It stops its own organization at the end and removes the scratch folder when all went well. | none, but the trust entries of section 1 |
+| Register | `bash scripts/runbooks/self-hosting.sh register` | Starts the organization if it does not run, allows the owner `suisya-systems`, registers `makiba` with its network hosts, waits for the clone, places the ledger. | all of section 1 |
+| Triage | `bash scripts/runbooks/self-hosting.sh triage` | Dispatches one small document task, waits for its done report, closes it, waits for the scan, prints the scan's answer, checks two candidates with the GitHub CLI. | the events, notices and `out/` folder of section 1 |
+| Cleanup | `bash scripts/runbooks/self-hosting.sh cleanup` | Stops and removes the scratch places this script made (found by a marker file it wrote). Safe to run twice. It never touches the real organization. | none |
 
-What can be removed by hand afterwards, if the owner wants: the clone `~/makiba-repos/makiba` (only while no worktree of it is in use), the ledger copy, and the document task's `out/` folder.
+Each takes `--dry-run`: it prints every command and runs none, and writes no file. Run that first if you want to see what a stage will do. `register` and `triage` also take `--yes`, which skips the question. `register --replace-ledger` replaces a different ledger already placed (the old one is kept beside it as `makiba.md.before-<UTC>`; without the flag a different ledger is kept and only the clause check applies).
 
-## 3. The places this run touches
+The order of the day: `check`, then `rehearse` (optional; whether to rehearse is the owner's choice on the day), then `register`, then `triage`. Each prints `RESULT self-hosting <stage>: ok` and the path of its results file, or `REFUSED: ... fix: ...`. A refusal changed nothing in that step; fix what it names and run the same line again. `register` and `triage` are safe to run again: an organization that runs is not started again, a project already registered with the same hosts is not registered again, and a ledger already placed is not replaced.
+
+The results files are `.runbook-results/self-hosting-<stage>-<UTC>.txt` (not committed; `RUNBOOK_RESULTS_DIR` moves them). Every `CHECK <name>: PASS|FAIL|INFO` line there is a row of section 9. After a rehearsal the events and messages of the scratch organization are kept beside its file as `-events.txt` and `-messages.txt`.
+
+### What only the person can do
+
+The scripts need the person key, so the person types the lines; that is the one named step. Besides it:
+
+- **Typing `yes`** at the question of `register` and `triage` (section 1 lists what it covers).
+- **A dialog `makibad` cannot pass.** `makibad` answers the folder-trust dialog and the development-channel dialog itself (`DIALOGS` in `src/agents/claude_code.rs`; probes.md P10), for the secretary and for the document worker; the person approves nothing by hand. A dialog that is not on that list makes the launch fail with the screen recorded: the script then stops and tells the person to read the worker's screen, and to end the task with `makiba close <task> --abandon` (the exact line is printed; write why in the results).
+- **`gh auth login -h github.com`**, if the check says there is no stored login.
+
+## 4. Preconditions (the script checks each; the first that fails stops it and says how to fix it)
+
+1. A login shell on the host, not inside an agent.
+2. On PATH: `hc`, `claude` (logged in; open it once by hand if unsure), `git` 2.38 or newer, `python3` with its `sqlite3` module and the JSON functions, `gh`, `cargo`. Versions of `hc`, `claude`, `gh` and `git` go into the results file; so does the commit.
+3. The GitHub CLI has a stored login for github.com. `makiba up` removes `GH_TOKEN`, `GITHUB_TOKEN` and their enterprise forms from `makibad`'s environment (spec section 2), so a login held only in such a variable does not reach the clone or the scan. `gh config get git_protocol -h github.com` decides the clone's URL: `ssh` (a key usable with `BatchMode=yes`) or `https` (through `gh auth git-credential`). The rehearsal keeps `GH_CONFIG_DIR` where it is, since the CLI would otherwise look for its login under the scratch `XDG_CONFIG_HOME`.
+4. The pending list `docs/design/incidents-pending.txt` is empty and `tools/check_incidents.py` passes (definition of done 3).
+5. The ledger of the repository has the clause the Issue names (`issues/M7-1.md`, `## Goal clause`).
+6. For `register` and `triage`: no test seam is set (`MAKIBA_BASE`, `MAKIBA_LAUNCH_AGENT`, `MAKIBA_FAKE_AGENT`, `MAKIBA_DOOR=none`), and the project's folder `~/makiba-repos/makiba` (`$MAKIBA_REPOS_DIR/makiba`) is either absent (`makibad` clones it) or a clone of `suisya-systems/makiba`, on its default branch, with no uncommitted change to tracked files (`makibad` fetches it and fast-forwards that branch, else the command fails with `conflict`).
+7. A code run is not part of this runbook (the dispatched task is a `document` task), so the repository a code run keeps of its own (`<state>/git/<task>`, Issue 241) and the project's own git hooks (Issue 236) are not exercised here; a later `code` dispatch into makiba needs the network list of section 5, and `git` 2.38 or newer for `update`.
+
+## 5. The network list of makiba's workers
+
+A worker's and the curator's settings turn Claude Code's strict allow-list on: a worker reaches only the hosts listed for its project, none when none is listed, and a host outside the list is refused in every permission mode, with no prompt (`docs/design/lines.md` L-K2 and L-K7; Issue 244; `tests/network_allowlist.rs`). GitHub's hosts are never accepted into a list: pushes and GitHub writes go through `makibad`. Only the person sets the list.
+
+`register` registers makiba with `--hosts index.crates.io,static.crates.io`, the pair of hosts cargo's sparse registry uses for its index and its downloads, so that a later `code` worker of makiba can `cargo build`. It prints the list before it registers. `MAKIBA_RUNBOOK_HOSTS=a.example,b.example` changes it for that run.
+
+**Only the host run proves the list is enough.** The pair is from cargo's behaviour, not from a document or a test of this repository (the one test that names a crates host uses `static.crates.io` alone, as a value). The document task of `triage` reaches no host, so it does not show it either. When a code worker's `cargo build` fails to fetch a crate, the refusal is a connection or proxy error for a named host, with no permission prompt; the person or the secretary adds the host, for example:
+
+```sh
+makiba config set network_hosts --project makiba index.crates.io,static.crates.io,<the missing host>
+```
+
+`config set` replaces the whole list, so name every host. `makiba status` shows the list of each project (`network hosts:`). This is a setting with its own event (section 1).
+
+## 6. The places a real run touches
 
 With no variable set, every path is the person's default (spec section 2):
 
@@ -37,214 +91,49 @@ With no variable set, every path is the person's default (spec section 2):
 | --- | --- | --- |
 | State | `${XDG_STATE_HOME:-~/.local/state}/makiba` (`$MAKIBA_STATE_DIR`) | `state.db` (projects row, commands, events, messages), `makibad.lock`, `makibad.log`, `settings/` |
 | Repositories | `~/makiba-repos` (`$MAKIBA_REPOS_DIR`) | the clone `makiba/`, made through `.makiba.partial-<command id>` |
-| Goal ledgers | `${XDG_CONFIG_HOME:-~/.config}/makiba/goals` (`$MAKIBA_GOALS_DIR`) | `suisya-systems/makiba.md`, the copy of section 7 |
+| Goal ledgers | `${XDG_CONFIG_HOME:-~/.config}/makiba/goals` (`$MAKIBA_GOALS_DIR`) | `suisya-systems/makiba.md`, the copy of the repository's ledger (never replaced without `--replace-ledger`) |
 | Person key, gate key | `${XDG_CONFIG_HOME:-~/.config}/makiba/person.key`, `gate.key` | created by `makiba up` if absent |
 | Base configuration | `${XDG_CONFIG_HOME:-~/.config}/makiba/base` | written by `makiba up` |
 | Share | `${XDG_DATA_HOME:-~/.local/share}/makiba` (`$MAKIBA_SHARE_DIR`) | the role files and the hooks' entry point |
 | Documents | `~/makiba-docs` (`$MAKIBA_DOCS_DIR`) | the task's folder; its `out/` stays after the close |
 | Door | `${XDG_RUNTIME_DIR}/makiba/door.sock` (`$MAKIBA_DOOR`) | the person's socket |
 | Base session | `makiba` (`$MAKIBA_BASE_SESSION`) | the core and its terminals |
-| Claude Code | `~/.claude.json`, `~/.claude/projects/` | trust entries and transcripts (section 2) |
+| Claude Code | `~/.claude.json`, `~/.claude/projects/` | trust entries and transcripts (section 1) |
+| The repository | `.runbook-results/` | the results files of the scripts |
 
-GitHub is read, not written: `git clone` / `git fetch` of `suisya-systems/makiba`, and `gh issue list` / `gh pr list` of it.
+GitHub is read, not written: `git clone` / `git fetch` of `suisya-systems/makiba`, and the scan's reads of its Issues and pull requests, and `gh issue view` of two candidates.
 
-## 4. Optional: a rehearsal in a scratch place
+The rehearsal moves every one of these into `${TMPDIR:-/tmp}/makiba-rehearsal-XXXXXX` (its `env.sh` holds the variables), and uses its own base session and port. The scratch `XDG_CONFIG_HOME` also hides a global git configuration kept under `~/.config/git`; the clone uses the person's ssh key or the CLI's login, not that configuration.
 
-The same steps (sections 6 to 9) can be run first in a scratch place, so that nothing of section 3 is written. It reads the same GitHub repository and launches the same kind of worker, so it shows the procedure works on this host; it does not register makiba in the real organization, and the real run (sections 5 to 9 with no variable set) is still needed afterwards. It leaves trust entries in `~/.claude.json` for the scratch path, like the real run.
-
-In a login shell, in the repository (with `MK` set, section 5, precondition 6), set the variables of `docs/runbooks/first-worker.md` section 3: run its first block with `makiba-m71` in place of `makiba-m45` in `RUN` and `SESSION`, and take the snapshot of the default places there (`snap > "$RUN/defaults-before.txt"`). Before that block, keep the GitHub CLI's own configuration where it is: the block moves `XDG_CONFIG_HOME` to an empty folder, and the GitHub CLI reads its stored login and `git_protocol` from `$XDG_CONFIG_HOME/gh` unless `GH_CONFIG_DIR` is set. `makibad` keeps `GH_CONFIG_DIR` (only the agents' launches empty it, spec section 6.4), so set it first and add it to `env.sh` after the block:
-
-```sh
-export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
-gh auth status -h github.com
-```
-
-and after the block, `echo "export GH_CONFIG_DIR='$GH_CONFIG_DIR'" >> "$RUN/env.sh"`. Skip its scratch repository block: here `makibad` clones the project itself. Every step below reads its places through the same variables (`${MAKIBA_STATE_DIR:-...}`, `${XDG_CONFIG_HOME:-...}`, `${MAKIBA_REPOS_DIR:-...}`), so they run unchanged. Clean up as first-worker.md section 8 says (its `hcs kill "$W"` line has nothing left to end: the close of section 8 here ended the task's terminal), and check that the snapshot's `diff` is empty.
-
-## 5. Preconditions
-
-Check each one; stop at the first that fails and say which.
-
-1. **A person's login shell, on the host, not inside an agent.** `env | grep -E '^(CLAUDE|HC_)'` prints nothing.
-2. **The versions and programs of `docs/runbooks/first-worker.md` section 2**, items 3 to 5: `hc`, `claude` (logged in), `git`, `python3` with its `sqlite3` module, `gh`.
-3. **The GitHub CLI is logged in to github.com with a stored login.** `gh auth status -h github.com` says logged in. `makiba up` removes `GH_TOKEN`, `GITHUB_TOKEN` and their enterprise forms from `makibad`'s environment (spec section 2), so a login held only in such a variable does not reach the clone or the scan. `gh config get git_protocol -h github.com` decides the clone's URL: `ssh` gives `git@github.com:suisya-systems/makiba.git` (an ssh key usable with `BatchMode=yes`, no passphrase prompt), anything else `https://github.com/suisya-systems/makiba.git` (through `gh auth git-credential`).
-4. **No organization runs on the default places yet, or the one that runs is this one.** `"$MK" status` either says `makibad has never run here` or shows the organization the owner means to use.
-5. **The repository folder.** `ls ~/makiba-repos/makiba` (or `$MAKIBA_REPOS_DIR/makiba`). If it does not exist, `makibad` clones it. If it exists, its `origin` must be `suisya-systems/makiba`, it must be on its default branch and have no uncommitted change to tracked files: `makibad` fetches it and fast-forwards that branch, else the command fails with `conflict`. Check with `git -C ~/makiba-repos/makiba remote get-url origin; git -C ~/makiba-repos/makiba status --short --branch --untracked-files=no`.
-6. **A build of this commit:** `cargo build` in the repository, then `MK=$PWD/target/debug/makiba`, `REPO=$PWD` and `COMMIT=$(git rev-parse --short HEAD)`. Write `COMMIT`, `hc --version`, `claude --version` and `gh --version` in the results.
-7. **The pending list is empty and the check passes** (definition of done, item 3). In the repository at `COMMIT`:
-
-   ```sh
-   grep -v '^#' docs/design/incidents-pending.txt | grep -c .
-   python3 tools/check_incidents.py; echo "exit=$?"
-   ```
-
-   Look at: `0`, then `incident table ok` and `exit=0`.
-
-The helper of the later sections, in the same shell:
-
-```sh
-DB="${MAKIBA_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/makiba}/state.db"
-sq() { python3 -I -c 'import sqlite3, sys
-c = sqlite3.connect("file:" + sys.argv[1] + "?mode=ro", uri=True)
-for r in c.execute(sys.argv[2]):
-    print("|".join("" if v is None else str(v) for v in r))' "$DB" "$@"; }
-```
-
-`sq "<query>"` opens `state.db` read-only and prints one row per line, the columns joined by `|`.
-
-## 6. Register makiba (the person types this)
-
-Start the organization if it is not running. `makiba up` starts the base, `makibad` and the secretary; `--no-secretary` leaves the secretary out (the notices then wait in the ledger, and every check below is read from `state.db` either way). Which one is the owner's choice.
-
-```sh
-"$MK" up
-"$MK" status; echo "exit=$?"
-```
-
-Look at: `makibad: started` (or that it already runs), then `status` with a heartbeat a few seconds old, `subscribed: yes`, exit 0. When `up` fails, use the table of first-worker.md section 3.
-
-Allow the organization that owns makiba, so that the secretary may fetch the project again later (the person may register any repository; the secretary only one whose owner is listed, `src/daemon/project.rs`):
-
-```sh
-"$MK" config set allowed_repo_owners suisya-systems
-```
-
-Look at: `{"key":"allowed_repo_owners","project":"","value":"suisya-systems"}`. If the organization already lists other owners, set the comma list of all of them (`"$MK" config get allowed_repo_owners` shows the current one); `set` replaces the value.
-
-Register the project. The request is `OWNER/NAME` only; `makibad` builds the URL:
-
-```sh
-"$MK" project makiba suisya-systems/makiba
-```
-
-Look at: `{"repo":"suisya-systems/makiba","slug":"makiba","status":"accepted"}`, exit 0. The clone runs on a thread of `makibad` and can take minutes (limit 30 minutes). Wait for the command to finish:
-
-```sh
-sq "SELECT id, status, error_kind, result_json FROM commands WHERE verb = 'project' ORDER BY id DESC LIMIT 1"
-```
-
-Repeat until `status` is `done` (or `failed`). Look at: `result_json` with `"action":"clone"` (or `"fetch"` when the folder existed), `"default_branch":"main"` and a `head`. Then the check of the definition of done, item 1:
-
-```sh
-sq "SELECT slug, origin_url, default_branch, status FROM projects WHERE slug = 'makiba'"
-sq "SELECT body FROM messages WHERE sender = 'makibad' AND body LIKE 'Project makiba %' ORDER BY id DESC LIMIT 1"
-git -C "${MAKIBA_REPOS_DIR:-$HOME/makiba-repos}/makiba" log --oneline -1
-```
-
-Look at: `makiba|https://github.com/suisya-systems/makiba|main|active`; the notice `Project makiba (suisya-systems/makiba) is cloned: main is at <sha>. You may dispatch into it.`; the clone's newest commit is that `<sha>`. Until Issue 227 ("`makiba status` lists the registered projects") lands, this query is the check, and the results say so; after it lands, `"$MK" status` shows the project and that line is recorded too.
-
-If it differs:
+## 7. If a stage refuses or a check fails
 
 | What you see | Meaning | Do |
 | --- | --- | --- |
-| exit 4 `denied: the owner ... is not in the organization's allowed_repo_owners` | the request did not come as the person | run it in the person's shell, with the person key |
-| exit 5 `conflict: project makiba is the repository ..., not ...` | the slug is registered to another repository | stop; the owner decides (a slug names one repository) |
-| `failed`, `... is a clone of ..., not of suisya-systems/makiba` | precondition 5 | stop; the folder is left as it is |
-| `failed`, `... is on <branch>, not on the default branch` or `has uncommitted changes` | precondition 5 | put the folder on `main` and clean, then run `project` again |
-| `failed`, `git clone failed: ...` | git's own words: login, network, ssh | check precondition 3; `tail "${MAKIBA_STATE_DIR:-$HOME/.local/state/makiba}/makibad.log"` |
+| `REFUSED: a CLAUDE* or HC_SESSION/HC_SOCKET/HC_SCOPE/HC_TERMINAL_* variable is set` | this shell is inside an agent or a terminal of the base | open a plain login shell; do not unset the variable by hand |
+| `makiba: unavailable: Claude Code version ...` (from `up`) | the version of `claude` is outside the supported range | stop; the owner decides (`docs/upgrading-claude-code.md`) |
+| other failures of `up` | see the table of `docs/runbooks/first-worker.md` section 3 | read `makibad.log` in the state folder |
+| `REFUSED: the ... ledger has no clause G<n>` | the ledger does not hold the clause Issue 50 names (the clause list of the repository has not landed, pull request 260 at the time of writing) | land it, pull main, then `register --replace-ledger` |
+| `conflict: project makiba is the repository ..., not ...` | the slug is registered to another repository | stop; the owner decides (a slug names one repository) |
+| the `project` command `failed`, `... is a clone of ..., not of suisya-systems/makiba` | precondition 6 | stop; the folder is left as it is |
+| `failed`, `... is on <branch>, not on the default branch` or `has uncommitted changes` | precondition 6 | put the folder on `main` and clean, then run `register` again |
+| `failed`, `git clone failed: ...` | git's own words: login, network, ssh | precondition 3; `tail` of `makibad.log` |
+| the worker did not report (a stop, a dialog it cannot pass) | see "What only the person can do" | read its screen; `makiba close <task> --abandon` as printed |
+| no scan after the close | a scan ran less than 30 minutes before, or `makibad` is not running | the `last-scan` line says how old the last scan was; `makiba status` |
+| scan status `error` with `gh not found` or GitHub CLI text | the CLI cannot be run or read | precondition 3; the close stays due and the next pass after the interval tries again |
+| `diagnostics` holds `unset:suisya-systems/makiba` | no ledger at the place `makibad` reads | `MAKIBA_GOALS_DIR` is read when `makibad` starts: it must be the same in the shell that ran `makiba up` |
+| `diagnostics` holds `error:suisya-systems/makiba` | the ledger cannot be read | the notice gives the line and what is wrong; fix the copy, not the repository |
+| `diagnostics` holds `norepo:makiba` | the project row has no URL and the clone no single `origin` | run `register` again |
+| scan status `no_candidates` | the scan read makiba and proposed nothing | `makiba status` prints `next work: ... why: ...`; record it with the open Issues of the moment; the owner decides whether item 2 holds |
 
-## 7. Place the goal ledger (the person types this)
+## 8. Cleanup
 
-The ledger is a file of the operator, outside every repository (`docs/goals.md`). makiba's own ledger is kept in this repository at `goals/suisya-systems/makiba.md`; the scan reads the copy in the configuration folder, not the repository's.
+Nothing of the real run is cleaned: the project, the clone and the ledger are what the run was for, and section 1 lists what stays. Leave the organization running or stop it with `makiba down` (add `--stop-base` to stop the core), as the owner wants. After a rehearsal that failed, its scratch place is kept for inspection and its organization is stopped (if `makiba down` fails in a place that has run, or `makibad` stays alive, the place is kept, the stage fails and the line to stop it by hand is printed); `bash scripts/runbooks/self-hosting.sh cleanup` removes it.
 
-```sh
-GOALS="${MAKIBA_GOALS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/makiba/goals}"
-mkdir -p "$GOALS/suisya-systems"
-cp -i "$REPO/goals/suisya-systems/makiba.md" "$GOALS/suisya-systems/makiba.md"
-grep -c '^## G[0-9]' "$GOALS/suisya-systems/makiba.md"
-```
+## 9. Results (filled in by the secretary)
 
-Look at: the number of clauses (`## G1` ... `## G<n>`) of the repository's ledger. `cp -i` asks before replacing a ledger that is already there; if one is, compare first (below) and answer `n` unless the owner wants it replaced.
+One row per check; "what happened" is one line with the exact text that showed it; an Issue number for every surprise. Nothing specific to the host goes here: no home paths, no account names. Write a placeholder such as `<host>` and say what it stands for. The `CHECK` lines of the results files carry most of it.
 
-The copy is the operator's: it does not follow the repository. When `goals/` changes on `main`, the copy is not updated by anything. Compare the two at any time with:
-
-```sh
-diff "$REPO/goals/suisya-systems/makiba.md" "$GOALS/suisya-systems/makiba.md" && echo "the ledger copy matches the repository"
-```
-
-The scan reads the ledger at each scan; nothing needs restarting after a change. `MAKIBA_GOALS_DIR` is read by `makibad` when it starts: if it is set in the person's shell, it must be the same in the shell that ran `makiba up`.
-
-## 8. Run the triage scan (the person types the dispatch and the close)
-
-The scan runs after a close. Find whether one has run in the last 30 minutes:
-
-```sh
-sq "SELECT id, occurred_at, json_extract(payload_json, '$.status') FROM events WHERE kind = 'work_discovery_scanned' ORDER BY id DESC LIMIT 1"
-sq "SELECT (julianday('now') - julianday(max(occurred_at))) * 1440 FROM events WHERE kind = 'work_discovery_scanned'"
-```
-
-The second line is the age of the newest scan in minutes (empty: none ever ran). If it is below 30, the close below is still recorded, and the scan runs by itself once the 30 minutes from that scan have passed (a close inside the interval waits for its end); wait for that rather than closing more tasks. A scan made before the project was registered does not count: the close below is newer than it.
-
-One small document task. Its folder is `~/makiba-docs/m71-triage` (or `$MAKIBA_DOCS_DIR/m71-triage`):
-
-```sh
-BRIEF=$(mktemp)
-cat > "$BRIEF" <<'EOF'
-Write the file out/note.md with the single line "triage trigger for M7-1". When it is written, call the tool report with state "done", task "m71-triage" and one sentence that says what you wrote.
-EOF
-"$MK" dispatch --kind document --task-id m71-triage --title "Triage trigger (M7-1)" --brief-file "$BRIEF"
-```
-
-Look at: `{"spawn_id":"...","status":"queued","task_id":"m71-triage"}`, exit 0 (exit 5 `conflict`: the task id was used; choose another and use it below). Wait for the done report:
-
-```sh
-sq "SELECT r.status FROM runs r WHERE r.task_id = 'm71-triage'"
-sq "SELECT id, substr(body, 1, 200) FROM messages WHERE kind = 'report_done' AND run_id = (SELECT id FROM runs WHERE task_id = 'm71-triage')"
-```
-
-Repeat until the run is `review` and the report is there. Then close it:
-
-```sh
-"$MK" close m71-triage; echo "exit=$?"
-sq "SELECT id, kind FROM events WHERE kind = 'run_closed' ORDER BY id DESC LIMIT 1"
-```
-
-Look at: exit 0 and a `run_closed` event. If the worker does not report (a stop, a dialog it cannot pass), `"$MK" close m71-triage --abandon` writes `run_closed` as well; record why. The close ends the worker's terminal and removes the task's folder except `out/`.
-
-Now wait for the scan (seconds to a minute: it reads GitHub on a thread of its own):
-
-```sh
-sq "SELECT id, json_extract(payload_json, '$.status'), json_extract(payload_json, '$.repos'), json_extract(payload_json, '$.candidate_count'), json_extract(payload_json, '$.candidate_refs'), json_extract(payload_json, '$.diagnostics'), json_extract(payload_json, '$.error') FROM events WHERE kind = 'work_discovery_scanned' ORDER BY id DESC LIMIT 1"
-```
-
-Look at, for the definition of done, item 2: an event newer than the `run_closed` above, with status `candidates_found`, `repos` `["suisya-systems/makiba"]` (and any other active project), a `candidate_count` above 0, and `candidate_refs` a comma list of `suisya-systems/makiba#<number>`, each an open Issue of makiba (check two of them with `gh issue view <number> --repo suisya-systems/makiba`). `diagnostics` does not hold `unset:suisya-systems/makiba` or `error:suisya-systems/makiba`. Then the notice:
-
-```sh
-sq "SELECT id, body FROM messages WHERE sender = 'makibad' AND body LIKE 'Triage after a close:%' ORDER BY id DESC LIMIT 1"
-```
-
-Look at: `Triage after a close: <n> candidates (free workers: <k>).`, then lines `1. suisya-systems/makiba#<number> <title> - G<i> <heading>` (the clause the Issue names under its `## Goal clause` heading; `names no clause` when it names none), and `Clauses of suisya-systems/makiba: G1 ...; G2 ...`. A notice is written only when the candidates or diagnostics differ from the last notified scan; the event is written either way.
-
-If it differs:
-
-| What you see | Meaning | Do |
-| --- | --- | --- |
-| no new event after some minutes | a scan ran less than 30 minutes before, or makibad is not running | the age query above; `"$MK" status` |
-| status `error`, `error` `gh not found` or `gh` text | the GitHub CLI cannot be run or read | precondition 3; the close stays due and the next pass after the interval tries again |
-| `diagnostics` `unset:suisya-systems/makiba` | no ledger at the place makibad reads | section 7; compare `MAKIBA_GOALS_DIR` in the shell that ran `up` |
-| `diagnostics` `error:suisya-systems/makiba` | the ledger cannot be read | the notice gives the line and what is wrong; fix the copy, not the repository |
-| `diagnostics` `norepo:makiba` | the project row has no URL and the clone no single `origin` | section 6 |
-| status `no_candidates` | the scan read makiba and proposed nothing | record it with the open Issues of the moment (`gh issue list --repo suisya-systems/makiba`); the owner decides whether item 2 holds |
-
-## 9. Cleanup
-
-Nothing of the real run is cleaned: the project, the clone and the ledger are what the run was for, and section 2 lists what stays. Check that the document task left nothing running:
-
-```sh
-sq "SELECT status FROM runs WHERE task_id = 'm71-triage'"
-sq "SELECT status FROM commands WHERE verb = 'close' ORDER BY id DESC LIMIT 1"
-ls "${MAKIBA_DOCS_DIR:-$HOME/makiba-docs}/m71-triage"
-```
-
-Look at: `completed` (or `abandoned`), the close `done`, and only `out` in the folder. `rm` of the `out/` folder is the owner's choice. Leave the organization running or stop it with `"$MK" down`, as the owner wants.
-
-For the rehearsal of section 4, clean up as first-worker.md section 8 instead.
-
-## 10. Results (filled in by the secretary)
-
-One row per check; "what happened" is one line with the exact text that showed it; an Issue number for every surprise. Nothing specific to the host goes here: no home paths, no account names. Write a placeholder such as `<host>` and say what it stands for.
-
-### 10.1 The run
+### 9.1 The run
 
 Leave this empty until the run.
 
@@ -252,28 +141,29 @@ Leave this empty until the run.
 | --- | --- |
 | Date and time (UTC) | |
 | Host | |
-| `makiba` commit (`$COMMIT`) | |
-| Runbook commit | |
-| `hc --version`, `claude --version`, `gh --version` | |
-| Rehearsal in a scratch place first (section 4): yes / no | |
+| `makiba` commit (the `commit` line) | |
+| Runbook and scripts commit | |
+| `hc`, `claude`, `gh`, `git` versions (the `versions` line) | |
+| Rehearsal first: yes / no | |
 | `makiba up` with or without the secretary | |
-| Who typed sections 6 to 8 (the person) | |
+| Who typed the lines (the person) | |
 
 | Check | Pass / fail / not run | What happened | Issue |
 | --- | --- | --- | --- |
-| Pending list empty, `check_incidents.py` exit 0 (precondition 7, DoD 3) | | | |
-| `config set allowed_repo_owners` | | | |
-| `project makiba suisya-systems/makiba` accepted, command `done` (`action`) | | | |
-| `projects` row (query of section 6, DoD 1 until Issue 227 lands) | | | |
-| `makiba status` shows the project (after Issue 227 lands) | | | |
-| Clone at the notice's head | | | |
-| Ledger copied; `diff` with the repository | | | |
-| Document task: dispatch, done report, `close`, `run_closed` | | | |
+| Pending list empty, `check_incidents.py` passes (DoD 3) | | | |
+| Ledger of the repository: clause count, clause named by the Issue (`ledger-repository`) | | | |
+| `allowed_repo_owners` set | | | |
+| `project makiba suisya-systems/makiba --hosts ...` accepted, command done (`action`) | | | |
+| `makiba status` lists the project, with its hosts (DoD 1; `status-lists-project`) | | | |
+| Ledger placed; clause count and clause (`ledger-placed`) | | | |
+| Document task: dispatch, done report, `close` | | | |
 | `work_discovery_scanned`: status, `candidate_count`, `candidate_refs`, `diagnostics` (DoD 2) | | | |
 | Two candidates checked as open Issues of makiba | | | |
-| Triage notice (first lines) | | | |
-| Leftovers (section 2: trust entries, `out/`) | | | |
+| Triage notice (first lines), and `next work:` in `makiba status` | | | |
+| `range` and `review` verbs: present or skipped (`verb-range`, `verb-review`) | | | |
+| Crates hosts enough for a code worker's `cargo build` (not run by this runbook: write "not run", or what a later code run showed) | | | |
+| Leftovers (section 1: trust entries, `out/`) | | | |
 | Permission prompts seen | | | |
 | Issues filed for surprises | | | |
 
-Owner's decision on Issue 50 (after reading 10.1): closed / not closed, with the reason.
+Owner's decision on Issue 50 (after reading 9.1): closed / not closed, with the reason.
