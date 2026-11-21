@@ -364,9 +364,8 @@ fn connected(db: &Db) -> (Endpoint, Server) {
     s.initialize();
     s.initialized();
     wait("the secretary's channel to be connected", || {
-        ep.hub.connected("secretary").then_some(())
+        (ep.hub.connected("secretary") && ep.hub.reaches("secretary")).then_some(())
     });
-    assert!(ep.hub.reaches("secretary"), "the push seam agrees");
     (ep, s)
 }
 
