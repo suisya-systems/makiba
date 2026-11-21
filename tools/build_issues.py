@@ -10,12 +10,15 @@ from pathlib import Path
 
 GOALS = {
     "G1": "G1 One contact: the person deals with the secretary only",
-    "G2": "G2 Past incidents do not come back",
-    "G3": "G3 No model touches a terminal or the ledger directly",
-    "G4": "G4 Dispatch and close record what was observed",
-    "G5": "G5 The watch does not stop, and if it stops it shows",
-    "G6": "G6 The base is a part that can be replaced, and an update of it does not break makiba",
-    "G7": "G7 It runs its own development",
+    "G2": "G2 The flow of work does not wait for the person's turn",
+    "G3": "G3 Past incidents do not come back",
+    "G4": "G4 No model touches a terminal or the ledger directly",
+    "G5": "G5 What must not happen is stopped by something outside the agent",
+    "G6": "G6 Dispatch and close record what was observed",
+    "G7": "G7 The watch does not stop, and if it stops it shows",
+    "G8": "G8 The base is a part that can be replaced, and an update of it does not break makiba",
+    "G9": "G9 It runs its own development",
+    "G10": "G10 It installs as one binary",
 }
 
 MILESTONES = {
@@ -83,7 +86,7 @@ add("M0-1", "Repository skeleton, CI and the acceptance job",
      "A declared path that is not a test target (`tests/common/mod.rs`) yields `ACCEPTANCE: fail`.",
      "A declared `tests/test_x.py` behaves as before (fails by pytest at the test commit, passes at head).",
      "A branch with no trailer yields `ACCEPTANCE: none`."],
-    "G7",
+    "G9",
     carry=[f"{PD}: `scripts/acceptance-check.sh`, `tests/acceptance-check.test.sh`, `.github/acceptance-check`, "
            "`docs/design/acceptance-check.md`",
            "makiba itself: `scripts/acceptance-check.sh`, `tests/test_acceptance_check.py`, "
@@ -171,7 +174,7 @@ add("M0-2", "Pin the base's version and the supported Claude Code versions",
      "`docs/upgrading-claude-code.md` names each probe and the runbook listed above.",
      "`scripts/install-base.sh`, with `HERDR_RELEASES_URL` naming a scratch folder that holds a manifest and a "
      "file, installs the file when its SHA-256 matches, and installs nothing and exits non-zero when it does not."],
-    "G6", deps=["M0-1"],
+    "G8", deps=["M0-1"],
     note="Claude Code's version goes here and not in a new Issue because it is the same kind of pin, kept in "
          "the same place and checked by the same kind of test; the check at `makiba up` is M4-4's. makiba's own "
          "releases take the base's shape (one binary per target, a manifest with each `url` and `sha256`); that "
@@ -192,7 +195,7 @@ add("M0-3", "A stand-in for the base, and the real base for CI",
     ["The same test (launch a terminal that prints a line, read the line, end it) passes on the stand-in and on "
      "the real base.",
      "With the real base, the fixture's place is never the default one and its folders are under a temp dir."],
-    "G6", deps=["M0-2"],
+    "G8", deps=["M0-2"],
     carry=[f"{PD}: `tests/hc-stub.sh` (as a reference for which behaviours a stand-in needs, not as code)"],
     note="Probe P2 (docs/design/probes.md) has been run before this Issue starts and decided whether the real "
          "base can run in GitHub's CI. If it did not, this Issue ships the stand-in half and says so in "
@@ -211,7 +214,7 @@ add("M0-4", "The test agent",
     "tests/fake_agent.rs",
     ["A script of `working, blocked(permission), done` is seen in that order through `Base::get`.",
      "Keys sent to a scripted dialog arrive in the record file in order."],
-    "G4", deps=["M0-3"],
+    "G6", deps=["M0-3"],
     carry=["herdr-core: `fake_tui.py` in its own tests (as a reference)"])
 
 add("M0-5", "Carry the state.db schema and writer, and add migration v4",
@@ -236,7 +239,7 @@ add("M0-5", "Carry the state.db schema and writer, and add migration v4",
     ["A fresh database migrates to v4 and has every table and CHECK of spec section 5.",
      "A second `(source_event_id, recipient)` delivery row is refused.",
      "A `run_launch` row with an unknown `stage` is refused."],
-    "G4", deps=["M0-1"],
+    "G6", deps=["M0-1"],
     carry=["makiba itself (merged in #58): `makiba/db/schema.sql` and `schema_v4.sql` (kept as SQL), "
            "`writer.py`, `queries.py` and `tests/db/` (ported)",
            f"{CJ}: `tools/state_db/schema.sql`, `writer.py`, `queries.py`, `test_writer.py`, `test_queries.py` "
@@ -256,7 +259,7 @@ add("M0-5", "Carry the state.db schema and writer, and add migration v4",
              "and removed.")
 
 add("M0-6", "The incident table and its check",
-    "G2 is only checkable if the incident table is data a test can read.",
+    "G3 is only checkable if the incident table is data a test can read.",
     ["`docs/design/incidents.md` as delivered, kept as a Markdown table.",
      "`tools/check_incidents.py`: parses the table; fails when a row has an empty `Test` cell or names a file "
      "that does not exist. A row whose guarding Issue is still open may name a file that does not exist yet "
@@ -265,7 +268,7 @@ add("M0-6", "The incident table and its check",
     ["A table with a row lacking a test fails the check.",
      "A row naming a missing file fails unless the file is in the pending list.",
      "The delivered table passes."],
-    "G2",
+    "G3",
     note="Merged in Python (#55). The check stays a Python development tool, run by CI and not shipped in the "
          "binary (plan.md section 7); the test files the table names are Rust tests (`tests/<name>.rs`).")
 
@@ -281,7 +284,7 @@ add("M0-7", "English only, checked in CI",
     ["A scratch tree with one kana character in `skills/x.md` fails.",
      "The same character under `tests/fixtures/i18n/` passes.",
      "The repository itself passes."],
-    "G7", deps=["M0-1"],
+    "G9", deps=["M0-1"],
     note="Built in Python (pull request #59) while the code lived under `makiba/`. The check stays a Python "
          "development tool, run by CI and not shipped in the binary (plan.md section 7). The Rust code lives "
          "under `src/`; M0-1's rework changes the scanned folder.")
@@ -297,7 +300,7 @@ add("M0-8", "The shared specification, checked against the code",
     "tests/spec_matches_code.rs",
     ["Every tag key, event kind, error kind, exit code and verb in the document equals the constant, both ways.",
      "Removing one name from either side fails the test."],
-    "G4", deps=["M0-5"])
+    "G6", deps=["M0-5"])
 
 
 # ---------------------------------------------------------------- M1
@@ -317,7 +320,7 @@ add("M1-1", "Connect to the base and say hello",
      "A base that is not running returns `BaseError::Unavailable`, not a panic or an unmapped `io::Error`.",
      "`tests/base_seam.rs` passes on the repository, and its scan fails on a scratch tree with a module outside "
      "`src/base/` that names `herdr`."],
-    "G6", deps=["M0-3"])
+    "G8", deps=["M0-3"])
 
 add("M1-2", "Terminal operations",
     "The dispatcher's hands: launch, look, type, end.",
@@ -329,7 +332,7 @@ add("M1-2", "Terminal operations",
     ["Launch the test agent, read a line it printed, send it a key, end it.",
      "The launched terminal carries the tags given and none of the unset variables.",
      "A terminal launched by something else is not in `list`."],
-    "G4", deps=["M1-1"])
+    "G6", deps=["M1-1"])
 
 add("M1-3", "Events and resync",
     "claude-org-ja once lost a terminal's end because an old cursor outlived a restart (#1235).",
@@ -342,7 +345,7 @@ add("M1-3", "Events and resync",
      "Restarting the base mid-test yields a `Resync`, and a terminal that finished during the gap is absent "
      "from its list.",
      "A dropped connection is re-established without the caller doing anything."],
-    "G5", deps=["M1-1"])
+    "G7", deps=["M1-1"])
 
 add("M1-4", "Errors as types",
     "The dispatcher decides differently for 'not found', 'blocked' and 'try again'. It should not parse "
@@ -354,7 +357,7 @@ add("M1-4", "Errors as types",
     ["`send` to a blocked terminal returns `BaseError::Blocked`.",
      "`send` with `only_if_idle` to a working terminal returns `BaseError::StatusMismatch`.",
      "An unknown terminal returns `BaseError::NotFound`."],
-    "G4", deps=["M1-2"])
+    "G6", deps=["M1-2"])
 
 add("M1-5", "Compatibility test against the base's own definition",
     "The pin (M0-2) says which version; this says which parts of it makiba depends on, so that moving the pin "
@@ -365,7 +368,7 @@ add("M1-5", "Compatibility test against the base's own definition",
     "tests/base_compat.rs",
     ["Green on the pinned version.",
      "With one used field removed from a copy of the definition, the test names that field."],
-    "G6", deps=["M1-1"])
+    "G8", deps=["M1-1"])
 
 # ---------------------------------------------------------------- M2
 add("M2-1", "makibad: one instance, a heartbeat, a clean stop",
@@ -385,7 +388,7 @@ add("M2-1", "makibad: one instance, a heartbeat, a clean stop",
     ["A second `makibad` on the same state folder exits with a message naming the first one's pid.",
      "`subscribed` is 0 until the subscription exists (the stand-in delays it) and 1 after.",
      "After `makibad` is killed with SIGKILL, `makiba status` exits non-zero within 30 s."],
-    "G5", deps=["M0-8", "M1-3"],
+    "G7", deps=["M0-8", "M1-3"],
     out=["Starting `makibad` at boot (stage 2)."])
 
 add("M2-2", "Record status and terminal events",
@@ -399,7 +402,7 @@ add("M2-2", "Record status and terminal events",
      "in order.",
      "A terminal without the organization's tag produces none.",
      "A terminal that exits produces one `terminal_gone` with its exit code."],
-    "G4", deps=["M2-1"])
+    "G6", deps=["M2-1"])
 
 add("M2-3", "Anomaly rules",
     "The model dispatcher looked at screens every three minutes and judged. These are the same judgments as "
@@ -442,7 +445,7 @@ add("M2-4", "Deliver messages: the push and its confirmation",
      "Every pushed text begins with `<makiba ` whatever the body is, and a body containing `</makiba>` cannot "
      "close the wrapper.",
      "A body over the limit is cut and carries the `show` line."],
-    "G5", deps=["M2-2"],
+    "G7", deps=["M2-2"],
     note="Decided (owner, 2026-11-18): plan.md section 3.3. A channel is the default route in every direction. "
          "Steps of probes P8 and P9 not yet run, to run before this Issue lands: a delivery to a `done` target, a "
          "turn that starts for another cause, a `blocked` recipient and two messages in a row (probes.md). P3 "
@@ -460,7 +463,7 @@ add("M2-5", "Rebuild the view after a restart",
     ["Kill `makibad` while an agent runs; the agent then reports `done`; restart; the `done` is recorded.",
      "A run whose terminal vanished while `makibad` was down gets one `terminal_gone`.",
      "An unknown tagged terminal is left alone and reported once."],
-    "G5", deps=["M2-2"])
+    "G7", deps=["M2-2"])
 
 add("M2-6", "Tell the secretary only what it can act on",
     "A secretary woken for every status change stops reading. claude-org-ja's suppression rules already "
@@ -500,7 +503,7 @@ add("M2-7", "Deliver messages: the box, the wake line and typed delivery",
      "`send` with `typed` to a worker that is `idle` types the wrapped text once and the row is `delivered`; to "
      "a `working` worker it is `conflict` and nothing is stored or typed; to the secretary it is `usage`.",
      "`inbox` for one agent never returns another agent's message."],
-    "G5", deps=["M2-4"],
+    "G7", deps=["M2-4"],
     note="Decided (owner, 2026-11-18): plan.md section 3.3. P4 passed for a terminal nobody types in, which is "
          "why a typed body to a worker is kept; the prompt-line check follows paddock's watcher (record 0013), "
          "seen on a host only for the empty prompt.")
@@ -524,7 +527,7 @@ add("M2-8", "The channel server",
      "After the stand-in `makibad` restarts, the server reconnects and receives messages again.",
      "While the server is stopped, `makibad` reports the agent as not connected and the messages stay "
      "`pending`."],
-    "G5", deps=["M2-4", "M0-4"],
+    "G7", deps=["M2-4", "M0-4"],
     note="Tested here against a stand-in for `makibad`; with the real door it runs from M3-3, and with real "
          "Claude Code in M4-5. Not yet shown (probes.md, P11): that the environment and arguments of this "
          "process are out of a sandboxed Bash's reach.")
@@ -540,7 +543,7 @@ add("M3-1", "Take queued runs within capacity",
     ["With capacity 2 and three queued runs, two launches start and the third waits.",
      "When one finishes, the third starts on the next pass.",
      "Runs are taken in `dispatched_at` order."],
-    "G4", deps=["M2-1"])
+    "G6", deps=["M2-1"])
 
 add("M3-2", "Prepare the worktree and the per-task settings",
     "A worker in a fresh git worktree stopped at the trust dialog in paddock, because trust comes from the "
@@ -559,7 +562,7 @@ add("M3-2", "Prepare the worktree and the per-task settings",
      "No file exists in the worktree that is not in the project's tree at that commit.",
      "Running preparation twice for the same launch changes nothing the second time.",
      "A `document` launch creates the working folder with `out/` and touches no git repository."],
-    "G4", deps=["M3-1"])
+    "G6", deps=["M3-1"])
 
 add("M3-3", "The door, agent tokens, and the message tools",
     "Agents must be able to report and to message without being able to write the database. The door is the "
@@ -601,7 +604,7 @@ add("M3-3", "The door, agent tokens, and the message tools",
      "role-files folder, and `state.db` holds only its SHA-256.",
      "No module of the person's command (`src/cli.rs` and every module it uses) other than "
      "`src/status_local.rs` uses `crate::db`; the daemon's own modules (`src/daemon/`) do."],
-    "G3", deps=["M2-1"],
+    "G4", deps=["M2-1"],
     note="Decided (owner, 2026-11-18): plan.md section 3.3. Agents reach `makibad` by the MCP server, the person "
          "by the socket, and an agent's token is in its launch arguments and never in its environment. Probe P11 "
          "measured the port and the token from a sandboxed Bash (port refused, token in the arguments not found, "
@@ -623,7 +626,7 @@ add("M3-4", "Launch",
      "The test agent's recorded environment contains no key and none of the names in spec section 6.4, "
      "even when the test's own environment sets them; its recorded argument list carries the token.",
      "The token in the argument list hashes to the stored `key_sha256`."],
-    "G3", deps=["M3-2", "M3-3", "M1-2"])
+    "G4", deps=["M3-2", "M3-3", "M1-2"])
 
 add("M3-5", "Startup dialogs",
     "A blind Enter once ended a terminal because the dialog's default line had changed (I-2).",
@@ -643,7 +646,7 @@ add("M3-5", "Startup dialogs",
      "No key is ever sent to a terminal that has a status.",
      "The development-channel dialog, shown after the trust dialog as P10 recorded it, ends with line 1 "
      "chosen; the same dialog with one option line reworded is not answered."],
-    "G2", deps=["M3-4"],
+    "G3", deps=["M3-4"],
     carry=[f"{RT}: `claude_org_runtime/dispatcher/spawn_prompt.py` (`decide`, `screen_lines` and helpers)",
            f"{PD}: the policy-list rule in `skills/org-escalation` and inventory row L-N3"],
     note="Probe P5 measures whether a task given in the launch arguments starts after the dialog on real "
@@ -665,7 +668,7 @@ add("M3-6", "A launch is verified only by an observed first turn",
      "An agent that launches and never reports is `failed` after the timeout; the run is not `in_use`; "
      "a notice to the secretary is queued.",
      "There is no code path that writes `worker_spawn_verified` without a status or turn event id in its payload."],
-    "G2", deps=["M3-5", "M2-2"])
+    "G3", deps=["M3-5", "M2-2"])
 
 add("M3-7", "A launch survives the dispatcher dying at any step",
     "A dispatcher that can be restarted safely is the point of making it code.",
@@ -679,7 +682,7 @@ add("M3-7", "A launch survives the dispatcher dying at any step",
      "and the run ends `in_use`.",
      "Kill after `Base::launch` returned but before the stage was written: the terminal is adopted, not "
      "launched again."],
-    "G4", deps=["M3-6"])
+    "G6", deps=["M3-6"])
 
 # ---------------------------------------------------------------- M4
 add("M4-1", "Deny the base's command in every role",
@@ -703,7 +706,7 @@ add("M4-1", "Deny the base's command in every role",
      "The hook refuses the command bare, by absolute path and behind `env`, and passes a command that only "
      "mentions the name as an argument.",
      "The hook refuses on empty and on malformed input."],
-    "G3", deps=["M0-1", "M1-1"],
+    "G4", deps=["M0-1", "M1-1"],
     carry=[f"{PD}: `templates/worker-settings.json`, `templates/secretary-settings.json`, "
            "`tests/worker-settings-*.test.sh`",
            f"{CJ}: `.hooks/lib/` (the rules of the fail-closed payload reader, ported)"])
@@ -727,7 +730,7 @@ add("M4-2", "The sandbox reaches the door and nothing of the base",
      "The launch arguments written for a run carry the token and the environment does not (shape only; the "
      "host rerun of P11 is what shows that a sandboxed Bash cannot read it, and it is the proof of the goal "
      "clause that an agent's token cannot be read from its own Bash)."],
-    "G3", deps=["M4-1"],
+    "G4", deps=["M4-1"],
     carry=[f"{PD}: `scripts/probes/core-api-reach.sh`"],
     note="The shape test goes through the acceptance gate. The host rerun of probes P1 and P11 does not: a person "
          "runs it and records the result. M4-5 may not start until that result is a pass. Decided (owner, "
@@ -751,7 +754,7 @@ add("M4-3", "Carry the role settings and the git guard hooks",
      "Every line in `docs/design/lines.md` names a settings entry, a hook or a test that exists.",
      "The rules file of each role (secretary, worker, curator) contains the two wrapper sentences of spec "
      "section 8, exactly as `src/spec.rs` holds them."],
-    "G3", deps=["M4-1"],
+    "G4", deps=["M4-1"],
     carry=[f"{PD}: `templates/worker-rules.md`, `worker-settings.json`, `secretary-rules.md`, "
            "`secretary-settings.json`, `curator.md`; `docs/design/predecessor-inventory.md` section 6.2",
            f"{CJ}: `.hooks/block-git-push.sh`, `block-dangerous-git.sh`, `block-no-verify.sh`, "
@@ -782,7 +785,7 @@ add("M4-4", "makiba up: start the base cleanly",
      "its content unchanged.",
      "With a stand-in `claude` on the path that prints a version outside the range, `up` exits non-zero and "
      "starts neither secretary nor worker."],
-    "G3", deps=["M2-1", "M3-3"],
+    "G4", deps=["M2-1", "M3-3"],
     carry=[f"{PD}: `skills/org-start/scripts/org-start.sh` `--check` (as the list of preconditions)"])
 
 add("M4-5", "One real worker, request to done report",
@@ -802,7 +805,7 @@ add("M4-5", "One real worker, request to done report",
      "The two attempts to reach the base from the worker are refused.",
      "The read of the person key file is refused, a call to the door's port with no token or an invented one "
      "is `denied`, and the agent's token is found nowhere the worker can read."],
-    "G3", deps=["M3-7", "M4-2", "M4-3", "M4-4"], gate=False,
+    "G4", deps=["M3-7", "M4-2", "M4-3", "M4-4"], gate=False,
     note="No failing test can come first: this is a host run with a real agent. It is outside the acceptance "
          "gate and is closed by a person on the recorded result.")
 
@@ -817,7 +820,7 @@ add("M5-1", "Close is refused before the done report",
     ["`close` before any report is rejected with `conflict` and nothing is ended.",
      "`close` after `report done` is accepted.",
      "`close --abandon` before a report is accepted and the run becomes `abandoned`."],
-    "G4", deps=["M2-2", "M3-3"])
+    "G6", deps=["M2-2", "M3-3"])
 
 add("M5-2", "End the terminal and remove the worktree",
     "Leftover terminals and worktrees are how a dead thing comes to look alive.",
@@ -831,7 +834,7 @@ add("M5-2", "End the terminal and remove the worktree",
      "A worktree with an unpushed commit is not removed without `--abandon`; the command fails and says why.",
      "Killing `makibad` mid-close and restarting ends in the same state.",
      "After closing a `document` run, `out/` and its files are still there."],
-    "G4", deps=["M5-1", "M3-6"])
+    "G6", deps=["M5-1", "M3-6"])
 
 add("M5-3", "makibad owns the PR watches",
     "A finished watcher that still looked alive (I-6), and a watch whose result nobody wrote (I-8).",
@@ -848,7 +851,7 @@ add("M5-3", "makibad owns the PR watches",
      "A watch whose `gh` call fails for good ends `failed` with a `ci_watch_failed` event and a notice.",
      "Restarting `makibad` with a `watching` row resumes polling it.",
      "`ci_completed` carries the head it was observed for."],
-    "G2", deps=["M2-4", "M3-3"],
+    "G3", deps=["M2-4", "M3-3"],
     carry=[f"{CJ}: `tools/pr_watch.py`, `tools/test_pr_watch.py` (2,171 lines; the parts under `_notify*` and "
            "`_configured_transport` are not carried)"])
 
@@ -863,7 +866,7 @@ add("M5-4", "Launch the curator at the threshold",
     ["Below the threshold nothing is launched.",
      "At the threshold one curator is launched; a second close while it runs launches none.",
      "A curator past its time limit is ended and a notice queued."],
-    "G7", deps=["M3-6"],
+    "G9", deps=["M3-6"],
     carry=[f"{CJ}: `tools/check_curate_threshold.py`, `tools/test_check_curate_threshold.py`",
            f"{PD}: `templates/curator.md`, `skills/org-curate/`"])
 
@@ -880,7 +883,7 @@ add("M5-5", "Run the triage scan and forward its result",
     ["The cases of the carried scan, goals and dedup tests, ported, pass.",
      "Two scans with the same candidates queue one notice.",
      "A project with no goal ledger is reported as such, once."],
-    "G7", deps=["M2-4"],
+    "G9", deps=["M2-4"],
     carry=[f"{CJ}: `tools/work_discovery_scan.py`, `work_discovery_goals.py`, `work_discovery_dedup.py`, "
            "`work_discovery_repos.py`; `tests/test_work_discovery_scan.py`, `test_work_discovery_goals.py`, "
            "`test_work_discovery_dedup.py`, `test_work_discovery_repos.py`; `registry/goals/README.md` (translated)"])
@@ -897,7 +900,7 @@ add("M5-6", "makiba down and up keep the work",
     ["After `down` then `up`, every run that was `in_use` is `in_use` again with one terminal.",
      "A run whose resume fails gets a fresh launch with the original brief.",
      "`down` never ends a terminal without the organization's tag."],
-    "G5", deps=["M2-5", "M3-7"],
+    "G7", deps=["M2-5", "M3-7"],
     carry=[f"{PD}: `skills/org-suspend`, `org-resume`, `org-down` (their rules, and Q4's decision)"])
 
 # ---------------------------------------------------------------- M6
@@ -919,7 +922,7 @@ add("M6-1", "The secretary's commands",
      "Every exit code of spec section 3 is produced by at least one case.",
      "The clap definition and the verb table of spec section 12 name the same verbs for the person, with the same "
      "arguments; a verb present on one side only fails the test."],
-    "G3", deps=["M2-1", "M3-3"])
+    "G4", deps=["M2-1", "M3-3"])
 
 add("M6-2", "Launch the secretary",
     "The secretary is one more terminal the dispatcher launches, with a fixed name and its own folder.",
@@ -938,7 +941,7 @@ add("M6-2", "Launch the secretary",
      "With `secretary.remote_control` on, the secretary's argv carries the Remote Control option and a "
      "worker's argv does not; with it off, neither does.",
      "The secretary's folder holds no file from the makiba checkout that the settings do not name."],
-    "G3", deps=["M3-4", "M4-4"],
+    "G4", deps=["M3-4", "M4-4"],
     carry=[f"{PD}: `templates/secretary.md`, `templates/secretary-rules.md`, "
            "`skills/org-start/scripts/org-start.sh` (the secretary-folder part)"])
 
@@ -967,7 +970,7 @@ add("M6-3", "The secretary's skills, operating no terminal",
      "`roles/secretary/rules.md` names `typed` and says both when to use it and that it never goes to the "
      "secretary.",
      "`roles/secretary/rules.md`, as rebuilt here, still contains the two wrapper sentences of spec section 8."],
-    "G3", deps=["M6-1"],
+    "G4", deps=["M6-1"],
     carry=[f"{PD}: `skills/org-delegate`, `org-escalation`, `org-pull-request`, `org-issue`, "
            "`org-update-branch`, `org-curate`",
            f"{CJ}: `.claude/skills/org-retro/` (translated), `.dispatcher/references/rationale.md` (translated, "
@@ -1032,7 +1035,7 @@ add("M6-6", "Conveyor and the acceptance gate",
      "A merge is refused when the latest `ci_completed` is for another head.",
      "Each of the other ways above is refused in `acceptance` mode, and a command that only mentions them as an "
      "argument is not."],
-    "G7", deps=["M6-3", "M5-3"],
+    "G9", deps=["M6-3", "M5-3"],
     note="A hook reads command text and cannot list every way to reach GitHub. It is kept for the ways above and "
          "is not the bound. The bound is on GitHub's side: branch protection that requires the `acceptance` check "
          "and lets nobody, the person's own login included, merge around it. M0-1 names that setting for this "
@@ -1052,7 +1055,7 @@ add("M6-7", "Language settings",
     ["With `conversation_language=ja` the secretary's launch arguments contain the Japanese sentence; with "
      "`en` they do not.",
      "A project without `artifact_language` gives a brief with the English sentence; with `ja`, the Japanese one."],
-    "G7", deps=["M6-2", "M6-3"],
+    "G9", deps=["M6-2", "M6-3"],
     carry=[f"{PD}: Q9's decision and the `conversation_language` handling in `org-start`"],
     note="That a real secretary then answers in the set language is checked once on a host and recorded in "
          "`docs/runbooks/first-worker.md`; that part is outside the acceptance gate.")
@@ -1083,10 +1086,10 @@ add("M7-1", "Register makiba in makiba",
     None,
     ["`makiba status` shows the project.", "The triage scan returns candidates from makiba's open Issues.",
      "`tools/check_incidents.py` passes with an empty pending list."],
-    "G7", deps=["M6-6", "M5-5", "M4-5", "M5-2", "M6-2", "M6-5", "M6-8"], gate=False,
+    "G9", deps=["M6-6", "M5-5", "M4-5", "M5-2", "M6-2", "M6-5", "M6-8"], gate=False,
     note="Outside the acceptance gate: closed by a person. It waits for what the week uses: one real worker "
          "through (M4-5), the secretary launched and renewed (M6-2, M6-5), a permission prompt relayed (M6-8) "
-         "and a close (M5-2). Goal G7 still asks for every Issue of M0 to M6 to be closed by the end.")
+         "and a close (M5-2). Goal G9 still asks for every Issue of M0 to M6 to be closed by the end.")
 
 add("M7-2", "One week of self-hosting",
     "A week is long enough to meet an update of the base, a secretary renewal and a failed launch at least once.",
@@ -1096,7 +1099,7 @@ add("M7-2", "One week of self-hosting",
      "undelivered messages at any point, renewals, time `makibad` was down."],
     None,
     ["The report exists and every incident it mentions has a row.", "The incident tests are green at the end."],
-    "G7", deps=["M7-1"], gate=False,
+    "G9", deps=["M7-1"], gate=False,
     note="Outside the acceptance gate: closed by a person.")
 
 add("M7-3", "Move the projects claude-org-ja serves",
@@ -1108,7 +1111,7 @@ add("M7-3", "Move the projects claude-org-ja serves",
      "One more week of observation."],
     None,
     ["For seven days after the move, claude-org-ja is not started."],
-    "G7", deps=["M7-2"], gate=False,
+    "G9", deps=["M7-2"], gate=False,
     note="Outside the acceptance gate, and outside the schedule counted in plan.md section 9.")
 
 add("M7-4", "What was not moved",
@@ -1119,7 +1122,7 @@ add("M7-4", "What was not moved",
      "because it continues; a file makiba copied from it is listed once, as makiba's own from then on."],
     None,
     ["The list exists and no entry is unmarked; no entry marks paddock or any of its features as dropped."],
-    "G7", deps=["M7-2"], gate=False,
+    "G9", deps=["M7-2"], gate=False,
     note="Outside the acceptance gate: closed by a person.")
 
 
