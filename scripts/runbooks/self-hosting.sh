@@ -24,6 +24,7 @@ GH_REPO=suisya-systems/makiba
 # The crates hosts a cargo build of makiba needs, so that a later `code` run of makiba can build. Only the
 # host run proves the list is enough: a host outside it is refused with no prompt (docs/design/lines.md L-K7).
 HOSTS=${MAKIBA_RUNBOOK_HOSTS:-index.crates.io,static.crates.io}
+MK_GIVEN=${MK:+1}   # a makiba binary the person named (MK=...) is used as it is; the default is built from this commit
 MK=${MK:-$REPO/target/debug/makiba}
 ASSUME_YES=0
 REPLACE_LEDGER=0
@@ -139,10 +140,11 @@ preflight() { # preflight <real|scratch>
     check commit INFO "$COMMIT"
     ledger_clauses "$REPO/goals/suisya-systems/makiba.md" repository
   fi
-  if [ ! -x "$MK" ]; then
-    say "  $MK does not exist: building this commit"
+  if [ -z "$MK_GIVEN" ]; then
+    say "  building this commit (an older target/debug/makiba would be run otherwise)"
     run cargo build --manifest-path "$REPO/Cargo.toml"
   fi
+  if [ "$DRY" != 1 ] && [ ! -x "$MK" ]; then refuse "$MK is not an executable" "build it: cargo build, or name another with MK=<path>"; fi
   if [ "$mode" = real ]; then
     for v in MAKIBA_BASE MAKIBA_LAUNCH_AGENT MAKIBA_FAKE_AGENT; do
       if [ -n "${!v:-}" ]; then refuse "$v is set (a test seam)" "unset $v and run the line again"; fi
@@ -372,17 +374,19 @@ EOF
   unset MAKIBA_BASE MAKIBA_LAUNCH_AGENT MAKIBA_FAKE_AGENT
 }
 
-# stop_org: ends the organization of this shell's environment (makiba down). 0: no makibad of it is alive
-# afterwards (a failing down with nothing alive is the case "nothing was running"); 1: makibad is still alive.
+# stop_org: ends the organization of this shell's environment (makiba down). 0: it is stopped, or never ran
+# here (no state.db); 1: makibad is still alive, or down failed in a place that has run (its terminals or
+# base may then remain, and the place is needed to retry).
 stop_org() {
-  local pid
-  "$MK" down --secretary --stop-base >/dev/null 2>&1 || true
+  local pid rc=0
+  "$MK" down --secretary --stop-base >/dev/null 2>&1 || rc=$?
+  if [ ! -f "$(db_path)" ]; then return 0; fi
   pid=$("$MK" status 2>/dev/null | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p')
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     sleep 3
     if kill -0 "$pid" 2>/dev/null; then return 1; fi
   fi
-  return 0
+  [ "$rc" -eq 0 ]
 }
 
 # Stops only the organization whose environment this shell holds (the scratch one), then keeps the evidence.

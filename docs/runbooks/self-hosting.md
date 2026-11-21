@@ -39,7 +39,7 @@ In a login shell on the host (not inside an agent), in the repository, at the co
 
 | Stage | The line | What it does | Real places written |
 | --- | --- | --- | --- |
-| Check | `bash scripts/runbooks/self-hosting.sh check` | The preconditions of section 4, the build (`cargo build` when there is none), the ledger clause count. Changes nothing. | none (a results file in `.runbook-results/`) |
+| Check | `bash scripts/runbooks/self-hosting.sh check` | The preconditions of section 4, an incremental `cargo build` of this commit (unless `MK=<path>` names a binary), the ledger clause count. Changes nothing. | none (a results file in `.runbook-results/`) |
 | Rehearsal | `bash scripts/runbooks/self-hosting.sh rehearse` | Everything below, `register` then `triage`, in a scratch place that has its own state, person key, door, port, base session, clone and ledger. It stops its own organization at the end and removes the scratch folder when all went well. | none, but the trust entries of section 1 |
 | Register | `bash scripts/runbooks/self-hosting.sh register` | Starts the organization if it does not run, allows the owner `suisya-systems`, registers `makiba` with its network hosts, waits for the clone, places the ledger. | all of section 1 |
 | Triage | `bash scripts/runbooks/self-hosting.sh triage` | Dispatches one small document task, waits for its done report, closes it, waits for the scan, prints the scan's answer, checks two candidates with the GitHub CLI. | the events, notices and `out/` folder of section 1 |
@@ -127,7 +127,7 @@ The rehearsal moves every one of these into `${TMPDIR:-/tmp}/makiba-rehearsal-XX
 
 ## 8. Cleanup
 
-Nothing of the real run is cleaned: the project, the clone and the ledger are what the run was for, and section 1 lists what stays. Leave the organization running or stop it with `makiba down` (add `--stop-base` to stop the core), as the owner wants. After a rehearsal that failed, its scratch place is kept for inspection and its organization is stopped (if it cannot be stopped, the place is kept, the stage fails and the line to stop it by hand is printed); `bash scripts/runbooks/self-hosting.sh cleanup` removes it.
+Nothing of the real run is cleaned: the project, the clone and the ledger are what the run was for, and section 1 lists what stays. Leave the organization running or stop it with `makiba down` (add `--stop-base` to stop the core), as the owner wants. After a rehearsal that failed, its scratch place is kept for inspection and its organization is stopped (if `makiba down` fails in a place that has run, or `makibad` stays alive, the place is kept, the stage fails and the line to stop it by hand is printed); `bash scripts/runbooks/self-hosting.sh cleanup` removes it.
 
 ## 9. Results (filled in by the secretary)
 
