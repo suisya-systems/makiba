@@ -317,16 +317,22 @@ impl Mask {
         let (mut i, mut done) = (0, 0);
         while i < b.len() {
             let n = b[i..].iter().take_while(|c| c.is_ascii_hexdigit()).count();
-            if n == 64
-                && self
+            // Every 64-character window of the run: a key may touch other hex characters.
+            let (end, mut j) = (i + n, i);
+            while j + 64 <= end {
+                if self
                     .hashes
-                    .contains(&crate::daemon::door::sha256_hex(&s[i..i + 64]))
-            {
-                out.push_str(&s[done..i]);
-                out.push_str("<key>");
-                done = i + 64;
+                    .contains(&crate::daemon::door::sha256_hex(&s[j..j + 64]))
+                {
+                    out.push_str(&s[done..j]);
+                    out.push_str("<key>");
+                    j += 64;
+                    done = j;
+                } else {
+                    j += 1;
+                }
             }
-            i += n.max(1);
+            i = end.max(i + 1);
         }
         out.push_str(&s[done..]);
         out
@@ -483,4 +489,24 @@ fn secretary_state(conn: &Connection, stage: Option<&str>) -> String {
         return format!("gone{failed}; makibad relaunches it");
     }
     format!("{}{failed}", stage.unwrap_or("not launched"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A key is masked alone, inside a longer run of hex and twice; other hex stays.
+    #[test]
+    fn a_key_is_masked_wherever_it_sits_in_hex() {
+        let key = "ab".repeat(32);
+        let m = Mask {
+            literals: vec!["lit-key-123".into()],
+            hashes: [crate::daemon::door::sha256_hex(&key)].into(),
+        };
+        let other = "cd".repeat(32);
+        assert_eq!(m.text(&format!("a{key}f {key}")), "a<key>f <key>");
+        assert_eq!(m.text(&format!("{key}{key}")), "<key><key>");
+        assert_eq!(m.text(&other), other);
+        assert_eq!(m.text("x lit-key-123 y"), "x <key> y");
+    }
 }
