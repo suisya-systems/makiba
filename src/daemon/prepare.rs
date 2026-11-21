@@ -7,7 +7,8 @@
 //! task's added, and the worker's rules file is written where the agent reads it (spec sections
 //! 2 and 9, Issue 134). The stage
 //! moves `planned`, `worktree_ready`, `settings_ready`, each recorded before the next step, and
-//! a launch already past a stage is not touched for it. Nothing is written inside a worktree.
+//! a launch already past a stage is not touched for it. Nothing is written inside a worktree;
+//! a code launch sets the project clone's hooks path to the secret scanner's (Issue 136).
 //!
 //! Reading of the Issue where the spec is silent (reported to the secretary):
 //! - (Owner) The project's own repository is `$MAKIBA_REPOS_DIR/<project>` (default
@@ -215,6 +216,11 @@ impl Prepare {
             agents::write_rules(role).map_err(|e| format!("the rules file: {e}"))?;
             agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
+        // The secret scanner (Issue 136): the clone's hooks path, outside the write surface.
+        let mut deny_write_dirs = vec![crate::cli::share_dir()];
+        if l.task.is_some() && l.kind != "document" {
+            deny_write_dirs.push(self.install_scanner(&self.places.repos.join(&l.project))?);
+        }
         // The worktree is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
         let mcp_json = absolute(vec![workplace.join(".mcp.json")])?;
         let settings = TaskSettings {
@@ -228,7 +234,7 @@ impl Prepare {
                 PathBuf::from(format!("{state_db}-wal")),
                 PathBuf::from(format!("{state_db}-shm")),
             ])?,
-            deny_write_dirs: vec![crate::cli::share_dir()],
+            deny_write_dirs,
             deny_write_files: mcp_json,
         };
         agent
@@ -256,6 +262,52 @@ impl Prepare {
         }
         super::crash::point("settings_ready");
         Ok(true)
+    }
+
+    /// The secret scanner's git hooks (Issue 136) in `<state>/git-hooks`, absolute, and the
+    /// project clone's `core.hooksPath` set to that folder, so that every worktree of the clone
+    /// runs them (the person's own commits in the clone too). A clone with per-worktree
+    /// configuration is refused: a worktree's own file could set another hooks path. Returns the
+    /// folder, for the run's settings to deny for write.
+    fn install_scanner(&self, repo: &Path) -> std::result::Result<PathBuf, String> {
+        let git = |args: &[&str]| {
+            Command::new("git")
+                .arg("-C")
+                .arg(repo)
+                .args(args)
+                .output()
+                .map_err(|e| e.to_string())
+        };
+        let per_worktree = git(&[
+            "config",
+            "--type=bool",
+            "--get",
+            "extensions.worktreeConfig",
+        ])?;
+        if String::from_utf8_lossy(&per_worktree.stdout).trim() == "true" {
+            return Err(format!(
+                "{} has extensions.worktreeConfig on, so a worktree could set its own hooks path past the secret scanner; turn it off",
+                repo.display()
+            ));
+        }
+        let dir = self.places.settings.with_file_name("git-hooks");
+        let dir = std::path::absolute(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let exe = std::env::current_exe().map_err(|e| format!("the scanner's program: {e}"))?;
+        crate::hooks::git_hook::install(&dir, &exe)
+            .map_err(|e| format!("the secret scanner's hooks in {}: {e}", dir.display()))?;
+        let want = dir.to_string_lossy().into_owned();
+        let now = git(&["config", "--get", "core.hooksPath"])?;
+        if String::from_utf8_lossy(&now.stdout).trim_end_matches('\n') != want {
+            let set = git(&["config", "core.hooksPath", &want])?;
+            if !set.status.success() {
+                return Err(format!(
+                    "cannot set core.hooksPath in {}: {}",
+                    repo.display(),
+                    String::from_utf8_lossy(&set.stderr).trim()
+                ));
+            }
+        }
+        Ok(dir)
     }
 
     /// A pass cut short before the stage was written leaves the worktree behind: it is kept only

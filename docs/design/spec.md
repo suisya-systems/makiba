@@ -29,8 +29,9 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 
 | Purpose | Path | Notes |
 | --- | --- | --- |
-| State folder | `$MAKIBA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/makiba` | Holds `state.db`, `makibad.lock`, `makibad.log`, `settings/`, `secretary/` |
+| State folder | `$MAKIBA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/makiba` | Holds `state.db`, `makibad.lock`, `makibad.log`, `settings/`, `git-hooks/`, `secretary/` |
 | Per-task settings | `<state>/settings/<task_id>.json` | Written by `makibad` before launch. Outside every worktree. |
+| The secret scanner's git hooks | `<state>/git-hooks/` | Issue 136, line L-K12. Each time `makibad` prepares a code launch it writes `pre-commit`, `pre-merge-commit`, `pre-applypatch`, `commit-msg` and `applypatch-msg` here (scripts that run `makiba hook <name>` by the absolute path of its own binary, and refuse the commit naming that path when it is missing) and sets the project clone's `core.hooksPath` to this folder, made absolute; a clone with `extensions.worktreeConfig` on fails the launch. The per-task settings deny writing it. The setting is the clone's, so it binds every commit made in the clone or its worktrees, a person's too; a person commits a false positive with git's flag that skips the hooks. The scanner reads the raw blobs the index holds that differ from `HEAD`, and the message, and refuses a match of its fixed list of token shapes (`src/hooks/git_hook.rs`) naming the file, the line and the shape, not the text. It does not hold against git's plumbing or a configuration override on one command (Issues 140 and 231). |
 | Secretary folder | `<state>/secretary/` | The secretary's working folder, as in paddock. Made empty when its launch is prepared; nothing is copied into it: its rules and settings are passed from outside it (section 9, Issue 43). |
 | Remote Control | `$MAKIBA_SECRETARY_REMOTE_CONTROL`, default off | The setting `secretary.remote_control`: `1` is on, anything else or unset is off. Read by `makibad` from its own environment, which `makiba up` passes on, and only by the Claude Code agent module, for the secretary only (section 9). It stays an environment variable: `config` does not store it (M6-7). |
 | Capacity | `$MAKIBA_MAX_CONCURRENT_WORKERS`, default 4 | `max_concurrent_workers`, read by `makibad` at start. It stays an environment variable: `config` does not store it (M6-7). |
@@ -694,7 +695,7 @@ makiba is one Rust package, `makiba`, built by Cargo into one binary, `makiba`. 
 | `makiba <verb>` | The person's command (section 12). |
 | `makiba daemon` | `makibad`, the dispatcher. `makiba up` starts it detached. The process keeps the name `makibad` in this document, in the log and in its lock file. |
 | `makiba channel` | The per-session channel server that Claude Code starts from an agent's MCP configuration (section 8, M2-8). |
-| `makiba hook <name>` | A Claude Code hook named in a role's settings (M4-1, M4-3, M6-6). It reads the hook payload on standard input. |
+| `makiba hook <name>` | A Claude Code hook named in a role's settings (M4-1, M4-3, M6-6). It reads the hook payload on standard input. `pre-commit`, `pre-merge-commit`, `pre-applypatch`, `commit-msg` and `applypatch-msg` are the git hooks of the secret scanner (Issue 136, section 2): git runs them, and they read no payload. |
 
 Why one package and one binary, not a workspace of several crates or several binaries:
 
