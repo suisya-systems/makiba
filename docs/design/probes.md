@@ -305,6 +305,18 @@ Second run (2026-11-18, 16:54Z, which is 2026-11-19 in the owner's time zone; hc
 
 If it fails: when the port can be reached from Bash, the token alone protects the daemon, which is weaker than the plan states, and option A is the way back; when the token can be read, it moves to a file in a folder the worker's settings deny, or option A; when a new dialog appears, it is added to the policy list if it can be matched whole, and otherwise option A.
 
+### P12. herdr-app shows the organization's terminals by their labels
+
+Issue 196. Measured by the owner on 2026-11-20 with hc 0.1.21, herdr-app on Windows and the base in WSL. A throwaway core of its own session (`HC_SESSION=appprobe`) ran one terminal that reported `working` (OSC 7501), started with `hc run --bg --no-parent --name probe-agent --label makiba.role=probe`.
+
+1. The app's machine `wsl` is bound to WSL's default session (`hc.exe machine ls` shows `"session": null`), so it never dials a core of another session, such as the one `makiba up` starts.
+2. Registered on the Windows side with `hc.exe machine add wsl --name appprobe --session appprobe`: `hc.exe machine ls` shows `appprobe` connected and `hc.exe ls` lists `appprobe/t1` as working. The app shows nothing.
+3. Labelled with `hc label t1 herdr.space=sp<32 hex> herdr.tab=tb<32 hex> "where=makiba-org / 1" herdr.seen=0`: the app shows the machine `appprobe`, under it a space named after the terminal's working folder (not the `where` text), a tab named after the reported program, and "Working 1" in its Agents list. The terminal's screen opens.
+
+Cleanup: `hc.exe machine rm appprobe`, and `hc server stop` for `appprobe` in WSL.
+
+Control, not yet run: the same registration without the labels, watched for several minutes. Step 3 came after both the labels and more time, so "the labels are required" is likely, not proven. Until the control runs, the labels are added anyway (they cost nothing).
+
 ## 3. If a move to Orca is considered
 
 Not part of this plan's work. herdr-core is the base (plan.md section 3.1), and Orca's orchestration is not used whatever these checks say. They are kept for the day one of the reasons listed there applies, and they concern Orca only as a base: its terminals, its status, its notifications.
@@ -396,5 +408,7 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | `door-and-base-reach` (run 7, after #144, hooks' entry point linked by hand) | 2026-11-19 (15:29Z) | 0.1.21 | 2.1.328 (Claude Code) | STOPPED (partial; no run log, only the head of the result file) | Steps 1 to 9 answered; stopped by the model's safeguards at step 10 and ended by its timeout (#150). The script was killed before it wrote its run log, so the head of the result file is the only record. Script commit f14be47 |
 | `door-and-base-reach` (run 8, steps 14 and 15 only, PR 151) | 2026-11-19 (16:02Z) | 0.1.21 | 2.1.328 (Claude Code) | PARTIAL PASS (`PROBE_STEPS="14 15"`; 0 failing cases) | `mcp-json-write` PASS (the write of the worktree's `.mcp.json` failed with `Permission denied`); the write of `.claude/settings.json` failed the same way and is an observation, not a case. Steps 1 to 13 not run (NOT-RUN). `makibad` passed the startup dialogs. Script commit fdd34fc |
 | `shell-mode-reach` (run 2, PR 152) | 2026-11-19 (16:19Z; 2026-11-20 in the owner's time zone) | 0.1.21 | 2.1.328 (Claude Code) | PASS (0 failing cases) | With `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` a shell-mode line was taken without a Bash tool call, the read of the decoy was refused with a sandbox-style error and the write in the workplace was allowed; without the variable the same decoy was read, so the variable made the difference. 0 safeguard-flag lines on both screens. `makibad` passed the startup dialogs in both launches. Script commit 4dcd7b4 |
+| P12 | 2026-11-20 | 0.1.21 | not used | PASS (registered and labelled: the app shows the machine, a space, a tab and Working 1); registered without labels: nothing shown | measured by the owner on the owner's machine (herdr-app on Windows, base in WSL); section 2, P12 |
+| P12 (control without labels) | | | | not yet run | the same registration without the labels, watched for several minutes |
 
 Not covered by a row on 2.1.328: steps 10 to 13 of `door-and-base-reach` since #144 (the port checks, the unsandboxed run, the Read and Edit tools on the decoy key), P3, P4, P5, P7, P8, P9, P10 as their own probes, paddock's carried probes, and the runbook of M4-5. See `docs/upgrading-claude-code.md`.

@@ -271,6 +271,8 @@ impl Launch {
         if let Some(task) = &row.task {
             tags.insert(TAG_TASK_ID.to_string(), task.clone());
         }
+        // Where the person's app shows the terminal (Issue 196).
+        tags.extend(crate::base::app_labels(&self.org, &row.name()));
         // No key goes into the environment. The role hooks find the entry point by
         // MAKIBA_SHARE_DIR, as this process resolved it.
         let mut env = BTreeMap::from([(
