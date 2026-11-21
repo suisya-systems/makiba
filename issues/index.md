@@ -94,6 +94,6 @@ Reworked after a merge in Python (their Issues are reopened): M0-1, M0-5.
 | Id | Title | Goal | Depends on | Gate |
 | --- | --- | --- | --- | --- |
 | [M7-1](M7-1.md) | Register makiba in makiba | G9 | M6-6, M5-5, M4-5, M5-2, M6-2, M6-5, M6-8 | person |
-| [M7-2](M7-2.md) | One week of self-hosting | G9 | M7-1 | person |
+| [M7-2](M7-2.md) | Self-hosting, measured by landed pull requests and events met | G9 | M7-1 | person |
 | [M7-3](M7-3.md) | Move the projects claude-org-ja serves | G9 | M7-2 | person |
 | [M7-4](M7-4.md) | What was not moved | G9 | M7-2 | person |
