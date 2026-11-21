@@ -301,7 +301,8 @@ pub fn owner_repo_from_url(url: &str) -> Option<String> {
     (ok(owner) && ok(repo) && parts.next().is_none()).then(|| format!("{owner}/{repo}"))
 }
 
-/// The project's repository: its URL, else the `origin` of its clone.
+/// The project's repository: its URL, else the `origin` of its clone as the clone's own
+/// configuration writes it (before any `insteadOf` rewrite), exactly one URL (Issue 211).
 pub(crate) fn repo_of(slug: &str, url: Option<&str>, repos_dir: &Path) -> Option<String> {
     if let Some(r) = url.and_then(owner_repo_from_url) {
         return Some(r);
@@ -309,15 +310,23 @@ pub(crate) fn repo_of(slug: &str, url: Option<&str>, repos_dir: &Path) -> Option
     let out = Command::new("git")
         .arg("-C")
         .arg(repos_dir.join(slug))
-        .args(["remote", "get-url", "origin"])
+        .args([
+            "config",
+            "--local",
+            "--null",
+            "--get-all",
+            "remote.origin.url",
+        ])
         .stdin(Stdio::null())
         .stderr(Stdio::null())
         .output()
         .ok()?;
-    out.status
-        .success()
-        .then(|| owner_repo_from_url(&String::from_utf8_lossy(&out.stdout)))
-        .flatten()
+    out.status.success().then_some(())?;
+    let urls = String::from_utf8_lossy(&out.stdout);
+    let [origin] = urls.strip_suffix('\0')?.split('\0').collect::<Vec<_>>()[..] else {
+        return None;
+    };
+    owner_repo_from_url(origin)
 }
 
 /// One scan. `None`: cancelled.
