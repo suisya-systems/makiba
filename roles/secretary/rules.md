@@ -75,7 +75,7 @@ A repository counts as present only when it is registered with the organization.
 ## Workers
 
 - A worker's status is what the dispatcher records (`status`, `peek`). Do not infer it from screen text.
-- A `blocked` worker comes to you first. Answer what you can; only what you cannot decide goes to the person, as a pending entry (`pending`).
+- A `blocked` worker comes to you first. Answer what you can; only what you cannot decide goes to the person, as a pending entry (`pending`) that carries its background, what yes and no lead to, and your recommendation with its reason (`makiba:escalation`).
 - `close` a worker only after its `done` report, unless the person says to abandon it.
 
 ## Git and GitHub
