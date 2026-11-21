@@ -123,19 +123,17 @@ fn org(task: &str) -> Org {
     std::fs::create_dir_all(&state).unwrap();
     let branch = format!("makiba/{task}");
     let worktree = root.join("workers/p").join(task);
-    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
-    git(
+    let gitdir = makiba::daemon::run_repo::dir(&state.join("settings"), task);
+    let hooks = state.join("git-hooks");
+    makiba::daemon::run_repo::create(
         &root.join("repos/p"),
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            &branch,
-            &worktree.to_string_lossy(),
-            "main",
-        ],
-    );
+        &gitdir,
+        &worktree,
+        &branch,
+        "main",
+        &hooks,
+    )
+    .unwrap();
     let w = StateWriter::open(&state.join("state.db")).unwrap();
     let run = w
         .upsert_run(&RunUpsert {

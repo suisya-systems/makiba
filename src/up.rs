@@ -1,6 +1,6 @@
 //! `makiba up` (spec section 12): start the base cleanly. It runs locally, before `makibad`
 //! exists, from the person's login shell: it refuses inside an agent, checks the Claude Code
-//! version, creates the person key, starts the base's own place and `makibad`, which it asks to
+//! version and the git version, creates the person key, starts the base's own place and `makibad`, which it asks to
 //! launch the secretary unless `--no-secretary` (Issue 43): `makibad` holds the base and decides
 //! whether one already runs. A `makibad` already running is asked by a `commands` row (actor
 //! `person`, verb `up`, `accepted`) that its secretary pass takes up (Issue 46).
@@ -67,6 +67,31 @@ fn check_claude() -> Result<(), Failure> {
         println!("claude: {line}");
     }
     Ok(())
+}
+
+/// `git --version` must be at or above `run_repo::GIT_LOWEST` (Issue 241: `update` merges with
+/// `git merge-tree --write-tree`).
+fn check_git() -> Result<(), Failure> {
+    let out = Command::new("git")
+        .arg("--version")
+        .output()
+        .map_err(unavailable("cannot run `git --version`"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let (a, b) = daemon::run_repo::GIT_LOWEST;
+    match daemon::run_repo::git_new_enough(&text) {
+        Some(true) => Ok(()),
+        found => Err((
+            ErrorKind::Unavailable,
+            format!(
+                "{} git {a}.{b} or newer is needed (makibad merges with git merge-tree --write-tree); no secretary or worker is started",
+                if found.is_none() {
+                    format!("cannot read a git version from {:?};", text.trim())
+                } else {
+                    format!("{} is too old:", text.trim())
+                }
+            ),
+        )),
+    }
 }
 
 /// Whether a `makibad` holds the lock of the state folder `dir`.
@@ -164,6 +189,7 @@ fn run(secretary: bool) -> Result<(), Failure> {
         ));
     }
     check_claude()?;
+    check_git()?;
     let dir = daemon::state_dir();
     std::fs::create_dir_all(&dir).map_err(unavailable("cannot create the state folder"))?;
     {

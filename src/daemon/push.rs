@@ -4,23 +4,27 @@
 //! tick: the command `done` with `branch_pushed` and a notice naming the head, or `failed` with a
 //! notice saying why, together.
 //!
-//! The thread checks, at the time it runs: the worktree is strictly under the workers folder and
-//! a worktree of the project's repository, on the run's branch, with no uncommitted change to a
-//! tracked file and nothing half-joined (a merge, rebase, cherry-pick or revert, one commit or a sequence). It pushes
-//! `<head>:refs/heads/<branch>` to `origin`, never forced, with no terminal prompt, so a missing
-//! credential fails at once with git's message. A restart runs an `accepted` push again; git
-//! finds it pushed already or pushes it.
+//! The thread checks, at the time it runs, reading the run's own repository only (Issue 241,
+//! `run_repo`): the worktree is strictly under the workers folder and a work tree of the run's
+//! repository `<state>/git/<task>`, on the run's branch, with no uncommitted change to a tracked
+//! file and nothing half-joined (a merge, rebase, cherry-pick or revert, one commit or a
+//! sequence). It hands the head to the project's repository as `refs/makiba/runs/<task>` and,
+//! from there, pushes `<head>:refs/heads/<branch>` to `origin`, never forced, with no terminal
+//! prompt, so a missing credential fails at once with git's message. A restart runs an
+//! `accepted` push again; git finds it pushed already or pushes it.
 //!
-//! `update` (Issue 183) runs here too, after the same checks: it fetches the base and the branch
-//! from `origin` by their full refs, refuses a branch not at origin or one that moved there (not
-//! an ancestor of the worktree's head), merges `origin/<base>` when the head does not hold it (a
-//! merge commit, never a rebase; a failed merge is aborted and its files named), and pushes the
-//! head when origin does not have it, never forced. Done: `branch_updated` with the old and new
-//! head, or, when nothing was merged or pushed, a notice naming origin's head. A restart runs it
-//! again: a merge not pushed yet is pushed, a push not recorded yet is found done. One job runs per
-//! worktree at a time.
+//! `update` (Issue 183) runs here too, after the same checks and the same hand-over, in the
+//! project's repository: it fetches the base and the branch from `origin` by their full refs,
+//! refuses a branch not at origin or one that moved there (not an ancestor of the worktree's
+//! head), merges `origin/<base>` when the head does not hold it (a merge commit made by
+//! `git merge-tree --write-tree` and `commit-tree`, never a rebase; a conflict names its files and
+//! leaves nothing behind), and pushes the result when origin does not have it, never forced. The
+//! worktree is not touched: the worker brings the new head in by a fast-forward of its own. Done:
+//! `branch_updated` with the old and new head, or, when nothing was merged or pushed, a notice
+//! naming origin's head. A restart runs it again. One job runs per worktree at a time.
 
 use super::prepare::Places;
+use super::run_repo;
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::hooks::git_hook::find;
@@ -126,11 +130,15 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> std::result::Result<bool, String
 }
 
 fn work(places: &Places, j: &Job) -> Outcome {
-    let real = checked(places, j)?;
-    let head = git(&real, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let (gitdir, real) = checked(places, j)?;
+    let repo = places.repos.join(&j.project);
+    let head = run_repo::read(&gitdir, &real, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    // Issue 241: the run is only read; the project's repository pushes and merges.
+    let to = format!("refs/makiba/runs/{}", j.task);
+    run_repo::deliver(&gitdir, &real, &repo, &head, &to, true)?;
     match j.base.as_deref() {
-        None => push_head(&real, &head, &j.branch).map(|()| Done::Pushed(head)),
-        Some(base) => update(&real, j, base, &head),
+        None => push_head(&repo, &head, &j.branch).map(|()| Done::Pushed(head)),
+        Some(base) => update(&repo, j, base, &head),
     }
 }
 
@@ -296,15 +304,6 @@ fn first_match(dir: &Path, objects: &str) -> std::result::Result<Option<Match>, 
     found
 }
 
-/// The path of `name` in the worktree's git folder exists (a merge or another operation under way).
-fn under_way(dir: &Path, name: &str) -> std::result::Result<bool, String> {
-    let p = git(
-        dir,
-        &["rev-parse", "--path-format=absolute", "--git-path", name],
-    )?;
-    Ok(PathBuf::from(p).exists())
-}
-
 fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     let fetch = |b: &str| {
         git(
@@ -335,65 +334,83 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
             j.branch
         ));
     }
-    if !is_ancestor(dir, &base_id, head)? {
-        let message = format!("Merge origin/{base} into {}", j.branch);
-        let merged = git(
-            dir,
-            &[
-                "merge",
-                "--no-edit",
-                "--commit",
-                "--no-squash",
-                "--ff",
-                "--no-overwrite-ignore",
-                "-m",
-                &message,
-                &base_id,
-            ],
-        );
-        if let Err(why) = merged {
-            let files = git(dir, &["diff", "--name-only", "--diff-filter=U"]).unwrap_or_default();
-            let undone = if under_way(dir, "MERGE_HEAD")? {
-                match git(dir, &["merge", "--abort"]) {
-                    Ok(_) => "the merge is undone".to_string(),
-                    Err(e) => {
-                        format!("the merge could not be undone, the worktree needs a look: {e}")
-                    }
-                }
-            } else {
-                "nothing was merged".to_string()
-            };
-            return Err(if files.is_empty() {
-                format!("the merge of origin/{base} failed, {undone}: {why}")
-            } else {
-                format!(
-                    "the merge of origin/{base} conflicts in {}; {undone}, nothing was pushed",
-                    files.lines().collect::<Vec<_>>().join(", ")
-                )
-            });
-        }
-        let clean = git(dir, &["status", "--porcelain", "--untracked-files=no"])?.is_empty();
-        if !is_ancestor(dir, &base_id, "HEAD")? || !clean || under_way(dir, "MERGE_HEAD")? {
-            return Err(format!(
-                "the merge of origin/{base} did not end in a commit; the worktree needs a look"
-            ));
-        }
-    }
-    let new = git(dir, &["rev-parse", "--verify", "HEAD^{commit}"])?;
+    let new = if is_ancestor(dir, &base_id, head)? {
+        head.to_string()
+    } else if is_ancestor(dir, head, &base_id)? {
+        base_id.clone()
+    } else {
+        merge(dir, j, base, head, &base_id)?
+    };
     if new == old {
         return Ok(Done::Current(new));
     }
     push_head(dir, &new, &j.branch).map_err(|e| {
-        format!(
-            "the worktree is at {new}, but the push failed: {e}; nothing was reset, update or push \
-             again"
-        )
+        format!("the merged head {new} was not pushed: {e}; nothing changed at origin, update or push again")
     })?;
     Ok(Done::Updated { old, new })
 }
 
-/// The checks of the worktree, before any write: its canonical path.
-fn checked(places: &Places, j: &Job) -> std::result::Result<PathBuf, String> {
+/// The merge commit of `head` and the base commit `base_id`, made in the project's repository with
+/// no work tree; a conflict names its files.
+fn merge(
+    dir: &Path,
+    j: &Job,
+    base: &str,
+    head: &str,
+    base_id: &str,
+) -> std::result::Result<String, String> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            head,
+            base_id,
+        ])
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut lines = text.lines();
+    let tree = lines.next().unwrap_or_default().to_string();
+    match out.status.code() {
+        Some(0) => {}
+        Some(1) => {
+            return Err(format!(
+                "the merge of origin/{base} conflicts in {}; nothing was merged or pushed",
+                lines.collect::<Vec<_>>().join(", ")
+            ));
+        }
+        _ => {
+            return Err(format!(
+                "the merge of origin/{base} failed: {}",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ));
+        }
+    }
+    let message = format!("Merge origin/{base} into {}", j.branch);
+    git(
+        dir,
+        &[
+            "commit-tree",
+            &tree,
+            "-p",
+            head,
+            "-p",
+            base_id,
+            "-m",
+            &message,
+        ],
+    )
+}
+
+/// The checks of the worktree, reading only: the run's git folder and the worktree's canonical
+/// path.
+fn checked(places: &Places, j: &Job) -> std::result::Result<(PathBuf, PathBuf), String> {
     let path = j
         .worktree
         .as_deref()
@@ -407,18 +424,15 @@ fn checked(places: &Places, j: &Job) -> std::result::Result<PathBuf, String> {
             places.workers.display()
         ));
     }
-    let common = git(
-        &real,
-        &["rev-parse", "--path-format=absolute", "--git-common-dir"],
-    )?;
-    let repo = places.repos.join(&j.project).join(".git");
-    if std::fs::canonicalize(&common).ok() != std::fs::canonicalize(&repo).ok() {
+    let gitdir = run_repo::dir(&places.settings, &j.task);
+    if !run_repo::is_run(&gitdir, &real) {
         return Err(format!(
-            "{path} is not a worktree of {}",
-            places.repos.join(&j.project).display()
+            "{path} has no repository of its own at {} (made before Issue 241)",
+            gitdir.display()
         ));
     }
-    let on = git(&real, &["symbolic-ref", "--short", "-q", "HEAD"]).unwrap_or_default();
+    let on = run_repo::read(&gitdir, &real, &["symbolic-ref", "--short", "-q", "HEAD"])
+        .unwrap_or_default();
     if on != j.branch {
         return Err(format!(
             "worktree {path} is on {}, not on {}",
@@ -426,7 +440,7 @@ fn checked(places: &Places, j: &Job) -> std::result::Result<PathBuf, String> {
             j.branch
         ));
     }
-    if !git(&real, &["status", "--porcelain", "--untracked-files=no"])?.is_empty() {
+    if !run_repo::status(&gitdir, &real, false)?.is_empty() {
         return Err(format!(
             "worktree {path} has uncommitted changes to tracked files"
         ));
@@ -439,13 +453,13 @@ fn checked(places: &Places, j: &Job) -> std::result::Result<PathBuf, String> {
         "rebase-apply",
         "sequencer",
     ] {
-        if under_way(&real, half)? {
+        if gitdir.join(half).symlink_metadata().is_ok() {
             return Err(format!(
                 "worktree {path} is in the middle of an operation ({half})"
             ));
         }
     }
-    Ok(real)
+    Ok((gitdir, real))
 }
 
 impl Push {
@@ -573,9 +587,13 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
                     ..Default::default()
                 })?;
                 format!(
-                    "The branch {} of {} holds origin/{base} and is pushed to origin at {new} \
-                     (was {old}). Record it with pr pushed and this head.",
-                    j.branch, j.task
+                    "The branch {b} of {} holds origin/{base} and is pushed to origin at {new} \
+                     (was {old}). Record it with pr pushed and this head. The worker's tree is \
+                     not changed: tell the worker to run git fetch origin and git merge --ff-only \
+                     origin/{b}. If the worker has committed since, the fast-forward fails: it \
+                     then runs git merge origin/{b} and asks for a push again.",
+                    j.task,
+                    b = j.branch
                 )
             }
             Ok(Done::Current(head)) => format!(
