@@ -337,7 +337,13 @@ impl Door {
         if let Err(e) = begin() {
             return Err(internal(e));
         }
-        let r = run(&w, &*self.base, &self.agent, &actor, role, v, &args);
+        // A decided candidate's file is replaced outside the transaction: its old bytes come back
+        // when its record does not stand.
+        let mut undo = None;
+        let r = match v {
+            Verb::Candidate => candidate(&w, &actor, &args, &mut undo),
+            _ => run(&w, &*self.base, &self.agent, &actor, role, v, &args),
+        };
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
         }
@@ -347,6 +353,9 @@ impl Door {
                 && let Some(file) = saved["file"].as_str()
             {
                 let _ = std::fs::remove_file(super::curator::knowledge_dir().join(file));
+            }
+            if let Some((path, old)) = &undo {
+                let _ = replace_file(path, old);
             }
         };
         // A verb's writes stand only with their record: without it a retry would repeat them.
@@ -1317,17 +1326,7 @@ fn note(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let task = str_arg(args, "task")?;
     let topic = str_arg(args, "topic")?;
     let text = str_arg(args, "text")?;
-    let kebab = topic.len() <= 64
-        && topic.split('-').all(|p| {
-            !p.is_empty()
-                && p.chars()
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
-        });
-    if !kebab {
-        return Err(usage(format!(
-            "topic is English kebab-case (a-z, 0-9, single dashes, at most 64), not {topic:?}"
-        )));
-    }
+    kebab("topic", topic)?;
     let missing: Vec<&str> = NOTE_HEADINGS
         .into_iter()
         .filter(|h| !text.lines().any(|l| l.trim_end() == *h))
@@ -1366,6 +1365,226 @@ fn note(w: &StateWriter, actor: &str, args: &Value) -> Response {
         return Err(internal(e));
     }
     Ok(json!({"file": file}))
+}
+
+/// English kebab-case: a-z, 0-9, single dashes, at most 64.
+fn kebab(what: &str, s: &str) -> Result<(), DoorError> {
+    let ok = s.len() <= 64
+        && s.split('-').all(|p| {
+            !p.is_empty()
+                && p.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit())
+        });
+    if ok {
+        Ok(())
+    } else {
+        Err(usage(format!(
+            "{what} is English kebab-case (a-z, 0-9, single dashes, at most 64), not {s:?}"
+        )))
+    }
+}
+
+/// `candidate` (spec section 12, Issue 191): the person's decision on a skill candidate, written
+/// by `makibad` into the entry of `pattern` in `<knowledge>/skill-candidates.md`. The file is
+/// replaced whole; `undo` gets its old bytes for the door to put back if the record fails.
+// ponytail: makibad dying between the rename and the commit leaves the decision in the file without
+// its record; a retry is then `conflict`, which tells the truth about the file. A stored intent
+// reconciled at start would close it.
+fn candidate(
+    w: &StateWriter,
+    actor: &str,
+    args: &Value,
+    undo: &mut Option<(PathBuf, Vec<u8>)>,
+) -> Response {
+    let pattern = str_arg(args, "pattern")?;
+    let decision = str_arg(args, "decision")?;
+    let reason = str_arg(args, "reason")?.trim();
+    kebab("pattern", pattern)?;
+    // The words of skills/curate.
+    let status = match decision {
+        "approved" | "rejected" => decision.to_string(),
+        d => match d.strip_prefix("into-") {
+            Some(skill) => {
+                kebab("the skill of into-<skill>", skill)?;
+                format!("merged-into-{skill}")
+            }
+            None => {
+                return Err(usage(format!(
+                    "decision is approved, rejected or into-<skill>, not {d:?}"
+                )));
+            }
+        },
+    };
+    if reason.is_empty() || reason.chars().any(char::is_control) {
+        return Err(usage("reason is one line of text, not blank"));
+    }
+    if curator_at_work(w)? {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            "the curator is at work and may be writing skill-candidates.md; nothing was written",
+            "decide after its report, once it has ended",
+        ));
+    }
+    let path = super::curator::knowledge_dir().join(CANDIDATES_FILE);
+    let text = match std::fs::read_to_string(&path) {
+        Ok(t) => t,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(refuse(
+                ErrorKind::NotFound,
+                format!("no {CANDIDATES_FILE}, so no pattern {pattern:?}"),
+                "",
+            ));
+        }
+        Err(e) => return Err(internal(format!("cannot read {}: {e}", path.display()))),
+    };
+    let decided: String = w
+        .conn()
+        .query_row("SELECT date('now', 'localtime')", [], |r| r.get(0))
+        .map_err(internal)?;
+    let new = decide_entry(&text, pattern, &status, &decided, reason)?;
+    let payload =
+        json!({"pattern": pattern, "status": status, "decided": decided, "reason": reason});
+    w.append_event(&NewEvent {
+        kind: "skill_candidate_decided",
+        actor: Some(actor),
+        payload: Some(&payload),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    replace_file(&path, new.as_bytes())
+        .map_err(|e| internal(format!("cannot write {}: {e}", path.display())))?;
+    *undo = Some((path, text.into_bytes()));
+    Ok(payload)
+}
+
+const CANDIDATES_FILE: &str = "skill-candidates.md";
+
+/// Whether a curator may be writing the knowledge folder: a launch under way, or a curator key
+/// not yet revoked (`makibad` revokes it when the curator reported or ended). The door's
+/// transaction holds the write lock, so no launch can be added before the file is replaced.
+fn curator_at_work(w: &StateWriter) -> Result<bool, DoorError> {
+    w.conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM run_launch
+                            WHERE role = 'curator' AND stage NOT IN ('verified', 'failed'))
+                 OR EXISTS (SELECT 1 FROM agents WHERE role = 'curator' AND revoked_at IS NULL)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(internal)
+}
+
+/// The lines of an entry of `skill-candidates.md` (skills/curate, roles/curator).
+const CANDIDATE_KEYS: [&str; 8] = [
+    "pattern", "date", "notes", "when", "skill", "status", "decided", "reason",
+];
+
+/// A line `<key>: <value>`, after leading spaces and an optional `- `: the key and the byte
+/// offset just past its `:`.
+fn candidate_field(line: &str) -> Option<(&str, usize)> {
+    let body = line.trim_start();
+    let body = body.strip_prefix("- ").unwrap_or(body);
+    let (key, _) = body.split_once(':')?;
+    let key = CANDIDATE_KEYS.into_iter().find(|k| *k == key)?;
+    Some((key, line.len() - body.len() + key.len() + 1))
+}
+
+/// `text` with the `status`, `decided` and `reason` values of the one open entry of `pattern`
+/// replaced; every other byte as it was.
+fn decide_entry(
+    text: &str,
+    pattern: &str,
+    status: &str,
+    decided: &str,
+    reason: &str,
+) -> Result<String, DoorError> {
+    let mut lines: Vec<String> = text.split_inclusive('\n').map(String::from).collect();
+    let value = |line: &str, at: usize| line[at..].trim().to_string();
+    let starts: Vec<usize> = (0..lines.len())
+        .filter(|i| candidate_field(&lines[*i]).is_some_and(|(k, _)| k == "pattern"))
+        .collect();
+    let ours: Vec<(usize, usize)> = starts
+        .iter()
+        .enumerate()
+        .filter(|(_, i)| {
+            let (_, at) = candidate_field(&lines[**i]).unwrap();
+            let v = value(&lines[**i], at);
+            v.strip_prefix('`')
+                .and_then(|v| v.strip_suffix('`'))
+                .unwrap_or(&v)
+                == pattern
+        })
+        .map(|(n, i)| (*i, starts.get(n + 1).copied().unwrap_or(lines.len())))
+        .collect();
+    let (from, to) = match ours[..] {
+        [] => {
+            return Err(refuse(
+                ErrorKind::NotFound,
+                format!("no entry of pattern {pattern:?} in {CANDIDATES_FILE}"),
+                "",
+            ));
+        }
+        [one] => one,
+        _ => {
+            return Err(refuse(
+                ErrorKind::Conflict,
+                format!(
+                    "{} entries of pattern {pattern:?} in {CANDIDATES_FILE}; nothing was written",
+                    ours.len()
+                ),
+                "the curator must merge them into one",
+            ));
+        }
+    };
+    let mut set = Vec::new();
+    for (key, new) in [("status", status), ("decided", decided), ("reason", reason)] {
+        let Some((i, at)) = (from..to).find_map(|i| {
+            candidate_field(&lines[i])
+                .filter(|(k, _)| *k == key)
+                .map(|(_, at)| (i, at))
+        }) else {
+            return Err(refuse(
+                ErrorKind::Conflict,
+                format!("the entry of pattern {pattern:?} has no {key} line; nothing was written"),
+                "",
+            ));
+        };
+        if key == "status" && value(&lines[i], at) != "pending" {
+            return Err(refuse(
+                ErrorKind::Conflict,
+                format!(
+                    "the entry of pattern {pattern:?} is decided already: {}",
+                    value(&lines[i], at)
+                ),
+                "",
+            ));
+        }
+        set.push((i, at, new));
+    }
+    for (i, at, new) in set {
+        let line = &lines[i];
+        let body = line.trim_end_matches(['\n', '\r']);
+        let end = &line[body.len()..];
+        lines[i] = format!("{} {new}{end}", &line[..at]);
+    }
+    Ok(lines.concat())
+}
+
+/// Replace `path` whole: `bytes` go to a dot file beside it, flushed, then renamed over it, so a
+/// reader sees the old file or the new one, never a part.
+fn replace_file(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let name = path.file_name().unwrap_or_default().to_string_lossy();
+    let staged = path.with_file_name(format!(".{name}-{}", random_key()?));
+    let r = (|| {
+        let mut f = std::fs::File::create(&staged)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        std::fs::rename(&staged, path)
+    })();
+    if r.is_err() {
+        let _ = std::fs::remove_file(&staged);
+    }
+    r
 }
 
 /// Write `body` whole to a staging file (a dot name, which the curator's count skips), then
@@ -2365,6 +2584,15 @@ fn tool(v: Verb) -> Value {
             Map::from_iter([("slug".into(), text.clone()), ("repo".into(), text.clone())]),
             &["slug", "repo"],
         ),
+        Verb::Candidate => (
+            "Record the person's decision on a pending skill candidate: makibad writes status (approved, rejected, or merged-into-<skill> for into-<skill>), decided (today) and reason into the entry of pattern in <knowledge>/skill-candidates.md, changing nothing else. reason is one line. An unknown pattern is not_found; an entry already decided is conflict.",
+            Map::from_iter([
+                ("pattern".into(), text.clone()),
+                ("decision".into(), text.clone()),
+                ("reason".into(), text.clone()),
+            ]),
+            &["pattern", "decision", "reason"],
+        ),
         _ => ("Not built yet.", Map::new(), &[]),
     };
     props.insert(
@@ -2380,7 +2608,25 @@ fn tool(v: Verb) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::save_note;
+    use super::{curator_at_work, save_note};
+
+    #[test]
+    fn a_curator_key_not_revoked_means_the_curator_is_at_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        assert!(!curator_at_work(&w).unwrap());
+        w.conn()
+            .execute(
+                "INSERT INTO agents (agent_id, role, key_sha256) VALUES ('curator', 'curator', 'k')",
+                [],
+            )
+            .unwrap();
+        assert!(curator_at_work(&w).unwrap());
+        w.conn()
+            .execute("UPDATE agents SET revoked_at = 'now'", [])
+            .unwrap();
+        assert!(!curator_at_work(&w).unwrap());
+    }
 
     #[test]
     fn a_note_takes_the_first_name_free_in_raw_and_in_the_archive() {
