@@ -309,7 +309,17 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
     }
     if let Some(old) = g.replaces {
         let st = load(w, old)?.status;
-        if !["active", "paused"].contains(&st.as_str()) {
+        // A draft replaced by this draft was ended at the proposal: nothing is left to replace.
+        let draft: bool = w
+            .conn()
+            .query_row(
+                "SELECT status = 'ended' AND ended_reason = 'replaced' AND approved_at IS NULL
+                 FROM ranges WHERE id = ?1",
+                [old],
+                |r| r.get(0),
+            )
+            .map_err(internal)?;
+        if !draft && !["active", "paused"].contains(&st.as_str()) {
             return Err(conflict(format!(
                 "range {} replaces range {old}, which is {st}; propose again",
                 g.id
@@ -1232,6 +1242,8 @@ fn admit(
             .filter(|(_, i)| s.takes.matches(i))
             .map(|(n, _)| *n),
     );
+    // The range's Issues in this read: a follow-up of any of them is asked for.
+    let members = numbers.clone();
     for n in numbers {
         let listed = s.listed.contains(&n);
         let Some(i) = open.get(&n) else {
@@ -1270,7 +1282,7 @@ fn admit(
             if after
                 && follow
                     .iter()
-                    .any(|f| s.listed.contains(f) || dispatched_in(w, s.id, *f).unwrap_or(false))
+                    .any(|f| members.contains(f) || dispatched_in(w, s.id, *f).unwrap_or(false))
             {
                 why = Some("follow_up (ask)".into());
             }
@@ -1853,6 +1865,80 @@ mod tests {
         assert!(t.matches(&issue(&["Bug"])));
         assert!(!t.matches(&issue(&["bug", "wip"])));
         assert!(!Takes::default().matches(&issue(&["bug"])));
+    }
+
+    fn org() -> (tempfile::TempDir, StateWriter) {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.ensure_project("p", None, Some("https://github.com/o/p"))
+            .unwrap();
+        (dir, w)
+    }
+
+    /// A draft that replaced a draft (which ended at the proposal) is approved like any draft.
+    #[test]
+    fn a_draft_that_replaced_a_draft_can_be_approved() {
+        let (_dir, w) = org();
+        let draft = |replaces: Option<i64>| {
+            range(
+                &w,
+                "secretary",
+                Role::Secretary,
+                &json!({"action": "propose", "project": "p", "issues": [1], "at_once": 1,
+                        "budget_tasks": 1, "brief_head": "h", "replaces": replaces}),
+            )
+            .unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        };
+        let first = draft(None);
+        let second = draft(Some(first));
+        let read = event(
+            &w,
+            "range_read",
+            "makibad",
+            None,
+            json!({"range_id": second, "complete": true}),
+        )
+        .unwrap();
+        let r = range(
+            &w,
+            "person",
+            Role::Person,
+            &json!({"action": "approve", "id": second, "read": read}),
+        );
+        assert_eq!(r.unwrap()["status"], json!("active"));
+    }
+
+    /// A new Issue the condition matches is left out as a follow-up when its parent is in the
+    /// range by the condition too, not only by the list.
+    #[test]
+    fn a_follow_up_of_an_issue_the_condition_takes_is_asked_for() {
+        let (_dir, w) = org();
+        let spec = Spec {
+            id: 1,
+            slug: "p".into(),
+            origin: None,
+            listed: Vec::new(),
+            takes: Takes::parse("label:bug").unwrap(),
+        };
+        let issue = |n: i64, body: &str, at: &str| {
+            json!({"number": n, "title": "t", "body": body, "labels": [{"name": "bug"}],
+                   "comments": [], "createdAt": at})
+        };
+        let f = Fetched {
+            repo: "o/p".into(),
+            open: vec![
+                issue(5, "The parent.", "2026-11-01T00:00:00Z"),
+                issue(6, "Follow-up of #5", "2026-11-23T00:00:00Z"),
+            ],
+            prs: Vec::new(),
+            views: BTreeMap::new(),
+        };
+        let c = admit(&w, &spec, &f, Some("2026-11-22T00:00:00Z")).unwrap();
+        let why = |n: i64| c.iter().find(|c| c.issue == n).unwrap().why.clone();
+        assert_eq!(why(5), None);
+        assert_eq!(why(6).as_deref(), Some("follow_up (ask)"));
     }
 
     #[test]
