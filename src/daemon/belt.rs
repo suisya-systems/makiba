@@ -914,19 +914,24 @@ impl Belt {
 
     pub fn pass(&mut self, w: &StateWriter) -> Result<()> {
         if let Some(job) = self.job.as_mut() {
-            if job.done.is_none() {
+            // Finished only once its outcome is received or its thread has dropped the sender
+            // (cancelled or crashed: nothing to write, the read stays due). An outcome is kept
+            // until its transaction commits.
+            let mut finished = job.done.is_some();
+            if !finished {
                 match job.rx.try_recv() {
-                    Ok(o) => job.done = Some(o),
+                    Ok(o) => {
+                        job.done = Some(o);
+                        finished = true;
+                    }
                     Err(TryRecvError::Empty) => {}
-                    Err(TryRecvError::Disconnected) => {}
+                    Err(TryRecvError::Disconnected) => finished = true,
                 }
             }
-            let finished =
-                job.done.is_some() || job.handle.as_ref().is_some_and(|h| h.is_finished());
             if finished {
-                if let Some(o) = job.done.take() {
+                if let Some(o) = &job.done {
                     let (through, activation, agent) = (job.through, job.activation, &self.agent);
-                    w.transaction(|w| record(w, through, activation, &o, agent))?;
+                    w.transaction(|w| record(w, through, activation, o, agent))?;
                 }
                 if let Some(mut job) = self.job.take() {
                     job.stop();
