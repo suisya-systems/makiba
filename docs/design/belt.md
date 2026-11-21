@@ -301,7 +301,7 @@ Not in the first version: parking terminals (step 3, Q5), `design_ahead`, `follo
 | Q3 | Follow-ups found on the way | Asked each time for now; `inside` becomes the default of a proposal from step 4. |
 | Q4 | May a range carry "answer with the recommended option" | No for now; decided after N = 10 stops from their record, not after days (5.2). |
 | Q5 | Parking terminals | Step 3, after the counts. |
-| Q6 | Goal clause of Issue 248 | G7, "it runs its own development". |
+| Q6 | Goal clause of Issue 248 | G9, "it runs its own development". |
 | Q7 | One range or several | One active range per project now, as a check; the records are built for several ranges and several people (section 10). |
 | Q8 | A dispatch naming no range while a range is active | Needs no person key, as today (2.3). |
 
