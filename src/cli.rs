@@ -1,8 +1,8 @@
-//! The person's command (spec section 12), defined with clap. The verbs other than `up`, `down`
-//! and `status` (run locally by `main.rs`) talk to
+//! The person's command (spec section 12), defined with clap. The verbs other than `up`, `down`,
+//! `status` and `events` (run locally by `main.rs`) talk to
 //! `makibad` over the person's socket only, with the content of the person key file as its key;
 //! with no file it sends no key. It never opens `state.db` (only `src/status_local.rs` does, for
-//! `status`), so it uses no database module.
+//! `status` and `events`), so it uses no database module.
 //!
 //! The places on disk the person's command and `makibad` share (spec section 2) are here, so the
 //! daemon takes them from this module and not the other way round.
@@ -139,8 +139,17 @@ pub enum Command {
         #[arg(long)]
         stop_base: bool,
     },
-    /// The dispatcher's heartbeat, read from state.db without makibad.
+    /// Runs, terminals, anomalies, pending entries, PR watches and the heartbeat, from state.db.
     Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// The events after an id, in order, read from state.db without makibad.
+    Events {
+        #[arg(long)]
+        after: i64,
+        #[arg(long)]
+        limit: Option<u32>,
         #[arg(long)]
         json: bool,
     },
@@ -297,7 +306,10 @@ fn read(path: &Path) -> Result<String, String> {
 pub fn request(c: Command) -> Result<(&'static str, Value), String> {
     let none = |v: Option<String>| v.map_or(Value::Null, Value::String);
     Ok(match c {
-        Command::Up { .. } | Command::Down { .. } | Command::Status { .. } => {
+        Command::Up { .. }
+        | Command::Down { .. }
+        | Command::Status { .. }
+        | Command::Events { .. } => {
             return Err("this verb runs locally, not over the door".into());
         }
         Command::Dispatch {

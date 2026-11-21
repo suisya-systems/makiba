@@ -169,7 +169,10 @@ fn status_of(r: &Response) -> Option<&'static str> {
 
 /// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`, `gate`).
 pub fn has_tool(v: Verb) -> bool {
-    !matches!(v, Verb::Up | Verb::Down | Verb::Config | Verb::Gate)
+    !matches!(
+        v,
+        Verb::Up | Verb::Down | Verb::Config | Verb::Gate | Verb::Events
+    )
 }
 
 /// The actor of a request that carries the merge gate's key (spec section 3).
@@ -290,6 +293,11 @@ impl Door {
         }
         if v == Verb::Gate {
             return self.gate(w, &actor, &args, idem);
+        }
+        if v == Verb::Events {
+            // A read that a client repeats: recorded, it would write a row and an event per
+            // poll and show the client its own polls (spec section 3). Refusals are recorded above.
+            return events(&w, &args);
         }
         if args.get("typed") == Some(&json!(true)) {
             // Typed sends are recorded before anything is typed, outside the verb's transaction.
@@ -631,6 +639,28 @@ fn renew(w: &StateWriter, args: &Value) -> Response {
 /// `status` (spec section 12): what the person's local `makiba status --json` prints, read from
 /// the door's own database file. Read in `makibad`, its `merge_approval_mode` is the gate's.
 fn status(w: &StateWriter) -> Response {
+    crate::status_local::read(&db_file(w)?).map_err(internal)
+}
+
+/// `events` (Issue 168): the person's `makiba events --json`, read from the door's own file.
+fn events(w: &StateWriter, args: &Value) -> Response {
+    let after = args
+        .get("after")
+        .and_then(Value::as_i64)
+        .ok_or_else(|| usage("the argument after (an event id) is missing"))?;
+    let limit = match args.get("limit") {
+        None | Some(Value::Null) => None,
+        Some(n) => Some(
+            n.as_u64()
+                .and_then(|n| u32::try_from(n).ok())
+                .ok_or_else(|| usage("limit is a count"))?,
+        ),
+    };
+    crate::status_local::events(&db_file(w)?, after, limit).map_err(internal)
+}
+
+/// The path of the door's own database file.
+fn db_file(w: &StateWriter) -> Result<std::path::PathBuf, DoorError> {
     let file: String = w
         .conn()
         .query_row(
@@ -639,7 +669,7 @@ fn status(w: &StateWriter) -> Response {
             |r| r.get(0),
         )
         .map_err(internal)?;
-    crate::status_local::read(Path::new(&file)).map_err(internal)
+    Ok(file.into())
 }
 
 /// How many lines `peek` returns when not told, and at most.

@@ -22,6 +22,9 @@ fn main() -> ExitCode {
         Command::Up { .. } => makiba::up::main(&args[1..]),
         Command::Down { .. } => makiba::down::main(&args[1..]),
         Command::Status { json } => makiba::status_local::main(json),
+        Command::Events { after, limit, json } => {
+            makiba::status_local::events_main(after, limit, json)
+        }
         other => makiba::cli::main(other),
     }
 }
