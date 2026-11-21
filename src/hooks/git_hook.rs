@@ -195,8 +195,9 @@ fn forward(name: &str, last: bool) -> String {
 /// Write the scripts of `NAMES` and `FORWARDED` into `dir`, each running `makiba` (an absolute
 /// path) and refusing with the path when it is missing or cannot run. A scanner script scans,
 /// runs the project's hook of its name (Issue 236) and scans again, for what that hook staged or
-/// wrote; a forwarding script runs the project's hook only. A script already as wanted is left
-/// as it is.
+/// wrote; a forwarding script runs the project's hook only. What `prepare-commit-msg` or
+/// `commit-msg` stages is not in that commit (git writes its tree before them): it stays staged,
+/// and the next commit's `pre-commit` scan reads it. A script already as wanted is left as it is.
 pub fn install(dir: &Path, makiba: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
