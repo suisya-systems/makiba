@@ -74,7 +74,10 @@ pub fn read(path: &Path) -> Result<Value, String> {
             .0;
     let projects: Vec<Value> = projects(&conn)
         .into_iter()
-        .map(|(slug, repo, branch)| json!({"slug": slug, "repo": repo, "default_branch": branch}))
+        .map(|(slug, repo, branch)| {
+            let hosts = crate::daemon::hosts_of(&conn, &slug).unwrap_or_default();
+            json!({"slug": slug, "repo": repo, "default_branch": branch, "network_hosts": hosts.join(",")})
+        })
         .collect();
     let sql = |e: rusqlite::Error| format!("cannot read {}: {e}", path.display());
     let mut v = json!({"makibad": {"pid": pid, "heartbeat_at": beat, "subscribed": subscribed == 1,
@@ -378,9 +381,19 @@ fn projects_text(conn: &Connection) -> String {
     }
     let mut text = String::from("projects:\n");
     for (slug, repo, branch) in rows {
+        let hosts = crate::daemon::hosts_of(conn, &slug).unwrap_or_default();
+        let hosts = if hosts.is_empty() {
+            "none".to_string()
+        } else {
+            hosts.join(", ")
+        };
         match repo {
-            Some(repo) => text.push_str(&format!("  {slug}: {repo} (default branch {branch})\n")),
-            None => text.push_str(&format!("  {slug}: repository not recorded\n")),
+            Some(repo) => text.push_str(&format!(
+                "  {slug}: {repo} (default branch {branch}; network hosts: {hosts})\n"
+            )),
+            None => text.push_str(&format!(
+                "  {slug}: repository not recorded (network hosts: {hosts})\n"
+            )),
         }
     }
     text

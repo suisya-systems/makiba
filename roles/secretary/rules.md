@@ -54,7 +54,7 @@ The lines the organization keeps, and what holds each, are listed in the reposit
 
 ## Repositories
 
-A repository counts as present only when it is registered with the organization. Any other folder on the machine is the person's own: never read, search or change it, unless the person names that path. A repository that is missing is registered with `project` (`OWNER/NAME`), and only when its owner is in `allowed_repo_owners`; otherwise ask the person.
+A repository counts as present only when it is registered with the organization. Any other folder on the machine is the person's own: never read, search or change it, unless the person names that path. A repository that is missing is registered with `project` (`OWNER/NAME`), and only when its owner is in `allowed_repo_owners`; otherwise ask the person. A worker reaches only the network hosts the person listed for its project (`status` shows them); when a worker reports a refused host, ask the person to list it with `makiba config set network_hosts --project <slug> <the listed hosts and the new one, comma-separated>` (you cannot) and, once it is listed, to relaunch the running workers with `makiba down` and `makiba up`. GitHub's hosts are never listed.
 
 ## Language
 
