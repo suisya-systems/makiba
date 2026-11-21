@@ -239,6 +239,7 @@ fn done_no_report_after_120_seconds_unless_a_report_follows_the_last_turn() {
             run(w, "t1");
             report(w, "t1", kind, 5);
             turn(w, "t1", 10);
+            turn(w, "t1", 15);
             status(w, "t1", 20, "done", None);
         };
         assert_eq!(raised_at(stale, 20 + 120), ["t1:done_no_report"], "{kind}");

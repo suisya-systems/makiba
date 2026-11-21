@@ -636,7 +636,7 @@ Pure functions of (the run, its latest status record, recorded events, now). Eac
 | `blocked_auth` | status `blocked`, kind `auth` | secretary, marked as needing the person |
 | `error` | status `error` | secretary |
 | `gone` | `terminal_gone` of the run's newest launch (or one with no `spawn_id`) with no `report_done` for the run | secretary; the run becomes `failed` |
-| `done_no_report` | status `done` for 120 s, no `report_done` or `report_blocked` since the last `terminal_turn` | secretary |
+| `done_no_report` | status `done` for 120 s and 120 s since the last `terminal_turn`, no `report_done` or `report_blocked` in the turn that just ended or after it: after the `terminal_turn` before the last one (since the launch when the last is turn 1), or after the last one when the counter of the one before is not one less (a turn whose start was not recorded; Issue 218) | secretary |
 | `no_status` | no status record 180 s after launch | secretary |
 | `secretary_gone` | `terminal_gone` for the terminal named `secretary` while no `makiba renew` is under way, or no status record 180 s after the secretary was launched | the person: the log and `makiba status` until stage 2 adds a way to notify the person. `makibad` relaunches the secretary itself (below) |
 | `secretary_still` | any worker anomaly open, and the secretary's status unchanged for 600 s; or a `pending` entry `open` (not `escalated`) for 600 s since its `created_at`, whatever the secretary's status | the person (stage 2 adds a way to notify; until then, the log and `makiba status`) |
