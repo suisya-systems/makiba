@@ -201,6 +201,11 @@ fn run(secretary: bool) -> Result<(), Failure> {
             format!("cannot start the base: {e}"),
         )
     })?;
+    // Printed only: the app's machine list is the person's (Issue 196).
+    println!(
+        "app: to see this organization in the app, run on the app's machine: {}",
+        base::app_register_command(&session)
+    );
     {
         let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
         let resumed = resume(&w).map_err(internal)?;

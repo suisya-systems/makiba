@@ -152,7 +152,7 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
         .expect("a terminal named w-t1");
     let got = local.get(&terminal.id).unwrap();
     let org = dir.to_string_lossy().into_owned();
-    let want: BTreeMap<String, String> = [
+    let mut want: BTreeMap<String, String> = [
         ("makiba.role", "worker"),
         ("makiba.task_id", "t1"),
         ("makiba.spawn", "spawn-t1"),
@@ -161,6 +161,8 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
     .into_iter()
     .map(|(k, v)| (k.to_string(), v.to_string()))
     .collect();
+    // The app's labels (Issue 196).
+    want.extend(makiba::base::app_labels(&org, "w-t1"));
     let mut tags = got.tags;
     // The fifth tag, the hash of the key (Issue 131), is checked against the stored hash below.
     let key_tag = tags.remove("makiba.key");
