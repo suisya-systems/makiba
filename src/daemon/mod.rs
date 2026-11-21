@@ -325,6 +325,9 @@ fn serve_until(
     let mut anomalies = Anomalies::new();
     let dispatch = Dispatch::new(dispatch::capacity_from_env());
     let prepare = Prepare::new(Places::from_env(dir), events_base.worker_denies());
+    if let Err(e) = prepare.sweep(&w) {
+        eprintln!("makibad: the temporary folders of launches that are over: {e}");
+    }
     let launch = launch::Launch::new(dir, door_addr);
     let mut curator = curator::Curator::from_env(dir);
     // `makiba up` asks for the secretary (Issue 43), read once, at start; renewals and relaunches

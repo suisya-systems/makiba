@@ -11,6 +11,7 @@
 //!    unless `--abandon`, by keeping the run's branch (and a HEAD off it) in the project's
 //!    repository, then removing the work tree and the run's git folder `<state>/git/<task>`
 //!    (Issue 241), each only under its own folder; document by removing everything but `out/`
+//!    and each launch's own temporary folder `<state>/tmp/<launch id>` (Issue 243) is removed
 //!    (kill point `close_removed`);
 //! 3. the per-task settings file is deleted and the command becomes `done`.
 //!
@@ -164,11 +165,13 @@ impl Close {
         j: &Job,
     ) -> std::result::Result<bool, String> {
         let db = |e: rusqlite::Error| e.to_string();
-        let launches: Vec<(String, String, String)> = w
+        let launches: Vec<(String, String, String, i64)> = w
             .conn()
-            .prepare("SELECT spawn_id, kind, worktree FROM run_launch WHERE run_id = ?1")
+            .prepare("SELECT spawn_id, kind, worktree, id FROM run_launch WHERE run_id = ?1")
             .map_err(db)?
-            .query_map([j.run], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .query_map([j.run], |r| {
+                Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
+            })
             .map_err(db)?
             .collect::<std::result::Result<_, _>>()
             .map_err(db)?;
@@ -191,11 +194,19 @@ impl Close {
         super::crash::point("close_ended");
 
         let mut done: Vec<&str> = Vec::new();
-        for (_, kind, path) in &launches {
+        for (_, kind, path, _) in &launches {
             if !done.contains(&path.as_str()) {
                 self.remove(j, kind, Path::new(path))?;
                 done.push(path);
             }
+        }
+        // Each launch's own temporary folder (Issue 243).
+        let tmp_root = super::prepare::tmp_root(&self.places.settings);
+        for (.., id) in &launches {
+            run_repo::remove_under(
+                &tmp_root,
+                &super::prepare::tmp_dir(&self.places.settings, *id),
+            )?;
         }
         super::crash::point("close_removed");
 

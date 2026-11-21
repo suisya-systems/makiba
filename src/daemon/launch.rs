@@ -295,6 +295,14 @@ impl Launch {
                 env.insert("MAKIBA_DOOR".to_string(), abs(door));
             }
         }
+        // The launch's own temporary folder (Issue 243), when its preparation made one: a launch
+        // prepared before it keeps the shared one its settings name.
+        let tmp = super::prepare::tmp_dir(&self.settings, row.id);
+        if tmp.is_dir() {
+            for var in agents::TMP_VARS {
+                env.insert(var.to_string(), tmp.display().to_string());
+            }
+        }
         LaunchSpec {
             argv,
             cwd: PathBuf::from(&row.worktree),
