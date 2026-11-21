@@ -465,7 +465,7 @@ fn refused(command: &str) -> Option<String> {
         return Some("a command substitution with the word merge cannot be read".into());
     }
     let command = without_text_heredocs(command);
-    let (segments, assigns) = shell::segments_and_assignments(&command);
+    let (segments, assigns) = segments_and_assignments(&command);
     if mentions
         && (shell::split_segments(&command).1 || shell::unreadable(&segments, &assigns).is_some())
     {
@@ -475,6 +475,83 @@ fn refused(command: &str) -> Option<String> {
         .iter()
         .filter(|s| !s.trim().is_empty())
         .find_map(|s| refused_segment(s, mentions))
+}
+
+/// `shell::segments_and_assignments`, except that a newline inside quotes does not end a segment
+/// (Issue 200): a quoted argument of several lines, such as a commit message, stays one argument.
+/// A command with a here-document, a command or process substitution, anywhere, is cut at every
+/// newline as before: their bodies may span lines inside quotes or land in a later segment.
+fn segments_and_assignments(command: &str) -> (Vec<String>, Vec<String>) {
+    if ["<<", "$(", "`", "<(", ">("]
+        .iter()
+        .any(|c| command.contains(c))
+    {
+        return shell::segments_and_assignments(command);
+    }
+    let mut segs: Vec<String> = shell::split_segments(command)
+        .0
+        .iter()
+        .flat_map(|s| lines(s))
+        .collect();
+    // The bodies of `eval` and `bash -c` are code: cut at every newline, as before.
+    let bodies = shell::unwrap(&segs);
+    segs.extend(
+        bodies
+            .iter()
+            .flat_map(|b| b.split('\n'))
+            .filter(|l| !l.is_empty())
+            .map(String::from),
+    );
+    let assigns = shell::collect_assignments(&segs)
+        .into_iter()
+        .filter(|a| !a.is_empty())
+        .collect();
+    (segs, assigns)
+}
+
+/// `segment` cut at the newlines outside quotes (`'...'`, `"..."`, `$'...'`) and outside
+/// comments. A segment whose quote does not close is cut at every newline, as before.
+fn lines(segment: &str) -> Vec<String> {
+    let mut out = vec![String::new()];
+    // The quote open: `'`, `"`, or `$` for `$'...'`.
+    let mut quote: Option<char> = None;
+    let mut word_start = true;
+    let mut chars = segment.chars().peekable();
+    while let Some(c) = chars.next() {
+        let cur = out.last_mut().expect("a line");
+        cur.push(c);
+        if let Some(q) = quote {
+            if c == '\\' && q != '\'' {
+                cur.extend(chars.next());
+            } else if c == if q == '"' { '"' } else { '\'' } {
+                quote = None;
+            }
+            continue;
+        }
+        match c {
+            '\n' => {
+                cur.pop();
+                out.push(String::new());
+            }
+            '#' if word_start => {
+                while let Some(n) = chars.next_if(|n| *n != '\n') {
+                    cur.push(n);
+                }
+            }
+            '\\' => cur.extend(chars.next()),
+            '\'' | '"' => quote = Some(c),
+            '$' if chars.peek() == Some(&'\'') => {
+                cur.extend(chars.next());
+                quote = Some('$');
+            }
+            _ => {}
+        }
+        word_start = c.is_whitespace() || ";&|()".contains(c);
+    }
+    if quote.is_some() {
+        return segment.split('\n').map(String::from).collect();
+    }
+    out
 }
 
 const PLAINLY: &str = "write the command plainly: plain words or quotes without $, backquotes or backslashes, a redirection as a word of its own";
