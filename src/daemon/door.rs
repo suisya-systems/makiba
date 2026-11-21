@@ -1387,8 +1387,9 @@ fn kebab(what: &str, s: &str) -> Result<(), DoorError> {
 /// `candidate` (spec section 12, Issue 191): the person's decision on a skill candidate, written
 /// by `makibad` into the entry of `pattern` in `<knowledge>/skill-candidates.md`. The file is
 /// replaced whole; `undo` gets its old bytes for the door to put back if the record fails.
-// ponytail: a curator write between the read and the rename is lost; the curator runs one short
-// cycle, and the secretary decides from its finished report. A lock file both honour would close it.
+// ponytail: makibad dying between the rename and the commit leaves the decision in the file without
+// its record; a retry is then `conflict`, which tells the truth about the file. A stored intent
+// reconciled at start would close it.
 fn candidate(
     w: &StateWriter,
     actor: &str,
@@ -1416,6 +1417,13 @@ fn candidate(
     };
     if reason.is_empty() || reason.chars().any(char::is_control) {
         return Err(usage("reason is one line of text, not blank"));
+    }
+    if curator_at_work(w)? {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            "the curator is at work and may be writing skill-candidates.md; nothing was written",
+            "decide after its report, once it has ended",
+        ));
     }
     let path = super::curator::knowledge_dir().join(CANDIDATES_FILE);
     let text = match std::fs::read_to_string(&path) {
@@ -1450,6 +1458,21 @@ fn candidate(
 }
 
 const CANDIDATES_FILE: &str = "skill-candidates.md";
+
+/// Whether a curator may be writing the knowledge folder: a launch under way, or a curator key
+/// not yet revoked (`makibad` revokes it when the curator reported or ended). The door's
+/// transaction holds the write lock, so no launch can be added before the file is replaced.
+fn curator_at_work(w: &StateWriter) -> Result<bool, DoorError> {
+    w.conn()
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM run_launch
+                            WHERE role = 'curator' AND stage NOT IN ('verified', 'failed'))
+                 OR EXISTS (SELECT 1 FROM agents WHERE role = 'curator' AND revoked_at IS NULL)",
+            [],
+            |r| r.get(0),
+        )
+        .map_err(internal)
+}
 
 /// The lines of an entry of `skill-candidates.md` (skills/curate, roles/curator).
 const CANDIDATE_KEYS: [&str; 8] = [
@@ -2585,7 +2608,25 @@ fn tool(v: Verb) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::save_note;
+    use super::{curator_at_work, save_note};
+
+    #[test]
+    fn a_curator_key_not_revoked_means_the_curator_is_at_work() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        assert!(!curator_at_work(&w).unwrap());
+        w.conn()
+            .execute(
+                "INSERT INTO agents (agent_id, role, key_sha256) VALUES ('curator', 'curator', 'k')",
+                [],
+            )
+            .unwrap();
+        assert!(curator_at_work(&w).unwrap());
+        w.conn()
+            .execute("UPDATE agents SET revoked_at = 'now'", [])
+            .unwrap();
+        assert!(!curator_at_work(&w).unwrap());
+    }
 
     #[test]
     fn a_note_takes_the_first_name_free_in_raw_and_in_the_archive() {
