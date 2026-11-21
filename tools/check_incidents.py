@@ -1,4 +1,4 @@
-"""Check docs/design/incidents.md: every row names a Test file that exists (G2).
+"""Check docs/design/incidents.md: every row names a Test file that exists (G3).
 
 A missing file is allowed only if listed in docs/design/incidents-pending.txt
 (one path per line, '#' comments); that list must be empty by M7-1.
