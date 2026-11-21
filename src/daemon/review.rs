@@ -554,7 +554,12 @@ fn same_settings(places: &Places, snap: &Snapshot) -> Result<PathBuf, String> {
     Ok(file)
 }
 
-fn run_other(program: &Path, snap: &Snapshot, design: bool) -> Result<(Ran, Stream), String> {
+fn run_other(
+    program: &Path,
+    snap: &Snapshot,
+    design: bool,
+    until: Instant,
+) -> Result<(Ran, Stream), String> {
     let mut c = Command::new(program);
     c.current_dir(&snap.tree).args([
         "exec",
@@ -568,7 +573,7 @@ fn run_other(program: &Path, snap: &Snapshot, design: bool) -> Result<(Ran, Stre
         "mcp_servers={}",
         &prompt(design),
     ]);
-    let ran = bounded(c, None, BOUND)?;
+    let ran = bounded(c, None, until.saturating_duration_since(Instant::now()))?;
     let read = read_other(&ran.out);
     Ok((ran, read))
 }
@@ -578,6 +583,7 @@ fn run_same(
     places: &Places,
     snap: &Snapshot,
     design: bool,
+    until: Instant,
 ) -> Result<(Ran, Stream), String> {
     let settings = same_settings(places, snap)?;
     let mut c = Command::new(program);
@@ -600,7 +606,11 @@ fn run_same(
         ])
         .arg(&settings)
         .args(["--tools", "Read,Grep,Glob"]);
-    let ran = bounded(c, Some(&prompt(design)), BOUND)?;
+    let ran = bounded(
+        c,
+        Some(&prompt(design)),
+        until.saturating_duration_since(Instant::now()),
+    )?;
     let read = read_same(&ran.out);
     Ok((ran, read))
 }
@@ -609,7 +619,10 @@ fn run_same(
 fn judge(reader: String, ran: &Ran, read: Stream) -> Answer {
     let found = findings(&read.text);
     let reason = if ran.timed_out {
-        Some(format!("stopped after {} minutes", BOUND.as_secs() / 60))
+        Some(format!(
+            "stopped at the round's bound of {} minutes",
+            BOUND.as_secs() / 60
+        ))
     } else if !ran.ok {
         Some(
             read.error
@@ -637,9 +650,12 @@ fn judge(reader: String, ran: &Ran, read: Stream) -> Answer {
 }
 
 /// Run one round with the readers of `plan` on `snap`.
+/// Both readers share one deadline: the round never runs past `BOUND`, which the tool call's own
+/// timeout is above.
 pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answer {
+    let until = Instant::now() + BOUND;
     let fallback_reason = match &plan.other {
-        Ok(program) => match run_other(program, snap, design) {
+        Ok(program) => match run_other(program, snap, design, until) {
             Ok((ran, read)) => {
                 // A failure before anything was read is the program not usable: fall back once.
                 if ran.ok || read.reads > 0 || plan.same.is_none() {
@@ -666,7 +682,7 @@ pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answe
             text: String::new(),
         });
     };
-    let mut a = match run_same(same, places, snap, design) {
+    let mut a = match run_same(same, places, snap, design, until) {
         Ok((ran, read)) => judge(FRESH.into(), &ran, read),
         Err(e) => Answer {
             established: false,
