@@ -19,7 +19,7 @@
 //! - (Owner) The workplace path is read from `run_launch.worktree`; `Places::workplace` computes
 //!   it, for the dispatch verb to use when it makes the row.
 
-use crate::agents::{self, Agent, TaskSettings};
+use crate::agents::{self, Agent, Role, TaskSettings};
 use crate::base::BaseDenies;
 use crate::db::Result;
 use crate::db::writer::StateWriter;
@@ -67,6 +67,22 @@ impl Places {
             self.workers.join(project).join(task)
         }
     }
+}
+
+/// The person's git and GitHub CLI credential files, denied to a worker and the curator (Issue
+/// 140): the ssh keys, git's plain credential store and the CLI's stored login, at their default
+/// places and under `XDG_CONFIG_HOME` as this process has it. Folders, then files.
+fn credentials() -> (Vec<PathBuf>, Vec<PathBuf>) {
+    let mut files = vec![
+        PathBuf::from("~/.git-credentials"),
+        PathBuf::from("~/.config/git/credentials"),
+    ];
+    if let Some(xdg) = std::env::var_os("XDG_CONFIG_HOME").filter(|x| !x.is_empty()) {
+        let xdg = PathBuf::from(xdg);
+        files.push(xdg.join("git/credentials"));
+        files.push(xdg.join("gh/hosts.yml"));
+    }
+    (vec![PathBuf::from("~/.ssh")], files)
 }
 
 pub struct Prepare {
@@ -217,25 +233,48 @@ impl Prepare {
             agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
         // The secret scanner (Issue 136): the clone's hooks path, outside the write surface.
-        let mut deny_write_dirs = vec![crate::cli::share_dir()];
-        if l.task.is_some() && l.kind != "document" {
-            deny_write_dirs.push(self.install_scanner(&self.places.repos.join(&l.project))?);
-        }
         // The worktree is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
-        let mcp_json = absolute(vec![workplace.join(".mcp.json")])?;
+        let mut deny_write_dirs = vec![crate::cli::share_dir()];
+        let mut deny_write_files = vec![workplace.join(".mcp.json")];
+        if l.task.is_some() && l.kind != "document" {
+            let repo = self.places.repos.join(&l.project);
+            deny_write_dirs.push(self.install_scanner(&repo)?);
+            // The configuration naming that hooks path, by makiba's own entry (Issue 140):
+            // Claude Code opens the clone's shared `.git` to a linked worktree but `config`.
+            deny_write_files.push(repo.join(".git").join("config"));
+        }
+        // No credential to push with or to write to GitHub (Issue 140, line L-K2).
+        let (cred_dirs, cred_files) = if role == Role::Secretary {
+            (vec![], vec![])
+        } else {
+            credentials()
+        };
         let settings = TaskSettings {
             role: Some(role),
             write_dirs: vec![workplace, std::env::temp_dir()],
-            deny_dirs: absolute([&self.denies.resolved[..], &self.denies.folders[..]].concat())?,
-            deny_files: absolute(vec![
-                crate::cli::person_key_path(),
-                crate::cli::gate_key_path(),
-                PathBuf::from(&state_db),
-                PathBuf::from(format!("{state_db}-wal")),
-                PathBuf::from(format!("{state_db}-shm")),
-            ])?,
+            deny_dirs: absolute(
+                [
+                    &self.denies.resolved[..],
+                    &self.denies.folders[..],
+                    &cred_dirs[..],
+                ]
+                .concat(),
+            )?,
+            deny_files: absolute(
+                [
+                    &[
+                        crate::cli::person_key_path(),
+                        crate::cli::gate_key_path(),
+                        PathBuf::from(&state_db),
+                        PathBuf::from(format!("{state_db}-wal")),
+                        PathBuf::from(format!("{state_db}-shm")),
+                    ][..],
+                    &cred_files[..],
+                ]
+                .concat(),
+            )?,
             deny_write_dirs,
-            deny_write_files: mcp_json,
+            deny_write_files: absolute(deny_write_files)?,
         };
         agent
             .write_task_settings(
