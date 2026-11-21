@@ -215,8 +215,8 @@ fn a_workers_settings_deny_reading_the_persons_git_credentials() {
         );
     }
 
-    // lines.md: L-K2 names this holder; the network, not held today, names its Issue (#244),
-    // as does L-K7, which says the same of every host.
+    // lines.md: L-K2 names this holder; the network, held since Issue 244, names its test and
+    // no longer the Issue, as does L-K7, which says the same of every host.
     let k2 = row("L-K2");
     assert!(
         k2.contains(
@@ -224,9 +224,11 @@ fn a_workers_settings_deny_reading_the_persons_git_credentials() {
         ),
         "L-K2 does not name the credential deny: {k2}"
     );
-    assert!(k2.contains("`Open: #244`"), "L-K2 does not name #244: {k2}");
+    assert!(!k2.contains("`Open: #244`"), "L-K2 still names #244: {k2}");
+    assert!(k2.contains("`tests/network_allowlist.rs::"), "{k2}");
     let k7 = row("L-K7");
-    assert!(k7.contains("`Open: #244`"), "L-K7 does not name #244: {k7}");
+    assert!(!k7.contains("`Open: #244`"), "L-K7 still names #244: {k7}");
+    assert!(k7.contains("`tests/network_allowlist.rs::"), "{k7}");
 }
 
 /// B2. A code launch's settings deny writing the project clone's `.git/config` (where
