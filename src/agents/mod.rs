@@ -349,6 +349,25 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
     std::fs::write(path, format!("{settings}\n"))
 }
 
+/// The variables naming a launch's own temporary folder (Issue 243): the commands' and Claude
+/// Code's own.
+pub const TMP_VARS: [&str; 2] = ["TMPDIR", "CLAUDE_CODE_TMPDIR"];
+
+/// Name `tmp` as `TMP_VARS` in the `env` of the settings file at `path`, written by
+/// `write_task_settings`: given with `--settings`, it is applied over what the person's own
+/// settings say.
+pub fn set_tmp_dir(path: &Path, tmp: &Path) -> io::Result<()> {
+    let text = std::fs::read_to_string(path)?;
+    let mut settings: serde_json::Value = serde_json::from_str(&text).map_err(io::Error::other)?;
+    if !settings["env"].is_object() {
+        settings["env"] = serde_json::json!({});
+    }
+    for var in TMP_VARS {
+        settings["env"][var] = tmp.display().to_string().into();
+    }
+    std::fs::write(path, format!("{settings}\n"))
+}
+
 pub trait Agent: Send + Sync {
     /// `"claude_code"` or `"fake"`.
     fn name(&self) -> &'static str;

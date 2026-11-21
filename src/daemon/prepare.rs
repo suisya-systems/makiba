@@ -88,6 +88,33 @@ fn credentials() -> (Vec<PathBuf>, Vec<PathBuf>) {
     (vec![PathBuf::from("~/.ssh")], files)
 }
 
+/// `<state>/tmp`, where each launch's own temporary folder is (Issue 243).
+pub fn tmp_root(settings: &Path) -> PathBuf {
+    settings.with_file_name("tmp")
+}
+
+/// The temporary folder of launch `id` (`run_launch.id`): `<state>/tmp/<id>`, absolute. A row id
+/// keeps the path short whatever the task id, and a resume, a new row, gets a new one.
+pub fn tmp_dir(settings: &Path, id: i64) -> PathBuf {
+    let dir = tmp_root(settings).join(id.to_string());
+    std::path::absolute(&dir).unwrap_or(dir)
+}
+
+/// Make launch `id`'s temporary folder, mode 0700 (its parent too, when it makes it).
+fn make_tmp_dir(settings: &Path, id: i64) -> std::result::Result<PathBuf, String> {
+    use std::os::unix::fs::{DirBuilderExt, PermissionsExt};
+    let dir = tmp_dir(settings, id);
+    let shown = |e: std::io::Error| format!("{}: {e}", dir.display());
+    std::fs::DirBuilder::new()
+        .recursive(true)
+        .mode(0o700)
+        .create(&dir)
+        .map_err(shown)?;
+    // Already there (a pass cut short): the mode as if made now.
+    std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o700)).map_err(shown)?;
+    Ok(dir)
+}
+
 pub struct Prepare {
     places: Places,
     /// What the base says a role must not reach (spec section 6.2).
@@ -171,6 +198,34 @@ impl Prepare {
             }
         }
         Ok(ready)
+    }
+
+    /// At `makibad`'s start (Issue 243): the temporary folder of every launch that is over goes,
+    /// decided by the rows alone (never by a terminal being absent, never by a folder's name):
+    /// the launch `failed`, or a later launch of its run (of its role, for a launch without a run)
+    /// `verified`. A run's close removes its launches' folders as well; a folder no such row
+    /// names is left.
+    pub fn sweep(&self, w: &StateWriter) -> Result<()> {
+        let ids: Vec<i64> = w
+            .conn()
+            .prepare(
+                "SELECT l.id FROM run_launch l
+                 WHERE l.stage = 'failed'
+                    OR EXISTS (SELECT 1 FROM run_launch n
+                               WHERE n.id > l.id AND n.stage = 'verified'
+                                 AND (n.run_id = l.run_id
+                                      OR (n.run_id IS NULL AND l.run_id IS NULL
+                                          AND n.role = l.role)))",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        let root = tmp_root(&self.places.settings);
+        for id in ids {
+            if let Err(e) = run_repo::remove_under(&root, &tmp_dir(&self.places.settings, id)) {
+                eprintln!("makibad: the temporary folder of launch {id}: {e}");
+            }
+        }
+        Ok(())
     }
 
     /// `Ok(false)`: a stage update found the launch moved by somebody else; nothing more is done.
@@ -258,7 +313,10 @@ impl Prepare {
             deny_write_files.push(gitdir.join("config"));
             write_dirs.push(gitdir);
         }
-        write_dirs.push(std::env::temp_dir());
+        // The launch's own temporary folder (Issue 243), not the shared one: `TMPDIR` and
+        // `CLAUDE_CODE_TMPDIR` name it in the settings and in the launch's environment.
+        let tmp = make_tmp_dir(&self.places.settings, l.id)?;
+        write_dirs.push(tmp.clone());
         // No credential to push with or to write to GitHub (Issue 140, line L-K2).
         let (cred_dirs, cred_files) = if role == Role::Secretary {
             (vec![], vec![])
@@ -300,17 +358,16 @@ impl Prepare {
             deny_write_dirs,
             deny_write_files: absolute(deny_write_files)?,
         };
+        let settings_file = super::launch::settings_file(
+            &self.places.settings,
+            l.task.as_deref(),
+            &l.role,
+            &l.spawn,
+        );
         agent
-            .write_task_settings(
-                &super::launch::settings_file(
-                    &self.places.settings,
-                    l.task.as_deref(),
-                    &l.role,
-                    &l.spawn,
-                ),
-                &settings,
-            )
+            .write_task_settings(&settings_file, &settings)
             .map_err(|e| e.to_string())?;
+        agents::set_tmp_dir(&settings_file, &tmp).map_err(|e| e.to_string())?;
         super::crash::hold("settings_ready");
         let n = w
             .conn()
@@ -544,6 +601,45 @@ mod tests {
             .add_worktree(&l, &other)
             .unwrap_err();
         assert!(why.contains("not a clean worktree"), "{why}");
+    }
+
+    /// The start sweep removes the folders of launches that are over by their rows alone: a
+    /// `failed` one and one with a later `verified` launch of its role; a live one and a folder
+    /// no row names stay.
+    #[test]
+    fn the_sweep_removes_only_the_folders_of_launches_that_are_over() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let settings = dir.path().join("settings");
+        for (spawn, role, stage) in [
+            ("a", "curator", "failed"),
+            ("b", "secretary", "verified"),
+            ("c", "secretary", "verified"),
+            ("d", "curator", "settings_ready"),
+        ] {
+            w.conn()
+                .execute(
+                    "INSERT INTO run_launch (spawn_id, role, agent, brief, worktree, stage)
+                     VALUES (?1, ?2, 'fake', 'b', '/w', ?3)",
+                    [spawn, role, stage],
+                )
+                .unwrap();
+        }
+        for id in 1..=5 {
+            make_tmp_dir(&settings, id).unwrap();
+        }
+        let places = Places {
+            workers: dir.path().join("workers"),
+            docs: dir.path().join("docs"),
+            repos: dir.path().join("repos"),
+            settings: settings.clone(),
+            state_db: dir.path().join("state.db"),
+        };
+        Prepare::new(places, BaseDenies::default())
+            .sweep(&w)
+            .unwrap();
+        let left: Vec<bool> = (1..=5).map(|id| tmp_dir(&settings, id).is_dir()).collect();
+        assert_eq!(left, [false, false, true, true, true]);
     }
 
     /// A relative deny path is written absolute, as the daemon meant it; `~/` is kept.
