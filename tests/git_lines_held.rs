@@ -258,9 +258,7 @@ fn a_code_launchs_settings_deny_writing_the_clones_git_config() {
         ),
         "L-K3 does not name the config deny: {k3}"
     );
-    for n in ["`Open: #242`"] {
-        assert!(k3.contains(n), "L-K3 does not name {n}: {k3}");
-    }
+    assert!(k3.contains("`Open: #242`"), "L-K3 does not name #242: {k3}");
     assert!(
         k3.contains("`tests/workplace_own_git.rs::a_code_run_has_a_repository_of_its_own_and_its_commit_still_reaches_the_remote`"),
         "L-K3 does not name the run's own repository (#241): {k3}"
