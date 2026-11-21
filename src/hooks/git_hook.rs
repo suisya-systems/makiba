@@ -1,7 +1,8 @@
 //! `makiba hook pre-commit|pre-merge-commit|pre-applypatch|commit-msg|applypatch-msg`
 //! (Issue 136, line L-K12):
-//! the git hooks that keep a token-shaped line out of the history. `makibad` points the project
-//! clone's `core.hooksPath` at a folder of its own whose scripts run these (see `install`).
+//! the git hooks that keep a token-shaped line out of the history. `makibad` points a code run's
+//! `core.hooksPath` at a folder of its own whose scripts run these, and then the project's own
+//! hook of the same name (Issue 236; see `install`).
 //!
 //! Unlike the Claude Code hooks of this module's parent these are run by git: they read no JSON
 //! payload. The first three read every blob the index would commit that differs from `HEAD`, as
@@ -147,23 +148,85 @@ fn quoted(s: &str) -> String {
     format!("'{}'", s.replace('\'', r"'\''"))
 }
 
-/// Write the scripts of `NAMES` into `dir`, each running `makiba` (an absolute path) and refusing
-/// with the path when it is missing or cannot run. A script already as wanted is left as it is.
+/// The hook names whose scripts only forward to the project's own hook (Issue 236): every name
+/// git runs by name except the scanner's, `push-to-checkout` and `proc-receive` (whose mere
+/// presence changes what git does) and `fsmonitor-watchman` (not run by name).
+pub const FORWARDED: [&str; 19] = [
+    "prepare-commit-msg",
+    "post-commit",
+    "pre-rebase",
+    "post-checkout",
+    "post-merge",
+    "post-rewrite",
+    "post-applypatch",
+    "pre-push",
+    "pre-auto-gc",
+    "reference-transaction",
+    "post-index-change",
+    "sendemail-validate",
+    "pre-receive",
+    "update",
+    "post-receive",
+    "post-update",
+    "p4-changelist",
+    "p4-prepare-changelist",
+    "p4-post-changelist",
+];
+
+/// The run's configuration key naming the project's own hooks folder (Issue 236).
+pub const PROJECT_KEY: &str = "makiba.projectHooksPath";
+
+/// The shell lines that run the project's hook `name` from the folder `PROJECT_KEY` names, if
+/// there is one, as the last step when `last` (its status is the script's).
+fn forward(name: &str, last: bool) -> String {
+    let run = if last { "exec " } else { "" };
+    let then = if last { "" } else { " || exit $?" };
+    format!(
+        "d=$(git config --get {PROJECT_KEY}) || exit 0\n\
+         [ -x \"$d/{name}\" ] || exit 0\n\
+         if [ \"$d/{name}\" -ef \"$0\" ]; then\n\
+         \x20 echo \"makiba: refused: {PROJECT_KEY} names the secret scanner's own folder $d\" >&2\n\
+         \x20 exit 1\n\
+         fi\n\
+         {run}\"$d/{name}\" \"$@\"{then}\n"
+    )
+}
+
+/// Write the scripts of `NAMES` and `FORWARDED` into `dir`, each running `makiba` (an absolute
+/// path) and refusing with the path when it is missing or cannot run. A scanner script scans,
+/// runs the project's hook of its name (Issue 236) and scans again, for what that hook staged or
+/// wrote; a forwarding script runs the project's hook only. A script already as wanted is left
+/// as it is.
 pub fn install(dir: &Path, makiba: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
     let m = quoted(&makiba.to_string_lossy());
-    for name in NAMES {
-        let script = format!(
-            "#!/bin/sh\n\
-             # Written by makibad (Issue 136): the secret scanner of the project clone. Preparing a worktree rewrites it.\n\
-             m={m}\n\
-             if [ ! -x \"$m\" ]; then\n\
-             \x20 echo \"makiba: refused: the secret scanner $m is missing or cannot run; install makiba at that path again, or restart makibad from the installed binary and prepare a worktree, which rewrites this hook\" >&2\n\
-             \x20 exit 1\n\
-             fi\n\
-             exec \"$m\" hook {name} \"$@\"\n"
-        );
+    let head = format!(
+        "#!/bin/sh\n\
+         # Written by makibad (Issues 136, 236): the secret scanner of a code run, then the project's own hook. Preparing a worktree rewrites it.\n\
+         m={m}\n\
+         if [ ! -x \"$m\" ]; then\n\
+         \x20 echo \"makiba: refused: the secret scanner $m is missing or cannot run; install makiba at that path again, or restart makibad from the installed binary and prepare a worktree, which rewrites this hook\" >&2\n\
+         \x20 exit 1\n\
+         fi\n"
+    );
+    let scripts = NAMES
+        .iter()
+        .map(|name| {
+            let script = format!(
+                "{head}\"$m\" hook {name} \"$@\" || exit $?\n{}exec \"$m\" hook {name} \"$@\"\n",
+                forward(name, false)
+            );
+            (name, script)
+        })
+        .chain(FORWARDED.iter().map(|name| {
+            let script = format!(
+                "#!/bin/sh\n# Written by makibad (Issue 236): the project's own hook. Preparing a worktree rewrites it.\n{}",
+                forward(name, true)
+            );
+            (name, script)
+        }));
+    for (name, script) in scripts {
         let path = dir.join(name);
         if std::fs::read_to_string(&path).ok().as_deref() != Some(&script) {
             std::fs::write(&path, &script)?;

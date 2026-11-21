@@ -72,7 +72,8 @@ pub struct Push {
     rx: Receiver<(Job, Outcome)>,
 }
 
-/// `git -C <dir> <args>` with no terminal prompt: its trimmed output, or git's message.
+/// `git -C <dir> <args>` with no terminal prompt and no hook (Issue 236): its trimmed output, or
+/// git's message.
 fn git(dir: &Path, args: &[&str]) -> std::result::Result<String, String> {
     git_in(dir, args, String::new())
 }
@@ -83,6 +84,7 @@ fn git_in(dir: &Path, args: &[&str], input: String) -> std::result::Result<Strin
     let mut child = Command::new("git")
         .arg("-C")
         .arg(dir)
+        .args(["-c", run_repo::HOOKS_OFF])
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
@@ -114,7 +116,14 @@ fn is_ancestor(dir: &Path, a: &str, b: &str) -> std::result::Result<bool, String
     let out = Command::new("git")
         .arg("-C")
         .arg(dir)
-        .args(["merge-base", "--is-ancestor", a, b])
+        .args([
+            "-c",
+            run_repo::HOOKS_OFF,
+            "merge-base",
+            "--is-ancestor",
+            a,
+            b,
+        ])
         .env("GIT_NO_REPLACE_OBJECTS", "1")
         .stdin(Stdio::null())
         .output()
