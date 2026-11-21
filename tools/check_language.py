@@ -1,6 +1,6 @@
 """Fail when a file under src/, roles/, skills/, docs/, tests/ or knowledge/ holds
 Hiragana, Katakana or CJK Unified Ideographs, except under the paths in
-tools/language-allowlist.txt (M0-7, G7)."""
+tools/language-allowlist.txt (M0-7, G9)."""
 import re
 import sys
 from pathlib import Path
