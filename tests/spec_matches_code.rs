@@ -284,7 +284,7 @@ fn every_kind_of_name_is_read_from_the_document() {
     assert_eq!(count("error:"), 8);
     assert_eq!(count("tag:"), 5);
     assert_eq!(count("agent-id:"), 4);
-    assert_eq!(count("event:"), 14 + 27);
+    assert_eq!(count("event:"), 14 + 36);
 }
 
 #[test]
@@ -375,11 +375,12 @@ fn section_5_sql_is_migration_v4() {
     }
     let spec_stmts = statements(&spec_sql);
     let file_stmts: BTreeSet<String> = statements(&format!(
-        "{};{};{};{}",
+        "{};{};{};{};{}",
         makiba::db::SCHEMA_V4,
         makiba::db::SCHEMA_V5,
         makiba::db::SCHEMA_V6,
-        makiba::db::SCHEMA_V7
+        makiba::db::SCHEMA_V7,
+        makiba::db::SCHEMA_V8
     ))
     .into_iter()
     .filter(|s| !(s == "BEGIN" || s == "COMMIT" || s.starts_with("INSERT INTO schema_migrations")))
