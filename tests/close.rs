@@ -124,19 +124,10 @@ fn org(task: &str, kind: &str, workplace: Option<PathBuf>) -> Org {
             docs
         } else {
             let wt = root.join("workers/p").join(task);
-            std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
-            git(
-                &repo(),
-                &[
-                    "worktree",
-                    "add",
-                    "-q",
-                    "-b",
-                    &format!("makiba/{task}"),
-                    &wt.to_string_lossy(),
-                    "main",
-                ],
-            );
+            let gitdir = makiba::daemon::run_repo::dir(&state.join("settings"), task);
+            let (branch, hooks) = (format!("makiba/{task}"), state.join("git-hooks"));
+            makiba::daemon::run_repo::create(&repo(), &gitdir, &wt, &branch, "main", &hooks)
+                .unwrap();
             wt
         }
     });

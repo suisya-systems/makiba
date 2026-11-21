@@ -11,14 +11,15 @@ Once a branch is pushed it is never force-pushed, so it takes the base in as a m
 ## Steps
 
 1. mcp__makiba__update with `task` (the task id) and `base` (the pull request's base branch, for example `main`). It answers `accepted`; end your turn.
-2. `makibad` fetches the base and the branch from origin, merges `origin/<base>` into the run's worktree when the branch does not hold it yet (a merge commit, never a rebase), pushes the result, never forced, and sends you a notice.
+2. `makibad` fetches the base and the branch from origin into the project's repository, merges `origin/<base>` into the worktree's head there when the branch does not hold it yet (a merge commit, never a rebase), pushes the result, never forced, and sends you a notice. The worker's worktree is not changed (Issue 241).
 3. The notice names the head at origin: call mcp__makiba__pr with `state` `pushed`, the pull request's `repo`, `pr` and `task`, and that full `head`, as in the pull-request skill. When the notice says nothing was merged and the head is the one already recorded, there is nothing to record.
-4. The notice says it failed:
-   - A conflict: the merge was undone and the notice names the files. Send them to the worker with mcp__makiba__send to resolve (it merges the base itself and commits); it reports done again, and you push with mcp__makiba__push.
+4. When something was merged, tell the worker with mcp__makiba__send: "origin/<branch> is updated to <head>: run git fetch origin, then git merge --ff-only origin/<branch>". If it has committed since, the fast-forward fails: it then runs git merge origin/<branch> (a merge commit, never a rebase) and reports done again, and you push with mcp__makiba__push.
+5. The notice says it failed:
+   - A conflict: nothing was merged and the notice names the files. Send them to the worker with mcp__makiba__send to resolve (it merges the base itself and commits); it reports done again, and you push with mcp__makiba__push.
    - Uncommitted changes, or the worktree on another branch: they are the worker's; ask it with mcp__makiba__send, then call update again.
    - The branch is not at origin: it was never pushed; it is the worker's to rebase.
    - The branch moved at origin: somebody else pushed to it. Tell the person; nothing was merged or pushed.
-   - The push failed after the merge (git's message, for example a missing credential): the merge stays in the worktree; once the cause is dealt with, call update or push again.
+   - The push failed after the merge (git's message, for example a missing credential): nothing changed at origin or in the worktree; once the cause is dealt with, call update again.
 
 Never rebase a pushed branch, never force, never reset. Your hooks refuse the dangerous forms.
 

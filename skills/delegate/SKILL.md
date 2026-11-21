@@ -50,4 +50,4 @@ Never put a token, a password or a path of the person's own machine that the tas
 
 ## A worker says "base is stale"
 
-A worker reads its base from the project repository's `origin/<branch>`. Call mcp__makiba__project with the project's slug and repository; when the notice says it is done, answer the worker with mcp__makiba__send: "origin/<branch> is updated to <sha>" (the sha is in the notice). It rebases itself. If the notice says it failed, tell the person the reason.
+A worker reads its base from the project repository's `origin/<branch>`. Call mcp__makiba__project with the project's slug and repository; when the notice says it is done, answer the worker with mcp__makiba__send: "origin/<branch> is updated to <sha>: run git fetch origin" (the sha is in the notice). Its `origin` is the project's repository (Issue 241), so the fetch brings that sha; it rebases itself. If the notice says it failed, tell the person the reason.
