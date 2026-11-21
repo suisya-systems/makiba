@@ -34,6 +34,9 @@ const IDLE_WAIT_S: f64 = 600.0;
 /// The relaunch window after `secretary_gone`, and how many relaunches it holds (first proposals).
 const RELAUNCH_WINDOW_S: f64 = 600.0;
 const RELAUNCHES: i64 = 2;
+/// How long before the renewal a message delivered to the secretary is still named in the new
+/// secretary's records part (Issue 202, a first proposal).
+const DELIVERED_WINDOW_S: f64 = 600.0;
 
 const BRIEF: &str = "You are the secretary of this makiba organization: the one agent the person talks to. Your rules are appended to your system prompt. Wait for the person's first request.";
 
@@ -41,6 +44,12 @@ const RESUME: &str = "You are the secretary of this makiba organization, launche
 
 const CUT: &str =
     "\n[cut: call the pending tool with action list, and the status tool, for the rest]";
+
+/// The head of the records part (Issue 202): it tells the records from the handover.
+const RECORDS: &str =
+    "--- Read from the records (state.db) at this launch, not from the handover ---";
+
+const RECORDS_CUT: &str = "\n[cut: call the pending tool with action list, the inbox tool, and the show tool with a message id, for the rest]";
 
 pub struct Secretary {
     org: String,
@@ -55,7 +64,8 @@ pub struct Secretary {
 struct Renewal {
     id: i64,
     actor: String,
-    handover: String,
+    /// None for a relaunch of `makibad` that found no handover left.
+    handover: Option<String>,
     age_s: f64,
     old: Option<String>,
     /// `old` was recorded (it may be null: no secretary ran): the ending has begun.
@@ -143,28 +153,31 @@ impl Secretary {
         // No secretary runs: every secretary key left, its terminal gone or not, dies before a new
         // one is issued. A secretary that ran before resumes from what it left.
         revoke_all(w)?;
-        let before: bool = w.conn().query_row(
-            "SELECT EXISTS (SELECT 1 FROM run_launch WHERE role = 'secretary')",
-            [],
-            |r| r.get(0),
-        )?;
-        let brief = if before {
-            resume_brief(&last_handover(w)?.map_or_else(|| state_text(w), Ok)?)
-        } else {
-            BRIEF.to_string()
-        };
-        if let Err(e) = super::launch::add_launch(
-            w,
-            spec::Role::Secretary,
-            &self.folder,
-            &brief,
-            None,
-            &self.agent,
-        ) {
-            eprintln!("makibad: cannot add the secretary launch: {e}");
-            return Ok(false);
-        }
-        Ok(true)
+        // The records are read in the transaction that adds the launch: one snapshot.
+        w.transaction(|w| {
+            let before: bool = w.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM run_launch WHERE role = 'secretary')",
+                [],
+                |r| r.get(0),
+            )?;
+            let brief = if before {
+                launch_brief(w, last_handover(w)?.as_deref(), None)?
+            } else {
+                BRIEF.to_string()
+            };
+            if let Err(e) = super::launch::add_launch(
+                w,
+                spec::Role::Secretary,
+                &self.folder,
+                &brief,
+                None,
+                &self.agent,
+            ) {
+                eprintln!("makibad: cannot add the secretary launch: {e}");
+                return Ok(false);
+            }
+            Ok(true)
+        })
     }
 
     /// One step of the renewal `r` (spec section 5.3).
@@ -259,12 +272,13 @@ impl Secretary {
                 return Ok(());
             }
         }
-        let brief = resume_brief(&r.handover);
         let folder = self.folder.clone();
         let agent = self.agent.clone();
-        // The launch and the progress that names it are one transaction.
+        // The launch, the records its brief holds and the progress that names it are one
+        // transaction.
         w.transaction(|w| {
             revoke_all(w)?;
+            let brief = launch_brief(w, r.handover.as_deref(), Some(r.id))?;
             match super::launch::add_launch(w, spec::Role::Secretary, &folder, &brief, None, &agent)
             {
                 Ok(new) => progress(w, r.id, &json!({"old": r.old, "new": new})),
@@ -296,14 +310,13 @@ impl Secretary {
             let why = "relaunch limit reached: twice in 10 minutes; run makiba up";
             return insert(w, json!({"reason": "secretary_gone"}), "rejected", Err(why));
         }
-        let handover = last_handover(w)?.map_or_else(|| state_text(w), Ok)?;
+        // With no handover left, the launch builds what state.db holds open (`launch_brief`).
+        let args = match last_handover(w)? {
+            Some(h) => json!({"handover": h, "reason": "secretary_gone"}),
+            None => json!({"reason": "secretary_gone"}),
+        };
         eprintln!("makibad: the secretary is gone; relaunching it");
-        insert(
-            w,
-            json!({"handover": handover, "reason": "secretary_gone"}),
-            "accepted",
-            Ok(()),
-        )
+        insert(w, args, "accepted", Ok(()))
     }
 
     fn is_ours(&self, t: &Terminal) -> bool {
@@ -332,7 +345,7 @@ fn renewal(w: &StateWriter) -> Result<Option<Renewal>> {
         Renewal {
             id,
             actor,
-            handover: args["handover"].as_str().unwrap_or_default().to_string(),
+            handover: args["handover"].as_str().map(String::from),
             age_s,
             old: text(&result["result"]["old"]),
             ending: result["result"].get("old").is_some(),
@@ -514,6 +527,88 @@ fn state_text(w: &StateWriter) -> Result<String> {
     Ok(text)
 }
 
+/// The brief of a secretary that resumes: with a handover, the handover and then the records part
+/// (Issue 202); with none, what state.db holds open, as before. `renewal` is the `renew` row whose
+/// `received_at` the message window counts back from; none counts back from now.
+fn launch_brief(w: &StateWriter, handover: Option<&str>, renewal: Option<i64>) -> Result<String> {
+    Ok(match handover {
+        Some(h) => resume_brief_with(h, &records(w, renewal)?),
+        None => resume_brief(&state_text(w)?),
+    })
+}
+
+/// What the records say now: the messages delivered to the secretary since `DELIVERED_WINDOW_S`
+/// before the renewal (read them with `show`), the runs at `review`, the open pending entries and
+/// the `in_use` runs.
+fn records(w: &StateWriter, renewal: Option<i64>) -> Result<String> {
+    let c = w.conn();
+    let list =
+        |text: &mut String, head: &str, sql: &str, p: &[&dyn rusqlite::ToSql]| -> Result<()> {
+            text.push_str(head);
+            let mut q = c.prepare(sql)?;
+            let rows = q.query_map(p, |r| r.get::<_, String>(0))?;
+            let before = text.len();
+            for row in rows {
+                text.push_str(&row?);
+                text.push('\n');
+            }
+            if text.len() == before {
+                text.push_str("- none\n");
+            }
+            Ok(())
+        };
+    let mut text = format!("{RECORDS}\n");
+    list(
+        &mut text,
+        "Messages delivered to the secretary just before this launch (read them with the show tool):\n",
+        "SELECT printf('- #%d %s from %s (task %s)', m.id, m.kind, m.sender, coalesce(r.task_id, '-'))
+         FROM messages m
+         JOIN event_deliveries d ON d.source_event_id = m.event_id AND d.recipient = m.recipient
+         LEFT JOIN runs r ON r.id = m.run_id
+         WHERE m.recipient = 'secretary' AND d.status = 'delivered'
+           AND julianday(d.delivered_at) >= julianday(coalesce(
+                 (SELECT received_at FROM commands WHERE id = ?1), 'now')) - ?2 / 86400.0
+         ORDER BY m.id",
+        &[&renewal, &DELIVERED_WINDOW_S],
+    )?;
+    list(
+        &mut text,
+        "Runs waiting for review:\n",
+        "SELECT printf('- %s: %s', task_id, title) FROM runs WHERE status = 'review' ORDER BY id",
+        &[],
+    )?;
+    list(
+        &mut text,
+        "Open pending entries:\n",
+        "SELECT printf('- #%d (%s, task %s): %s', p.id, p.status, coalesce(r.task_id, '-'), p.question)
+         FROM pending p LEFT JOIN runs r ON r.id = p.run_id
+         WHERE p.status IN ('open', 'escalated') ORDER BY p.id",
+        &[],
+    )?;
+    list(
+        &mut text,
+        "Running tasks:\n",
+        "SELECT printf('- %s: %s', task_id, title) FROM runs WHERE status = 'in_use' ORDER BY id",
+        &[],
+    )?;
+    Ok(text)
+}
+
+/// The resume line, the handover and the records, at most `HANDOVER_MAX` bytes in all: the tail
+/// is cut, so the records go first and the handover only once they are all gone.
+fn resume_brief_with(handover: &str, records: &str) -> String {
+    let mut brief = format!("{RESUME}\n\n{handover}\n\n{records}");
+    if brief.len() > HANDOVER_MAX {
+        let mut end = HANDOVER_MAX - RECORDS_CUT.len();
+        while !brief.is_char_boundary(end) {
+            end -= 1;
+        }
+        brief.truncate(end);
+        brief.push_str(RECORDS_CUT);
+    }
+    brief
+}
+
 /// The resume line and `text`, at most `HANDOVER_MAX` bytes in all.
 fn resume_brief(text: &str) -> String {
     let mut brief = format!("{RESUME}\n\n{text}");
@@ -605,5 +700,17 @@ mod tests {
         assert!(brief.len() <= HANDOVER_MAX);
         assert!(brief.ends_with(CUT));
         assert_eq!(resume_brief("short"), format!("{RESUME}\n\nshort"));
+    }
+
+    /// Over the limit, the records are cut before the handover, and the cut is always said.
+    #[test]
+    fn the_records_are_cut_before_the_handover() {
+        let handover = "h".repeat(HANDOVER_MAX / 2);
+        let brief = resume_brief_with(&handover, &"r".repeat(HANDOVER_MAX));
+        assert_eq!(brief.len(), HANDOVER_MAX);
+        assert!(brief.contains(&handover) && brief.ends_with(RECORDS_CUT));
+        let brief = resume_brief_with(&"\u{e9}".repeat(HANDOVER_MAX / 2), "records");
+        assert!(brief.len() <= HANDOVER_MAX && brief.ends_with(RECORDS_CUT));
+        assert!(!brief.contains("records"));
     }
 }
