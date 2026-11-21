@@ -52,7 +52,14 @@ GitHub is read, not written: `git clone` / `git fetch` of `suisya-systems/makiba
 
 The same steps (sections 6 to 9) can be run first in a scratch place, so that nothing of section 3 is written. It reads the same GitHub repository and launches the same kind of worker, so it shows the procedure works on this host; it does not register makiba in the real organization, and the real run (sections 5 to 9 with no variable set) is still needed afterwards. It leaves trust entries in `~/.claude.json` for the scratch path, like the real run.
 
-In a login shell, in the repository (with `MK` set, section 5, precondition 6), set the variables of `docs/runbooks/first-worker.md` section 3: run its first block with `makiba-m71` in place of `makiba-m45` in `RUN` and `SESSION`, and take the snapshot of the default places there (`snap > "$RUN/defaults-before.txt"`). Skip its scratch repository block: here `makibad` clones the project itself. Every step below reads its places through the same variables (`${MAKIBA_STATE_DIR:-...}`, `${XDG_CONFIG_HOME:-...}`, `${MAKIBA_REPOS_DIR:-...}`), so they run unchanged. Clean up as first-worker.md section 8 says (its `hcs kill "$W"` line has nothing left to end: the close of section 8 here ended the task's terminal), and check that the snapshot's `diff` is empty.
+In a login shell, in the repository (with `MK` set, section 5, precondition 6), set the variables of `docs/runbooks/first-worker.md` section 3: run its first block with `makiba-m71` in place of `makiba-m45` in `RUN` and `SESSION`, and take the snapshot of the default places there (`snap > "$RUN/defaults-before.txt"`). Before that block, keep the GitHub CLI's own configuration where it is: the block moves `XDG_CONFIG_HOME` to an empty folder, and the GitHub CLI reads its stored login and `git_protocol` from `$XDG_CONFIG_HOME/gh` unless `GH_CONFIG_DIR` is set. `makibad` keeps `GH_CONFIG_DIR` (only the agents' launches empty it, spec section 6.4), so set it first and add it to `env.sh` after the block:
+
+```sh
+export GH_CONFIG_DIR="${GH_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/gh}"
+gh auth status -h github.com
+```
+
+and after the block, `echo "export GH_CONFIG_DIR='$GH_CONFIG_DIR'" >> "$RUN/env.sh"`. Skip its scratch repository block: here `makibad` clones the project itself. Every step below reads its places through the same variables (`${MAKIBA_STATE_DIR:-...}`, `${XDG_CONFIG_HOME:-...}`, `${MAKIBA_REPOS_DIR:-...}`), so they run unchanged. Clean up as first-worker.md section 8 says (its `hcs kill "$W"` line has nothing left to end: the close of section 8 here ended the task's terminal), and check that the snapshot's `diff` is empty.
 
 ## 5. Preconditions
 
