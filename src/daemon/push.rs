@@ -70,15 +70,30 @@ pub struct Push {
 
 /// `git -C <dir> <args>` with no terminal prompt: its trimmed output, or git's message.
 fn git(dir: &Path, args: &[&str]) -> std::result::Result<String, String> {
-    let out = Command::new("git")
+    git_in(dir, args, String::new())
+}
+
+/// `git` with `input` on its standard input.
+fn git_in(dir: &Path, args: &[&str], input: String) -> std::result::Result<String, String> {
+    use std::io::Write;
+    let mut child = Command::new("git")
         .arg("-C")
         .arg(dir)
         .args(args)
         .env("GIT_TERMINAL_PROMPT", "0")
         .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .stdin(Stdio::null())
-        .output()
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("cannot run git: {e}"))?;
+    let mut stdin = child.stdin.take().ok_or("git has no input")?;
+    // Written beside the read, so a long output cannot stall a long input.
+    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot run git: {e}"))?;
+    let _ = writer.join();
     if out.status.success() {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     } else {
@@ -172,9 +187,17 @@ fn scan(dir: &Path, head: &str) -> std::result::Result<(), String> {
         );
     }
     let refs = remote(dir, &["ls-remote", "--heads", "--tags", url])?;
-    let mut range = vec!["--ignore-missing", head, "--not"];
-    range.extend(refs.lines().filter_map(|l| l.split_whitespace().next()));
-    let objects = git(dir, &[&["rev-list", "--objects"], &range[..]].concat())?;
+    // On standard input: a remote with many branches and tags would not fit in the arguments.
+    let range: String = [head, "--not"]
+        .into_iter()
+        .chain(refs.lines().filter_map(|l| l.split_whitespace().next()))
+        .map(|r| format!("{r}\n"))
+        .collect();
+    let objects = git_in(
+        dir,
+        &["rev-list", "--objects", "--ignore-missing", "--stdin"],
+        range.clone(),
+    )?;
     let Some((oid, path, shape, line)) = first_match(dir, &objects)? else {
         return Ok(());
     };
@@ -188,11 +211,15 @@ fn scan(dir: &Path, head: &str) -> std::result::Result<(), String> {
         Some(path) => {
             // The oldest new commit that brings the blob in; a merge's own content too (`-m`).
             let log = [
-                &["log", "-m", "--format=%H", "--find-object", &oid][..],
-                &range[..],
-            ]
-            .concat();
-            let commit = git(dir, &log)
+                "log",
+                "-m",
+                "--format=%H",
+                "--find-object",
+                &oid,
+                "--ignore-missing",
+                "--stdin",
+            ];
+            let commit = git_in(dir, &log, range)
                 .ok()
                 .and_then(|l| l.lines().last().map(str::to_string))
                 .map_or("a new commit".to_string(), |c| format!("commit {c}"));
