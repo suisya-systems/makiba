@@ -32,8 +32,26 @@ const UNKNOWN_KEY: &str = "badbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadbadba
 
 /// Every verb of spec section 12, the person's and the agents'.
 const VERBS: &[&str] = &[
-    "up", "down", "status", "dispatch", "close", "peek", "send", "report", "show", "pending",
-    "answer", "pr", "renew", "config", "inbox", "note", "push", "project", "update",
+    "up",
+    "down",
+    "status",
+    "dispatch",
+    "close",
+    "peek",
+    "send",
+    "report",
+    "show",
+    "pending",
+    "answer",
+    "pr",
+    "renew",
+    "config",
+    "inbox",
+    "note",
+    "push",
+    "project",
+    "update",
+    "candidate",
 ];
 
 fn sha256(text: &str) -> String {
@@ -406,8 +424,22 @@ fn each_role_is_listed_exactly_the_tools_of_its_verbs() {
     assert_eq!(
         org.tools(SECRETARY_KEY),
         set(&[
-            "dispatch", "close", "answer", "pr", "pending", "peek", "status", "send", "show",
-            "renew", "inbox", "note", "push", "project", "update"
+            "dispatch",
+            "close",
+            "answer",
+            "pr",
+            "pending",
+            "peek",
+            "status",
+            "send",
+            "show",
+            "renew",
+            "inbox",
+            "note",
+            "push",
+            "project",
+            "update",
+            "candidate"
         ])
     );
     let limited = set(&["report", "send", "show", "inbox"]);

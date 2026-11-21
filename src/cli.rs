@@ -253,6 +253,14 @@ pub enum Command {
         topic: String,
         text: String,
     },
+    /// Record the person's decision on a pending skill candidate.
+    Candidate {
+        pattern: String,
+        /// approved, rejected or into-<skill>.
+        decision: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Register a project and have makibad clone or fetch its GitHub repository.
     Project {
         slug: String,
@@ -381,6 +389,14 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
         Command::Note { task, topic, text } => {
             ("note", json!({"task": task, "topic": topic, "text": text}))
         }
+        Command::Candidate {
+            pattern,
+            decision,
+            reason,
+        } => (
+            "candidate",
+            json!({"pattern": pattern, "decision": decision, "reason": reason}),
+        ),
         Command::Config {
             action,
             key,
