@@ -37,6 +37,10 @@ struct Outcome {
     repos: Vec<String>,
     /// The projects with no GitHub repository, by slug.
     norepo: Vec<String>,
+    /// Every project scanned, by slug, with its repository (Issue 256).
+    projects: Vec<(String, String)>,
+    /// The same scan with no cut (Issue 256): every candidate found ready. Null when it failed.
+    every: Value,
 }
 
 struct Job {
@@ -337,15 +341,19 @@ fn scan(
     goals: &Path,
     free: usize,
 ) -> Option<Outcome> {
-    let (mut repos, mut norepo) = (Vec::<String>::new(), Vec::new());
+    let (mut repos, mut norepo, mut of) = (Vec::<String>::new(), Vec::new(), Vec::new());
     for (slug, url) in projects {
         match repo_of(slug, url.as_deref(), repos_dir) {
-            Some(r) if !repos.contains(&r) => repos.push(r),
-            Some(_) => {}
+            Some(r) => {
+                if !repos.contains(&r) {
+                    repos.push(r.clone());
+                }
+                of.push((slug.clone(), r));
+            }
             None => norepo.push(slug.clone()),
         }
     }
-    let run = |f: &mut GhFetch| -> std::result::Result<Value, String> {
+    let run = |f: &mut GhFetch| -> std::result::Result<(Value, Value), String> {
         let (mut bundles, mut t) = (Vec::new(), Truncation::default());
         for r in &repos {
             let (b, tr) = wd::gather(f, r, None, &Limits::default())?;
@@ -366,16 +374,33 @@ fn scan(
             trigger: "close".into(),
             ..ScanConfig::default()
         };
-        Ok(wd::scan_repos(
+        // Ranked once with no cut, for the record (Issue 256); the notice's cut is taken from
+        // that same ranking, so the two agree even if a goal ledger changes meanwhile.
+        let every = wd::scan_repos(
             &bundles,
-            &cfg,
+            &ScanConfig {
+                top_n: -1,
+                ..cfg.clone()
+            },
             Some(&t),
             None,
             model.as_ref(),
             Some(goals),
-        ))
+        );
+        let mut cut = every.clone();
+        let all = every["candidates"].as_array().map_or(0, Vec::len);
+        let keep = all.min(usize::try_from(cfg.top_n).unwrap_or(all));
+        if let Some(c) = cut["candidates"].as_array_mut() {
+            c.truncate(keep);
+        }
+        cut["candidate_count"] = json!(keep);
+        cut["truncated_count"] = json!(all - keep);
+        Ok((cut, every))
     };
-    let scan = run(f);
+    let (scan, every) = match run(f) {
+        Ok((s, e)) => (Ok(s), e),
+        Err(e) => (Err(e), Value::Null),
+    };
     if f.cancel.load(Ordering::SeqCst) {
         return None;
     }
@@ -383,6 +408,8 @@ fn scan(
         scan,
         repos,
         norepo,
+        projects: of,
+        every,
     })
 }
 
@@ -440,12 +467,15 @@ fn record(
         ),
         Err(e) => (json!("error"), json!(0), json!(0), json!(e)),
     };
-    let payload = json!({
+    let mut payload = json!({
         "trigger": "close", "status": status, "through_close_id": through,
         "candidate_refs": refs, "diagnostics": diagnostics,
         "candidate_count": count, "truncated_count": cut, "free_workers": free,
         "repos": o.repos, "notified": notify, "error": error,
     });
+    if let (Value::Object(p), Value::Object(more)) = (&mut payload, shown(o, goals)) {
+        p.extend(more);
+    }
     w.transaction(|w| {
         w.append_event(&NewEvent {
             kind: "work_discovery_scanned",
@@ -466,6 +496,108 @@ fn record(
         Ok(())
     })
 }
+
+/// What the read surface shows of a scan (Issue 256): the candidates in rank order, what was left
+/// out with a reason a person can act on (one entry per project of the repository), and which
+/// reads were cut short (comma list).
+fn shown(o: &Outcome, goals: &Path) -> Value {
+    let Ok(cut) = &o.scan else {
+        return json!({"candidates": [], "left_out": [], "input_truncated": "",
+                      "candidates_not_recorded": 0, "left_out_not_recorded": 0});
+    };
+    let scan = &o.every;
+    let arr = |v: &Value| v.as_array().cloned().unwrap_or_default();
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    let warnings = arr(&scan["dependency_warnings"]);
+    let rec = &scan["recommendation"];
+    let forwarded = arr(&cut["candidates"]);
+    let mut candidates: Vec<Value> = arr(&scan["candidates"])
+        .iter()
+        .map(|c| {
+            let one = c.as_object().cloned().unwrap_or_default();
+            let mut why = vec![s(&wd::make_recommendation(&[one])["reason"])];
+            // The qualifiers the notice shows: a dependency only treated as resolved.
+            why.extend(
+                arr(&c["signals"])
+                    .iter()
+                    .map(s)
+                    .filter(|g| g.contains("un-scanned") || g.contains("treated resolved")),
+            );
+            why.extend(
+                warnings
+                    .iter()
+                    .filter(|d| d["repo"] == c["repo"] && d["issue"] == c["issue"])
+                    .map(|d| format!("dependency line not read: {}", s(&d["line"]))),
+            );
+            let clause = &c["goal_clause"];
+            json!({"repo": c["repo"], "issue": c["issue"], "title": c["title"],
+                   "clause_id": clause["id"], "clause_heading": clause["heading"],
+                   "why": why.join("; "), "size": c["effort"],
+                   "size_estimated": c["effort_estimated"],
+                   "recommended": rec["repo"] == c["repo"] && rec["issue"] == c["issue"],
+                   "forwarded": forwarded.iter().any(|f| f["repo"] == c["repo"] && f["issue"] == c["issue"])})
+        })
+        .collect();
+    let mut left_out = Vec::new();
+    let mut leave = |repo: &Value, issue: Value, kind: &str, reason: String| {
+        let slugs: Vec<&String> = o
+            .projects
+            .iter()
+            .filter(|(_, r)| repo.as_str().is_some_and(|x| x.eq_ignore_ascii_case(r)))
+            .map(|(p, _)| p)
+            .collect();
+        let entry = |p: Value| json!({"project": p, "repo": repo, "issue": issue, "kind": kind, "reason": reason});
+        if slugs.is_empty() {
+            left_out.push(entry(Value::Null));
+        }
+        left_out.extend(slugs.into_iter().map(|p| entry(json!(p))));
+    };
+    let gr = &scan["goal_rank"];
+    for u in arr(&gr["goal_unset_repos"]) {
+        let reason = format!(
+            "no goal ledger, so the ready Issues of it ({}) are not ranked; write {}/{}.md (format in docs/goals.md)",
+            u["candidate_count"],
+            goals.display(),
+            s(&u["repo"])
+        );
+        leave(&u["repo"], Value::Null, "no_goal_ledger", reason);
+    }
+    for e in arr(&gr["goal_errors"]) {
+        let reason = format!("the goal ledger cannot be used: {}; fix it", s(&e["error"]));
+        leave(&e["repo"], Value::Null, "goal_ledger_error", reason);
+    }
+    for b in arr(&scan["excluded_blocked"]) {
+        if arr(&b["blocking_refs"]).is_empty() {
+            let reason =
+                "put aside by a blocked or on-hold label; remove the label to bring it back";
+            leave(&b["repo"], b["issue"].clone(), "put_aside", reason.into());
+        } else {
+            let reason = format!("held by {}", s(&b["note"]));
+            leave(&b["repo"], b["issue"].clone(), "blocked", reason);
+        }
+    }
+    for slug in &o.norepo {
+        left_out.push(
+            json!({"project": slug, "repo": null, "issue": null, "kind": "no_repository",
+            "reason": "no GitHub repository: register it with makiba project <slug> <OWNER/NAME>"}),
+        );
+    }
+    let input: Vec<&str> = ["open_issues", "open_prs", "base_merges"]
+        .into_iter()
+        .filter(|k| scan["input_truncated"][*k] == json!(true))
+        .collect();
+    let over = |v: &mut Vec<Value>| {
+        let n = v.len().saturating_sub(RECORD_MAX);
+        v.truncate(RECORD_MAX);
+        n
+    };
+    let (nc, nl) = (over(&mut candidates), over(&mut left_out));
+    json!({"candidates": candidates, "left_out": left_out, "input_truncated": input.join(","),
+           "candidates_not_recorded": nc, "left_out_not_recorded": nl})
+}
+
+/// At most this many candidates, and as many entries left out, are recorded per scan.
+const RECORD_MAX: usize = 100;
 
 /// The notice: every candidate in the scan's order with the clause it names, the qualifiers the
 /// scan attached, and the diagnostics not in the last notice (`seen`).
