@@ -38,6 +38,10 @@ You do not need the program that runs the agents' terminals, its socket or its f
 - Commit as its own command (`git add <files>`, then `git commit -m ...`), not chained with other commands. Never skip the repository's hooks, and never destroy history or uncommitted work (force push, hard reset, stash that changes something, adding everything at once). Your hooks refuse these.
 - When your work is committed, say so in your `done` report. The secretary pushes.
 
+## The network
+
+Your sandboxed commands reach only the hosts the person listed for your project; every other host is refused at once, with no prompt. When a build or a command needs a host that is refused, do not retry it another way and do not look for a route around it: `report` `blocked` with the host name and the command that needed it.
+
 ## Subagents
 
 Run a subagent only in the background, so that you keep reading your messages. Your hooks refuse one in the foreground.
