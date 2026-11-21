@@ -269,6 +269,8 @@ pub fn mcp_config(door: &DoorAccess) -> String {
         "type": "http",
         "url": format!("http://{}{}", door.address, crate::daemon::door::MCP_PATH),
         "headers": {"Authorization": format!("Bearer {}", door.token)},
+        // A review waits for its reader up to its bound (Issue 135): the call's limit is above it.
+        "timeout": crate::daemon::review::BOUND.as_millis() as u64 + 5 * 60 * 1000,
     }}})
     .to_string()
 }

@@ -439,11 +439,15 @@ fn each_role_is_listed_exactly_the_tools_of_its_verbs() {
             "push",
             "project",
             "update",
-            "candidate"
+            "candidate",
+            "review"
         ])
     );
     let limited = set(&["report", "send", "show", "inbox"]);
-    assert_eq!(org.tools(WORKER_KEY), limited);
+    assert_eq!(
+        org.tools(WORKER_KEY),
+        set(&["report", "send", "show", "inbox", "review"])
+    );
     assert_eq!(org.tools(CURATOR_KEY), limited);
 }
 
