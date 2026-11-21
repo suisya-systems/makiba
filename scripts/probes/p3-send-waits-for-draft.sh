@@ -16,6 +16,7 @@ probe_init p3 "${1:-}" 0.1.20
 MODE=${P3_MODE:-keys}
 REPO=$WORK/repo; new_repo "$REPO" || { say "RESULT p3: precondition-failed (repository)"; exit 2; }
 T=p3-agent
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 launch "$T" "$REPO" -- --permission-mode default || { record launch FAIL "hc run failed"; finish; }
 wait_ready "$T" 120 || { record launch NEEDS-HUMAN "claude did not reach an empty prompt in 120s"; screen_dump "$T" launch; finish; }
 

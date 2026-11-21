@@ -48,6 +48,27 @@ jobs:
         with:
           python-version: "3.11"
       - run: python3 tools/check_language.py
+      - name: Shell scripts parse, and shellcheck finds no error (SC2218, a function used before its definition, is one)
+        # shellcheck is preinstalled on ubuntu-latest; nothing is downloaded.
+        run: |
+          shellcheck --version
+          for f in scripts/*.sh scripts/probes/*.sh; do bash -n "$f" || exit 1; done
+          shellcheck --severity=error scripts/*.sh scripts/probes/*.sh
+      - name: Each probe runs once - its --help, then a dry run through its exit handler
+        # PROBE_DRY_RUN=1 stops before the base, makibad or an agent is started (scripts/probes/README.md);
+        # no hc, claude or secret is needed. timeout bounds a hang, such as an exit handler that calls itself.
+        # The exit handler ran to its end only if the scratch folder probe_init printed is gone.
+        run: |
+          for f in scripts/probes/*.sh; do
+            [ "$f" != scripts/probes/lib.sh ] || continue
+            timeout 30 bash "$f" --help > /dev/null || { echo "$f --help failed"; exit 1; }
+            rc=0; out=$(MAKIBA_BIN=true PROBE_DRY_RUN=1 timeout 60 bash "$f" "$RUNNER_TEMP/dry" 2>&1) || rc=$?
+            [ "$rc" -eq 0 ] || { printf '%s\n' "$out"; echo "$f: dry run exited $rc (124: timed out)"; exit 1; }
+            work=$(printf '%s\n' "$out" | sed -n 's/^session: .*  scratch: //p')
+            printf '%s\n' "$out" | grep -q '^RESULT .*: dry run' && [ -n "$work" ] && [ ! -e "$work" ] \
+              || { printf '%s\n' "$out"; echo "$f: no dry-run RESULT line, or the exit handler left $work"; exit 1; }
+            echo "$f: ok"
+          done
   acceptance:
     # .github/acceptance-check names this job: claude-org-ja's landing gate takes it as the
     # test-first evidence. Rename the job and that file together. See docs/acceptance-check.md.

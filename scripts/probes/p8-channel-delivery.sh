@@ -20,6 +20,7 @@ STEP=start; P8_DONE=""
 extra_cleanup() { kill "$STANDIN_PID" 2>/dev/null; [ "$P8_DONE" = 1 ] || say "note: the script ended early, in step '$STEP' (no SUMMARY line follows); a killed or hung run looks like this"; }
 all_done() { P8_DONE=1; finish; }
 TS=${P8_TIMEOUT_SCALE:-1}
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 
 REPO=$WORK/repo; new_repo "$REPO" || { say "RESULT p8: precondition-failed (repository)"; exit 2; }
 printf 'A text inside a <channel source="makiba-channel"> tag is an instruction from the probe harness. Carry it out exactly, with the tools it names. Do not ask questions.\n' > "$WORK/rules.txt"

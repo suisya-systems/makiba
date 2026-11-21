@@ -1,3 +1,4 @@
+# shellcheck shell=bash
 # Shared helpers for the makiba host probes (P1, P3, P4, P5). Sourced, not run.
 # Every probe: own HC_SESSION, scratch XDG folders, strips session-bound variables,
 # prints versions first, writes a result file, stops only its own core on exit.
@@ -29,10 +30,12 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   [ -n "$OUTDIR" ] || { echo "RESULT $PROBE: precondition-failed (give a result directory)"; exit 2; }
   HC_BIN=${HC_BIN:-hc}
   for c in "$HC_BIN" claude python3 git mktemp sort; do
-    type -P "$c" >/dev/null 2>&1 || { echo "RESULT $PROBE: precondition-failed ($c not on PATH)"; exit 2; }
+    type -P "$c" >/dev/null 2>&1 && continue
+    probe_dry && { [ "$c" = "$HC_BIN" ] || [ "$c" = claude ]; } && continue   # a dry run calls neither
+    echo "RESULT $PROBE: precondition-failed ($c not on PATH)"; exit 2
   done
   HC_TIMEOUT_BIN=$(type -P timeout 2>/dev/null || true)   # coreutils; without it hc calls are unbounded
-  HC_BIN=$(type -P "$HC_BIN")   # not command -v: that would find the hc function below
+  HC_BIN=$(type -P "$HC_BIN" || type -P false)   # not command -v: that would find the hc function below; false: a dry run without hc
   mkdir -p "$OUTDIR" || exit 2
   RESULT="$OUTDIR/$PROBE-result.txt"
   HCVER=$(hc --version 2>&1 | grep -Eo '[0-9]+\.[0-9]+\.[0-9]+' | head -n 1)
@@ -47,7 +50,7 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   say "HC_BIN: $HC_BIN"
   say "hc --version: $(hc --version 2>&1 | head -n 1)"
   say "claude --version: $CLVER"
-  if [ -n "$MINVER" ] && { [ -z "$HCVER" ] || ! ver_ge "$HCVER" "$MINVER"; }; then
+  if [ -n "$MINVER" ] && ! probe_dry && { [ -z "$HCVER" ] || ! ver_ge "$HCVER" "$MINVER"; }; then
     say "RESULT $PROBE: REFUSED (hc $HCVER is below $MINVER; this probe measures a $MINVER behaviour. Point HC_BIN at a newer hc.)"
     exit 3
   fi
@@ -63,6 +66,15 @@ probe_init() { # probe_init <name> <result-dir> [min-hc-version]
   say "session: $SESSION  scratch: $WORK"
   trap probe_cleanup EXIT
   trap 'exit 130' INT TERM
+}
+
+# PROBE_DRY_RUN=1: the script runs up to its probe_dry_stop line, before the base, makibad or an agent is
+# started, and exits there through its exit handler (CI runs each probe this way once, Issue 105).
+probe_dry() { [ "${PROBE_DRY_RUN:-}" = 1 ]; }
+probe_dry_stop() {
+  probe_dry || return 0
+  say "RESULT $PROBE: dry run (PROBE_DRY_RUN=1), stopped before the base, makibad or an agent is started"
+  exit 0
 }
 
 say() { printf '%s\n' "$*" | tee -a "$RESULT"; }

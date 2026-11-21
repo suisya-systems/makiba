@@ -33,6 +33,7 @@ python3 "$WORK/door.py" "$DOOR" "$WORK/door.log" & DOORPID=$!
 extra_cleanup() { kill "$DOORPID" 2>/dev/null; }
 i=0; while [ ! -S "$DOOR" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
 [ -S "$DOOR" ] || { say "RESULT p1: precondition-failed (listener did not start)"; exit 2; }
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 
 # Learn the scratch core's own socket paths from a terminal it launches (names paddock measured).
 cat > "$WORK/envdump.sh" <<'SH'
