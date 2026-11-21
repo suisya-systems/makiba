@@ -66,6 +66,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "curator_started",
     "run_taken",
     "raw_note_saved",
+    "skill_candidate_decided",
     "observation_lost",
     "config_set",
 ];
@@ -167,6 +168,7 @@ pub enum Verb {
     Push,
     Project,
     Update,
+    Candidate,
 }
 
 impl Verb {
@@ -191,6 +193,7 @@ impl Verb {
         Verb::Push,
         Verb::Project,
         Verb::Update,
+        Verb::Candidate,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -215,6 +218,7 @@ impl Verb {
             Verb::Push => "push",
             Verb::Project => "project",
             Verb::Update => "update",
+            Verb::Candidate => "candidate",
         }
     }
 }
@@ -256,7 +260,7 @@ impl Role {
         match self {
             Role::Secretary => &[
                 Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox, Note,
-                Push, Project, Update,
+                Push, Project, Update, Candidate,
             ],
             Role::Worker | Role::Curator => &[Report, Send, Show, Inbox],
             Role::Person => Verb::ALL,
