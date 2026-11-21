@@ -374,15 +374,28 @@ fn scan(
             trigger: "close".into(),
             ..ScanConfig::default()
         };
-        let scan = |cfg: &ScanConfig| {
-            wd::scan_repos(&bundles, cfg, Some(&t), None, model.as_ref(), Some(goals))
-        };
-        // The scan reads nothing: ranked again with no cut, from the same reads, for the record.
-        let every = scan(&ScanConfig {
-            top_n: -1,
-            ..cfg.clone()
-        });
-        Ok((scan(&cfg), every))
+        // Ranked once with no cut, for the record (Issue 256); the notice's cut is taken from
+        // that same ranking, so the two agree even if a goal ledger changes meanwhile.
+        let every = wd::scan_repos(
+            &bundles,
+            &ScanConfig {
+                top_n: -1,
+                ..cfg.clone()
+            },
+            Some(&t),
+            None,
+            model.as_ref(),
+            Some(goals),
+        );
+        let mut cut = every.clone();
+        let all = every["candidates"].as_array().map_or(0, Vec::len);
+        let keep = all.min(usize::try_from(cfg.top_n).unwrap_or(all));
+        if let Some(c) = cut["candidates"].as_array_mut() {
+            c.truncate(keep);
+        }
+        cut["candidate_count"] = json!(keep);
+        cut["truncated_count"] = json!(all - keep);
+        Ok((cut, every))
     };
     let (scan, every) = match run(f) {
         Ok((s, e)) => (Ok(s), e),
