@@ -93,10 +93,22 @@ Result of the rerun (M4-2, 2026-11-19T12:13Z, hc 0.1.21, Claude Code 2.1.328, `s
 - `unsandboxed-run`: a call asked to run with the sandbox off ran inside it (`Read-only file system` writing to `$HOME`).
 - `read-tool`, `edit-tool`: refused by a permission rule (`File is in a directory that is denied by your permission settings.`); the decoy was unchanged.
 
-Cases for Issue 241 (line L-K3), recorded here before the script has them (`scripts/probes/` is a follow-up; no host row yet). The probe uses a document run, so these need a code run of their own: a scratch project clone with one commit on `main`, kept outside `${TMPDIR:-/tmp}` (Issue 243: the temporary folder is in every run's write surface), a queued `code` run of it prepared by the real `makibad`, and the questions asked of the model's Bash with the sandbox on:
+Cases for Issue 241 (line L-K3), recorded here before the script has them (`scripts/probes/` is a follow-up; no host row yet). The probe uses a document run, so these need a code run of their own: a scratch project clone with one commit on `main`, a queued `code` run of it prepared by the real `makibad`, and the questions asked of the model's Bash with the sandbox on:
 - `clone-ref-write`: `git -C <clone> update-ref refs/makiba-probe/x HEAD`, then a plain write of `<clone>/.git/refs/heads/makiba-probe`. PASS when both fail (`Read-only file system` or `cannot lock ref`) and the clone's whole `git for-each-ref`, read from outside before and after, is the same.
 - `clone-object-delete`: the probe first resolves one loose object of the clone (or its pack) from outside and checks that it exists; then a delete of that file is asked. PASS when it is refused, the file still exists and `git -C <clone> fsck --connectivity-only` from outside is clean.
 - `run-commit` (control): `git commit --allow-empty -m probe` in the workplace. PASS when it exits 0 and the run's HEAD moved: the run's own repository stays writable.
+
+Cases for Issue 243 (lines L-K4 and L-K6), the case set `run-tmp-dir`, recorded here before the script has them (a proposal: `scripts/probes/` is a follow-up; no host row yet). A code run prepared by the real `makibad`, the sandbox on, one short turn per case, the questions asked of the model's Bash:
+- `tmpdir-is-own`: `echo "$TMPDIR"`. PASS when it is under `<state>/tmp/<launch id>/claude-<uid>`: the `claude-<uid>` part shows Claude Code moved its own per-user folder by `CLAUDE_CODE_TMPDIR` (`<state>/tmp/<launch id>` alone would not tell).
+- `socket`: `python3 -c` binding a Unix socket at `$TMPDIR/s`. PASS when it binds (the path is short enough); run again with a long `MAKIBA_STATE_DIR`, and if it fails there, the folder moves to a short path under the temporary folder (the design's fallback).
+- `claude-files-moved`: from outside, the entries under `/tmp/claude-<uid>` listed before and after the session. PASS when the session added none.
+- `other-run-tmp`: a write into a second prepared launch's `<state>/tmp/<id2>`, then a recursive delete of it. PASS when both are refused and the folder is intact from outside.
+- `tmpdir-write` (control): `mktemp -p "$TMPDIR"`. PASS when it exits 0.
+- `shared-tmp-write`: a write of `/tmp/makiba-probe-<pid>`. PASS when it fails with `Read-only file system` and the file does not exist from outside.
+- `other-tmp-folder-write`: a folder `/tmp/mk-probe-other` made from outside beforehand, with a file in it; a write of a new file in it, then a recursive delete of it. PASS when both are refused and the folder and its file are intact from outside (the Issue's case: a write to another folder under the temporary folder is refused).
+- `claude-user-tmp-write`: a write of `/tmp/claude-<uid>/makiba-probe`. OBSERVATION first: it tells whether `/tmp/claude-<uid>` can also be denied for write.
+- `scratchpad`: the scratchpad path Claude Code gives the model. OBSERVATION: under the launch's folder or not.
+- `close`: after the run's close, `<state>/tmp/<launch id>` from outside. PASS when it is gone.
 
 Why the script runs one short turn per step and reads only one result line per step: of the four runs before, the first was cut off by the person's time limit; in the second, one long message raised a safeguards notice, the agent read the step files first, that call raised a permission prompt and its Escape ended the turn, so no step ran; in the third, the agent added `; echo "exit=$?"` when asked for the exit code (a prompt again), and a helper named `http.py` shadowed Python's `http`; in the fourth, `base-socket` was judged FAIL from a success marker quoted in a traceback's source line, while the socket had been refused.
 
