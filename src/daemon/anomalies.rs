@@ -14,7 +14,7 @@
 //! the events whose `role` is `secretary`, one terminal generation per `agents` row of
 //! `secretary`, and a renewal under way is a `renew` row of `commands` that is `accepted`, or
 //! `done` with the gone inside the time it took, of the terminal it replaces. Elapsed time is
-//! measured from persisted times and the `now` given; "after the last turn" is by event id. The
+//! measured from persisted times and the `now` given; which turn a report is in is by event id. The
 //! time of a status is when it was recorded, which is when it changed (the monitor writes only
 //! changes).
 //!
@@ -96,7 +96,7 @@ impl Rule {
                 "the worker's terminal is gone and no report_done was made; the run is now failed."
             }
             Rule::DoneNoReport => {
-                "the worker has been done for over 120 s with no report_done or report_blocked since its last turn."
+                "the worker has been done for over 120 s with no report_done or report_blocked during or after its latest turn."
             }
             Rule::NoStatus => "no status was recorded within 180 s of the launch.",
             Rule::SecretaryGone | Rule::SecretaryStill => "",
@@ -121,9 +121,12 @@ pub struct RunScene {
     pub gone: bool,
     /// A `report_done` for the run, ever.
     pub report_done: bool,
-    /// A `report_done` or `report_blocked` after the last `terminal_turn` (any since the launch
-    /// when there is no turn).
-    pub reported_since_turn: bool,
+    /// When the last `terminal_turn` since the launch was recorded.
+    pub turn_at: Option<i64>,
+    /// A `report_done` or `report_blocked` in the turn that just ended or after it: after the
+    /// `terminal_turn` before the last one (since the launch when the last is turn 1), or after
+    /// the last one when the turn before it was not recorded (Issue 218).
+    pub reported_in_turn: bool,
 }
 
 /// What the secretary rules need to know about the current secretary terminal.
@@ -144,7 +147,11 @@ pub fn run_rules(s: &RunScene, now: i64) -> Vec<Rule> {
             ("blocked", Some("auth")) => out.push(Rule::BlockedAuth),
             ("blocked", _) if age >= BLOCKED_QUESTION_MS => out.push(Rule::BlockedQuestion),
             ("error", _) => out.push(Rule::Error),
-            ("done", _) if age >= DONE_NO_REPORT_MS && !s.reported_since_turn => {
+            // The wait is the turn's own: a turn can end with the `done` of the last one unchanged.
+            ("done", _)
+                if now - st.at.max(s.turn_at.unwrap_or(st.at)) >= DONE_NO_REPORT_MS
+                    && !s.reported_in_turn =>
+            {
                 out.push(Rule::DoneNoReport)
             }
             _ => {}
@@ -445,27 +452,40 @@ fn run_scene(w: &StateWriter, run: i64) -> Result<RunScene> {
         params![run, since],
         |r| r.get(0),
     )?;
-    let last_turn: i64 = c.query_row(
-        &format!(
-            "SELECT COALESCE(MAX(id), 0) FROM events
-             WHERE run_id = ?1 AND kind = 'terminal_turn' AND {at} >= ?2"
-        ),
-        params![run, since],
-        |r| r.get(0),
-    )?;
+    // The last two turn ends: (id, turn counter, time). A worker reports inside its turn, before
+    // the turn's end is recorded, so a report counts from the end of the turn before (Issue 218).
+    let turns: Vec<(i64, Option<i64>, i64)> = c
+        .prepare(&format!(
+            "SELECT id, json_extract(payload_json, '$.turn'), {at} FROM events
+             WHERE run_id = ?1 AND kind = 'terminal_turn' AND {at} >= ?2
+             ORDER BY id DESC LIMIT 2"
+        ))?
+        .query_map(params![run, since], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    // A turn whose start is not recorded (the counter jumped, as after a resync) counts only the
+    // reports after its end, as before.
+    let from = match turns.as_slice() {
+        [] => 0,
+        [(_, Some(1), _)] => 0,
+        [(_, Some(n), _), (prev, Some(m), _)] if *n == m + 1 => *prev,
+        [(last, ..), ..] => *last,
+    };
+    let turn_at = turns.first().map(|t| t.2);
     let report_done: bool = c.query_row(
         "SELECT EXISTS (SELECT 1 FROM messages WHERE run_id = ?1 AND kind = 'report_done')",
         [run],
         |r| r.get(0),
     )?;
-    let reported_since_turn: bool = c.query_row(
+    let reported_in_turn: bool = c.query_row(
         &format!(
             "SELECT EXISTS (SELECT 1 FROM messages m JOIN events e ON e.id = m.event_id
              WHERE m.run_id = ?1 AND m.kind IN ('report_done', 'report_blocked')
                AND e.id > ?2 AND {} >= ?3)",
             ms("e.occurred_at")
         ),
-        params![run, last_turn, since],
+        params![run, from, since],
         |r| r.get(0),
     )?;
     Ok(RunScene {
@@ -473,7 +493,8 @@ fn run_scene(w: &StateWriter, run: i64) -> Result<RunScene> {
         status,
         gone,
         report_done,
-        reported_since_turn,
+        turn_at,
+        reported_in_turn,
     })
 }
 
