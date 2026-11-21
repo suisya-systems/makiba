@@ -16,7 +16,7 @@ use crate::agents;
 use crate::base::Base;
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
-use crate::spec::{AGENT_SECRETARY, TAG_SPAWN};
+use crate::spec::{AGENT_SECRETARY, ErrorKind, TAG_SPAWN};
 use rusqlite::params;
 use serde_json::json;
 use std::path::Path;
@@ -180,6 +180,9 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<bool> {
                 [run],
             )?;
         }
+        if let Some(task) = row.task.as_deref() {
+            super::door::finish_dispatch(w, task, None)?;
+        }
         Ok(true)
     })
 }
@@ -244,6 +247,8 @@ pub(super) fn fail(
                  WHERE task_id = ?1 AND status IN ('queued', 'suspended')",
                 params![task, format!("launch failed: {why}")],
             )?;
+            let reason = format!("launch failed at stage {stage}: {why}");
+            super::door::finish_dispatch(w, task, Some((ErrorKind::Internal, &reason)))?;
         }
         if !super::notify_gate::decide("worker_spawn_failed").send {
             return Ok(true);
