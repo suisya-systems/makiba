@@ -16,6 +16,7 @@ pub mod deny_foreground_subagent;
 pub mod deny_no_verify;
 pub mod deny_push;
 pub mod deny_workers_delete;
+pub mod git_hook;
 pub mod merge_gate;
 pub mod re;
 pub mod shell;
@@ -50,8 +51,16 @@ const CHECK_BUDGET: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub fn main(args: &[String]) -> ExitCode {
     let name = args.first().map(String::as_str);
+    // The git hooks of the secret scanner (Issue 136) are run by git and read no payload.
+    if let Some(git) = git_hook::NAMES.iter().find(|n| Some(**n) == name) {
+        return git_hook::main(git, &args[1..]);
+    }
     let Some(&(_, hook)) = HOOKS.iter().find(|(n, _)| Some(*n) == name) else {
-        let names: Vec<&str> = HOOKS.iter().map(|(n, _)| *n).collect();
+        let names: Vec<&str> = HOOKS
+            .iter()
+            .map(|(n, _)| *n)
+            .chain(git_hook::NAMES)
+            .collect();
         eprintln!("usage: makiba hook <{}>", names.join("|"));
         return ExitCode::from(2);
     };
