@@ -273,17 +273,22 @@ impl Fetch for GhFetch {
 
 /// `owner/repo`, lowercased, of a github.com URL (`https://github.com/o/r(.git)`,
 /// `git@github.com:o/r.git`, `ssh://git@github.com/o/r`), as the carried `_owner_repo_from_url`.
-/// The host must be `github.com` itself, not a name ending in it.
+/// The host must be `github.com` itself, not a name ending in it; user info is dropped only inside
+/// the authority (before the first `/` of a scheme URL, before the `:` of the scp form), so an `@`
+/// in a path does not move the host (Issue 198).
 pub fn owner_repo_from_url(url: &str) -> Option<String> {
     let s = url.trim().to_lowercase();
-    let host = s
-        .strip_prefix("https://")
-        .or_else(|| s.strip_prefix("http://"))
-        .or_else(|| s.strip_prefix("ssh://"))
-        .or_else(|| s.strip_prefix("git://"))
-        .unwrap_or(&s);
-    let host = host.split_once('@').map_or(host, |(_, h)| h);
-    let rest = host.strip_prefix("github.com")?.strip_prefix([':', '/'])?;
+    let (authority, rest) = match s.split_once("://") {
+        Some((scheme, after)) => {
+            ["https", "http", "ssh", "git"]
+                .contains(&scheme)
+                .then_some(())?;
+            after.split_once('/')?
+        }
+        None => s.split_once(':').filter(|(a, _)| !a.contains('/'))?,
+    };
+    let host = authority.rsplit_once('@').map_or(authority, |(_, h)| h);
+    (host == "github.com").then_some(())?;
     let mut parts = rest.trim_end_matches('/').splitn(3, '/');
     let owner = parts.next().filter(|p| !p.is_empty())?;
     let repo = parts.next()?;
