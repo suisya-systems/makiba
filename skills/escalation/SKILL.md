@@ -10,9 +10,9 @@ A `blocked` worker comes to you first. Answer what you can yourself, with mcp__m
 
 ## A question for the person
 
-1. Record it: mcp__makiba__pending with `action` `add`, `task` (the task id) and `question` (one sentence, in English). It returns the entry's `id`.
-2. Mark it as gone to the person: mcp__makiba__pending with `action` `escalate` and the `id`. This only changes the entry's status; nothing reaches the person by it.
-3. Put it to the person yourself, in the conversation language, so they can decide from your words alone: the question, why it is asked, what yes leads to, what no leads to, and your recommendation with its reason. Name the entry id.
+1. Record it: mcp__makiba__pending with `action` `add`, `task` (the task id), `question` (one sentence, in English) and its context, in English: `background` (why it is asked), `if_yes` (what yes leads to), `if_no` (what no leads to), `recommend` (your recommendation) and `why` (its reason). It returns the entry's `id`. These five parts are written once into the entry, so the person can read them in `makiba status` and on a screen, not only in the conversation. When you have no recommendation, say so plainly in `recommend` (for example "None: either is fine") and give the reason in `why`; do not invent one.
+2. Mark it as gone to the person: mcp__makiba__pending with `action` `escalate` and the `id`. It is refused `usage` while a part is missing or blank, and the message names the missing parts: add them with `add` again (the same `task` and `question`; it fills in the parts you give) and escalate again. This only changes the entry's status; nothing reaches the person by it.
+3. Put it to the person yourself, in the conversation language, so they can decide from your words alone: the same five parts as the entry, the question, why it is asked, what yes leads to, what no leads to, and your recommendation with its reason. Name the entry id. The answer is yes or no (with a note); named options are not offered.
 4. End your turn and wait.
 
 ## The person's answer
