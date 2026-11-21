@@ -25,6 +25,7 @@ pub mod prwatch;
 mod push;
 mod recover;
 mod resume;
+pub mod run_repo;
 pub mod secretary;
 mod triage;
 pub use triage::owner_repo_from_url;
