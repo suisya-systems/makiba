@@ -59,7 +59,8 @@ impl Org {
     fn add(&self, task: &str, q: &str) -> Value {
         self.call(
             "pending",
-            json!({"action": "add", "task": task, "question": q}),
+            json!({"action": "add", "task": task, "question": q, "background": "b",
+                   "if_yes": "y", "if_no": "n", "recommend": "r", "why": "w"}),
         )
         .unwrap()
     }
