@@ -60,3 +60,8 @@ The range is in the records: a renewed secretary's brief names the ranges in for
 - A scope written in the conversation or a file, and your own count of slots: the range and `makibad`'s counts replace them.
 - Dispatching the range's next candidate yourself: `makibad` does it when a slot frees.
 - Answering a stop with the recommendation on the person's behalf: not in this version; each stop records the recommendation and the answer so that the person can decide later.
+- The review round cap's relay: the door counts the rounds (`review`); a worker out of rounds reports it (stop line 5), and only you raise its allowance, with a reason.
+- A journal of the belt: `makibad` records every dispatch, push, pull request and close itself.
+- A notice when a pull request is merged: you merge it yourself; a merge by the person on GitHub you learn from the person.
+- A classifier of what a change touches and its evidence for the pull request: the worker says how it ran its change, and the pull request says how it was checked.
+- Ports for parallel runs: the worker's and the project's own concern.

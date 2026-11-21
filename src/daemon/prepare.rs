@@ -75,7 +75,7 @@ impl Places {
 /// The person's git and GitHub CLI credential files, denied to a worker and the curator (Issue
 /// 140): the ssh keys, git's plain credential store and the CLI's stored login, at their default
 /// places and under `XDG_CONFIG_HOME` as this process has it. Folders, then files.
-fn credentials() -> (Vec<PathBuf>, Vec<PathBuf>) {
+pub(crate) fn credentials() -> (Vec<PathBuf>, Vec<PathBuf>) {
     let mut files = vec![
         PathBuf::from("~/.git-credentials"),
         PathBuf::from("~/.config/git/credentials"),

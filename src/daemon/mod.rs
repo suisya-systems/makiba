@@ -26,6 +26,7 @@ pub mod prwatch;
 mod push;
 mod recover;
 mod resume;
+pub mod review;
 pub mod run_repo;
 pub mod secretary;
 mod triage;
