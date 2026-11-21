@@ -2048,6 +2048,16 @@ struct GateRows {
     pin: Option<super::gate::Pin>,
     projects: Vec<(String, Option<String>)>,
     task: Option<String>,
+    review: ReviewRows,
+}
+
+/// What the gate read of the PR's task's reviews (Issue 263): the kind of its newest launch and
+/// its worker's newest diff review row (`commands.id`, the answer). Read again when the verdict
+/// is recorded; a difference there is "ask again".
+#[derive(Clone, Default, PartialEq)]
+struct ReviewRows {
+    kind: Option<String>,
+    row: Option<(i64, Value)>,
 }
 
 fn same_pr(p: &Value, repo: &str, pr: i64) -> bool {
@@ -2091,7 +2101,7 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         .prepare("SELECT slug, origin_url FROM projects WHERE status = 'active' ORDER BY slug")?
         .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let task = c
+    let task: Option<String> = c
         .query_row(
             "SELECT r.task_id FROM pr_watches p JOIN runs r ON r.id = p.run_id
              WHERE lower(p.repo) = lower(?1) AND p.pr = ?2 ORDER BY p.id DESC LIMIT 1",
@@ -2099,6 +2109,28 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
             |r| r.get(0),
         )
         .optional()?;
+    let mut review = ReviewRows::default();
+    if let Some(t) = &task {
+        review.kind = c
+            .query_row(
+                "SELECT l.kind FROM runs r JOIN run_launch l ON l.run_id = r.id
+                 WHERE r.task_id = ?1 ORDER BY l.id DESC LIMIT 1",
+                [t],
+                |r| r.get(0),
+            )
+            .optional()?;
+        let row: Option<(i64, Option<String>)> = c
+            .query_row(
+                "SELECT id, json_extract(result_json, '$.result') FROM commands
+                 WHERE verb = 'review' AND actor = ?1 AND status = 'done'
+                   AND json_extract(result_json, '$.result.kind') = 'diff'
+                 ORDER BY id DESC LIMIT 1",
+                [crate::spec::worker_agent_id(t)],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        review.row = row.and_then(|(id, t)| Some((id, serde_json::from_str(&t?).ok()?)));
+    }
     Ok(GateRows {
         latest_ci: ci
             .last()
@@ -2111,6 +2143,7 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         pin,
         projects,
         task,
+        review,
     })
 }
 
@@ -2145,7 +2178,96 @@ fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
 /// What the gate found outside the door's lock: refused before the git checks, or their verdict.
 enum Found {
     Before(String),
-    Ran(super::gate::Verdict, bool),
+    Ran(super::gate::Verdict, bool, Value),
+}
+
+/// The review state of the PR's head `head` (Issue 263), from the task's last diff review: `state`
+/// is `passed`, `blockers` (passed, with blockers found: not a pass), `none`, `stale`,
+/// `not-established` or `not-required` (only Markdown or `docs/` changed). A review of another
+/// head is carried to this one only when the PR's own changes are byte-equal (a join commit of
+/// the base, a rebase); otherwise it is stale.
+fn gate_review(rows: &GateRows, clone: &Path, base: &str, head: &str, docs: bool) -> Value {
+    let mut r = json!({"state": "not-established", "head": head});
+    if docs {
+        r["state"] = json!("not-required");
+        return r;
+    }
+    let rv = &rows.review;
+    if rows.task.is_none() {
+        r["reason"] = json!("no task of makiba is tied to this PR by a watch");
+        return r;
+    }
+    match rv.kind.as_deref() {
+        None => {
+            r["reason"] = json!("the PR's task has no launched run");
+            return r;
+        }
+        Some("code") => {}
+        Some(_) => {
+            r["reason"] =
+                json!("the PR's task is not a code task, and the PR changes more than docs");
+            return r;
+        }
+    }
+    let Some((_, l)) = &rv.row else {
+        r["state"] = json!("none");
+        return r;
+    };
+    r["reviewed_head"] = l["head"].clone();
+    if let Some(rh) = l["head"].as_str()
+        && rh != head
+    {
+        let same =
+            l["verdict"] == json!("passed") && super::gate::same_changes(clone, base, rh, head);
+        if !same {
+            r["state"] = json!("stale");
+        }
+        r["same_changes"] = json!(same);
+    }
+    if r["state"] == json!("stale") {
+        return r;
+    }
+    for k in ["reader", "round", "allowed", "findings", "reason"] {
+        if !l[k].is_null() {
+            r[k] = l[k].clone();
+        }
+    }
+    r["state"] = json!(match l["verdict"].as_str() {
+        Some("passed") if l["findings"]["blocker"].as_i64().unwrap_or(0) > 0 => "blockers",
+        Some("passed") => "passed",
+        _ => "not-established",
+    });
+    r
+}
+
+/// The line the gate's answer carries for a review state.
+fn gate_review_line(r: &Value) -> String {
+    let short = |v: &Value| {
+        v.as_str()
+            .map(|s| s[..s.len().min(12)].to_string())
+            .unwrap_or_default()
+    };
+    let head = short(&r["head"]);
+    match r["state"].as_str().unwrap_or_default() {
+        "blockers" => format!(
+            "review of {head}: passed by {} but with {} blocker(s) found",
+            r["reader"].as_str().unwrap_or("?"),
+            r["findings"]["blocker"]
+        ),
+        "stale" => format!(
+            "review of {head}: stale (the last diff review read {}, and this head's changes differ)",
+            short(&r["reviewed_head"])
+        ),
+        "not-required" => {
+            format!("review of {head}: not required (only Markdown or docs/ changed)")
+        }
+        "passed" if r["same_changes"] == json!(true) => format!(
+            "{} (read {}, same changes)",
+            review_line(r),
+            short(&r["reviewed_head"])
+        ),
+        _ => review_line(r),
+    }
 }
 
 /// The gate's reads of GitHub and git: no lock is held while they run.
@@ -2218,8 +2340,10 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         v.result = "rejected".into();
         v.reason = e.0;
     }
-    let docs = v.result == "no_manifest" && gate::docs_only(&clone, &base, head);
-    Found::Ran(v, docs)
+    let docs = gate::docs_only(&clone, &base, head);
+    let review = gate_review(rows, &clone, &base, head, docs);
+    let docs_pass = v.result == "no_manifest" && docs;
+    Found::Ran(v, docs_pass, review)
 }
 
 impl Door {
@@ -2259,9 +2383,11 @@ impl Door {
             }
         };
         let mode = super::gate::merge_approval_mode();
-        let (verdict, reason, allow, event) = match found {
+        let mut review = None;
+        let mut warn = false;
+        let (mut verdict, reason, mut allow, event) = match found {
             Found::Before(why) => ("rejected".to_string(), why, false, None),
-            Found::Ran(mut v, docs) => {
+            Found::Ran(mut v, docs, rv) => {
                 // What changed while the gate ran: a new CI result, or a first pin of another test.
                 if now.latest_ci != rows.latest_ci {
                     v.result = "rejected".into();
@@ -2272,6 +2398,10 @@ impl Door {
                 {
                     v.result = "rejected".into();
                     v.reason = "another verdict pinned a different test commit while the gate ran - ask the person".into();
+                } else if now.task != rows.task || now.review != rows.review {
+                    v.result = "rejected".into();
+                    v.reason =
+                        "the PR's task or its reviews changed while the gate ran; ask again".into();
                 }
                 let allow = v.result == "passed"
                     || (v.result == "no_manifest" && (mode == "human" || docs));
@@ -2283,9 +2413,31 @@ impl Door {
                 } else {
                     v.reason.clone()
                 };
+                review = Some(rv);
                 (v.result.clone(), reason, allow, Some(v))
             }
         };
+        // Issue 263: a code PR whose head has no passed, blocker-free diff review. Under
+        // acceptance no person is asked, so it is refused; under human the person decides and the
+        // hook asks them. An earlier refusal keeps its own verdict; the review line is appended.
+        let mut reason = reason;
+        if let Some(rv) = &review {
+            let line = gate_review_line(rv);
+            let bad = ["none", "stale", "not-established", "blockers"]
+                .contains(&rv["state"].as_str().unwrap_or_default());
+            if allow && bad && mode == "acceptance" {
+                allow = false;
+                verdict = "review_missing".into();
+                reason = format!(
+                    "{line}; merge_approval_mode acceptance lets no code pull request land without a passed diff review of this head: the person merges it in the GitHub web UI"
+                );
+            } else if allow && bad {
+                warn = true;
+                reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
         if let Some(v) = &event {
             let mut payload = json!({
                 "repo": repo, "pr": pr, "base": v.base, "head": v.head, "result": v.result,
@@ -2300,6 +2452,9 @@ impl Door {
             }
             if let Some(t) = &now.task {
                 payload["task"] = json!(t);
+            }
+            if let Some(rv) = &review {
+                payload["review"] = rv.clone();
             }
             let written = w.append_event(&NewEvent {
                 kind: "acceptance_gate",
@@ -2318,8 +2473,13 @@ impl Door {
                 );
             }
         }
-        let r: Response = Ok(json!({"verdict": verdict, "allow": allow, "reason": reason,
-                                    "mode": mode, "repo": repo, "pr": pr, "head": head}));
+        let mut answer = json!({"verdict": verdict, "allow": allow, "reason": reason,
+                                "mode": mode, "repo": repo, "pr": pr, "head": head});
+        if let Some(rv) = review {
+            answer["review"] = rv;
+            answer["warn"] = json!(warn);
+        }
+        let r: Response = Ok(answer);
         if !record(&w, actor, "gate", args, idem, &r) || w.conn().is_autocommit() {
             let _ = w.rollback();
             return Err(internal(

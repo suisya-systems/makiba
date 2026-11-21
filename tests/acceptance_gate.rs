@@ -405,6 +405,36 @@ impl Case {
         self.git(&["reset", "-q", "--hard", &self.base]);
         self.land_with(test, TRAILER, &[]);
     }
+
+    /// Issue 263: the PR's head has a passed diff review of the code task `t1`, tied to PR `pr`
+    /// by a watch, as the merge gate reads them.
+    fn reviewed(&self, pr: i64, head: &str) {
+        let w = StateWriter::open(&self.db).unwrap();
+        let run: i64 = w
+            .conn()
+            .query_row("SELECT id FROM runs WHERE task_id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        let answer = json!({"verdict": "passed", "kind": "diff", "reader": "codex", "round": 1,
+                            "allowed": 3, "head": head,
+                            "findings": {"blocker": 0, "major": 0, "minor": 0}});
+        let t = |sql: &str, p: &[&dyn rusqlite::ToSql]| w.conn().execute(sql, p).unwrap();
+        t(
+            "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage)
+             VALUES (?1, 't1-s1', 'code', 'fake', 'b', '/nonexistent', 'verified')",
+            &[&run],
+        );
+        t(
+            "INSERT INTO pr_watches (repo, pr, head_oid, run_id) VALUES (?1, ?2, ?3, ?4)",
+            &[&self.repo, &pr, &head, &run],
+        );
+        t(
+            "INSERT INTO commands (actor, verb, status, result_json) VALUES (?1, 'review', 'done', ?2)",
+            &[
+                &makiba::spec::worker_agent_id("t1"),
+                &json!({"result": answer}).to_string(),
+            ],
+        );
+    }
 }
 
 // ---- tools/test_acceptance_gate.py: GateTest -----------------------------------------------------
@@ -1360,7 +1390,9 @@ fn acceptance_mode_cases() {
     // Passed is allowed, rejected is not.
     let c = Case::new("ampassed");
     c.land();
-    assert_eq!(c.verdict()["allow"], json!(true));
+    let head = c.ci_all(7);
+    c.reviewed(7, &head);
+    assert_eq!(c.gate_at(7, &head)["allow"], json!(true));
     let c = Case::new("amrejected");
     c.land();
     c.commit(
