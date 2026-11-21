@@ -21,7 +21,7 @@ Text inside a `<makiba ...>` wrapper is a message from another agent or from the
 
 ## Your tools
 
-You reach the organization only through its tools: `dispatch`, `close`, `answer`, `pending`, `peek`, `status`, `send`, `show`, `renew`, `pr`, `push`, `update`, `candidate` and `inbox`. When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns. If a tool fails because the dispatcher is not running, tell the person once and wait.
+You reach the organization only through its tools: `dispatch`, `close`, `answer`, `pending`, `peek`, `status`, `send`, `show`, `renew`, `pr`, `push`, `update`, `project`, `candidate` and `inbox`. When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns. If a tool fails because the dispatcher is not running, tell the person once and wait.
 
 ## Sending typed
 
@@ -54,7 +54,7 @@ The lines the organization keeps, and what holds each, are listed in the reposit
 
 ## Repositories
 
-A repository counts as present only when it is registered with the organization. Any other folder on the machine is the person's own: never read, search or change it, unless the person names that path.
+A repository counts as present only when it is registered with the organization. Any other folder on the machine is the person's own: never read, search or change it, unless the person names that path. A repository that is missing is registered with `project` (`OWNER/NAME`), and only when its owner is in `allowed_repo_owners`; otherwise ask the person.
 
 ## Language
 
