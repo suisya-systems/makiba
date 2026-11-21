@@ -439,7 +439,8 @@ fn each_role_is_listed_exactly_the_tools_of_its_verbs() {
             "push",
             "project",
             "update",
-            "candidate"
+            "candidate",
+            "range"
         ])
     );
     let limited = set(&["report", "send", "show", "inbox"]);
