@@ -105,6 +105,7 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Nearest in makiba: role rules live outside the worktree and are passed at launch, and a worker may not edit its own settings (L-K5).
 - Mark: **drop**.
 - Reason: in makiba the rules are source files in the repository, changed by an ordinary pull request that passes the gate, while the running rules are the installed binary's copy; no separate handshake is needed. Reconsider if a worker's edit can reach the installed copy.
+- Checked facts (writer's reading, 2026-11-22): the running rules are files at `<share>/roles/<role>/rules.md`, rewritten from the binary's embedded copy at every launch (`src/agents/mod.rs`, `write_rules`; called from `src/daemon/prepare.rs`); a worker's settings and its sandbox deny writes to the share folder (`roles/worker/settings.json`, `src/daemon/prepare.rs`). Open point: whether anything reinstalls the binary after a landing without a person; if something does, a merged change to `roles/` goes live with no person, and the mark should be looked at again.
 
 **N12. Checks that the model dispatcher ran its steps.**
 - Does: deterministic checks that the dispatcher followed its own prose: the spawn-completion gate, the retro-completion gate, the loop-directive guards, blocking a close before retro, the ad hoc PR watch block, cursor reset and the restart guard of a watcher.
@@ -156,6 +157,13 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - Nearest in makiba: the curator writes `<knowledge>/raw` and `curated` for new work (spec sections 2 and 12); the old notes are Japanese and are not copied.
 - Mark: **build**, as a review pass at M7-3 that translates and moves the notes that still hold; no Issue yet.
 - Reason: this is learned content that the carried tools and rules do not replace.
+- Also in this pass (recommendation): compare claude-org-ja's `docs/contracts/knowledge-curation-contract.md` with `roles/curator/rules.md` and `skills/curate/SKILL.md`. The writer found these rules of the contract that makiba's curator rules and skill lack, as the rules to carry:
+  - a. Edit policy of curated notes: the curator may restructure, merge or delete sections, in or out of a cycle, with one invariant: no silent removal of substantive content.
+  - b. A `deferred` status for a candidate the person holds: not terminal, revisited later, not counted toward the batch question. `makiba candidate` takes only approved, rejected and into-<skill>.
+  - c. A pattern that returns: new notes merge into an existing pending entry instead of a duplicate, and the contract says what happens when the pattern returns after a terminal status.
+  - d. A count for asking the person: the contract batches at 5 pending; the skill says "a batch" with no number.
+  - e. No operator-private content in tracked files (workers told in their brief; the secretary routes a scrub). Needed before M7-3, because the repository is public.
+  - f. Minor: archived notes never move back out of `raw/archive/`; guidance on naming curated topics.
 
 **N19. Goal-setup dialogue.**
 - Does: writes or revises a project's goal ledger by asking the person what they aim at and what would show it unmet, proposes clauses from the README and the open Issues, and validates the file.
