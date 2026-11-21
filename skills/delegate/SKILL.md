@@ -26,6 +26,7 @@ Call mcp__makiba__dispatch with:
 - `brief`: the task text (below).
 - `model` (optional): only when the person asks for a model for this task.
 - `branch` (optional): the branch name, when the person or the repository wants one.
+- `issue` (optional): the Issue number the task works on. Give it whenever the task is one Issue: a range of the project then does not dispatch that Issue again (`makibad` reads it from the run). A task without it is invisible to a range.
 
 A refusal names its kind: `usage` (fix the arguments), `conflict` (the task id is in use: pick another), `unavailable` (`makibad` is not running: tell the person once and wait).
 
