@@ -495,6 +495,35 @@ fn insert_command(
         .ok()
 }
 
+/// Finish the `dispatch` command of `task` while it is `accepted` (spec section 5.2, Issue 145):
+/// `done`, or `failed` with `error_kind` and the reason as the `error` beside its accepted line,
+/// which stays, so a retry of the same idem still answers it. Called inside the transaction that
+/// settles the run's launch.
+pub(super) fn finish_dispatch(
+    w: &StateWriter,
+    task: &str,
+    failed: Option<(ErrorKind, &str)>,
+) -> rusqlite::Result<()> {
+    let (status, kind, error) = match failed {
+        None => ("done", None, None),
+        Some((k, m)) => (
+            "failed",
+            Some(k.as_str()),
+            Some(json!({"kind": k.as_str(), "message": m, "hint": ""}).to_string()),
+        ),
+    };
+    w.conn().execute(
+        "UPDATE commands SET status = ?2, error_kind = ?3,
+           result_json = CASE WHEN ?4 IS NULL THEN result_json
+                              ELSE json_set(COALESCE(result_json, '{}'), '$.error', json(?4)) END,
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE verb = 'dispatch' AND status = 'accepted'
+           AND json_extract(args_json, '$.task_id') = ?1",
+        params![task, status, kind, error],
+    )?;
+    Ok(())
+}
+
 fn record(
     w: &StateWriter,
     actor: &str,
@@ -1227,6 +1256,14 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "UPDATE run_launch SET stage = 'failed', failed_reason = 'makiba close'
              WHERE run_id = ?1 AND stage NOT IN ('verified', 'failed')",
             [run],
+        )?;
+        finish_dispatch(
+            w,
+            task,
+            Some((
+                ErrorKind::Conflict,
+                "the run was closed before its launch was verified",
+            )),
         )?;
         w.append_event(&NewEvent {
             kind: "run_closed",

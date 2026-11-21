@@ -302,10 +302,14 @@ fn fail(w: &StateWriter, j: &Job, why: &str) -> Result<()> {
     w.transaction(|w| {
         w.conn().execute(
             &format!(
-                "UPDATE commands SET status = 'failed', error_kind = 'conflict', finished_at = {NOW}
+                "UPDATE commands SET status = 'failed', error_kind = 'conflict', finished_at = {NOW},
+                   result_json = json_set(COALESCE(result_json, '{{}}'), '$.error', json(?2))
                  WHERE id = ?1 AND status = 'accepted'"
             ),
-            params![j.command],
+            params![
+                j.command,
+                serde_json::json!({"kind": "conflict", "message": why, "hint": ""}).to_string()
+            ],
         )?;
         let body = format!(
             "The close of {} could not be finished: {why}. Close it again (with --abandon to \
