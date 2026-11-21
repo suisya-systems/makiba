@@ -13,6 +13,7 @@ REPO=$WORK/repo; new_repo "$REPO" || { say "RESULT p5: precondition-failed (repo
 # The answer (42-P5-DONE) is not in the prompt text, so seeing it means the agent answered.
 TASK="Reply with the sum of 40 and 2 followed directly by -P5-DONE, and nothing else."
 T=p5-worker
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 launch "$T" "$REPO" -- --permission-mode default "$TASK" || { record launch FAIL "hc run failed"; finish; }
 
 i=0; seen=

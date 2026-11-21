@@ -23,6 +23,7 @@ case "${1:-}" in -h|--help) probe_usage "$0" "P9: MCP tool vs direct HTTP from a
 probe_init p9 "${1:-}"
 standin_start || { say "RESULT p9: precondition-failed (stand-in did not start)"; exit 2; }
 extra_cleanup() { kill "$STANDIN_PID" 2>/dev/null; }
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 
 WT=$WORK/wt; new_repo "$WT" || { say "RESULT p9: precondition-failed (repository)"; exit 2; }
 ENVTOK=DECOYENV$(python3 -c 'import secrets;print(secrets.token_hex(8))')

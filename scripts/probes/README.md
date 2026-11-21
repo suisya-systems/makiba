@@ -11,6 +11,7 @@ Not here: **P2** (needs a GitHub repository, see probes.md) and **P6** (needs a 
 - Every run uses its own core: `HC_SESSION=makiba-probe-<pid>`, scratch `XDG_CONFIG_HOME` and `XDG_STATE_HOME`, and stops only that core at the end, also on failure. The variables of spec section 6.4 are removed first. No real secret is used; P1 writes a decoy.
 - Claude Code's own trust record in `~/.claude.json` is shared (as with any accepted dialog): P3, P4 and P5 add entries for their scratch repositories.
 - Each script takes one argument, the directory for the result file `<probe>-result.txt` (versions, date, script commit, one line per case, captured screen text on failure). Every case prints `CASE <name>: PASS|FAIL|NEEDS-HUMAN`. Paste the result file into probes.md section 1 with the versions.
+- `PROBE_DRY_RUN=1` (Issue 105; CI runs every probe this way once, with `MAKIBA_BIN=true` and neither `hc` nor `claude` installed): the script runs its top level up to its `probe_dry_stop` line, which comes after its exit handler is set up and before the base, `makibad` or an agent is started, prints `RESULT <probe>: dry run ...` and exits 0 through the exit handler. A missing `hc` or `claude` is then not a precondition failure (`HC_BIN` falls back to `false`), and P3's minimum version is not checked. P1, P7, P8 and P9 start their own loopback stand-in (`door.py`, `channel-standin.py`) before the stop. Unset, nothing changes.
 
 ## P1 `p1-door-reach.sh <dir>`
 
