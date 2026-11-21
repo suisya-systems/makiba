@@ -202,15 +202,22 @@ impl Prepare {
 
     /// At `makibad`'s start (Issue 243): the temporary folder of every launch that is over goes,
     /// decided by the rows alone (never by a terminal being absent, never by a folder's name):
-    /// the launch `failed`, or a later launch of its run (of its role, for a launch without a run)
-    /// `verified`. A run's close removes its launches' folders as well; a folder no such row
-    /// names is left.
+    /// the launch `failed` while it was prepared (its `worker_spawn_failed` names `planned` or
+    /// `worktree_ready`: no process was started), or a later launch of its run (of its role, for
+    /// a launch without a run) `verified`. A launch that failed later may keep its terminal for
+    /// inspection, so its folder stays until the run's close, which ends the terminals first. A
+    /// folder no such row names is left.
     pub fn sweep(&self, w: &StateWriter) -> Result<()> {
         let ids: Vec<i64> = w
             .conn()
             .prepare(
                 "SELECT l.id FROM run_launch l
-                 WHERE l.stage = 'failed'
+                 WHERE (l.stage = 'failed'
+                        AND EXISTS (SELECT 1 FROM events e
+                                    WHERE e.kind = 'worker_spawn_failed'
+                                      AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id
+                                      AND json_extract(e.payload_json, '$.stage')
+                                          IN ('planned', 'worktree_ready')))
                     OR EXISTS (SELECT 1 FROM run_launch n
                                WHERE n.id > l.id AND n.stage = 'verified'
                                  AND (n.run_id = l.run_id
@@ -603,9 +610,10 @@ mod tests {
         assert!(why.contains("not a clean worktree"), "{why}");
     }
 
-    /// The start sweep removes the folders of launches that are over by their rows alone: a
-    /// `failed` one and one with a later `verified` launch of its role; a live one and a folder
-    /// no row names stay.
+    /// The start sweep removes the folders of launches that are over by their rows alone: one
+    /// that failed while prepared and one with a later `verified` launch of its role; one that
+    /// failed after its launch (its terminal may be kept), a live one and a folder no row names
+    /// stay.
     #[test]
     fn the_sweep_removes_only_the_folders_of_launches_that_are_over() {
         let dir = tempfile::tempdir().unwrap();
@@ -616,6 +624,7 @@ mod tests {
             ("b", "secretary", "verified"),
             ("c", "secretary", "verified"),
             ("d", "curator", "settings_ready"),
+            ("e", "secretary", "failed"),
         ] {
             w.conn()
                 .execute(
@@ -625,7 +634,15 @@ mod tests {
                 )
                 .unwrap();
         }
-        for id in 1..=5 {
+        for (spawn, stage) in [("a", "worktree_ready"), ("e", "dialog_passed")] {
+            w.append_event(&crate::db::writer::NewEvent {
+                kind: "worker_spawn_failed",
+                payload: Some(&serde_json::json!({"spawn_id": spawn, "stage": stage})),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        for id in 1..=6 {
             make_tmp_dir(&settings, id).unwrap();
         }
         let places = Places {
@@ -638,8 +655,8 @@ mod tests {
         Prepare::new(places, BaseDenies::default())
             .sweep(&w)
             .unwrap();
-        let left: Vec<bool> = (1..=5).map(|id| tmp_dir(&settings, id).is_dir()).collect();
-        assert_eq!(left, [false, false, true, true, true]);
+        let left: Vec<bool> = (1..=6).map(|id| tmp_dir(&settings, id).is_dir()).collect();
+        assert_eq!(left, [false, false, true, true, true, true]);
     }
 
     /// A relative deny path is written absolute, as the daemon meant it; `~/` is kept.
