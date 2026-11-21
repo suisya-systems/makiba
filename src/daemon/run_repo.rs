@@ -225,12 +225,14 @@ pub fn create(
         "objects",
     ])?;
     let start = clone(&["rev-parse", "--verify", &format!("{start}^{{commit}}")])?;
+    // The clone's object format (sha1 or sha256), or its objects could not be borrowed.
+    let format = clone(&["rev-parse", "--show-object-format"])?;
     for d in [gitdir, workplace] {
         std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()))?;
     }
     let mut init = Command::new("git");
     init.env("GIT_DIR", gitdir)
-        .args(["init", "-q"])
+        .args(["init", "-q", &format!("--object-format={format}")])
         .stdin(Stdio::null());
     out(init, "git init")?;
     std::fs::write(
@@ -326,6 +328,33 @@ mod tests {
         assert_eq!(git_new_enough("git version 2.37.9"), Some(false));
         assert_eq!(git_new_enough("git version 3.0"), Some(true));
         assert_eq!(git_new_enough("nonsense"), None);
+    }
+
+    /// A run of a sha256 clone is a sha256 repository, whatever git's default format is.
+    #[test]
+    fn a_run_takes_the_object_format_of_its_clone() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path().join("repo");
+        let git = |args: &[&str]| {
+            let o = Command::new("git")
+                .arg("-C")
+                .arg(&repo)
+                .args(["-c", "user.name=t", "-c", "user.email=t@e"])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        std::fs::create_dir(&repo).unwrap();
+        git(&["init", "-q", "--object-format=sha256", "-b", "main"]);
+        git(&["commit", "-q", "--allow-empty", "-m", "m"]);
+        let (gitdir, wt) = (dir.path().join("git"), dir.path().join("work"));
+        create(&repo, &gitdir, &wt, "b", "main", &dir.path().join("hooks")).unwrap();
+        assert_eq!(
+            read(&gitdir, &wt, &["rev-parse", "--show-object-format"]).unwrap(),
+            "sha256"
+        );
+        assert!(commit(&gitdir, &wt, "HEAD").is_some());
     }
 
     /// A submodule counts only when its folder holds something: an empty one is not checked out.
