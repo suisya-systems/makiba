@@ -16,6 +16,8 @@
 //! The two fixtures are the settings main 26cbf71 built for the worker and the secretary from
 //! the same `TaskSettings` as `built` below.
 
+mod common;
+
 use makiba::agents::{self, TaskSettings};
 use makiba::base::stub::Stub;
 use makiba::daemon;
@@ -139,19 +141,7 @@ fn org_at(task: &str, at: Option<PathBuf>) -> Org {
     std::fs::create_dir_all(&state).unwrap();
     let branch = format!("makiba/{task}");
     let worktree = at.unwrap_or_else(|| root.join("workers/p").join(task));
-    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
-    git(
-        &root.join("repos/p"),
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            &branch,
-            &worktree.to_string_lossy(),
-            "main",
-        ],
-    );
+    common::run_workplace(&state, &root.join("repos/p"), &worktree, task, &branch);
     let base = format!("base-{task}");
     let theirs = root.join(format!("theirs-{task}"));
     git(
@@ -363,7 +353,15 @@ fn the_secretary_brings_a_pushed_branch_up_to_date_through_makibad() {
     assert_eq!(org.finished(), "done", "{:?}", org.notices());
     let new = at_origin(&org.branch).unwrap();
     assert_ne!(new, old);
-    assert_eq!(org.head(), new);
+    // Issue 241: the worker's tree is not changed; the clone records origin's new head.
+    assert_eq!(org.head(), old);
+    assert_eq!(
+        git(
+            &root().join("repos/p"),
+            &["rev-parse", &format!("refs/remotes/origin/{}", org.branch)]
+        ),
+        new
+    );
     let parents = git(&org.worktree, &["rev-list", "--parents", "-n", "1", &new]);
     assert_eq!(parents, format!("{new} {old} {base}"));
     assert_eq!(org.updates(), vec![(old, new.clone())]);

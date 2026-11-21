@@ -10,6 +10,8 @@
 //! The token-shaped test data is joined from parts at run time, so that no file in the repository
 //! holds a line a scanner would flag.
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
@@ -141,22 +143,10 @@ fn org(task: &str) -> Org {
     std::fs::create_dir_all(&state).unwrap();
     let branch = format!("makiba/{task}");
     let worktree = root.join("workers/p").join(task);
-    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
-    // Parallel `git worktree add` on one repository races (Issue 240): one at a time.
+    // One at a time, as since Issue 240: the runs read the one clone.
     static ADD: Mutex<()> = Mutex::new(());
     let added = ADD.lock().unwrap_or_else(|e| e.into_inner());
-    git(
-        &root.join("repos/p"),
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            &branch,
-            &worktree.to_string_lossy(),
-            "main",
-        ],
-    );
+    common::run_workplace(&state, &root.join("repos/p"), &worktree, task, &branch);
     drop(added);
     let w = StateWriter::open(&state.join("state.db")).unwrap();
     let run = w

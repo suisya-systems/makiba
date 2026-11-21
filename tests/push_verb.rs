@@ -8,6 +8,8 @@
 //! The test writes `state.db` only before `makibad` starts and through the door afterwards; it
 //! waits on the command row `makibad` finishes, read-only (Issue 181).
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
@@ -123,19 +125,7 @@ fn org(task: &str) -> Org {
     std::fs::create_dir_all(&state).unwrap();
     let branch = format!("makiba/{task}");
     let worktree = root.join("workers/p").join(task);
-    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
-    git(
-        &root.join("repos/p"),
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            &branch,
-            &worktree.to_string_lossy(),
-            "main",
-        ],
-    );
+    common::run_workplace(&state, &root.join("repos/p"), &worktree, task, &branch);
     let w = StateWriter::open(&state.join("state.db")).unwrap();
     let run = w
         .upsert_run(&RunUpsert {
