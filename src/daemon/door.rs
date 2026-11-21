@@ -38,12 +38,13 @@ const IO_LIMIT: Duration = Duration::from_secs(5);
 /// MCP protocol versions answered as asked; any other gets the first.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// The settings `config` knows (spec section 12).
-const CONFIG_KEYS: [&str; 5] = [
+const CONFIG_KEYS: [&str; 6] = [
     "max_concurrent_workers",
     "merge_approval_mode",
     "conversation_language",
     "artifact_language",
     super::project::OWNERS_KEY,
+    super::project::HOSTS_KEY,
 ];
 
 /// What a request comes to: the response's `result`, or its `error`.
@@ -598,7 +599,8 @@ fn run(
         Verb::Project => {
             let slug = str_arg(args, "slug")?;
             plain_name("slug", slug)?;
-            super::project::accept(w, role, slug, str_arg(args, "repo")?)
+            let hosts = args.get("hosts").and_then(Value::as_str);
+            super::project::accept(w, role, actor, slug, str_arg(args, "repo")?, hosts)
         }
         Verb::Update => update(w, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
@@ -1784,6 +1786,9 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     if key == super::project::OWNERS_KEY {
         return allowed_owners(w, actor, action, args);
     }
+    if key == super::project::HOSTS_KEY {
+        return network_hosts(w, actor, action, args);
+    }
     let Some((kind, per_project)) = super::language::kind_of(key) else {
         return match action {
             "get" => Ok(json!({"key": key, "value": null})),
@@ -1876,6 +1881,37 @@ fn allowed_owners(w: &StateWriter, actor: &str, action: &str, args: &Value) -> R
     })
     .map_err(internal)?;
     Ok(shown(Some(&value)))
+}
+
+/// `config get|set network_hosts --project <slug>` (Issue 244): the hosts a project's workers may
+/// reach, a comma list of host names, never GitHub's. Stored as `config_set`; a launch reads it
+/// when its settings are written, so a running worker keeps the list it was launched with.
+fn network_hosts(w: &StateWriter, actor: &str, action: &str, args: &Value) -> Response {
+    let key = super::project::HOSTS_KEY;
+    let project = args
+        .get("project")
+        .and_then(Value::as_str)
+        .filter(|p| !p.is_empty())
+        .ok_or_else(|| usage(format!("{key} is a project's: name it with --project")))?;
+    plain_name("project", project)?;
+    let shown = |v: Option<&str>| json!({"key": key, "project": project, "value": v});
+    if action == "get" {
+        let v = super::language::get(w.conn(), project, key).map_err(internal)?;
+        return Ok(shown(v.as_deref()));
+    }
+    let value = super::project::hosts_value(str_arg(args, "value")?).map_err(usage)?;
+    w.append_event(&NewEvent {
+        kind: "config_set",
+        actor: Some(actor),
+        payload: Some(&json!({"project": project, "key": key, "value": value})),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    let mut v = shown(Some(&value));
+    v["applies"] = json!(
+        "at the next launch of each worker of the project (makiba down, then makiba up, relaunches running ones)"
+    );
+    Ok(v)
 }
 
 // ---- the acceptance gate (Issue 47) ------------------------------------------------------------

@@ -78,6 +78,66 @@ pub fn owners_value(v: &str) -> Option<String> {
     owners.iter().all(|o| owner_ok(o)).then(|| owners.join(","))
 }
 
+/// The project's setting that lists the network hosts its workers may reach (Issue 244).
+pub const HOSTS_KEY: &str = "network_hosts";
+
+/// One entry of `network_hosts`: a host name (lowercase), or `*.` and a name of two labels or
+/// more, whose subdomains Claude Code then allows (never the name itself). No scheme, path, port
+/// or IP address; GitHub's hosts never.
+fn host_ok(h: &str) -> std::result::Result<(), String> {
+    let name = h.strip_prefix("*.").unwrap_or(h);
+    let labels: Vec<&str> = name.split('.').collect();
+    let label_ok = |l: &&str| {
+        (1..=63).contains(&l.len())
+            && !l.starts_with('-')
+            && !l.ends_with('-')
+            && l.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+    };
+    let shaped = name.len() <= 253
+        && labels.len() >= 2
+        && labels.iter().all(label_ok)
+        // The last label of a name has a letter: `140.82.112.3` is an address, not a name.
+        && labels.last().is_some_and(|l| l.chars().any(|c| c.is_ascii_lowercase()));
+    if !shaped {
+        return Err(format!(
+            "{h:?} is not a host name (letters, digits, - and . only; no scheme, path, port or address; a wildcard only as *.name.tld)"
+        ));
+    }
+    if name == "github.com" || name.ends_with(".github.com") {
+        return Err(format!(
+            "{h:?}: github.com and its subdomains are never listed for a worker: pushes and GitHub writes go through makibad (line L-K2)"
+        ));
+    }
+    Ok(())
+}
+
+/// The value of `network_hosts` as stored: hosts, trimmed, lowercased, comma-joined; or why one
+/// is refused. An empty value lists no host.
+pub fn hosts_value(v: &str) -> std::result::Result<String, String> {
+    if v.trim().is_empty() {
+        return Ok(String::new());
+    }
+    let hosts: Vec<String> = v
+        .split(',')
+        .map(|h| h.trim().to_ascii_lowercase())
+        .collect();
+    for h in &hosts {
+        host_ok(h)?;
+    }
+    Ok(hosts.join(","))
+}
+
+/// The hosts listed for `project`: none when nothing is set (a project registered before Issue
+/// 244 among them).
+pub fn hosts_of(c: &rusqlite::Connection, project: &str) -> rusqlite::Result<Vec<String>> {
+    let v = super::language::get(c, project, HOSTS_KEY)?.unwrap_or_default();
+    Ok(v.split(',')
+        .filter(|h| !h.is_empty())
+        .map(String::from)
+        .collect())
+}
+
 /// The canonical origin of a repository, as the project row keeps it.
 fn origin_of(owner: &str, name: &str) -> String {
     format!("https://github.com/{owner}/{name}")
@@ -95,7 +155,14 @@ pub(super) fn under_way(w: &StateWriter, slug: &str) -> Result<bool> {
 
 /// The door's half, in its transaction: refuse at once, or accept (the command is recorded
 /// `accepted` and a pass carries it out).
-pub(super) fn accept(w: &StateWriter, role: Role, slug: &str, repo: &str) -> Response {
+pub(super) fn accept(
+    w: &StateWriter,
+    role: Role,
+    actor: &str,
+    slug: &str,
+    repo: &str,
+    hosts: Option<&str>,
+) -> Response {
     let Some((owner, name)) = parse_repo(repo) else {
         return Err(refuse(
             ErrorKind::Usage,
@@ -104,6 +171,18 @@ pub(super) fn accept(w: &StateWriter, role: Role, slug: &str, repo: &str) -> Res
         ));
     };
     let internal = |e: rusqlite::Error| refuse(ErrorKind::Internal, e.to_string(), "");
+    // Only the person lists a project's network hosts (Issue 244).
+    let hosts = match hosts {
+        Some(_) if role != Role::Person => {
+            return Err(refuse(
+                ErrorKind::Denied,
+                "only the person lists a project's network hosts",
+                "ask the person: makiba config set network_hosts --project <slug> <hosts>",
+            ));
+        }
+        Some(h) => Some(hosts_value(h).map_err(|m| refuse(ErrorKind::Usage, m, ""))?),
+        None => None,
+    };
     if role != Role::Person {
         let allowed = super::language::get(w.conn(), "", OWNERS_KEY)
             .map_err(internal)?
@@ -142,6 +221,15 @@ pub(super) fn accept(w: &StateWriter, role: Role, slug: &str, repo: &str) -> Res
             format!("project {slug} is being fetched already"),
             "wait for the notice that it is done",
         ));
+    }
+    if let Some(value) = &hosts {
+        w.append_event(&crate::db::writer::NewEvent {
+            kind: "config_set",
+            actor: Some(actor),
+            payload: Some(&json!({"project": slug, "key": HOSTS_KEY, "value": value})),
+            ..Default::default()
+        })
+        .map_err(|e| refuse(ErrorKind::Internal, e.to_string(), ""))?;
     }
     Ok(json!({"slug": slug, "repo": repo, "status": "accepted"}))
 }

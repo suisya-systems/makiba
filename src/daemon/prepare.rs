@@ -249,8 +249,16 @@ impl Prepare {
         } else {
             credentials()
         };
+        // The strict network allow-list (Issue 244, lines L-K2 and L-K7): a worker reaches its
+        // project's listed hosts only, the curator none; the secretary keeps its role's.
+        let allowed_hosts = match role {
+            Role::Secretary => None,
+            _ if l.task.is_none() => Some(vec![]),
+            _ => Some(super::project::hosts_of(w.conn(), &l.project).map_err(|e| e.to_string())?),
+        };
         let settings = TaskSettings {
             role: Some(role),
+            allowed_hosts,
             write_dirs: vec![workplace, std::env::temp_dir()],
             deny_dirs: absolute(
                 [
