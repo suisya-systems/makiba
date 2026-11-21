@@ -1,14 +1,16 @@
 //! Preparing a taken run (Issue M3-2): its workplace and its per-task settings file.
 //!
-//! A launch is prepared once its `run_taken` event exists (M3-1). Code: `git worktree add` from
-//! the project's own repository into `$MAKIBA_WORKERS_DIR/<project>/<task_id>` on a new branch
-//! from the project's default branch. Document: `$MAKIBA_DOCS_DIR/<task_id>/out/`, no git. Then
+//! A launch is prepared once its `run_taken` event exists (M3-1). Code: a repository of the run's
+//! own (Issue 241, `run_repo`) with its work tree `$MAKIBA_WORKERS_DIR/<project>/<task_id>` and
+//! its git folder `<state>/git/<task_id>`, borrowing the project's own repository's objects, on a
+//! new branch from the project's default branch. Document: `$MAKIBA_DOCS_DIR/<task_id>/out/`, no git. Then
 //! the agent module writes `<state>/settings/<task_id>.json`, the worker role's settings with the
 //! task's added, and the worker's rules file is written where the agent reads it (spec sections
 //! 2 and 9, Issue 134). The stage
 //! moves `planned`, `worktree_ready`, `settings_ready`, each recorded before the next step, and
-//! a launch already past a stage is not touched for it. Nothing is written inside a worktree;
-//! a code launch sets the project clone's hooks path to the secret scanner's (Issue 136).
+//! a launch already past a stage is not touched for it. Nothing is written inside a worktree
+//! after it is made; a code launch sets the project clone's and the run's hooks path to the
+//! secret scanner's (Issue 136).
 //!
 //! Reading of the Issue where the spec is silent (reported to the secretary):
 //! - (Owner) The project's own repository is `$MAKIBA_REPOS_DIR/<project>` (default
@@ -19,6 +21,7 @@
 //! - (Owner) The workplace path is read from `run_launch.worktree`; `Places::workplace` computes
 //!   it, for the dispatch verb to use when it makes the row.
 
+use super::run_repo;
 use crate::agents::{self, Agent, Role, TaskSettings};
 use crate::base::BaseDenies;
 use crate::db::Result;
@@ -233,16 +236,29 @@ impl Prepare {
             agents::link_entry_point().map_err(|e| format!("the hooks' entry point: {e}"))?;
         }
         // The secret scanner (Issue 136): the clone's hooks path, outside the write surface.
-        // The worktree is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
         let mut deny_write_dirs = vec![crate::cli::share_dir()];
+        // The workplace is the sandbox's write surface; its `.mcp.json` is not (Issue 137).
+        let mut write_dirs = vec![workplace.clone()];
         let mut deny_write_files = vec![workplace.join(".mcp.json")];
-        if l.task.is_some() && l.kind != "document" {
+        if let Some(task) = l.task.as_deref().filter(|_| l.kind != "document") {
             let repo = self.places.repos.join(&l.project);
             deny_write_dirs.push(self.install_scanner(&repo)?);
-            // The configuration naming that hooks path, by makiba's own entry (Issue 140):
-            // Claude Code opens the clone's shared `.git` to a linked worktree but `config`.
+            // The configuration naming that hooks path, by makiba's own entry (Issue 140).
             deny_write_files.push(repo.join(".git").join("config"));
+            // The run's own repository (Issue 241): every launch, a resume's too, is checked.
+            let gitdir = run_repo::dir(&self.places.settings, task);
+            if !run_repo::is_run(&gitdir, &workplace) {
+                return Err(format!(
+                    "the workplace {} has no repository of its own at {} (made before Issue 241, or removed); close the run with --abandon and dispatch it again",
+                    workplace.display(),
+                    gitdir.display()
+                ));
+            }
+            // Its objects and refs are the worker's to write; its configuration is not.
+            deny_write_files.push(gitdir.join("config"));
+            write_dirs.push(gitdir);
         }
+        write_dirs.push(std::env::temp_dir());
         // No credential to push with or to write to GitHub (Issue 140, line L-K2).
         let (cred_dirs, cred_files) = if role == Role::Secretary {
             (vec![], vec![])
@@ -259,7 +275,7 @@ impl Prepare {
         let settings = TaskSettings {
             role: Some(role),
             allowed_hosts,
-            write_dirs: vec![workplace, std::env::temp_dir()],
+            write_dirs,
             deny_dirs: absolute(
                 [
                     &self.denies.resolved[..],
@@ -337,8 +353,7 @@ impl Prepare {
                 repo.display()
             ));
         }
-        let dir = self.places.settings.with_file_name("git-hooks");
-        let dir = std::path::absolute(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        let dir = self.hooks_dir()?;
         let exe = std::env::current_exe().map_err(|e| format!("the scanner's program: {e}"))?;
         crate::hooks::git_hook::install(&dir, &exe)
             .map_err(|e| format!("the secret scanner's hooks in {}: {e}", dir.display()))?;
@@ -357,22 +372,19 @@ impl Prepare {
         Ok(dir)
     }
 
-    /// A pass cut short before the stage was written leaves the worktree behind: it is kept only
-    /// when it is a clean worktree of this repository on the expected branch.
-    fn check_existing(repo: &Path, path: &Path, branch: &str) -> std::result::Result<(), String> {
-        let git = |args: &[&str]| {
-            let out = Command::new("git").arg("-C").arg(path).args(args).output();
-            out.ok()
-                .filter(|o| o.status.success())
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        };
-        let common = git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]);
-        let same = common.is_some_and(|c| {
-            std::fs::canonicalize(c).ok() == std::fs::canonicalize(repo.join(".git")).ok()
-        });
-        let on_branch = git(&["symbolic-ref", "--short", "HEAD"]).as_deref() == Some(branch);
-        let clean = git(&["status", "--porcelain", "--untracked-files=all"]).as_deref() == Some("");
-        if same && on_branch && clean {
+    /// `<state>/git-hooks`, absolute.
+    fn hooks_dir(&self) -> std::result::Result<PathBuf, String> {
+        let dir = self.places.settings.with_file_name("git-hooks");
+        std::path::absolute(&dir).map_err(|e| format!("{}: {e}", dir.display()))
+    }
+
+    /// A pass cut short before the stage was written leaves the workplace behind: it is kept only
+    /// when it is a clean work tree of the run's own repository on the expected branch.
+    fn check_existing(gitdir: &Path, path: &Path, branch: &str) -> std::result::Result<(), String> {
+        let on_branch = run_repo::is_run(gitdir, path)
+            && run_repo::read(gitdir, path, &["symbolic-ref", "--short", "HEAD"]).as_deref()
+                == Ok(branch);
+        if on_branch && run_repo::status(gitdir, path, true).as_deref() == Ok("") {
             Ok(())
         } else {
             Err(format!(
@@ -382,7 +394,8 @@ impl Prepare {
         }
     }
 
-    /// `git worktree add -b <branch> <path> <default branch>` in the project's repository.
+    /// The run's own repository (Issue 241, `run_repo`) on `<branch>` from the project's default
+    /// branch, its git folder `<state>/git/<task>`.
     fn add_worktree(&self, l: &Launch, path: &Path) -> std::result::Result<(), String> {
         let repo = Some(self.places.repos.join(&l.project)).filter(|r| r.join(".git").exists());
         let repo = repo.ok_or_else(|| {
@@ -393,23 +406,32 @@ impl Prepare {
         })?;
         let task = l.task.as_deref().unwrap_or_default();
         let branch = l.branch.clone().unwrap_or_else(|| format!("makiba/{task}"));
+        let gitdir = run_repo::dir(&self.places.settings, task);
+        let git_root = run_repo::root(&self.places.settings);
+        if path.join(".git").symlink_metadata().is_ok() {
+            return Self::check_existing(&gitdir, path, &branch);
+        }
+        // No `.git` file: a preparation cut short (it is written last), or nothing yet. At
+        // `planned` no worker has had either folder, so both are made again.
         if path.exists() {
-            return Self::check_existing(&repo, path, &branch);
+            if !gitdir.exists() {
+                return Err(format!(
+                    "{} exists and is not a clean worktree of the project on {branch}",
+                    path.display()
+                ));
+            }
+            run_repo::remove_under(&self.places.workers, path)?;
         }
-        std::fs::create_dir_all(path.parent().unwrap_or(path)).map_err(|e| e.to_string())?;
-        let out = Command::new("git")
-            .arg("-C")
-            .arg(repo)
-            .args(["worktree", "add", "-b", &branch])
-            .arg(path)
-            .arg(&l.default_branch)
-            .output()
-            .map_err(|e| e.to_string())?;
-        if out.status.success() {
-            Ok(())
-        } else {
-            Err(String::from_utf8_lossy(&out.stderr).trim().to_string())
-        }
+        std::fs::create_dir_all(&git_root).map_err(|e| format!("{}: {e}", git_root.display()))?;
+        run_repo::remove_under(&git_root, &gitdir)?;
+        run_repo::create(
+            &repo,
+            &gitdir,
+            path,
+            &branch,
+            &l.default_branch,
+            &self.hooks_dir()?,
+        )
     }
 }
 
