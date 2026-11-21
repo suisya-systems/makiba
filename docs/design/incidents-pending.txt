@@ -1,9 +1,1 @@
 # Test files named in incidents.md whose Issues are still open. Must be empty by M7-1.
-tests/delivery.rs
-tests/events_resync.rs
-tests/heartbeat.rs
-tests/pr_watch.rs
-tests/recover.rs
-tests/spawn_verified.rs
-tests/startup_dialog.rs
-tests/worktree.rs
