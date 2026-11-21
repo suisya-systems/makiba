@@ -85,6 +85,7 @@ pub fn read(path: &Path) -> Result<Value, String> {
         "runs": runs(&conn).map_err(sql)?, "terminals": terminals(&conn).map_err(sql)?,
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?});
+    v["next_work"] = next_work(&conn).map_err(sql)?;
     Mask::new(&conn).value(&mut v);
     Ok(v)
 }
@@ -228,6 +229,110 @@ fn pr_watches(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
          LEFT JOIN runs r ON r.id = w.run_id WHERE w.status = 'watching' ORDER BY w.id",
         [],
     )
+}
+
+/// The newest triage scan (Issue 256), null before the first: what the secretary would propose
+/// next outside any range. A scan recorded before Issue 256 has null `candidates` and `left_out`.
+fn next_work(conn: &Connection) -> rusqlite::Result<Value> {
+    let Some(e) = rows(
+        conn,
+        "SELECT id, occurred_at, payload_json FROM events
+         WHERE kind = 'work_discovery_scanned' ORDER BY id DESC LIMIT 1",
+        [],
+    )?
+    .pop() else {
+        return Ok(Value::Null);
+    };
+    let p: Value =
+        serde_json::from_str(e["payload_json"].as_str().unwrap_or("{}")).unwrap_or_default();
+    // Every candidate found ready: those the notice listed and those its cut left.
+    let all =
+        p["candidate_count"].as_i64().unwrap_or(0) + p["truncated_count"].as_i64().unwrap_or(0);
+    let mut v = json!({"scan_id": e["id"], "scanned_at": e["occurred_at"], "candidate_count": all});
+    for k in [
+        "trigger",
+        "status",
+        "error",
+        "input_truncated",
+        "candidates",
+        "candidates_not_recorded",
+        "left_out",
+        "left_out_not_recorded",
+    ] {
+        v[k] = p[k].clone();
+    }
+    Ok(v)
+}
+
+/// The `next work:` line of the text, from the masked `next_work`, and a second line with the
+/// reasons when there is no candidate.
+fn next_text(conn: &Connection) -> String {
+    let mut v = next_work(conn).unwrap_or_default();
+    Mask::new(conn).value(&mut v);
+    let s = |v: &Value| v.as_str().unwrap_or("").to_string();
+    if v.is_null() {
+        return "next work: no scan yet (makibad scans after a run is closed)\n".into();
+    }
+    let at = s(&v["scanned_at"]);
+    if v["status"] == "error" {
+        return format!("next work: the scan of {at} failed: {}\n", s(&v["error"]));
+    }
+    let n = v["candidate_count"].as_u64().unwrap_or(0);
+    let mut line = match n {
+        0 => format!("next work: no candidates (scan of {at})"),
+        1 => format!("next work: 1 candidate (scan of {at})"),
+        n => format!("next work: {n} candidates (scan of {at})"),
+    };
+    let forwarded = v["candidates"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|c| c["forwarded"] == json!(true))
+        .count();
+    if n > 0 && v["candidates"].is_array() {
+        line.push_str(&format!(", {forwarded} forwarded to the secretary"));
+    }
+    if !s(&v["input_truncated"]).is_empty() {
+        line.push_str(&format!(", input truncated: {}", s(&v["input_truncated"])));
+    }
+    let Some(candidates) = v["candidates"].as_array() else {
+        return format!("{line}; details not recorded by this makibad\n");
+    };
+    if let Some(c) = candidates.iter().find(|c| c["recommended"] == json!(true)) {
+        let clause = match c["clause_id"].as_str() {
+            Some(id) => format!("{id} {}", s(&c["clause_heading"])),
+            None => "names no clause".into(),
+        };
+        line.push_str(&format!(
+            "; recommended {}#{} {} ({clause})",
+            s(&c["repo"]),
+            c["issue"],
+            s(&c["title"])
+        ));
+    }
+    line.push('\n');
+    if n == 0 {
+        let why: Vec<String> = v["left_out"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|l| {
+                let at = match (l["project"].as_str(), l["issue"].as_i64()) {
+                    (Some(p), Some(i)) => format!("project {p} #{i}"),
+                    (Some(p), None) => format!("project {p}"),
+                    (None, Some(i)) => format!("{}#{i}", s(&l["repo"])),
+                    (None, None) => s(&l["repo"]),
+                };
+                format!("{at}: {}", s(&l["reason"]))
+            })
+            .collect();
+        line.push_str(&match why.len() {
+            0 => "  why: no open Issue is ready\n".to_string(),
+            1..=3 => format!("  why: {}\n", why.join("; ")),
+            k => format!("  why: {}; +{} more\n", why[..3].join("; "), k - 3),
+        });
+    }
+    line
 }
 
 /// How many events `events` returns when not told, and at most.
@@ -427,8 +532,9 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     let (Some(beat), Some(age)) = (beat, age) else {
         return Ok((
             format!(
-                "makibad: no heartbeat has ever been written\n{}",
-                projects_text(&conn)
+                "makibad: no heartbeat has ever been written\n{}{}",
+                projects_text(&conn),
+                next_text(&conn)
             ),
             false,
         ));
@@ -457,6 +563,7 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
         crate::base::attach_command(&session, crate::spec::AGENT_SECRETARY)
     ));
     text.push_str(&projects_text(&conn));
+    text.push_str(&next_text(&conn));
     Ok((text, fresh))
 }
 
