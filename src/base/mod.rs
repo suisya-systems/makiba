@@ -29,6 +29,26 @@ pub fn attach_command(session: &str, name: &str) -> String {
     format!("HC_SESSION={session} hc attach {name}")
 }
 
+/// The labels herdr-app places a terminal by (Issue 196), in the form measured to work
+/// (probes.md P12): one space per organization `org` (`makiba.org`), one tab per terminal `name`.
+pub fn app_labels(org: &str, name: &str) -> BTreeMap<String, String> {
+    let id = |text: &str| crate::daemon::door::sha256_hex(text)[..32].to_string();
+    BTreeMap::from([
+        ("herdr.space".to_string(), format!("sp{}", id(org))),
+        (
+            "herdr.tab".to_string(),
+            format!("tb{}", id(&format!("{org}\n{name}"))),
+        ),
+        ("where".to_string(), format!("makiba / {name}")),
+    ])
+}
+
+/// What the person runs on herdr-app's machine so that the app dials the base's place `session`
+/// (`makiba up`, Issue 196). Measured with herdr-app on Windows and the base in WSL.
+pub fn app_register_command(session: &str) -> String {
+    format!("hc.exe machine add wsl --name {session} --session {session}")
+}
+
 /// The real base of `session`, which `Base::start` can start (`makiba up`).
 pub fn connect_session_for_start(session: &str, timeout: Duration) -> Box<dyn Base> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
