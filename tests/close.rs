@@ -124,19 +124,7 @@ fn org(task: &str, kind: &str, workplace: Option<PathBuf>) -> Org {
             docs
         } else {
             let wt = root.join("workers/p").join(task);
-            std::fs::create_dir_all(wt.parent().unwrap()).unwrap();
-            git(
-                &repo(),
-                &[
-                    "worktree",
-                    "add",
-                    "-q",
-                    "-b",
-                    &format!("makiba/{task}"),
-                    &wt.to_string_lossy(),
-                    "main",
-                ],
-            );
+            common::run_workplace(&state, &repo(), &wt, task, &format!("makiba/{task}"));
             wt
         }
     });
