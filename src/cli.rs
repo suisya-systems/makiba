@@ -591,7 +591,7 @@ pub fn exit(code: i32) -> ExitCode {
 /// `state.db` as `status` reads it, and ask on the terminal unless `yes`. The read's id goes with
 /// the approval, so a read made since is refused (`stale`) instead of approved unseen.
 fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
-    let status = crate::status_local::read(&crate::daemon::state_dir().join("state.db"))?;
+    let status = crate::status_local::read_here()?;
     let range = status["ranges"]
         .as_array()
         .and_then(|a| a.iter().find(|r| r["id"] == json!(id)))
