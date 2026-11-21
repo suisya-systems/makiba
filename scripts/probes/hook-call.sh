@@ -93,6 +93,7 @@ SH
 chmod +x "$SHARE/makiba"
 say "hooks' entry point: $SHARE/makiba (a logging wrapper of $MAKIBA_BIN; MAKIBA_SHARE_DIR=$SHARE for makibad and so for the launch)"
 
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 # The core, brought up by an idle terminal of its own.
 TERMS="$TERMS hk-idle"
 hc run --bg --no-parent --name hk-idle --cwd "$WORK" -- python3 -c 'import time;time.sleep(3600)' >/dev/null 2>&1 \

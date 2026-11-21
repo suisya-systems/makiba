@@ -13,6 +13,7 @@ probe_init p4 "${1:-}"
 
 REPO=$WORK/repo; new_repo "$REPO" || { say "RESULT p4: precondition-failed (repository)"; exit 2; }
 T=p4-agent
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 # acceptEdits: the agent writes the echo files inside its folder without a prompt.
 launch "$T" "$REPO" -- --permission-mode acceptEdits || { record launch FAIL "hc run failed"; finish; }
 wait_ready "$T" 120 || { record launch NEEDS-HUMAN "claude did not reach an empty prompt in 120s"; screen_dump "$T" launch; finish; }

@@ -107,6 +107,7 @@ extra_cleanup() {
 # The hooks' entry point, as the role settings name it: made only when missing, removed only if made here.
 EPDIR=${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}; EP=$EPDIR/makiba
 EP_MADE=""; EPDIR_MADE=""
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 if [ -e "$EP" ] || [ -L "$EP" ]; then say "hooks' entry point: $EP exists, left as it is (-> $(readlink "$EP" 2>/dev/null || echo 'not a link'))"
 else
   d=$EPDIR; while [ ! -d "$d" ]; do EPDIR_MADE=$d; d=$(dirname "$d"); done   # the topmost folder made here

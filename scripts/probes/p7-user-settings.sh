@@ -19,6 +19,7 @@ umask 077
 standin_start || { say "RESULT p7: precondition-failed (stand-in did not start)"; exit 2; }
 P7_DONE=""
 extra_cleanup() { kill "$STANDIN_PID" 2>/dev/null; [ "$P7_DONE" = 1 ] || say "note: the script ended early (no SUMMARY line follows); a killed or hung run looks like this"; }
+probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 NW=${P7_NOTIFY_WAIT:-70}; case $NW in ''|*[!0-9]*) NW=70 ;; esac
 
 SRC=${HOST_CFG:-$HOME/.claude}
