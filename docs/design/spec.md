@@ -679,7 +679,7 @@ New:
 
 `pr_merged` is written by the belt's landing check (section 5.8): `repo`, `pr`, `title`, `merged_at`, `task_id`.
 
-`work_discovery_scanned` (Issue 40) is written by the triage pass of `makibad`. A scan is due when a `run_closed` is newer than the `through_close_id` of the newest scan whose `status` is not `error`, and the newest scan of any status is at least `MAKIBA_TRIAGE_INTERVAL_MS` old, both read from `events`; a close inside the interval waits for its end. The scan (`src/work_discovery/`) runs on a thread of its own over the active projects; a project's GitHub repository is its `origin_url`, else the `origin` remote of its clone in the repositories folder (section 2) as the clone's own configuration writes it (before any `insteadOf` rewrite; exactly one URL, Issue 211), else it is reported as having none. It reads with `gh issue list` and `gh pr list --repo github.com/<owner>/<repo>` (open Issues, open PRs, recent merges and, for one repository, the merged PRs and closed Issues the effort model learns from); free capacity is `max_concurrent_workers` minus the runs `dispatch` counts. No model is called: candidates are ordered by the goal clause their Issue names (`docs/goals.md`). Payload: `trigger` (`close`), `status` (`candidates_found`, `no_candidates` or `error`), `through_close_id` (the newest `run_closed` id when the scan started), `candidate_refs` (`owner/repo#N`, sorted, comma-joined), `diagnostics` (`unset:<owner/repo>`, `error:<owner/repo>` and `norepo:<project>`, sorted, comma-joined), `candidate_count`, `truncated_count`, `free_workers`, `repos`, `notified`, `error`. When the scan did not fail, found something, and its `candidate_refs` or `diagnostics` differ from those of the newest event with `notified` true, a `notice` to the secretary lists the candidates with their clauses and qualifiers and the diagnostics not in that notice; the event, the message, its `message_sent` and the delivery row are written in one transaction.
+`work_discovery_scanned` (Issue 40) is written by the triage pass of `makibad`. A scan is due when a `run_closed` is newer than the `through_close_id` of the newest scan whose `status` is not `error`, and the newest scan of any status is at least `MAKIBA_TRIAGE_INTERVAL_MS` old, both read from `events`; a close inside the interval waits for its end. The scan (`src/work_discovery/`) runs on a thread of its own over the active projects; a project's GitHub repository is its `origin_url`, else the `origin` remote of its clone in the repositories folder (section 2) as the clone's own configuration writes it (before any `insteadOf` rewrite; exactly one URL, Issue 211), else it is reported as having none. It reads with `gh issue list` and `gh pr list --repo github.com/<owner>/<repo>` (open Issues, open PRs, recent merges and, for one repository, the merged PRs and closed Issues the effort model learns from); free capacity is `max_concurrent_workers` minus the runs `dispatch` counts. No model is called: candidates are ordered by the goal clause their Issue names (`docs/goals.md`). Payload: `trigger` (`close`), `status` (`candidates_found`, `no_candidates` or `error`), `through_close_id` (the newest `run_closed` id when the scan started), `candidate_refs` (`owner/repo#N`, sorted, comma-joined), `diagnostics` (`unset:<owner/repo>`, `error:<owner/repo>` and `norepo:<project>`, sorted, comma-joined), `candidate_count`, `truncated_count`, `free_workers`, `repos`, `notified`, `error`; and, for the read surface (Issue 256, section 12, table `Next work field`), `candidates` (every candidate the scan found ready, in its order: the scan ranks once with no cut and the notice's cut of three is taken from that ranking, so the two agree), `left_out`, `input_truncated`, `candidates_not_recorded` and `left_out_not_recorded` (each array keeps at most 100 entries; the count of those dropped above that bound, 0 when none). A scan drops before ranking the Issues of a repository with no goal ledger or a ledger in error (only their count is known, in that entry of `left_out`), Issues held by an open dependency or a label (each in `left_out`), Issues a merge into a base branch closed (not shown: done work) and Issues past the read limits (`input_truncated`). When the scan did not fail, found something, and its `candidate_refs` or `diagnostics` differ from those of the newest event with `notified` true, a `notice` to the secretary lists the candidates with their clauses and qualifiers and the diagnostics not in that notice; the event, the message, its `message_sent` and the delivery row are written in one transaction.
 
 `worker_spawned` and `worker_spawn_verified` carry `task_id` (null for a launch without a run, section 5.3) and `spawn_id`; `worker_spawn_verified` also carries `event_id`, the id of the `terminal_status` (`working`) or `terminal_turn` of that `spawn_id` that verified the launch (section 5.3); the database refuses it without one.
 
@@ -784,6 +784,36 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `pr_watches[].head_oid` | `pr_watches.head_oid` |
 | `pr_watches[].task_id` | `runs.task_id` of `pr_watches.run_id` |
 | `pr_watches[].started_at` | `pr_watches.started_at` |
+| `next_work` | the newest `work_discovery_scanned` (Issue 256), null before the first scan; its fields are the table `Next work field` |
+
+`next_work` is what the secretary would propose next outside any range: the newest triage scan as it was recorded, read, never run, by a read. The belt of Issue 248 keeps a list of its own, what a range will admit, read whole by its own clock; an Issue may be in both, and the two are told apart by where they are read. A scan recorded before Issue 256 has `candidates` and `left_out` null (not recorded), not empty. The text of `makiba status` ends with one line `next work:`: the number of candidates, how many were forwarded to the secretary and the recommended one with its clause; or `no candidates` and a second line `why:` with the first three reasons; or that the scan failed and why; or `no scan yet`. It is made from the masked `next_work`.
+
+| Next work field | Source |
+| --- | --- |
+| `next_work.scan_id` | `events.id` of the newest `work_discovery_scanned` |
+| `next_work.scanned_at` | its `occurred_at` |
+| `next_work.trigger` | its `trigger` |
+| `next_work.status` | its `status`: `candidates_found`, `no_candidates` or `error` |
+| `next_work.error` | its `error`, null unless the scan failed |
+| `next_work.candidate_count` | every candidate found ready: its `candidate_count` plus `truncated_count` |
+| `next_work.input_truncated` | the reads cut short by their limits, a comma list of `open_issues`, `open_prs`, `base_merges`, empty when none |
+| `next_work.candidates[].repo` | the candidate's repository `OWNER/NAME`, every candidate found ready in the scan's order |
+| `next_work.candidates[].issue` | its Issue number |
+| `next_work.candidates[].title` | its title |
+| `next_work.candidates[].clause_id` | the goal clause its Issue names (`G<n>`), null when it names none |
+| `next_work.candidates[].clause_heading` | that clause's heading in the ledger, null when none |
+| `next_work.candidates[].why` | the reason the scan gives it (priority, follow-up, effort, dependencies), with a dependency only treated as resolved and a dependency line not read |
+| `next_work.candidates[].size` | its effort (`S`, `M`, `L`) |
+| `next_work.candidates[].size_estimated` | whether that effort is estimated |
+| `next_work.candidates[].recommended` | whether it is the scan's recommendation (the first) |
+| `next_work.candidates[].forwarded` | whether it is among the candidates the notice lists (the first three) |
+| `next_work.candidates_not_recorded` | candidates past the bound of 100, 0 when none |
+| `next_work.left_out[].project` | the project's slug, one entry per project of the repository, null when no project has it |
+| `next_work.left_out[].repo` | the repository, null for a project with none |
+| `next_work.left_out[].issue` | the Issue number, null for a reason of the whole repository |
+| `next_work.left_out[].kind` | `no_goal_ledger`, `goal_ledger_error`, `no_repository`, `blocked` (an open dependency) or `put_aside` (a `blocked` or `on-hold` label the person set) |
+| `next_work.left_out[].reason` | what to do about it, in one sentence |
+| `next_work.left_out_not_recorded` | entries past the bound of 100, 0 when none |
 
 | Event field | Source |
 | --- | --- |
