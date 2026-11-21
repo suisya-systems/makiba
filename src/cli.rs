@@ -271,6 +271,15 @@ pub enum Command {
         #[arg(long)]
         handover_file: PathBuf,
     },
+    /// Set a task's diff review allowance (a number, or unlimited), with a reason.
+    Review {
+        #[arg(long)]
+        task: String,
+        #[arg(long)]
+        allowed: String,
+        #[arg(long)]
+        reason: String,
+    },
     /// Save a raw note for the curator, with the four headings.
     Note {
         #[arg(long)]
@@ -429,6 +438,19 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
         ),
         Command::Push { task } => ("push", json!({"task": task})),
+        Command::Review {
+            task,
+            allowed,
+            reason,
+        } => {
+            let allowed = allowed
+                .parse::<i64>()
+                .map_or_else(|_| json!(allowed), |n| json!(n));
+            (
+                "review",
+                json!({"task": task, "allowed": allowed, "reason": reason}),
+            )
+        }
         Command::Project { slug, repo, hosts } => {
             let mut args = json!({"slug": slug, "repo": repo});
             if let Some(h) = hosts {

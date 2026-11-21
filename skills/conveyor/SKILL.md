@@ -99,7 +99,7 @@ After a renewal, read the handover's scope back before the belt moves. A scope y
 - A scope file: the scope is in the conversation and the renewal's handover.
 - A scan on request and its flags (free slots, rank mode, repository): `makibad` scans only after a close; the first candidates come from the person.
 - A count of free terminals: the belt's own "at most at once" is the limit.
-- The review round cap and its relay: makiba counts no rounds; a worker out of rounds reports it (stop line 5).
+- The review round cap's relay: the door counts the rounds (`review`); a worker out of rounds reports it (stop line 5), and only you raise its allowance, with a reason.
 - A journal of the belt: `makibad` records every dispatch, push, pull request and close itself.
 - A notice when a pull request is merged: you merge it yourself; a merge by the person on GitHub you learn from the person.
 - A classifier of what a change touches and its evidence for the pull request: the worker says how it ran its change, and the pull request says how it was checked.

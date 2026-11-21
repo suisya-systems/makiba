@@ -203,16 +203,36 @@ pub struct Door {
     agent: String,
     /// The SHA-256 of the merge gate's key, once it is written (spec section 3).
     gate_key: OnceLock<String>,
+    /// The state folder, where `state.db` is: the places a review reads (Issue 135).
+    state: PathBuf,
+    /// The readers' programs, read when the door is made, so no request chooses them.
+    review: super::review::Programs,
+    /// The tasks whose review runs now: one at a time per task.
+    reviewing: Mutex<std::collections::HashSet<String>>,
 }
 
 impl Door {
     pub fn new(w: StateWriter, base: Arc<dyn Base>, agent: String) -> Door {
+        let state = w
+            .conn()
+            .path()
+            .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+            .unwrap_or_default();
         Door {
             w: Mutex::new(w),
             base,
             agent,
             gate_key: OnceLock::new(),
+            state,
+            review: super::review::Programs::from_env(),
+            reviewing: Mutex::new(Default::default()),
         }
+    }
+
+    /// The readers of `review` (Issue 135): the other model's program and the same model's.
+    pub fn with_review_programs(mut self, other: PathBuf, same: PathBuf) -> Door {
+        self.review = super::review::Programs { other, same };
+        self
     }
 
     /// The merge gate's key: its holder may ask `gate` and nothing else.
@@ -294,6 +314,9 @@ impl Door {
         }
         if v == Verb::Gate {
             return self.gate(w, &actor, &args, idem);
+        }
+        if v == Verb::Review && role == Role::Worker {
+            return self.review(w, &actor, &args, idem);
         }
         if v == Verb::Events {
             // A read that a client repeats: recorded, it would write a row and an event per
@@ -603,6 +626,7 @@ fn run(
             super::project::accept(w, role, actor, slug, str_arg(args, "repo")?, hosts)
         }
         Verb::Update => update(w, args),
+        Verb::Review => review_allowance(w, actor, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }
 }
@@ -1265,6 +1289,17 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     if !run_exists(w, task)? {
         return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
     }
+    // A code task's done report carries the state of its review, recorded by the door (Issue 135).
+    let review = if state == "done" && role == Role::Worker {
+        last_review_clear(w, actor)?;
+        review_state(w, actor, task)?
+    } else {
+        None
+    };
+    let body = match &review {
+        Some(r) => format!("{text}\n\n[makiba] {}", review_line(r)),
+        None => text.to_string(),
+    };
     let kind = format!("report_{state}");
     let id = store_message(
         w,
@@ -1272,8 +1307,19 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
         crate::spec::AGENT_SECRETARY,
         &kind,
         Some(task),
-        text,
+        &body,
     )?;
+    if let Some(r) = &review {
+        let payload = json!({"task": task, "state": state, "review": r});
+        w.append_event(&NewEvent {
+            kind: "worker_reported",
+            actor: Some(actor),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })
+        .map_err(internal)?;
+    }
     if state == "done" {
         w.conn()
             .execute(
@@ -2288,6 +2334,422 @@ impl Door {
     }
 }
 
+// ---- review (Issue 135) -------------------------------------------------------------------------
+
+/// The rounds of `mode` (`diff` or `design`) a task has started; a row without a mode is `diff`.
+fn rounds_used(w: &StateWriter, task: &str, mode: &str) -> rusqlite::Result<i64> {
+    w.conn().query_row(
+        "SELECT COUNT(*) FROM events WHERE kind = 'codex_round_started'
+           AND json_extract(payload_json, '$.task') = ?1
+           AND COALESCE(json_extract(payload_json, '$.mode'), 'diff') = ?2",
+        params![task, mode],
+        |r| r.get(0),
+    )
+}
+
+/// A task's diff allowance: the last `codex_round_cap_changed`, else the default; `None` is
+/// unlimited.
+fn rounds_allowed(w: &StateWriter, task: &str) -> rusqlite::Result<Option<i64>> {
+    let last: Option<Value> = w
+        .conn()
+        .query_row(
+            "SELECT json_extract(payload_json, '$.allowed') FROM events
+             WHERE kind = 'codex_round_cap_changed' AND json_extract(payload_json, '$.task') = ?1
+             ORDER BY id DESC LIMIT 1",
+            [task],
+            |r| r.get::<_, Option<rusqlite::types::Value>>(0),
+        )
+        .optional()?
+        .flatten()
+        .map(|v| match v {
+            rusqlite::types::Value::Integer(n) => json!(n),
+            rusqlite::types::Value::Text(t) => json!(t),
+            _ => Value::Null,
+        });
+    Ok(match last {
+        None => Some(super::review::DIFF_ALLOWED),
+        Some(v) => v.as_i64(),
+    })
+}
+
+fn allowed_json(a: Option<i64>) -> Value {
+    a.map_or(json!("unlimited"), |n| json!(n))
+}
+
+/// `review` by the secretary or the person: set a task's diff allowance, with a reason.
+fn review_allowance(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let task = str_arg(args, "task")
+        .map_err(|_| usage("the secretary sets a task's allowance: task, allowed and reason"))?;
+    let allowed = match &args["allowed"] {
+        Value::String(s) if s == "unlimited" => None,
+        v => Some(
+            v.as_i64()
+                .filter(|n| *n >= 0)
+                .ok_or_else(|| usage("allowed is a whole number from 0, or \"unlimited\""))?,
+        ),
+    };
+    let reason = args["reason"].as_str().map(str::trim).unwrap_or_default();
+    if reason.is_empty() {
+        return Err(usage("a reason is required"));
+    }
+    if !run_exists(w, task)? {
+        return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    let previous = rounds_allowed(w, task).map_err(internal)?;
+    let payload = json!({"task": task, "allowed": allowed_json(allowed),
+                         "previous": allowed_json(previous), "reason": reason});
+    w.append_event(&NewEvent {
+        kind: "codex_round_cap_changed",
+        actor: Some(actor),
+        payload: Some(&payload),
+        run_task_id: Some(task),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    Ok(json!({
+        "task": task,
+        "allowed": allowed_json(allowed),
+        "used": rounds_used(w, task, "diff").map_err(internal)?,
+        "design_used": rounds_used(w, task, "design").map_err(internal)?,
+    }))
+}
+
+/// `report done` is refused while the worker's last diff review found a blocker (Issue 135).
+fn last_review_clear(w: &StateWriter, actor: &str) -> Result<(), DoorError> {
+    let blockers: Option<i64> = w
+        .conn()
+        .query_row(
+            "SELECT json_extract(result_json, '$.result.findings.blocker') FROM commands
+             WHERE verb = 'review' AND actor = ?1 AND status = 'done'
+               AND json_extract(result_json, '$.result.kind') = 'diff'
+             ORDER BY id DESC LIMIT 1",
+            [actor],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()
+        .map_err(internal)?
+        .flatten();
+    match blockers {
+        Some(n) if n > 0 => Err(refuse(
+            ErrorKind::Conflict,
+            format!("your last diff review found {n} blocker(s)"),
+            "fix them, commit, and call review again; or report blocked with the findings",
+        )),
+        _ => Ok(()),
+    }
+}
+
+/// The review state of a code task's reported head: `passed`, `not-established`, `none` (no diff
+/// review) or `stale` (the last one read an older head), with the reader and the heads. `None` for
+/// a task that is not a code run with a repository of its own.
+fn review_state(w: &StateWriter, actor: &str, task: &str) -> Result<Option<Value>, DoorError> {
+    let Ok(run) = review_run(w, task) else {
+        return Ok(None);
+    };
+    let state_dir = w
+        .conn()
+        .path()
+        .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    let places = super::prepare::Places::from_env(&state_dir);
+    let gitdir = super::run_repo::dir(&places.settings, task);
+    if run.kind != "code" || !super::run_repo::is_run(&gitdir, &run.workplace) {
+        return Ok(None);
+    }
+    let head = super::run_repo::commit(&gitdir, &run.workplace, "HEAD");
+    let last: Option<String> = w
+        .conn()
+        .query_row(
+            "SELECT json_extract(result_json, '$.result') FROM commands
+             WHERE verb = 'review' AND actor = ?1 AND status = 'done'
+               AND json_extract(result_json, '$.result.kind') = 'diff'
+             ORDER BY id DESC LIMIT 1",
+            [actor],
+            |r| r.get(0),
+        )
+        .optional()
+        .map_err(internal)?
+        .flatten();
+    let last: Option<Value> = last.and_then(|t| serde_json::from_str(&t).ok());
+    let state = match &last {
+        None => "none",
+        // Stale only when the review names a head and it is another; a review that ran on no
+        // head (no reader could start) keeps its own verdict and reason.
+        Some(l) if l["head"].is_string() && l["head"].as_str() != head.as_deref() => "stale",
+        Some(l) => l["verdict"].as_str().unwrap_or("not-established"),
+    };
+    let mut r = json!({"state": state, "head": head});
+    if let Some(l) = &last {
+        for k in ["reader", "round", "allowed", "findings", "reason"] {
+            if !l[k].is_null() {
+                r[k] = l[k].clone();
+            }
+        }
+        r["reviewed_head"] = l["head"].clone();
+    }
+    Ok(Some(r))
+}
+
+/// The line the secretary reads under a done report.
+fn review_line(r: &Value) -> String {
+    let short = |v: &Value| {
+        v.as_str()
+            .map(|s| s[..s.len().min(12)].to_string())
+            .unwrap_or_default()
+    };
+    let head = short(&r["head"]);
+    match r["state"].as_str().unwrap_or_default() {
+        "passed" => format!(
+            "review of {head}: passed by {} (round {} of {}), findings {}",
+            r["reader"].as_str().unwrap_or("?"),
+            r["round"],
+            r["allowed"],
+            r["findings"]
+        ),
+        "none" => format!("review of {head}: none (no diff review was run)"),
+        "stale" => format!(
+            "review of {head}: stale (the last diff review read {})",
+            short(&r["reviewed_head"])
+        ),
+        _ => format!(
+            "review of {head}: not established ({})",
+            r["reason"].as_str().unwrap_or("no reason")
+        ),
+    }
+}
+
+/// What a worker's review needs of its run.
+struct ReviewRun {
+    project: String,
+    branch: String,
+    kind: String,
+    workplace: PathBuf,
+}
+
+fn review_run(w: &StateWriter, task: &str) -> Result<ReviewRun, DoorError> {
+    w.conn()
+        .query_row(
+            "SELECT p.slug, COALESCE(p.default_branch, 'main'), l.kind, l.worktree
+             FROM runs r JOIN projects p ON p.id = r.project_id
+             JOIN run_launch l ON l.run_id = r.id
+             WHERE r.task_id = ?1 ORDER BY l.id DESC LIMIT 1",
+            [task],
+            |r| {
+                Ok(ReviewRun {
+                    project: r.get(0)?,
+                    branch: r.get(1)?,
+                    kind: r.get(2)?,
+                    workplace: PathBuf::from(r.get::<_, String>(3)?),
+                })
+            },
+        )
+        .optional()
+        .map_err(internal)?
+        .ok_or_else(|| {
+            refuse(
+                ErrorKind::NotFound,
+                format!("no launched task {task:?}"),
+                "",
+            )
+        })
+}
+
+/// Removes the task from the door's set of running reviews when the round ends, however.
+struct Reviewing<'a>(&'a Mutex<std::collections::HashSet<String>>, String);
+
+impl Drop for Reviewing<'_> {
+    fn drop(&mut self) {
+        self.0
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.1);
+    }
+}
+
+impl Door {
+    /// `review` by a worker (Issue 135): one round of `kind` (`diff` or `design`) on its own task.
+    /// Checked and counted under the door's lock; the reader runs with the lock released.
+    fn review(
+        &self,
+        w: MutexGuard<'_, StateWriter>,
+        actor: &str,
+        args: &Value,
+        idem: Option<&str>,
+    ) -> Response {
+        let fail = |w: &StateWriter, r: Response| {
+            let _ = record(w, actor, "review", args, idem, &r);
+            r
+        };
+        if ["task", "allowed", "reason"]
+            .iter()
+            .any(|k| args.get(*k).is_some())
+        {
+            return fail(
+                &w,
+                Err(refuse(
+                    ErrorKind::Denied,
+                    "a worker reviews its own task and cannot set its allowance",
+                    "only the secretary changes the allowance; report the remaining findings to it",
+                )),
+            );
+        }
+        let task = actor.strip_prefix("w-").unwrap_or(actor).to_string();
+        let design = match args["kind"].as_str() {
+            Some("design") => true,
+            Some("diff") => false,
+            _ => return Err(usage("kind is diff or design")),
+        };
+        let note = args["note"].as_str().filter(|n| !n.trim().is_empty());
+        if design && note.is_none() {
+            return Err(usage("a design review needs the design as note"));
+        }
+        let mode = if design { "design" } else { "diff" };
+        let run = match review_run(&w, &task) {
+            Ok(r) => r,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        if run.kind != "code" {
+            return Err(usage(
+                "review is for code tasks; a document task has no repository",
+            ));
+        }
+        if !self
+            .reviewing
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(task.clone())
+        {
+            return fail(
+                &w,
+                Err(refuse(
+                    ErrorKind::Conflict,
+                    "a review of this task is running",
+                    "wait for its answer",
+                )),
+            );
+        }
+        let _running = Reviewing(&self.reviewing, task.clone());
+        drop(w);
+        // Before a round is spent: which reader can run, and the snapshot it will read.
+        let places = super::prepare::Places::from_env(&self.state);
+        let plan = super::review::Plan::find(&self.review);
+        let base_answer = |verdict: &str, reader: &str, reason: &str| json!({"verdict": verdict, "kind": mode, "reader": reader, "reason": reason});
+        if let Some(why) = plan.none() {
+            let w = self.writer();
+            let why = super::review::scrub(why);
+            return fail(&w, Ok(base_answer("not-established", "none", &why)));
+        }
+        let snap = match super::review::snapshot(
+            &places,
+            &task,
+            &run.project,
+            &run.branch,
+            &run.workplace,
+            note.filter(|_| design),
+        ) {
+            Ok(s) => s,
+            Err(why) => {
+                let w = self.writer();
+                return fail(
+                    &w,
+                    Err(refuse(
+                        ErrorKind::Conflict,
+                        format!("the review could not be prepared: {why}"),
+                        "no round was spent",
+                    )),
+                );
+            }
+        };
+        // Admission: count and record the round, or refuse it, in one short transaction.
+        let (round, allowed) = {
+            let w = self.writer();
+            if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+                return Err(internal(e));
+            }
+            let counted = (|| -> rusqlite::Result<(i64, Option<i64>)> {
+                let used = rounds_used(&w, &task, mode)?;
+                let allowed = if design {
+                    Some(super::review::DESIGN_ALLOWED)
+                } else {
+                    rounds_allowed(&w, &task)?
+                };
+                Ok((used, allowed))
+            })();
+            let (used, allowed) = match counted {
+                Ok(c) => c,
+                Err(e) => {
+                    let _ = w.rollback();
+                    return Err(internal(e));
+                }
+            };
+            let over = allowed.is_some_and(|a| used >= a);
+            let mut payload = json!({"task": task, "mode": mode, "allowed": allowed_json(allowed),
+                                     "base": snap.base, "head": snap.head});
+            if over {
+                payload["used"] = json!(used);
+            } else {
+                payload["round"] = json!(used + 1);
+            }
+            if let Some(n) = note.filter(|_| design) {
+                payload["note_sha256"] = json!(sha256_hex(n));
+            }
+            let written = w.append_event(&NewEvent {
+                kind: if over {
+                    "codex_round_denied"
+                } else {
+                    "codex_round_started"
+                },
+                actor: Some(actor),
+                payload: Some(&payload),
+                run_task_id: Some(&task),
+                ..Default::default()
+            });
+            let r: Response = if over {
+                Err(refuse(
+                    ErrorKind::Conflict,
+                    format!(
+                        "REVIEW_ROUND_DENIED (kind={mode} used={used} allowed={}): do not call review again; report the remaining findings and your judgment to the secretary and stop",
+                        allowed_json(allowed)
+                    ),
+                    "only the secretary raises the allowance",
+                ))
+            } else {
+                Ok(Value::Null)
+            };
+            let recorded = r.is_ok() || record(&w, actor, "review", args, idem, &r);
+            if written.is_err() || !recorded || w.commit().is_err() {
+                let _ = w.rollback();
+                return Err(internal("the round could not be recorded; nothing was run"));
+            }
+            r?;
+            (used + 1, allowed)
+        };
+        let a = super::review::run(&plan, &places, &snap, design);
+        let findings = a
+            .findings
+            .map(|[b, ma, mi]| json!({"blocker": b, "major": ma, "minor": mi}));
+        let mut answer = json!({
+            "verdict": if a.established { "passed" } else { "not-established" },
+            "kind": mode,
+            "reader": a.reader,
+            "round": round,
+            "allowed": allowed_json(allowed),
+            "base": snap.base,
+            "head": snap.head,
+            "findings": findings,
+            "text": a.text,
+        });
+        if let Some(f) = a.fallback_reason {
+            answer["fallback_reason"] = json!(f);
+        }
+        if let Some(r) = a.reason {
+            answer["reason"] = json!(r);
+        }
+        let w = self.writer();
+        fail(&w, Ok(answer))
+    }
+}
+
 // ---- the entrances ----------------------------------------------------------------------------
 
 /// Where the door listens (spec section 2).
@@ -2776,6 +3238,20 @@ fn tool(v: Verb) -> Value {
                 ("reason".into(), text.clone()),
             ]),
             &["pattern", "decision", "reason"],
+        ),
+        Verb::Review => (
+            "A worker: have a second reader review your task, once with kind design (the design as note) before code, and with kind diff after your last commit, before report done. makibad runs the reader (another model's program when usable, else the same model in a fresh session) on your committed head and answers with verdict (passed or not-established), reader, round, allowed, findings (blocker, major, minor) and text. Rounds are capped: design 1, diff 3; over the cap it is refused with REVIEW_ROUND_DENIED. The secretary: set a task's diff allowance with task, allowed (a number or unlimited) and reason.",
+            Map::from_iter([
+                (
+                    "kind".into(),
+                    json!({"type": "string", "enum": ["diff", "design"]}),
+                ),
+                ("note".into(), text.clone()),
+                ("task".into(), text.clone()),
+                ("allowed".into(), json!({"type": ["integer", "string"]})),
+                ("reason".into(), text.clone()),
+            ]),
+            &[],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
     };

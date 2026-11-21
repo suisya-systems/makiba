@@ -39,6 +39,17 @@ You do not need the program that runs the agents' terminals, its socket or its f
 - Commit as its own command (`git add <files>`, then `git commit -m ...`), not chained with other commands. Never skip the repository's hooks, and never destroy history or uncommitted work (force push, hard reset, stash that changes something, adding everything at once). Your hooks refuse these.
 - When your work is committed, say so in your `done` report. The secretary pushes.
 
+## The review
+
+A code task is read by a second reader through the tool `review`; never run a reader's program yourself (its hosts are refused). makibad runs it on your committed head and counts the rounds.
+
+- When the brief asks for a design first: write the design, call `review` with `kind` design and the design as `note`, once (you have one design round). Fix the design for each Blocker and Major and report it with the answer's `verdict`, `reader` and findings.
+- After your last commit, before `report` `done`: call `review` with `kind` diff. For each Blocker or Major, fix it in a new commit and call it again; leave a Minor and name it in your done report as a known limit. The door refuses `done` while your last diff review found a Blocker.
+- Put the answer's `verdict`, `reader`, `round` and findings counts in your done report as they are.
+- `REVIEW_ROUND_DENIED` (out of rounds): do not call it again. `report` `blocked` with the remaining findings and your judgment: a design problem, or separate issues surfacing one after another.
+- `not-established`: do not call it again at once. Put the answer's `reason` in your report and wait for the secretary.
+- The same finding through three rounds, or a finding that would undo the previous round's fix: stop and `report` `blocked`, naming the pull in each direction.
+
 ## The network
 
 Your sandboxed commands reach only the hosts the person listed for your project; every other host is refused at once, with no prompt. When a build or a command needs a host that is refused, do not retry it another way and do not look for a route around it: `report` `blocked` with the host name and the command that needed it.
