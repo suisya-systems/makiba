@@ -650,20 +650,34 @@ pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, St
     }
 }
 
-/// Fetch the PR's head and base into `clone` under `refs/makiba/gate/<repo>/<n>/`; their ids.
+/// Fetch the PR's head and base into `clone` under `refs/makiba/gate/<repo>/<n>/`, through the
+/// clone's own `origin` (Issue 198), which must name `repo`; their ids. The configured URL is
+/// compared, not the one `url.<x>.insteadOf` rewrites it to; git applies the person's rewrites and
+/// ssh configuration when it fetches. Nothing is fetched from an origin that names another one.
 pub fn fetch(
     clone: &Path,
-    url: &str,
     repo: &str,
     pr: i64,
     base_branch: &str,
 ) -> Result<(String, String), Reject> {
-    let prefix = url.rsplit_once("/pull/").map_or(url, |(p, _)| p);
-    let remote = if prefix.starts_with("https://") {
-        format!("{prefix}.git")
-    } else {
-        prefix.to_string()
+    let urls = git(clone, &["config", "--get-all", "remote.origin.url"]).unwrap_or_default();
+    let urls: Vec<&str> = urls
+        .lines()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .collect();
+    let [origin] = urls[..] else {
+        return reject(format!(
+            "the project's clone {} has no single origin URL ({urls:?}); the gate fetches only through an origin that names {repo}",
+            clone.display()
+        ));
     };
+    if super::triage::owner_repo_from_url(origin).as_deref() != Some(repo.to_lowercase().as_str()) {
+        return reject(format!(
+            "the project's clone {} has origin {origin}, which is not {repo}; the gate fetches only through an origin that names the PR's repository",
+            clone.display()
+        ));
+    }
     let r = format!("refs/makiba/gate/{repo}/{pr}");
     let never = AtomicBool::new(false);
     let dir = clone.display().to_string();
@@ -675,13 +689,18 @@ pub fn fetch(
             "fetch",
             "--no-tags",
             "--quiet",
-            &remote,
+            "--refmap=",
+            "origin",
             &format!("+refs/pull/{pr}/head:{r}/head"),
             &format!("+refs/heads/{base_branch}:{r}/base"),
         ],
         &never,
     )
-    .map_err(|_| Reject(format!("git fetch of the PR from {remote} failed")))?;
+    .map_err(|_| {
+        Reject(format!(
+            "git fetch of the PR through origin ({origin}) failed"
+        ))
+    })?;
     let id = |end: &str| -> Result<String, Reject> {
         Ok(
             git(clone, &["rev-parse", &format!("{r}/{end}^{{commit}}")])?

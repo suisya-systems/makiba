@@ -1926,7 +1926,7 @@ enum Found {
 fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
     use super::gate;
     let program = super::gh::program();
-    let (url, base_branch, view_head) = match gate::pr_view(&program, repo, pr) {
+    let (_url, base_branch, view_head) = match gate::pr_view(&program, repo, pr) {
         Ok(v) => v,
         Err(e) => return Found::Before(e.0),
     };
@@ -1961,7 +1961,7 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
             repos.display()
         ));
     };
-    let (base, fetched) = match gate::fetch(&clone, &url, repo, pr, &base_branch) {
+    let (base, fetched) = match gate::fetch(&clone, repo, pr, &base_branch) {
         Ok(ids) => ids,
         Err(e) => return Found::Before(e.0),
     };

@@ -225,6 +225,23 @@ impl Case {
             &home.join("repos"),
             &["clone", "-q", c.origin.to_str().unwrap(), name],
         );
+        git_in(
+            &clone,
+            &[
+                "remote",
+                "set-url",
+                "origin",
+                &format!("https://github.com/o/{name}"),
+            ],
+        );
+        git_in(
+            &clone,
+            &[
+                "config",
+                &format!("url.{}.insteadOf", c.origin.display()),
+                &format!("https://github.com/o/{name}"),
+            ],
+        );
         c.git(&["checkout", "-q", "-b", "feature"]);
         c
     }

@@ -27,6 +27,7 @@ mod recover;
 mod resume;
 pub mod secretary;
 mod triage;
+pub use triage::owner_repo_from_url;
 mod verify;
 
 use self::anomalies::Anomalies;
