@@ -4,7 +4,8 @@
 //!
 //! Also the regressions of the diff review's round 1: a committed link cannot make makibad write
 //! outside the snapshot, a secret in a reader's error is withheld, and a review no reader could
-//! run is not reported stale.
+//! run is not reported stale. Round 2: the reader sees every committed file as recorded, whatever
+//! the project's export attributes say.
 //!
 //! The helpers are those of `tests/review_gate.rs` (the declared test, not changed after its
 //! commit).
@@ -412,4 +413,33 @@ fn a_review_no_reader_could_run_is_not_reported_stale() {
     let r = o.recorded();
     assert_eq!(r["state"], "not-established", "{r}");
     assert!(!r["reason"].as_str().unwrap_or_default().is_empty(), "{r}");
+}
+
+/// Review round 2, P2: an `export-ignore` or `export-subst` file is still in the snapshot, as committed.
+#[test]
+fn the_snapshot_keeps_files_the_export_attributes_would_drop() {
+    let o = org("rr9", "code");
+    std::fs::write(
+        o.worktree.join(".gitattributes"),
+        "hidden.txt export-ignore\nsubst.txt export-subst\n",
+    )
+    .unwrap();
+    std::fs::write(o.worktree.join("hidden.txt"), "hidden\n").unwrap();
+    std::fs::write(o.worktree.join("subst.txt"), "$Format:%H$\n").unwrap();
+    git(
+        &o.worktree,
+        &["add", ".gitattributes", "hidden.txt", "subst.txt"],
+    );
+    git(&o.worktree, &["commit", "-q", "-m", "attributes"]);
+    stand_in(
+        &o.other,
+        0,
+        r#"cp hidden.txt "$0.hidden"; cp subst.txt "$0.subst"
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"cat x","exit_code":0,"status":"completed"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"FINDINGS: blocker=0 major=0 minor=0"}}'"#,
+    );
+    assert_eq!(o.diff().unwrap()["verdict"], "passed");
+    let seen = |ext: &str| std::fs::read_to_string(o.other.with_extension(ext)).unwrap();
+    assert_eq!(seen("hidden"), "hidden\n");
+    assert_eq!(seen("subst"), "$Format:%H$\n");
 }

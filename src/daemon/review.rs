@@ -209,26 +209,7 @@ pub fn snapshot(
         top,
     };
     // The tree at the head, without the folders an agent program reads its settings from.
-    let mut archive = run_repo::git(&gitdir, workplace);
-    archive
-        .args(["archive", "--format=tar", &snap.head])
-        .stdout(Stdio::piped());
-    let mut a = archive.spawn().map_err(|e| format!("git archive: {e}"))?;
-    let tar = Command::new("tar")
-        .arg("-x")
-        .arg("-C")
-        .arg(&snap.tree)
-        .stdin(a.stdout.take().ok_or("git archive: no output")?)
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|e| format!("tar: {e}"))?;
-    let archived = a.wait().map_err(|e| format!("git archive: {e}"))?;
-    if !archived.success() || !tar.status.success() {
-        return Err(format!(
-            "the head could not be written for the reader: {}",
-            String::from_utf8_lossy(&tar.stderr).trim()
-        ));
-    }
+    write_tree(&gitdir, workplace, &snap.head, &snap.tree)?;
     for d in [".claude", ".codex"] {
         remove_in(&snap.tree, &snap.tree.join(d))?;
     }
@@ -265,6 +246,90 @@ pub fn snapshot(
         write(NOTE_FILE, n.as_bytes())?;
     }
     Ok(snap)
+}
+
+/// Write the commit `head` of the run into `tree` as it is recorded: every blob byte for byte
+/// (no export or filter attribute applies, as it would in `git archive`), a link as a plain file
+/// holding its target (so nothing in the folder leads out of it), submodules left out.
+fn write_tree(gitdir: &Path, workplace: &Path, head: &str, tree: &Path) -> Result<(), String> {
+    let list = run_repo::git(gitdir, workplace)
+        .args(["ls-tree", "-r", "-z", "--full-tree", head])
+        .output()
+        .map_err(|e| format!("git ls-tree: {e}"))?;
+    if !list.status.success() {
+        return Err(format!(
+            "git ls-tree: {}",
+            String::from_utf8_lossy(&list.stderr).trim()
+        ));
+    }
+    // `<mode> blob <oid>\t<path>`, NUL-separated.
+    let mut files: Vec<(bool, String, PathBuf)> = vec![];
+    for e in list.stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
+        let e = String::from_utf8_lossy(e);
+        let Some((meta, path)) = e.split_once('\t') else {
+            continue;
+        };
+        let m: Vec<&str> = meta.split(' ').collect();
+        if m.len() != 3 || m[1] != "blob" {
+            continue;
+        }
+        let rel = Path::new(path);
+        if rel.is_absolute()
+            || rel
+                .components()
+                .any(|c| !matches!(c, std::path::Component::Normal(_)))
+        {
+            return Err(format!(
+                "the head records a path that is not plain: {path:?}"
+            ));
+        }
+        files.push((m[0] == "100755", m[2].to_string(), tree.join(rel)));
+    }
+    let mut cat = run_repo::git(gitdir, workplace);
+    cat.args(["cat-file", "--batch"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped());
+    let mut child = cat.spawn().map_err(|e| format!("git cat-file: {e}"))?;
+    let mut input = child.stdin.take().ok_or("git cat-file: no input")?;
+    let oids: String = files.iter().map(|(_, o, _)| format!("{o}\n")).collect();
+    let feeder = std::thread::spawn(move || {
+        let _ = input.write_all(oids.as_bytes());
+    });
+    let mut out = std::io::BufReader::new(child.stdout.take().ok_or("git cat-file: no output")?);
+    let written = (|| -> Result<(), String> {
+        use std::io::BufRead;
+        for (exec, oid, dest) in &files {
+            let mut header = String::new();
+            out.read_line(&mut header).map_err(|e| e.to_string())?;
+            let size: usize = header
+                .split_whitespace()
+                .nth(2)
+                .and_then(|n| n.parse().ok())
+                .ok_or_else(|| format!("git cat-file: no blob {oid}: {}", header.trim()))?;
+            let mut body = vec![0u8; size + 1];
+            out.read_exact(&mut body).map_err(|e| e.to_string())?;
+            body.pop();
+            if let Some(dir) = dest.parent() {
+                std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+            }
+            std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(dest)
+                .and_then(|mut f| f.write_all(&body))
+                .map_err(|e| format!("{}: {e}", dest.display()))?;
+            if *exec {
+                use std::os::unix::fs::PermissionsExt;
+                let _ = std::fs::set_permissions(dest, std::fs::Permissions::from_mode(0o755));
+            }
+        }
+        Ok(())
+    })();
+    drop(out);
+    let _ = child.kill();
+    let _ = child.wait();
+    let _ = feeder.join();
+    written.map_err(|e| format!("the head could not be written for the reader: {e}"))
 }
 
 /// What a finished child left.
