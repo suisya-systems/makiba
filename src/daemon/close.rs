@@ -33,9 +33,14 @@ use std::process::Command;
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
-/// `git -C <dir> <args>`: its trimmed output, or `None` when it fails.
+/// `git -C <dir> <args>`, running no hook (Issue 236): its trimmed output, or `None` when it fails.
 fn git(dir: &Path, args: &[&str]) -> Option<String> {
-    let out = Command::new("git").arg("-C").arg(dir).args(args).output();
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["-c", run_repo::HOOKS_OFF])
+        .args(args)
+        .output();
     out.ok()
         .filter(|o| o.status.success())
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
