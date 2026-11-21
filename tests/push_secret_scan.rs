@@ -141,22 +141,20 @@ fn org(task: &str) -> Org {
     std::fs::create_dir_all(&state).unwrap();
     let branch = format!("makiba/{task}");
     let worktree = root.join("workers/p").join(task);
-    std::fs::create_dir_all(worktree.parent().unwrap()).unwrap();
-    // Parallel `git worktree add` on one repository races (Issue 240): one at a time.
+    // One at a time, as since Issue 240: the runs read the one clone.
     static ADD: Mutex<()> = Mutex::new(());
     let added = ADD.lock().unwrap_or_else(|e| e.into_inner());
-    git(
+    let gitdir = makiba::daemon::run_repo::dir(&state.join("settings"), task);
+    let hooks = state.join("git-hooks");
+    makiba::daemon::run_repo::create(
         &root.join("repos/p"),
-        &[
-            "worktree",
-            "add",
-            "-q",
-            "-b",
-            &branch,
-            &worktree.to_string_lossy(),
-            "main",
-        ],
-    );
+        &gitdir,
+        &worktree,
+        &branch,
+        "main",
+        &hooks,
+    )
+    .unwrap();
     drop(added);
     let w = StateWriter::open(&state.join("state.db")).unwrap();
     let run = w

@@ -1316,16 +1316,31 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
 
 /// Refuse a close (without `--abandon`) while a code worktree of the run holds unsaved work.
 fn unsaved_work(w: &StateWriter, run: i64) -> Result<(), DoorError> {
-    let paths: Vec<String> = w
+    let rows: Vec<(String, String, String, String)> = w
         .conn()
-        .prepare("SELECT DISTINCT worktree FROM run_launch WHERE run_id = ?1 AND kind = 'code'")
+        .prepare(
+            "SELECT DISTINCT l.worktree, r.task_id, COALESCE(p.slug, ''),
+                    COALESCE(r.branch, 'makiba/' || r.task_id)
+             FROM run_launch l JOIN runs r ON r.id = l.run_id
+             LEFT JOIN projects p ON p.id = r.project_id
+             WHERE l.run_id = ?1 AND l.kind = 'code'",
+        )
         .and_then(|mut st| {
-            st.query_map([run], |r| r.get(0))?
+            st.query_map([run], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
                 .collect::<rusqlite::Result<_>>()
         })
         .map_err(internal)?;
-    for p in paths.iter().map(Path::new).filter(|p| p.exists()) {
-        if let Some(why) = super::close::unsaved(p) {
+    // The run's git folder is in the state folder, beside `state.db` (Issue 241).
+    let state = w.conn().path().map(Path::new).and_then(Path::parent);
+    let places = super::prepare::Places::from_env(state.unwrap_or(Path::new("")));
+    for (p, task, project, branch) in &rows {
+        let p = Path::new(p);
+        if !p.exists() {
+            continue;
+        }
+        let gitdir = super::run_repo::dir(&places.settings, task);
+        let repo = places.repos.join(project);
+        if let Some(why) = super::close::unsaved(&gitdir, p, &repo, branch) {
             return Err(refuse(
                 ErrorKind::Conflict,
                 why,

@@ -34,7 +34,8 @@ You do not need the program that runs the agents' terminals, its socket or its f
 ## No GitHub writes
 
 - You have no GitHub credential. Never push, and never write to GitHub in any way (pull request, comment, review, issue, release, workflow run). Do not look for a login or a token. Your hooks refuse `git push` and any `gh` call that writes.
-- Read the base from the local `origin/<branch>`. If you need a newer base, `send` the secretary "base is stale: need origin/<branch> at or after <sha, or: the latest>" and end the turn; rebase yourself once it answers.
+- Read the base from the local `origin/<branch>`; your `origin` is the project's repository on this machine, and `git fetch origin` brings what it last fetched. If you need a newer base, `send` the secretary "base is stale: need origin/<branch> at or after <sha, or: the latest>" and end the turn; once it answers, run `git fetch origin` and rebase yourself.
+- When the secretary says your pushed branch was updated at origin, run `git fetch origin`, then `git merge --ff-only origin/<your branch>`. If you have committed since and the fast-forward fails, run `git merge origin/<your branch>` (a merge, never a rebase of a pushed branch) and report done again.
 - Commit as its own command (`git add <files>`, then `git commit -m ...`), not chained with other commands. Never skip the repository's hooks, and never destroy history or uncommitted work (force push, hard reset, stash that changes something, adding everything at once). Your hooks refuse these.
 - When your work is committed, say so in your `done` report. The secretary pushes.
 

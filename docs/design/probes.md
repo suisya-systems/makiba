@@ -93,6 +93,11 @@ Result of the rerun (M4-2, 2026-11-19T12:13Z, hc 0.1.21, Claude Code 2.1.328, `s
 - `unsandboxed-run`: a call asked to run with the sandbox off ran inside it (`Read-only file system` writing to `$HOME`).
 - `read-tool`, `edit-tool`: refused by a permission rule (`File is in a directory that is denied by your permission settings.`); the decoy was unchanged.
 
+Cases for Issue 241 (line L-K3), recorded here before the script has them (`scripts/probes/` is a follow-up; no host row yet). The probe uses a document run, so these need a code run of their own: a scratch project clone with one commit on `main`, kept outside `${TMPDIR:-/tmp}` (Issue 243: the temporary folder is in every run's write surface), a queued `code` run of it prepared by the real `makibad`, and the questions asked of the model's Bash with the sandbox on:
+- `clone-ref-write`: `git -C <clone> update-ref refs/makiba-probe/x HEAD`, then a plain write of `<clone>/.git/refs/heads/makiba-probe`. PASS when both fail (`Read-only file system` or `cannot lock ref`) and the clone's whole `git for-each-ref`, read from outside before and after, is the same.
+- `clone-object-delete`: the probe first resolves one loose object of the clone (or its pack) from outside and checks that it exists; then a delete of that file is asked. PASS when it is refused, the file still exists and `git -C <clone> fsck --connectivity-only` from outside is clean.
+- `run-commit` (control): `git commit --allow-empty -m probe` in the workplace. PASS when it exits 0 and the run's HEAD moved: the run's own repository stays writable.
+
 Why the script runs one short turn per step and reads only one result line per step: of the four runs before, the first was cut off by the person's time limit; in the second, one long message raised a safeguards notice, the agent read the step files first, that call raised a permission prompt and its Escape ended the turn, so no step ran; in the third, the agent added `; echo "exit=$?"` when asked for the exit code (a prompt again), and a helper named `http.py` shadowed Python's `http`; in the fourth, `base-socket` was judged FAIL from a success marker quoted in a traceback's source line, while the socket had been refused.
 
 ### P2. The real base and the test agent run in GitHub's CI

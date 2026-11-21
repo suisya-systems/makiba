@@ -250,8 +250,8 @@ fn a_code_launchs_settings_deny_writing_the_clones_git_config() {
         w.worker
     );
 
-    // lines.md: L-K3 names this holder, and the Issues of the holders decided but not built:
-    // a run that shares no writable `.git` with the clone (#241) and a ruleset on each default
+    // lines.md: L-K3 names this holder, a run that shares no writable `.git` with the clone, and
+    // the Issue of the holder decided but not built: a ruleset on each default
     // branch (#242). L-K6 names the whole temporary folder in the write surface (#243).
     let k3 = row("L-K3");
     assert!(
@@ -260,9 +260,11 @@ fn a_code_launchs_settings_deny_writing_the_clones_git_config() {
         ),
         "L-K3 does not name the config deny: {k3}"
     );
-    for n in ["`Open: #241`", "`Open: #242`"] {
-        assert!(k3.contains(n), "L-K3 does not name {n}: {k3}");
-    }
+    assert!(k3.contains("`Open: #242`"), "L-K3 does not name #242: {k3}");
+    assert!(
+        k3.contains("`tests/workplace_own_git.rs::a_code_run_has_a_repository_of_its_own_and_its_commit_still_reaches_the_remote`"),
+        "L-K3 does not name the run's own repository (#241): {k3}"
+    );
     let k6 = row("L-K6");
     assert!(k6.contains("`Open: #243`"), "L-K6 does not name #243: {k6}");
 }
