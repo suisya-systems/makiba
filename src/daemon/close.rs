@@ -62,6 +62,16 @@ pub(super) fn unsaved(gitdir: &Path, path: &Path, repo: &Path, branch: &str) -> 
         }
         Ok(_) => {}
     }
+    match run_repo::checked_out_submodules(gitdir, path) {
+        Err(_) => return Some(format!("git cannot read the worktree {shown}")),
+        Ok(subs) if !subs.is_empty() => {
+            return Some(format!(
+                "worktree {shown} has submodules checked out ({}), whose work makibad does not read",
+                subs.join(", ")
+            ));
+        }
+        Ok(_) => {}
+    }
     let tip = format!("refs/heads/{branch}");
     let count = run_repo::at_origin(repo)
         .and_then(|saved| run_repo::count_not(gitdir, path, &["HEAD", &tip], &saved));
