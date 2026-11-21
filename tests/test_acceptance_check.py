@@ -17,7 +17,9 @@ WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 REPO_CHECK = ROOT / ".github" / "acceptance-check"
 
 ENV = {
-    **os.environ,
+    # An inherited target folder would be shared by the checker's two worktrees (Issue #106);
+    # the checker's own weakness there is Issue #232, not fixed here.
+    **{k: v for k, v in os.environ.items() if k not in ("CARGO_TARGET_DIR", "CARGO_BUILD_TARGET_DIR")},
     "GIT_AUTHOR_NAME": "t",
     "GIT_AUTHOR_EMAIL": "t@t",
     "GIT_COMMITTER_NAME": "t",
