@@ -159,7 +159,7 @@ preflight() { # preflight <real|scratch>
 lines_changed() { # lines_changed <what this stage is about to change>: shown before the real stages go on
   say "This stage is about to change:"
   printf '%s\n' "$1" | while IFS= read -r l; do say "  - $l"; done
-  say "Runbook section 2 lists what cannot be undone afterwards; read it first."
+  say "Runbook section 1 lists what cannot be undone afterwards; read it first."
 }
 
 place_ledger() {
@@ -410,10 +410,11 @@ remove_scratch() { # remove_scratch <dir>: only a folder this script made, by na
 
 stage_rehearse() {
   say "== rehearsal in a scratch place (no real place is written; the GitHub repository is only read)"
-  say "Left behind on purpose by any run: trust entries for the scratch path in ~/.claude.json and a transcript folder under ~/.claude/projects/ (runbook section 2)."
+  say "Left behind on purpose by any run: trust entries for the scratch path in ~/.claude.json and a transcript folder under ~/.claude/projects/ (runbook section 1)."
   preflight scratch
   scratch_env
   if [ "$DRY" = 1 ]; then
+    plan "NOTE: the paths printed below are the real defaults; a real rehearsal points every one of them into the scratch place"
     plan "run everything below with that environment, then: $MK down --secretary --stop-base, keep events and messages, remove the scratch folder (kept if a check failed)"
   fi
   stage_register 1
