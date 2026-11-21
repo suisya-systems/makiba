@@ -72,10 +72,52 @@ pub fn read(path: &std::path::Path) -> Result<Value, String> {
     let mode =
         crate::daemon::gate::mode_of(std::env::var(crate::daemon::gate::MODE_ENV).ok().as_deref())
             .0;
+    let projects: Vec<Value> = projects(&conn)
+        .into_iter()
+        .map(|(slug, repo, branch)| json!({"slug": slug, "repo": repo, "default_branch": branch}))
+        .collect();
     Ok(
         json!({"makibad": {"pid": pid, "heartbeat_at": beat, "subscribed": subscribed == 1,
-                          "running": running}, "merge_approval_mode": mode}),
+                          "running": running}, "merge_approval_mode": mode, "projects": projects}),
     )
+}
+
+/// The active projects by slug (Issue 227): slug, `OWNER/NAME` (`None` when no `origin_url` is
+/// recorded; another URL as it is) and the branch a dispatch starts from. A database without the
+/// table reads as no project.
+fn projects(conn: &Connection) -> Vec<(String, Option<String>, String)> {
+    let Ok(mut q) = conn.prepare(
+        "SELECT slug, origin_url, COALESCE(default_branch, 'main') FROM projects
+         WHERE status = 'active' ORDER BY slug",
+    ) else {
+        return Vec::new();
+    };
+    q.query_map([], |r| {
+        let url: Option<String> = r.get(1)?;
+        let repo = url.map(|u| {
+            u.strip_prefix("https://github.com/")
+                .map_or(u.clone(), str::to_string)
+        });
+        Ok((r.get(0)?, repo, r.get(2)?))
+    })
+    .map(|rows| rows.filter_map(|r| r.ok()).collect())
+    .unwrap_or_default()
+}
+
+/// The text lines of the projects: one line when there is none.
+fn projects_text(conn: &Connection) -> String {
+    let rows = projects(conn);
+    if rows.is_empty() {
+        return "projects: none registered\n".into();
+    }
+    let mut text = String::from("projects:\n");
+    for (slug, repo, branch) in rows {
+        match repo {
+            Some(repo) => text.push_str(&format!("  {slug}: {repo} (default branch {branch})\n")),
+            None => text.push_str(&format!("  {slug}: repository not recorded\n")),
+        }
+    }
+    text
 }
 
 /// The text to print and whether the heartbeat is fresh.
@@ -102,18 +144,13 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
             ))
         },
     );
-    let (pid, subscribed, beat, age) = match row {
-        Ok(r) => r,
-        Err(_) => {
-            return Ok((
-                "makibad: no heartbeat has ever been written\n".into(),
-                false,
-            ));
-        }
-    };
+    let (pid, subscribed, beat, age) = row.unwrap_or((None, 0, None, None));
     let (Some(beat), Some(age)) = (beat, age) else {
         return Ok((
-            "makibad: no heartbeat has ever been written\n".into(),
+            format!(
+                "makibad: no heartbeat has ever been written\n{}",
+                projects_text(&conn)
+            ),
             false,
         ));
     };
@@ -140,6 +177,7 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
         secretary_state(&conn, stage.as_deref()),
         crate::base::attach_command(&session, crate::spec::AGENT_SECRETARY)
     ));
+    text.push_str(&projects_text(&conn));
     Ok((text, fresh))
 }
 
