@@ -19,8 +19,12 @@ fn walk(dir: &Path, out: &mut Vec<PathBuf>) {
 }
 
 fn main() {
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("skills");
-    println!("cargo:rerun-if-changed=skills");
+    // Read when the script runs, not when it is compiled: a compiled build script is reused by
+    // another checkout built with the same target folder (Issue 197).
+    let root = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR"))
+        .join("skills");
+    // Absolute, so that a build in another checkout sees a recorded path that is not its own.
+    println!("cargo:rerun-if-changed={}", root.display());
     let mut files = Vec::new();
     walk(&root, &mut files);
     let mut code = String::from("pub const SKILLS: &[(&str, &[u8])] = &[\n");
