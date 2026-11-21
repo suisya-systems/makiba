@@ -101,6 +101,18 @@ pub fn status(gitdir: &Path, workplace: &Path, untracked: bool) -> Result<String
     )
 }
 
+/// The submodules of the index whose folder in the work tree is not empty: their work is never
+/// read (their own configuration would run), so it counts as unsaved. Only the index is read.
+pub fn checked_out_submodules(gitdir: &Path, workplace: &Path) -> Result<Vec<String>, String> {
+    let staged = read(gitdir, workplace, &["ls-files", "--stage", "-z"])?;
+    Ok(staged
+        .split('\0')
+        .filter_map(|e| e.strip_prefix("160000 ")?.split_once('\t'))
+        .map(|(_, p)| p.to_string())
+        .filter(|p| std::fs::read_dir(workplace.join(p)).is_ok_and(|mut d| d.next().is_some()))
+        .collect())
+}
+
 /// Push the commit `oid` of the run into the clone `repo` as `refname` (`force`: replacing what is
 /// there). The clone's own receive-pack writes; the run is only read.
 pub fn deliver(
@@ -306,5 +318,43 @@ mod tests {
         assert_eq!(git_new_enough("git version 2.37.9"), Some(false));
         assert_eq!(git_new_enough("git version 3.0"), Some(true));
         assert_eq!(git_new_enough("nonsense"), None);
+    }
+
+    /// A submodule counts only when its folder holds something: an empty one is not checked out.
+    #[test]
+    fn a_checked_out_submodule_is_found_from_the_index_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        // As a run is laid out: the git folder outside the work tree.
+        let wt = &dir.path().join("work");
+        let gitdir = dir.path().join("git");
+        std::fs::create_dir(wt).unwrap();
+        let git = |args: &[&str]| {
+            let o = Command::new("git")
+                .arg("-C")
+                .arg(wt)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+        };
+        git(&[
+            "init",
+            "-q",
+            "--separate-git-dir",
+            &gitdir.to_string_lossy(),
+        ]);
+        let oid = "1111111111111111111111111111111111111111";
+        for p in ["sub", "empty"] {
+            git(&[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("160000,{oid},{p}"),
+            ]);
+            std::fs::create_dir(wt.join(p)).unwrap();
+        }
+        assert!(checked_out_submodules(&gitdir, wt).unwrap().is_empty());
+        std::fs::write(wt.join("sub/work.txt"), "unsaved\n").unwrap();
+        assert_eq!(checked_out_submodules(&gitdir, wt).unwrap(), ["sub"]);
     }
 }

@@ -328,6 +328,11 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     let base_id = id(format!("refs/remotes/origin/{base}"))?;
     let old = id(format!("refs/remotes/origin/{}", j.branch))?;
     if !is_ancestor(dir, &old, head)? {
+        // A restart after the merge was pushed and before it was recorded: origin holds the
+        // worktree's head and the base, which the worktree does not (it is not written).
+        if is_ancestor(dir, head, &old)? && is_ancestor(dir, &base_id, &old)? {
+            return Ok(Done::Current(old));
+        }
         return Err(format!(
             "the branch {} at origin moved to {old}, which the worktree does not hold; nothing \
              was merged or pushed",
@@ -597,9 +602,12 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
                 )
             }
             Ok(Done::Current(head)) => format!(
-                "The branch {} of {} already holds origin/{base}; nothing was merged. origin has \
-                 it at {head}; record it with pr pushed and this head if it is not recorded yet.",
-                j.branch, j.task
+                "The branch {b} of {} already holds origin/{base}; nothing was merged. origin has \
+                 it at {head}; record it with pr pushed and this head if it is not recorded yet. \
+                 If the worker's tree is behind it, the worker runs git fetch origin and git merge \
+                 --ff-only origin/{b}.",
+                j.task,
+                b = j.branch
             ),
             Err(why) => {
                 eprintln!("makibad: {} of {}: {why}", j.verb, j.task);
