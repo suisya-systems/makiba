@@ -17,7 +17,8 @@
 //! project's repository: it fetches the base and the branch from `origin` by their full refs,
 //! refuses a branch not at origin or one that moved there (not an ancestor of the worktree's
 //! head), merges `origin/<base>` when the head does not hold it (a merge commit made by
-//! `git merge-tree --write-tree` and `commit-tree`, never a rebase; a conflict names its files and
+//! `git merge-tree --write-tree` and `commit-tree`, as git's own identity or, where git has none,
+//! makiba <makiba@localhost>; never a rebase; a conflict names its files and
 //! leaves nothing behind), and pushes the result when origin does not have it, never forced. The
 //! worktree is not touched: the worker brings the new head in by a fast-forward of its own. Done:
 //! `branch_updated` with the old and new head, or, when nothing was merged or pushed, a notice
@@ -505,18 +506,38 @@ fn merge(
         }
     }
     let message = format!("Merge origin/{base} into {}", j.branch);
+    // The merge commit is written as git's own identity (the repository's or the person's
+    // config). Only where git has none (a CI runner, a bare host) it is makiba <makiba@localhost>,
+    // so the merge is made instead of failing with "Author identity unknown".
+    let known = ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]
+        .iter()
+        .all(|v| git(dir, &["var", v]).is_ok());
+    let fallback: &[&str] = if known {
+        &[]
+    } else {
+        &[
+            "-c",
+            "user.name=makiba",
+            "-c",
+            "user.email=makiba@localhost",
+        ]
+    };
     git(
         dir,
         &[
-            "commit-tree",
-            &tree,
-            "-p",
-            head,
-            "-p",
-            base_id,
-            "-m",
-            &message,
-        ],
+            fallback,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                head,
+                "-p",
+                base_id,
+                "-m",
+                &message,
+            ],
+        ]
+        .concat(),
     )
 }
 
