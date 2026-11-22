@@ -18,6 +18,7 @@ pub mod deny_push;
 pub mod deny_workers_delete;
 pub mod git_hook;
 pub mod merge_gate;
+pub mod premise_check;
 pub mod re;
 pub mod shell;
 pub mod worker_boundary;
@@ -55,11 +56,16 @@ pub fn main(args: &[String]) -> ExitCode {
     if let Some(git) = git_hook::NAMES.iter().find(|n| Some(**n) == name) {
         return git_hook::main(git, &args[1..]);
     }
+    // The premise reminder (Issue 269) only prints a line and never refuses.
+    if name == Some("premise-check") {
+        return premise_check::main();
+    }
     let Some(&(_, hook)) = HOOKS.iter().find(|(n, _)| Some(*n) == name) else {
         let names: Vec<&str> = HOOKS
             .iter()
             .map(|(n, _)| *n)
             .chain(git_hook::NAMES)
+            .chain(["premise-check"])
             .collect();
         eprintln!("usage: makiba hook <{}>", names.join("|"));
         return ExitCode::from(2);
