@@ -217,7 +217,7 @@ What the decision took from these four. It takes option 2's box and fixed line, 
 
 ## 4. Scope
 
-In: the dispatcher (dispatch, monitoring, close, message delivery, ownership of PR watches); the secretary, workers and curator as terminals of the base; the secretary's skills, rebuilt from paddock's so that they operate no terminal; past incidents as tests; one week of self-hosting, then the switch from claude-org-ja.
+In: the dispatcher (dispatch, monitoring, close, message delivery, ownership of PR watches); the secretary, workers and curator as terminals of the base; the secretary's skills, rebuilt from paddock's so that they operate no terminal; past incidents as tests; self-hosting until twenty pull requests have landed and three events have been met, then the switch from claude-org-ja.
 
 Out, each a later plan: notifications, chat entry, conversation search, the local model, Docker distribution and the server installation, a screen over `state.db`, more than one machine, picking requests up from mail and chat (libretto does that; it is not built here), a second base, a second agent program.
 
@@ -352,7 +352,7 @@ Before M2 and M3, a person runs probes P1 to P5 and P7 to P11 (section 9). M2 an
 | M4 Boundary | One real worker goes from request to done report with no person, and the base's command run from inside it is refused. |
 | M5 Close | After close, no terminal and no worktree remain; a push replaces the PR watch. |
 | M6 Secretary | A request, a PR and a close happen through conversation with the secretary alone; no skill or rules file names a terminal tool or the base's command. |
-| M7 Self-hosting | One week of makiba developing makiba, incident tests green, claude-org-ja not started. |
+| M7 Self-hosting | makiba developing makiba until twenty pull requests have landed through makiba and an update of the base, a secretary renewal and a failed launch have each been met (brought about on purpose if need be), incident tests green, claude-org-ja not started. |
 
 ## 9. How it is developed
 
@@ -370,8 +370,8 @@ Before M2 and M3, a person runs probes P1 to P5 and P7 to P11 (section 9). M2 an
 Estimate: 51 Issues and 52 to 62 pull requests. The switch to Rust changed no dependency between Issues; the chains below were recomputed from `tools/build_issues.py` after it and are unchanged. No calendar estimate is given: the earlier one (weeks) had nothing behind it, and what actually limits the schedule can be counted.
 
 - Probes run by the owner. P1 to P5 and P7 to P11 by hand before M2 and M3 (a few hours each, so more than a day of the owner's own time, in a login shell, on a real sandbox and a real Claude Code); P1 again in M4-2; P6 at M6-2. No worker can do these: workers cannot start the base in their sandbox.
-- Issues checked by the owner. M4-5 (the first real worker), the host check of M6-7, M7-1 and M7-2 close on the owner's look, not on a test. M7-2 is seven days of use by definition and cannot be shortened. M0-1 is merged in `human` mode, and the repository, its labels and its branch protection are made by the owner before the rest can be merged test-first. M7-3 and its week of observation come after M7-2 and are not counted here.
-- Serial chains. The dependencies are in `tools/build_issues.py`, and each link is at least one pull request (a failing test commit, CI, review rounds, merge) that cannot overlap the one before it. The longest chain to M4-5 is 13 Issues: M0-1, M0-2, M0-3, M1-1, M1-3, M2-1, M3-1, M3-2, M3-4, M3-5, M3-6, M3-7, M4-5. The longest chain to M7-2 is 15: the 13 above with M4-5 last, then M7-1 and M7-2. M7-1 waits for M4-5, M5-2, M6-2, M6-5 and M6-8 as well as M6-6 and M5-5, which together are what the week of use needs (one real worker through, the secretary launched and renewed, a permission prompt relayed, a close); goal G9 still asks that every Issue of M0 to M6 be closed by the end.
+- Issues checked by the owner. M4-5 (the first real worker), the host check of M6-7, M7-1 and M7-2 close on the owner's look, not on a test. M7-2 is measured by twenty landed pull requests and three events met (an update of the base, a secretary renewal, a failed launch), not by days; an event that has not come by itself is brought about on purpose, so the time it takes is the time of twenty landings, not a calendar. M0-1 is merged in `human` mode, and the repository, its labels and its branch protection are made by the owner before the rest can be merged test-first. M7-3 and its observation (one pull request landed through makiba for each moved project) come after M7-2 and are not counted here.
+- Serial chains. The dependencies are in `tools/build_issues.py`, and each link is at least one pull request (a failing test commit, CI, review rounds, merge) that cannot overlap the one before it. The longest chain to M4-5 is 13 Issues: M0-1, M0-2, M0-3, M1-1, M1-3, M2-1, M3-1, M3-2, M3-4, M3-5, M3-6, M3-7, M4-5. The longest chain to M7-2 is 15: the 13 above with M4-5 last, then M7-1 and M7-2. M7-1 waits for M4-5, M5-2, M6-2, M6-5 and M6-8 as well as M6-6 and M5-5, which together are what the self-hosting needs (one real worker through, the secretary launched and renewed, a permission prompt relayed, a close); goal G9 still asks that every Issue of M0 to M6 be closed by the end.
 - Width. The graph has sixteen levels (M7 included) and at most eight Issues on one level, so beyond the three to five workers named above it is a chain, not a lack of workers, that is waited for.
 
 Within those limits the pull-request count is not what decides the time; the owner's availability for the probes and for M4-5 and M7 is.
