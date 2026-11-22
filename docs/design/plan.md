@@ -55,7 +55,7 @@ The aim is an organization that keeps running on a server: reachable from outsid
 | 3. Entry from outside | The person talks to the secretary and answers approvals from elsewhere. | A chat entry to the secretary. Remote approval. |
 | 4. Memory and back office | Past exchanges can be searched. Routine chores can go to a local model. | Search over past conversations. A local model for back-office work; the person still talks to Claude. |
 
-Kept in view without a stage: a screen that reads `state.db`, agents other than Claude Code, more than one machine.
+Kept in view without a stage: a screen over the read surface (Issue 169; its design note is [screen.md](screen.md)), agents other than Claude Code, more than one machine.
 
 A shortcut exists for stages 2 and 3 while the secretary is Claude Code: its Remote Control feature lets the Claude app on a phone drive a session running on the person's machine and receive push notifications from it. Turned on for the secretary only, it gives an entry from outside and notices that come from the secretary alone, which is what R2 asks. It is used as a shortcut and not as the mechanism:
 
