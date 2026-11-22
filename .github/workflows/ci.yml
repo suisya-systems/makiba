@@ -52,8 +52,8 @@ jobs:
         # shellcheck is preinstalled on ubuntu-latest; nothing is downloaded.
         run: |
           shellcheck --version
-          for f in scripts/*.sh scripts/probes/*.sh; do bash -n "$f" || exit 1; done
-          shellcheck --severity=error scripts/*.sh scripts/probes/*.sh
+          for f in scripts/*.sh scripts/probes/*.sh scripts/runbooks/*.sh; do bash -n "$f" || exit 1; done
+          shellcheck --severity=error scripts/*.sh scripts/probes/*.sh scripts/runbooks/*.sh
       - name: Each probe runs once - its --help, then a dry run through its exit handler
         # PROBE_DRY_RUN=1 stops before the base, makibad or an agent is started (scripts/probes/README.md);
         # no hc, claude or secret is needed. timeout bounds a hang, such as an exit handler that calls itself.
