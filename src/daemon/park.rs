@@ -318,25 +318,47 @@ pub fn parked_worker(w: &StateWriter, agent: &str) -> Result<Option<String>> {
 /// its last one was answered or withdrawn (by the secretary, the person or `makibad`), so nothing
 /// would bring it back otherwise. The reason is what became of its newest entry.
 pub fn settle(w: &StateWriter) -> Result<()> {
-    let runs: Vec<(String, Option<String>, Option<i64>)> = w
+    type Row = (
+        String,
+        Option<String>,
+        Option<i64>,
+        Option<String>,
+        Option<String>,
+    );
+    let runs: Vec<Row> = w
         .conn()
         .prepare(
-            "SELECT r.task_id, p.status, p.id FROM runs r
+            "SELECT r.task_id, p.status, p.id, p.question, p.answer FROM runs r
              LEFT JOIN pending p ON p.id = (SELECT max(id) FROM pending WHERE run_id = r.id)
              WHERE r.status = 'parked'
                AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id = r.id
                                AND q.status = 'escalated' AND q.kind = 'question')
              ORDER BY r.id",
         )?
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .query_map([], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
         .collect::<std::result::Result<_, _>>()?;
-    for (task, status, id) in runs {
+    for (task, status, id, question, answer) in runs {
         let reason = match status.as_deref() {
             Some("answered") => "answered",
             Some("withdrawn") => "withdrawn",
             _ => "not_waiting",
         };
-        unpark(w, &task, reason, json!(id))?;
+        // The worker is told what became of what it waited for: nothing else reaches it, and it
+        // cannot read the pending entries itself.
+        let what = match (id, question.as_deref()) {
+            (Some(id), Some(q)) => format!(
+                "Pending entry {id} ({}) was {reason}{}",
+                q.lines().next().unwrap_or_default(),
+                answer.map(|a| format!(" with {a:?}")).unwrap_or_default()
+            ),
+            _ => "Nothing is escalated to the person for you any more".to_string(),
+        };
+        let body = format!(
+            "{what}. You no longer wait for the person; ask the secretary if you still need an answer, else go on with the task."
+        );
+        wake_with_notice(w, &task, reason, json!(id), &body)?;
     }
     Ok(())
 }
@@ -575,5 +597,18 @@ mod tests {
             )
             .unwrap();
         assert_eq!(reason, "withdrawn");
+        // The worker is told which entry went, since nothing else reaches it.
+        let told: String = w
+            .conn()
+            .query_row(
+                "SELECT body FROM messages WHERE recipient = 'w-t' AND kind = 'notice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            told.starts_with(&format!("Pending entry {id} (q?) was withdrawn.")),
+            "{told}"
+        );
     }
 }
