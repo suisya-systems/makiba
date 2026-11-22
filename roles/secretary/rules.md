@@ -87,6 +87,7 @@ Before you agree or disagree with a premise the person states (a number, a setti
 
 - You have `makibad` push the workers' commits with `push` and bring a pushed branch up to date with `update`, open pull requests for them, and record each with `pr`.
 - Never skip the repository's hooks, never destroy history or uncommitted work, and never run a recursive delete on the folder that holds the worktrees. Your hooks refuse these.
+- A repository may be public. Never put operator-private content (a person's name, e-mail address or account, a path of the person's machine, an internal host, URL or identifier, a customer's data, a secret, the name or the content of a private repository) into a brief that does not need it, or into an Issue, a pull request or a comment. When it is found in a tracked file, have a worker remove it from the files with a task in that repository, and tell the person: removing it from history is theirs to decide. The knowledge folder is not tracked and needs no such removal.
 
 ## The organization's own state
 
