@@ -86,13 +86,13 @@ impl Before {
     }
 }
 
-/// The base the check before CI judges against, fetched from origin first: `update`'s base, else
-/// the base of the task's newest watched pull request (read as the gate reads it), else the
-/// project's default branch, the run's starting point. Its id; what cannot be read refuses.
+/// The base the check before CI judges against, fetched from origin first: the base of the task's
+/// newest watched pull request (read as the gate reads it), else the project's default branch, the
+/// run's starting point. Never `update`'s base, which is only what is merged in: a base naming the
+/// branch itself would hide the test commit. Its id; what cannot be read refuses.
 fn judged_base(dir: &Path, j: &Job) -> std::result::Result<String, String> {
-    let b = match (&j.base, &j.before.watched) {
-        (Some(b), _) => b.clone(),
-        (None, Some((repo, pr))) => gate::pr_view(&super::gh::program(), repo, *pr)
+    let b = match &j.before.watched {
+        Some((repo, pr)) => gate::pr_view(&super::gh::program(), repo, *pr)
             .map(|(_, b, _)| b)
             .map_err(|e| {
                 format!(
@@ -101,7 +101,7 @@ fn judged_base(dir: &Path, j: &Job) -> std::result::Result<String, String> {
                     e.0
                 )
             })?,
-        (None, None) => j.before.default_branch.clone(),
+        None => j.before.default_branch.clone(),
     };
     let r = format!("refs/remotes/origin/{b}");
     git(
@@ -466,7 +466,8 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     if new == old {
         return Ok(Done::Current(new));
     }
-    before_ci(dir, j, &base_id, &new)?;
+    let judged = judged_base(dir, j)?;
+    before_ci(dir, j, &judged, &new)?;
     push_head(dir, &new, &j.branch).map_err(|e| {
         format!("the merged head {new} was not pushed: {e}; nothing changed at origin, update or push again")
     })?;

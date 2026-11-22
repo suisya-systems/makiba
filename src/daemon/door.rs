@@ -343,6 +343,12 @@ impl Door {
                 drop(w);
                 let found = pr_before_ci(&projects, &failed, &repo, pr, &head);
                 let w = self.writer();
+                // The same request may have been recorded while the lock was released.
+                if let Some(idem) = idem
+                    && let Some(first) = replay(&w, &actor, idem).map_err(internal)?
+                {
+                    return first;
+                }
                 if let Err(why) = found {
                     let r = Err(refuse(
                         ErrorKind::Conflict,
@@ -2437,19 +2443,10 @@ fn pr_before_ci(
     };
     let program = super::gh::program();
     let (_url, base_branch, _) = gate::pr_view(&program, repo, pr).map_err(why)?;
-    let (base, _) = gate::fetch(&clone, repo, pr, &base_branch).map_err(why)?;
-    let held = std::process::Command::new("git")
-        .arg("-C")
-        .arg(&clone)
-        .args(["-c", super::run_repo::HOOKS_OFF, "cat-file", "-e"])
-        .arg(format!("{head}^{{commit}}"))
-        .stdin(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .is_ok_and(|s| s.success());
-    if !held {
+    let (base, fetched) = gate::fetch(&clone, repo, pr, &base_branch).map_err(why)?;
+    if fetched != head {
         return Err(format!(
-            "the head {head} is not in {repo}#{pr} as fetched through the project's clone; record the head the pull request has"
+            "{repo}#{pr} has the head {fetched} at origin, not {head}; record the head the pull request has (once makibad's push notice names it)"
         ));
     }
     gate::before_ci(
