@@ -3,8 +3,9 @@
 //! The SQL is carried from claude-org-ja and kept as SQL: `schema.sql` is v1 to v3, `schema_v4.sql`
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
 //! `schema_v5.sql` adds the launch identity to `agents`, `schema_v6.sql` the triggers that keep a
-//! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt, `schema_v9.sql` their budgets. `open` opens a
-//! database with the project's pragmas and `migrate` brings it to v9.
+//! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt, `schema_v9.sql` their budgets, `schema_v10.sql`
+//! the status `parked` of a run. `open` opens a database with the project's pragmas and `migrate`
+//! brings it to v10.
 
 use std::fmt;
 use std::path::Path;
@@ -32,6 +33,9 @@ pub const SCHEMA_V7: &str = include_str!("schema_v7.sql");
 pub const SCHEMA_V8: &str = include_str!("schema_v8.sql");
 /// v9: `ranges.budget_hours`, `ranges.budget_fixes` and the ended reason `budget_hours` (Issue 282).
 pub const SCHEMA_V9: &str = include_str!("schema_v9.sql");
+/// v10: `runs.status` `parked` (Issue 283). The script leaves its transaction open: `migrate`
+/// checks the foreign keys inside it before it commits.
+pub const SCHEMA_V10: &str = include_str!("schema_v10.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -147,12 +151,12 @@ fn is_current(conn: &Connection) -> Result<bool> {
         }
     }
     let (versions, session): (i64, i64) = conn.query_row(
-        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 9),
+        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 10),
                 (SELECT COUNT(*) FROM org_sessions WHERE id = 1)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(versions == 9 && session == 1)
+    Ok(versions == 10 && session == 1)
 }
 
 /// Bring a database to v9: apply v3 to an empty one, upgrade an older one in place, then add v4 to v9.
@@ -231,6 +235,53 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
             return Err(e.into());
         }
     }
+    // v10 makes `runs` again with the foreign keys off; its script leaves the transaction open so
+    // that they are checked before it commits (Issue 283): a row that breaks one rolls it back.
+    let done: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = 10",
+        [],
+        |r| r.get(0),
+    )?;
+    // A `runs` with no status CHECK (a database made before the carried schema, as an M1 one)
+    // already takes `parked`: it is left as it is and only the version is recorded.
+    let runs_sql: String = conn.query_row(
+        "SELECT coalesce((SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'runs'), '')",
+        [],
+        |r| r.get(0),
+    )?;
+    let rebuild = runs_sql.contains("'suspended'") && !runs_sql.contains("'parked'");
+    if done == 0 && !rebuild {
+        conn.execute(
+            "INSERT INTO schema_migrations (version, description)
+             VALUES (10, 'makiba: runs.status parked (the belt step 3, Issue 283)')",
+            [],
+        )?;
+    }
+    if done == 0 && rebuild {
+        let checked = conn
+            .execute_batch(SCHEMA_V10)
+            .and_then(|()| {
+                conn.query_row("SELECT count(*) FROM pragma_foreign_key_check", [], |r| {
+                    r.get::<_, i64>(0)
+                })
+            })
+            .and_then(|broken| match broken {
+                0 => conn.execute_batch("COMMIT"),
+                n => Err(rusqlite::Error::SqliteFailure(
+                    rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_CONSTRAINT_FOREIGNKEY),
+                    Some(format!(
+                        "migration v10: {n} rows break a foreign key; nothing was changed"
+                    )),
+                )),
+            });
+        if let Err(e) = checked {
+            if !conn.is_autocommit() {
+                let _ = conn.execute_batch("ROLLBACK");
+            }
+            let _ = conn.pragma_update(None, "foreign_keys", true);
+            return Err(e.into());
+        }
+    }
     conn.pragma_update(None, "foreign_keys", true)?;
     Ok(())
 }
@@ -292,7 +343,7 @@ mod tests {
         );
         assert!(!is_current(&conn).unwrap());
         migrate(&mut conn).unwrap();
-        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 9);
+        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 10);
         assert_eq!(
             n(
                 &conn,
@@ -330,7 +381,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
         let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 9);
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 10);
         assert_eq!(n("PRAGMA foreign_keys"), 1);
         assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
         let row: (String, i64, i64, String, String, Option<f64>, i64) = conn
@@ -391,5 +442,99 @@ mod tests {
                 .is_err(),
             "a run of no range is refused"
         );
+    }
+
+    /// v10 makes `runs` again (Issue 283): a v9 database keeps its runs, their launches, keys,
+    /// entries, messages and events (none deleted or nulled by the drop), a run may be `parked`,
+    /// the foreign keys hold as before, and the fast path takes v10 as current.
+    #[test]
+    fn v10_keeps_every_run_and_what_names_it_and_allows_parked() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        for script in [
+            SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9,
+        ] {
+            conn.execute_batch(script).unwrap();
+        }
+        conn.pragma_update(None, "foreign_keys", true).unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (id, slug, display_name) VALUES (1, 'p', 'p');
+             INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by)
+             VALUES (4, 1, 1, 1, 'head', 'secretary');
+             INSERT INTO runs (id, task_id, project_id, pattern, title, status, range_id, issue_refs)
+             VALUES (7, 't7', 1, 'A', 'Seven', 'in_use', 4, '[\"p#7\"]');
+             INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage, conversation_id)
+             VALUES (7, 's7', 'fake', 'b', '/w', 'verified', 'conv');
+             INSERT INTO agents (agent_id, role, run_id, key_sha256, spawn_id)
+             VALUES ('w-t7', 'worker', 7, 'h7', 's7');
+             INSERT INTO pending (run_id, kind, question, status) VALUES (7, 'question', 'q', 'escalated');
+             INSERT INTO events (kind, run_id) VALUES ('x', 7);
+             INSERT INTO messages (event_id, sender, recipient, kind, run_id, body)
+             VALUES ((SELECT max(id) FROM events), 'secretary', 'w-t7', 'message', 7, 'hi');",
+        )
+        .unwrap();
+        assert!(!is_current(&conn).unwrap());
+        assert!(
+            conn.execute("UPDATE runs SET status = 'parked' WHERE id = 7", [])
+                .is_err(),
+            "v9 refuses parked"
+        );
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        assert!(is_current(&conn).unwrap());
+        let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 10);
+        assert_eq!(n("PRAGMA foreign_keys"), 1);
+        assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+        assert_eq!(n("SELECT count(*) FROM run_launch WHERE run_id = 7"), 1);
+        assert_eq!(n("SELECT count(*) FROM agents WHERE run_id = 7"), 1);
+        assert_eq!(n("SELECT count(*) FROM pending WHERE run_id = 7"), 1);
+        assert_eq!(n("SELECT count(*) FROM events WHERE run_id = 7"), 1);
+        assert_eq!(n("SELECT count(*) FROM messages WHERE run_id = 7"), 1);
+        assert_eq!(n("SELECT range_id FROM runs WHERE task_id = 't7'"), 4);
+        assert_eq!(
+            n(
+                "SELECT count(*) FROM sqlite_master WHERE type = 'index' AND tbl_name = 'runs'
+               AND name LIKE 'idx_runs_%'"
+            ),
+            5
+        );
+        conn.execute("UPDATE runs SET status = 'parked' WHERE id = 7", [])
+            .unwrap();
+        assert!(
+            conn.execute("UPDATE runs SET status = 'asleep' WHERE id = 7", [])
+                .is_err()
+        );
+        // The children still name `runs`: a launch of no run is refused, a delete cascades.
+        assert!(
+            conn.execute(
+                "INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree)
+                 VALUES (99, 's99', 'fake', 'b', '/w')",
+                [],
+            )
+            .is_err()
+        );
+    }
+
+    /// A v9 database with a row that already breaks a foreign key is left at v9.
+    #[test]
+    fn v10_with_a_broken_foreign_key_changes_nothing() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        for script in [
+            SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9,
+        ] {
+            conn.execute_batch(script).unwrap();
+        }
+        conn.pragma_update(None, "foreign_keys", false).unwrap();
+        conn.execute_batch(
+            "INSERT INTO runs (id, task_id, project_id, pattern, title) VALUES (1, 't', 42, 'A', 'x');",
+        )
+        .unwrap();
+        assert!(migrate(&mut conn).is_err());
+        let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 9);
+        assert_eq!(n("PRAGMA foreign_keys"), 1);
+        assert!(conn.is_autocommit());
     }
 }

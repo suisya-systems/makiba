@@ -448,6 +448,18 @@ fn apply(w: &StateWriter, d: &Done) -> Result<()> {
             run_task_id: task.as_deref(),
             ..Default::default()
         })?;
+        // A failed CI brings a parked run back with that reason (Issue 283). A watch that ended
+        // without a result does not: it goes to the secretary only.
+        if let (Outcome::Concluded(s, _), Some(task)) = (&d.outcome, &task)
+            && s.status == "failed"
+        {
+            super::park::unpark(
+                w,
+                task,
+                "ci_failed",
+                json!({"repo": d.repo, "pr": d.pr, "head_oid": d.head}),
+            )?;
+        }
         // The notice (spec 5.4): the event, the message, the pending delivery with no attempt.
         let event = w.append_event(&NewEvent {
             kind: "message_sent",

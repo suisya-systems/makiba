@@ -60,9 +60,20 @@ const STOP_KINDS: [&str; 5] = ["design", "scope", "order", "naming", "other"];
 const DEFAULT_FIXES: i64 = 3;
 
 /// A run `r` waits only for the person: it has an escalated pending entry (belt.md 4.1). Such a
-/// run counts neither against its range's `at_once` nor against `max_concurrent_workers`.
-pub const WAITING: &str =
-    "EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.id AND wp.status = 'escalated')";
+/// run counts neither against its range's `at_once` nor against `max_concurrent_workers`. A run
+/// woken from parking (`run_unparked`, Issue 283) is at work again: it counts from the wake until
+/// it is parked again or escalates an entry newer than the wake (`pending_max`), even while an
+/// older entry is still escalated.
+pub const WAITING: &str = "EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.id
+    AND wp.status = 'escalated'
+    AND (NOT EXISTS (SELECT 1 FROM events wu WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')
+         OR wp.id > (SELECT json_extract(wu.payload_json, '$.pending_max') FROM events wu
+                     WHERE wu.run_id = r.id AND wu.kind = 'run_unparked'
+                     ORDER BY wu.id DESC LIMIT 1)
+         OR coalesce((SELECT max(wk.id) FROM events wk
+                      WHERE wk.run_id = r.id AND wk.kind = 'run_parked'), 0)
+            > (SELECT max(wu.id) FROM events wu
+               WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')))";
 
 /// `chain`: the range `?1` and every range it replaced (each `ended` `replaced`). Their runs stay
 /// theirs (where a run came from), and count for the range that replaced them.
@@ -944,7 +955,8 @@ pub(super) fn gate_allowed(
             no_edited_tests
         ],
     )?;
-    Ok(())
+    // A parked run whose last stop went waits for nobody (Issue 283).
+    super::park::settle(w)
 }
 
 /// `text` as one sentence: its first line, ended by a full stop.
@@ -982,6 +994,7 @@ pub(super) fn head_recorded(
            AND json_extract(context_json, '$.head') != ?2",
         params![format!("{}#{pr}", repo.to_lowercase()), head],
     )?;
+    super::park::settle(w)?;
     let budget: i64 = w.conn().query_row(
         "SELECT budget_fixes FROM ranges WHERE id = ?1",
         [range],
@@ -2058,6 +2071,8 @@ fn record(
                 json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
                        "task_id": task}),
             )?;
+            // A parked run whose pull request landed is brought back with that reason (Issue 283).
+            super::park::unpark(w, task, "landed", json!({"repo": repo, "pr": pr}))?;
         }
     }
     fill(w, agent)?;
@@ -2264,6 +2279,10 @@ fn items(
             it["place"] = json!("waiting_person");
             it["why"] = json!(why.lines().next().unwrap_or_default());
             it["since"] = json!(since);
+            // Its terminal let go while it waits (Issue 283).
+            if status == "parked" {
+                it["stage"] = json!("parked");
+            }
         } else {
             match status.as_str() {
                 "review" => {

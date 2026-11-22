@@ -128,16 +128,27 @@ fn rows(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> rusqlite::Res
     .collect()
 }
 
-/// The runs not closed (Issue 168): a `failed` run stays until it is closed.
+/// The runs not closed (Issue 168): a `failed` run stays until it is closed. A run waiting for
+/// the person carries `waiting`, and one woken from parking `unparked` (Issue 283).
 fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
-    rows(
+    let mut all = rows(
         conn,
         "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage FROM runs r
          JOIN projects p ON p.id = r.project_id
          LEFT JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
          WHERE r.status NOT IN ('completed', 'abandoned') ORDER BY r.id",
         [],
-    )
+    )?;
+    for run in &mut all {
+        let task = run["task_id"].as_str().unwrap_or_default().to_string();
+        let status = run["status"].as_str().unwrap_or_default().to_string();
+        if let Value::Object(more) = crate::daemon::park::read_fields(conn, &task, &status)? {
+            run.as_object_mut()
+                .expect("a row is an object")
+                .extend(more);
+        }
+    }
+    Ok(all)
 }
 
 /// The live terminals: the newest launch of each role and run whose key is not revoked (a key

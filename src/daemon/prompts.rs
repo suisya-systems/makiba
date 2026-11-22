@@ -131,7 +131,7 @@ impl Prompts {
         let all = scenes(
             w,
             &format!(
-                "r.status NOT IN ('completed','failed','abandoned','suspended')
+                "r.status NOT IN ('completed','failed','abandoned','suspended','parked')
                  OR EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
                             AND p.status IN ('open','escalated') AND {FROM_PROMPT})"
             ),
