@@ -872,14 +872,27 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
         && status == "active"
     {
         // The refusals of the range's pull requests since the last one read merged, and since the
-        // person last resumed the range (a resume starts the count again), newest first.
+        // person last resumed the range (a resume starts the count again), newest first. A refusal
+        // of a head that was not its pull request's recorded head then (as `recorded_head` reads
+        // it at that event) made no stop, and does not count either.
         let mut q = w.conn().prepare(&format!(
             "{CHAIN} SELECT e.kind, lower(json_extract(e.payload_json, '$.repo')) || '#'
                             || json_extract(e.payload_json, '$.pr')
              FROM events e WHERE e.run_id IN
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
-                    AND json_extract(e.payload_json, '$.allow') = 0))
+                    AND json_extract(e.payload_json, '$.allow') = 0
+                    AND json_extract(e.payload_json, '$.head') = coalesce(
+                      (SELECT json_extract(p.payload_json, '$.head_oid') FROM events p
+                       WHERE p.kind IN ('pr_opened', 'fix_pushed') AND p.id < e.id
+                         AND lower(json_extract(p.payload_json, '$.repo'))
+                             = lower(json_extract(e.payload_json, '$.repo'))
+                         AND json_extract(p.payload_json, '$.pr') = json_extract(e.payload_json, '$.pr')
+                       ORDER BY p.id DESC LIMIT 1),
+                      (SELECT x.head_oid FROM pr_watches x
+                       WHERE lower(x.repo) = lower(json_extract(e.payload_json, '$.repo'))
+                         AND x.pr = json_extract(e.payload_json, '$.pr')
+                       ORDER BY x.id DESC LIMIT 1))))
                AND e.id > coalesce((SELECT max(a.id) FROM events a WHERE a.kind = 'range_resumed'
                      AND json_extract(a.payload_json, '$.range_id') = ?1), 0)
              ORDER BY e.id DESC LIMIT 100"
@@ -2838,6 +2851,36 @@ mod tests {
         assert_eq!(status_of(&w, new), "active", "the merge reset the count");
         refused(&w, "c", 9, &h).unwrap();
         assert_eq!(status_of(&w, new), "paused");
+    }
+
+    /// A refusal of a head its pull request has left (a stale verdict) makes no stop and does
+    /// not count: with one current refusal of another pull request after it, the range goes on.
+    #[test]
+    fn a_stale_refusal_does_not_count_toward_the_pause() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        run_of(&w, id, "b");
+        w.conn()
+            .execute("UPDATE ranges SET budget_fixes = 99 WHERE id = ?1", [id])
+            .unwrap();
+        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
+        let record = |task: &str, pr: i64, kind: &str, head: &str| {
+            super::super::prwatch::register(&w, kind, task, "o/p", pr, head).unwrap();
+            head_recorded(&w, task, "o/p", pr, head).unwrap();
+        };
+        record("a", 7, "pr_opened", &h1);
+        record("a", 7, "fix_pushed", &h2);
+        record("b", 8, "pr_opened", &h1);
+        assert_eq!(refused(&w, "a", 7, &h1), None, "a stale head makes no stop");
+        refused(&w, "b", 8, &h1).expect("a stop of the current head");
+        assert_eq!(
+            status_of(&w, id),
+            "active",
+            "the stale refusal does not count"
+        );
+        refused(&w, "a", 7, &h2).expect("a stop of the current head");
+        assert_eq!(status_of(&w, id), "paused", "two current refusals do");
     }
 
     /// The person's resume starts the counts again: after it, an answer that allows with edited
