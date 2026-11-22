@@ -2794,10 +2794,11 @@ impl Door {
                 }
             }
         }
-        // An allowance of a head refused before: its gate stop is withdrawn with this verdict.
+        // An allowance of a head refused before: its gate stop is withdrawn with this verdict, and
+        // its tests stop too when no edited test is reported any more.
         if allow
             && range.is_some()
-            && let Err(e) = super::belt::gate_allowed(&w, &repo, pr, &head)
+            && let Err(e) = super::belt::gate_allowed(&w, &repo, pr, &head, edited.is_empty())
         {
             let _ = w.rollback();
             return fail(

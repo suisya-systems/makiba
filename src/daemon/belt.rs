@@ -905,18 +905,31 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
 
 /// The gate allowed a range task's pull request at `head`, in the gate's transaction: the `gate`
 /// stops still escalated for that pull request and head are withdrawn (what they were refused
-/// for has arrived: a CI result, a review), so the run counts again. Marked as `makibad`'s own
-/// withdrawal, so that a later refusal of the same head is a stop again.
-pub(super) fn gate_allowed(w: &StateWriter, repo: &str, pr: i64, head: &str) -> Result<()> {
+/// for has arrived: a CI result, a review), so the run counts again. When the allowance reports
+/// no edited test (`no_edited_tests`: the base has since taken those changes), the `tests` stops
+/// of that head go too. Marked as `makibad`'s own withdrawal, so that a later refusal of the
+/// same head is a stop again.
+pub(super) fn gate_allowed(
+    w: &StateWriter,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    no_edited_tests: bool,
+) -> Result<()> {
     w.conn().execute(
         "UPDATE pending SET status = 'withdrawn',
            context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
          WHERE status = 'escalated'
            AND json_extract(context_json, '$.by') = 'makibad'
-           AND json_extract(context_json, '$.stop_line') = 'gate'
+           AND (json_extract(context_json, '$.stop_line') = 'gate'
+                OR (?3 AND json_extract(context_json, '$.stop_line') = 'tests'))
            AND json_extract(context_json, '$.pr') = ?1
            AND json_extract(context_json, '$.head') = ?2",
-        params![format!("{}#{pr}", repo.to_lowercase()), head],
+        params![
+            format!("{}#{pr}", repo.to_lowercase()),
+            head,
+            no_edited_tests
+        ],
     )?;
     Ok(())
 }
@@ -2908,12 +2921,62 @@ mod tests {
             .execute("UPDATE ranges SET status = 'active' WHERE id = ?1", [id])
             .unwrap();
         assert_eq!(range_count(&w, id).unwrap(), 0);
-        gate_allowed(&w, "O/p", 7, &h).unwrap();
+        gate_allowed(&w, "O/p", 7, &h, true).unwrap();
         assert_eq!(escalated(&w), 1, "only the stop of that pull request goes");
         assert_eq!(range_count(&w, id).unwrap(), 1, "its run counts again");
         let again = refused(&w, "a", 7, &h).unwrap();
         assert_ne!(again, first);
         assert_eq!(escalated(&w), 2);
+    }
+
+    /// A head stopped for edited tests, then allowed with none (the base took those changes):
+    /// its `tests` stop goes; an allowance that still reports edited tests leaves it.
+    #[test]
+    fn an_allowance_without_edited_tests_withdraws_the_tests_stop_of_that_head() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let h = "1".repeat(40);
+        watch(&w, "a", 7, &h);
+        let tests = ["tests/x.rs".to_string()];
+        event(
+            &w,
+            "acceptance_gate",
+            "merge-gate",
+            Some("a"),
+            json!({"repo": "o/p", "pr": 7, "head": h, "allow": false}),
+        )
+        .unwrap();
+        let stopped = gate_stop(
+            &w,
+            &GateStop {
+                task: "a",
+                repo: "o/p",
+                pr: 7,
+                head: &h,
+                allow: false,
+                refused: false,
+                reason: "tests edited",
+                edited_tests: &tests,
+            },
+        )
+        .unwrap()
+        .expect("a stop of line tests");
+        gate_allowed(&w, "O/p", 7, &h, false).unwrap();
+        assert_eq!(
+            escalated(&w),
+            1,
+            "edited tests still reported: the stop stays"
+        );
+        gate_allowed(&w, "O/p", 7, &h, true).unwrap();
+        assert_eq!(escalated(&w), 0, "no edited test: the stop goes");
+        let status: String = w
+            .conn()
+            .query_row("SELECT status FROM pending WHERE id = ?1", [stopped], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "withdrawn");
     }
 
     /// A range budget is a stop only while it keeps a candidate out, and once.
