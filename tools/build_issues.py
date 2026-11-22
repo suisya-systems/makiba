@@ -1091,14 +1091,26 @@ add("M7-1", "Register makiba in makiba",
          "through (M4-5), the secretary launched and renewed (M6-2, M6-5), a permission prompt relayed (M6-8) "
          "and a close (M5-2). Goal G9 still asks for every Issue of M0 to M6 to be closed by the end.")
 
-add("M7-2", "One week of self-hosting",
-    "A week is long enough to meet an update of the base, a secretary renewal and a failed launch at least once.",
-    ["Develop makiba with makiba for seven days. claude-org-ja stays stopped.",
+add("M7-2", "Self-hosting, measured by landed pull requests and events met",
+    "The period is not measured in days. A week was chosen only because it is long enough to meet an update of "
+    "the base, a secretary renewal and a failed launch at least once; at the present throughput (ten to "
+    "fourteen pull requests a day) a count and the events themselves say more than seven days of calendar. "
+    "This repeats the owner's earlier decision for the belt (`docs/design/belt.md`, Q4: decided after N = 10 "
+    "stops from their record, not after days).",
+    ["Develop makiba with makiba until both hold, with claude-org-ja not started in between: (1) twenty pull "
+     "requests of makiba have landed through makiba; (2) each of three events has been met at least once: an "
+     "update of the base, a renewal of the secretary, a failed launch.",
+     "An event that has not happened by itself when the count is reached is brought about on purpose, and its "
+     "handling recorded: an update of the base by a base version bump on the host, a renewal by the "
+     "secretary's `renew` verb, a failed launch by a launch made to fail as the probes do.",
      "Every incident met: a row in `docs/design/incidents.md` and an Issue for its test.",
-     "At the end, a short report in `docs/reports/self-hosting-week.md`: counts of runs, failed launches, "
-     "undelivered messages at any point, renewals, time `makibad` was down."],
+     "A short report in `docs/reports/self-hosting-week.md` (the file name is kept: nothing reads it by name, "
+     "but a rename buys nothing and breaks the links already made to it): counts of runs, failed launches, "
+     "undelivered messages at any point, renewals, time `makibad` was down; the count of landed pull requests; "
+     "and for each of the three events, when it was met and whether it was brought about on purpose."],
     None,
-    ["The report exists and every incident it mentions has a row.", "The incident tests are green at the end."],
+    ["The report exists and shows the twenty landings and the three events.",
+     "Every incident the report mentions has a row.", "The incident tests are green at the end."],
     "G9", deps=["M7-1"], gate=False,
     note="Outside the acceptance gate: closed by a person.")
 
@@ -1108,9 +1120,10 @@ add("M7-3", "Move the projects claude-org-ja serves",
     "serves stay with it.",
     ["Register each project claude-org-ja serves; move their goal ledgers; stop claude-org-ja. Nothing of "
      "paddock's is stopped or moved.",
-     "One more week of observation."],
+     "After the move, each moved project has a pull request landed through makiba."],
     None,
-    ["For seven days after the move, claude-org-ja is not started."],
+    ["Each moved project has had at least one pull request landed through makiba, and claude-org-ja has not "
+     "been started in between."],
     "G9", deps=["M7-2"], gate=False,
     note="Outside the acceptance gate, and outside the schedule counted in plan.md section 9.")
 
