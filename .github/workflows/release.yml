@@ -1,0 +1,109 @@
+# The release workflow, staged here because .github/ is changed by the owner by hand (#62).
+# To activate it, copy this file to .github/workflows/release.yml; tests/release_install.rs fails when
+# the two differ. Nothing is released until a tag vX.Y.Z is pushed, and a tag whose version differs
+# from Cargo.toml releases nothing (the first job fails).
+#
+# A run started by hand (Actions > Release > Run workflow) is a rehearsal: it builds the four
+# archives and makes and checks the manifest, and cannot create a release, because the last job runs
+# only for a pushed tag.
+name: Release
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+"]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  check-version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        name: The tag and Cargo.toml must agree (a rehearsal has no tag and takes Cargo.toml's version)
+        run: |
+          if [ "$GITHUB_REF_TYPE" = tag ]; then
+            sh scripts/check-tag.sh "$GITHUB_REF_NAME"
+            version=${GITHUB_REF_NAME#v}
+          else
+            version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+  build:
+    needs: check-version
+    strategy:
+      fail-fast: true
+      matrix:
+        include:
+          # Linux is built on 22.04 so that the binary needs glibc 2.35 or newer.
+          - target: linux-x86_64
+            runner: ubuntu-22.04
+          - target: linux-aarch64
+            runner: ubuntu-22.04-arm
+          - target: macos-aarch64
+            runner: macos-15
+          - target: macos-x86_64
+            runner: macos-15-intel
+    runs-on: ${{ matrix.runner }}
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      # rustup installs the toolchain of rust-toolchain.toml on the first cargo call.
+      - run: cargo build --release --locked --bin makiba
+      - name: The binary runs here and prints the version
+        run: test "$(target/release/makiba --version)" = "makiba $VERSION"
+      - name: Archive
+        run: |
+          mkdir stage
+          cp target/release/makiba LICENSE THIRD-PARTY-NOTICES stage/
+          tar -czf "makiba-$VERSION-${{ matrix.target }}.tar.gz" -C stage makiba LICENSE THIRD-PARTY-NOTICES
+      - uses: actions/upload-artifact@v4
+        with:
+          name: archive-${{ matrix.target }}
+          path: makiba-${{ env.VERSION }}-${{ matrix.target }}.tar.gz
+          if-no-files-found: error
+  manifest:
+    needs: [check-version, build]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: archive-*
+          merge-multiple: true
+          path: dist
+      - name: Make manifest.json from the archives, then check it against them
+        run: |
+          sh scripts/release-manifest.sh make "$VERSION" "https://github.com/${{ github.repository }}/releases/download/v$VERSION" dist
+          sh scripts/release-manifest.sh check "$VERSION" dist
+          cat dist/manifest.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-files
+          path: dist
+          if-no-files-found: error
+  publish:
+    # The only job that can write, and only for a pushed tag: a rehearsal never reaches it.
+    if: github.event_name == 'push'
+    needs: [check-version, manifest]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.check-version.outputs.version }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-files
+          path: dist
+      - name: Check the manifest once more, then publish the archives, manifest.json and install.sh
+        run: |
+          sh scripts/release-manifest.sh check "$VERSION" dist
+          gh release create "v$VERSION" dist/*.tar.gz dist/manifest.json scripts/install.sh \
+            --verify-tag --title "makiba $VERSION" --notes "Install: see docs/installing.md"
