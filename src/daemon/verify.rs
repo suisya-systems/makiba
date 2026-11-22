@@ -249,6 +249,8 @@ pub(super) fn fail(
             )?;
             let reason = format!("launch failed at stage {stage}: {why}");
             super::door::finish_dispatch(w, task, Some((ErrorKind::Internal, &reason)))?;
+            // The belt (Issue 282): the second failed launch of a range in a row pauses it.
+            super::belt::launch_failed(w, task)?;
         }
         if !super::notify_gate::decide("worker_spawn_failed").send {
             return Ok(true);
