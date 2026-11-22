@@ -327,6 +327,24 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
         }
     };
     add(&mut settings["permissions"]["deny"], rules);
+    // The role's own door tools, by full name and nothing wider (Issue 292): a call of one is not
+    // put to the auto mode classifier. Generated from the verb table, so a new verb is not missed.
+    if let Some(role) = task.role {
+        use crate::spec::Role as R;
+        let spec_role = match role {
+            Role::Secretary => R::Secretary,
+            Role::Worker => R::Worker,
+            Role::Curator => R::Curator,
+            Role::Person => R::Person,
+        };
+        add(
+            &mut settings["permissions"]["allow"],
+            crate::daemon::door::tools_of(spec_role)
+                .into_iter()
+                .map(|v| format!("mcp__makiba__{}", v.as_str()))
+                .collect(),
+        );
+    }
     let sandbox = &mut settings["sandbox"];
     sandbox["enabled"] = true.into();
     sandbox["failIfUnavailable"] = true.into();
