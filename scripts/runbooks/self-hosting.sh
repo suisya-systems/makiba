@@ -798,7 +798,7 @@ sw_mode_of_makibad() {
   local pid
   pid=$("$MK" status 2>/dev/null | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p')
   [ -n "$pid" ] && [ -r "/proc/$pid/environ" ] || { printf unreadable; return 0; }
-  tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^MAKIBA_MERGE_APPROVAL_MODE=//p' | head -n 1 | grep . || printf unset
+  tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^MAKIBA_MERGE_APPROVAL_MODE=//p' | head -n 1 | tr 'A-Z' 'a-z' | tr -d '[:space:]' | grep . || printf unset
 }
 
 sw_preflight() {
@@ -870,11 +870,10 @@ Kept as they are: the goal ledger already placed, the project registration, the 
   # From here on every failure says the next line. The fast-forward below changes this script's own file, so
   # the case branch that calls this function ends in `exit`: the shell never reads the file again.
   say "== stop the organization"
-  run "$MK" down --secretary || true
-  if [ "$DRY" != 1 ]; then
-    if [ "$(sw_status | head -n 1)" = running ]; then sw_fail "makibad still runs after makiba down" "$MK status ; then run this stage again (nothing else was changed)"; fi
-    check down PASS "makibad is not running; the secretary's terminal is ended"
-  fi
+  # makiba down waits until makibad has let go of its lock and ends the terminals itself (src/down.rs); its exit status
+  # is the answer. (status shows "running" for 30 s after a stop, since it reads the last heartbeat: it is not used here.)
+  run "$MK" down --secretary || sw_fail "makiba down failed (its text is above): makibad, the secretary's terminal or the base may not be stopped as asked" "$MK status ; if the organization is not as it was, $MK up brings it back; then run this stage again (the checkout and the binary were not touched)"
+  if [ "$DRY" != 1 ]; then check down PASS "makiba down: makibad stopped, the secretary's terminal ended"; fi
 
   say "== bring the checkout to origin/main and build"
   run git -C "$REPO" merge --ff-only origin/main || sw_fail "the fast-forward failed" "$MK up   (the checkout and the old binary are as they were); read the error above, then run this stage again"
