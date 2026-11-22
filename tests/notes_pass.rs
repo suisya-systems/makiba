@@ -14,6 +14,9 @@
 //! The verb is called on the real binary, `makiba daemon` on the stand-in base with
 //! `MAKIBA_DOOR=none`, over the MCP port, as `tests/candidate_verb.rs` does.
 
+mod common;
+
+use common::makibad;
 use makiba::db::writer::StateWriter;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -22,8 +25,6 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 
 const SECRETARY_KEY: &str = "5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5";
 
@@ -192,7 +193,7 @@ fn start(root: &Path) -> (Daemon, String, PathBuf, PathBuf) {
     drop(w);
     let port = free_port();
     let daemon = Daemon(
-        Command::new(MAKIBA)
+        makibad::daemon(root)
             .env("HOME", root.join("home"))
             .env("MAKIBA_STATE_DIR", root.join("state"))
             .env("XDG_STATE_HOME", root.join("xdg-state"))
@@ -205,7 +206,6 @@ fn start(root: &Path) -> (Daemon, String, PathBuf, PathBuf) {
             .env("MAKIBA_BASE", "stub")
             .env("MAKIBA_STUB_SUBSCRIBE_DELAY_MS", "0")
             .env_remove("MAKIBA_PERSON_KEY")
-            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
