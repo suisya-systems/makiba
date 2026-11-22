@@ -12,6 +12,7 @@
 //! are not taken for `gh` calls, when the command is plain enough to tell (no alias, `PATH=` or
 //! function definition, and a parse that does not get lost).
 
+use super::Refusal;
 use super::re::Re;
 use super::shell;
 use serde_json::Value;
@@ -138,34 +139,44 @@ pub(crate) const GROUPS: &[&str] = &[
 const PUSH_REASON: &str =
     "git push is the secretary's: report your commits and the secretary pushes them";
 
-pub fn check(payload: &Value) -> Result<(), String> {
+/// The line this hook holds.
+const LINE: &str = "L-K2";
+
+fn refuse(matched: impl Into<String>, reason: impl Into<String>) -> Result<(), Refusal> {
+    Err(Refusal::new(LINE, matched, reason))
+}
+
+pub fn check(payload: &Value) -> Result<(), Refusal> {
     let command = super::command(payload);
     if command.is_empty() {
         return Ok(());
     }
     let push = Re::new(PUSH_RE);
-    if push.any_line(&shell::plain_git(&command)) {
-        return Err(PUSH_REASON.into());
+    if let Some(line) = command
+        .split('\n')
+        .find(|l| push.any_line(&shell::plain_git(l)))
+    {
+        return refuse(line, PUSH_REASON);
     }
     let lines: Vec<String> = command.split('\n').map(String::from).collect();
-    if shell::unwrap(&lines)
-        .iter()
-        .any(|b| push.any_line(&shell::plain_git(b)))
+    if let Some(body) = shell::unwrap(&lines)
+        .into_iter()
+        .find(|b| push.any_line(&shell::plain_git(b)))
     {
-        return Err(format!("{PUSH_REASON} (seen inside eval or bash -c)"));
+        return refuse(body, format!("{PUSH_REASON} (seen inside eval or bash -c)"));
     }
     // makiba's addition: each segment as the shell reads its words (quotes and backslashes
     // dropped, known variables expanded), so `git "push"` and `G=push; git $G` are seen.
     // Only where git is the segment's command, so a message that mentions a push is not one.
     let push_cmd = Re::new(PUSH_CMD);
     let (segments, assigns) = shell::segments_and_assignments(&command);
-    if let Some(why) = shell::unreadable(&segments, &assigns) {
-        return Err(why);
+    if let Some((matched, why)) = shell::unreadable_at(&segments, &assigns) {
+        return refuse(matched, why);
     }
     for segment in segments.iter().filter(|s| !s.is_empty()) {
         let words = shell::expand(segment, &assigns).replace(['"', '\'', '\\'], "");
         if push_cmd.any_line(&shell::plain_git(&words)) {
-            return Err(PUSH_REASON.into());
+            return refuse(segment.as_str(), PUSH_REASON);
         }
     }
     check_gh(&command)
@@ -175,7 +186,7 @@ fn strict_ok(text: &str) -> bool {
     !shell::split_segments(text).1
 }
 
-fn check_gh(command: &str) -> Result<(), String> {
+fn check_gh(command: &str) -> Result<(), Refusal> {
     let guard =
         Re::new(r"(^|[^A-Za-z0-9_-])(alias|enable|hash|function|shopt|PATH=|BASH_ENV|ENV=)|\(\)");
     let mut gh_command = command.to_string();
@@ -212,8 +223,9 @@ fn check_gh(command: &str) -> Result<(), String> {
         let flat = shell::flatten_text(&expanded);
         let joined = shell::flatten_text(&expanded.replace(['"', '\''], ""));
         if alias.any_line(&joined.replace('\\', "")) {
-            return Err(
-                "a git alias that runs a shell or names push cannot be read; run the command by its own name".into(),
+            return refuse(
+                segment.as_str(),
+                "a git alias that runs a shell or names push cannot be read; run the command by its own name",
             );
         }
         let mut verdicts = Vec::new();
@@ -227,10 +239,13 @@ fn check_gh(command: &str) -> Result<(), String> {
             }
         }
         if !verdicts.is_empty() {
-            return Err(format!(
-                "a gh call that writes to GitHub, or that cannot be read, is the secretary's (seen: {}). If no gh call was meant, the word gh in a text (a commit message, a heredoc) was read as one: put the text in a file and pass it by path",
-                verdicts.join(" ")
-            ));
+            return refuse(
+                segment.as_str(),
+                format!(
+                    "a gh call that writes to GitHub, or that cannot be read, is the secretary's (seen: {}). If no gh call was meant, the word gh in a text (a commit message, a heredoc) was read as one: put the text in a file and pass it by path",
+                    verdicts.join(" ")
+                ),
+            );
         }
     }
     Ok(())

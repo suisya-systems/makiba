@@ -12,6 +12,7 @@
 //!
 //! The file tools only: a Bash command that writes is bounded by the sandbox's write surface.
 
+use super::Refusal;
 use serde_json::Value;
 use std::path::{Component, Path, PathBuf};
 
@@ -22,17 +23,25 @@ const LOCKED: &[&str] = &[
     ".mcp.json",
 ];
 
-pub fn check(payload: &Value) -> Result<(), String> {
-    let root = std::env::var("CLAUDE_PROJECT_DIR").unwrap_or_default();
-    if root.is_empty() {
-        return Err("CLAUDE_PROJECT_DIR is not set, so the agent's folder is not known".into());
-    }
+pub fn check(payload: &Value) -> Result<(), Refusal> {
     let mut path = super::field(payload, "/tool_input/file_path");
     if path.is_empty() {
         path = super::field(payload, "/tool_input/notebook_path");
     }
+    let root = std::env::var("CLAUDE_PROJECT_DIR").unwrap_or_default();
+    if root.is_empty() {
+        return Err(Refusal::new(
+            "L-K4",
+            "CLAUDE_PROJECT_DIR unset",
+            "CLAUDE_PROJECT_DIR is not set, so the agent's folder is not known",
+        ));
+    }
     if path.is_empty() {
-        return Err("the file tool's payload has no file_path".into());
+        return Err(Refusal::new(
+            super::FAIL_CLOSED,
+            "the hook payload",
+            "the file tool's payload has no file_path",
+        ));
     }
     let file = resolve(Path::new(&path));
     let root = resolve(Path::new(&root));
@@ -41,8 +50,12 @@ pub fn check(payload: &Value) -> Result<(), String> {
         .iter()
         .any(|l| file == root.join(l) || file == resolve(&root.join(l)))
     {
-        return Err(format!(
-            "{path} configures this agent (its settings carry the guard hooks); ask the secretary instead"
+        return Err(Refusal::new(
+            "L-K5",
+            path.clone(),
+            format!(
+                "{path} configures this agent (its settings carry the guard hooks); ask the secretary instead"
+            ),
         ));
     }
     if file.starts_with(&root) && file != root {
@@ -54,9 +67,13 @@ pub fn check(payload: &Value) -> Result<(), String> {
             return Ok(());
         }
     }
-    Err(format!(
-        "{path} is outside this agent's folder {}; write only inside it",
-        root.display()
+    Err(Refusal::new(
+        "L-K4",
+        path.clone(),
+        format!(
+            "{path} is outside this agent's folder {}; write only inside it",
+            root.display()
+        ),
     ))
 }
 

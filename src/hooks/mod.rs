@@ -5,6 +5,13 @@
 //! Every hook reads its payload with `read_payload`, which fails closed as claude-org-ja's
 //! `.hooks/lib` does (inventory HK-1): input that cannot be read, is empty or blank, is not one
 //! JSON object, or carries a `tool_input` that is neither absent, null nor an object, is refused.
+//!
+//! Every refusal names the hook, the line it holds (its id in docs/design/lines.md) and the part
+//! of the input that matched (Issue 306), so that the agent need not guess which rule stopped it:
+//!
+//! ```text
+//! makiba: refused by hook <name> (line <id> in docs/design/lines.md): <reason>. Matched: "<text>"
+//! ```
 
 use serde_json::Value;
 use std::io::Read;
@@ -21,10 +28,55 @@ pub mod merge_gate;
 pub mod premise_check;
 pub mod re;
 pub mod shell;
+pub mod words;
 pub mod worker_boundary;
 
-/// A hook: the payload in, `Err(reason)` to refuse.
-type Hook = fn(&Value) -> Result<(), String>;
+/// Why a hook refuses: the line of docs/design/lines.md it holds, the part of the input that
+/// matched, and the reason with what to do instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refusal {
+    pub line: &'static str,
+    pub matched: String,
+    pub reason: String,
+}
+
+impl Refusal {
+    pub fn new(line: &'static str, matched: impl Into<String>, reason: impl Into<String>) -> Self {
+        Refusal {
+            line,
+            matched: matched.into(),
+            reason: reason.into(),
+        }
+    }
+
+    /// The line a refusal by hook `name` prints.
+    pub fn message(&self, name: &str) -> String {
+        format!(
+            "makiba: refused by hook {name} (line {} in docs/design/lines.md): {}. Matched: \"{}\"",
+            self.line,
+            self.reason.trim_end_matches('.'),
+            shown(&self.matched)
+        )
+    }
+}
+
+/// The longest matched text a refusal shows, in characters.
+const SHOWN: usize = 200;
+
+/// `text` on one line (a newline shown as `\n`), cut at `SHOWN` characters.
+fn shown(text: &str) -> String {
+    let one = text.trim().replace('\n', "\\n");
+    match one.char_indices().nth(SHOWN) {
+        Some((at, _)) => format!("{}...", &one[..at]),
+        None => one,
+    }
+}
+
+/// The line a hook that cannot read its input holds.
+const FAIL_CLOSED: &str = "L-K11";
+
+/// A hook: the payload in, `Err` to refuse.
+type Hook = fn(&Value) -> Result<(), Refusal>;
 
 const HOOKS: &[(&str, Hook)] = &[
     ("deny-base", deny_base::check),
@@ -78,45 +130,68 @@ pub fn main(args: &[String]) -> ExitCode {
     };
     let mut raw = Vec::new();
     let verdict = match std::io::stdin().read_to_end(&mut raw) {
-        Err(e) => Err(format!("cannot read the hook payload: {e}")),
+        Err(e) => Err(payload_refused(format!(
+            "cannot read the hook payload: {e}"
+        ))),
         Ok(_) => {
+            // What the check reads, for a refusal of the frame: the command, or the payload.
+            let seen = read_payload(&raw)
+                .map(|p| command(&p))
+                .ok()
+                .filter(|c| !c.is_empty())
+                .unwrap_or_else(|| "the hook payload".into());
             let (tx, rx) = std::sync::mpsc::channel();
             let started = std::thread::Builder::new()
                 .stack_size(CHECK_STACK)
                 .spawn(move || {
-                    let _ = tx.send(read_payload(&raw).and_then(|p| {
-                        if command(&p).len() > COMMAND_LIMIT {
-                            return Err(format!(
-                                "the command is longer than {COMMAND_LIMIT} bytes; split it, or write long text with the file tools"
+                    let _ = tx.send(read_payload(&raw).map_err(payload_refused).and_then(|p| {
+                        let len = command(&p).len();
+                        if len > COMMAND_LIMIT {
+                            return Err(Refusal::new(
+                                FAIL_CLOSED,
+                                format!("the command, {len} bytes"),
+                                format!(
+                                    "the command is longer than {COMMAND_LIMIT} bytes; split it, or write long text with the file tools"
+                                ),
                             ));
                         }
                         hook(&p)
                     }));
                 });
             match started {
-                Err(e) => Err(format!("cannot start the check: {e}")),
+                Err(e) => Err(Refusal::new(
+                    FAIL_CLOSED,
+                    seen,
+                    format!("cannot start the check: {e}"),
+                )),
                 // A panic drops the sender; a check that runs past the budget is not waited for.
                 Ok(_) => rx.recv_timeout(budget).unwrap_or_else(|e| {
-                    Err(match e {
+                    let reason = match e {
                         std::sync::mpsc::RecvTimeoutError::Timeout => format!(
                             "the check took longer than {} s; split the command",
                             budget.as_secs()
                         ),
                         _ => "the check failed".into(),
-                    })
+                    };
+                    Err(Refusal::new(FAIL_CLOSED, seen, reason))
                 }),
             }
         }
     };
-    verdict_exit(verdict)
+    verdict_exit(name.unwrap_or_default(), verdict)
 }
 
-/// Exit 0 for `Ok`; else the reason on standard error and exit 2.
-pub fn verdict_exit(verdict: Result<(), String>) -> ExitCode {
+/// A refusal of a payload that cannot be read (line L-K11).
+fn payload_refused(reason: String) -> Refusal {
+    Refusal::new(FAIL_CLOSED, "the hook payload", reason)
+}
+
+/// Exit 0 for `Ok`; else the refusal, naming hook `name`, on standard error and exit 2.
+pub fn verdict_exit(name: &str, verdict: Result<(), Refusal>) -> ExitCode {
     match verdict {
         Ok(()) => ExitCode::SUCCESS,
-        Err(reason) => {
-            eprintln!("makiba: refused: {reason}");
+        Err(refusal) => {
+            eprintln!("{}", refusal.message(name));
             ExitCode::from(2)
         }
     }

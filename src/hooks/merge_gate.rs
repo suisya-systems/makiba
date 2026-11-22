@@ -49,14 +49,27 @@ pub const GATE_WAIT: Duration = Duration::from_secs(840);
 
 const FORM: &str = "merge with exactly: gh pr merge <number> --repo <OWNER/REPO> --squash|--merge|--rebase --match-head-commit <full head SHA> [--delete-branch], alone on one line, so the acceptance gate can read it. A PR this form cannot merge (for example a repository without CI) is merged by the person in the GitHub web UI";
 
-pub fn check(payload: &Value) -> Result<(), String> {
+/// The line this hook holds; a gate that refuses for want of a passed review holds `REVIEW_LINE`.
+const LINE: &str = "L-K9";
+const REVIEW_LINE: &str = "L-K10";
+
+pub fn check(payload: &Value) -> Result<(), super::Refusal> {
     if super::field(payload, "/tool_name") != "Bash" {
         return Ok(());
     }
     let command = super::command(payload);
-    match parse(&command)? {
+    let refusal = |why: String| super::Refusal::new(LINE, command.trim(), why);
+    match parse(&command).map_err(refusal)? {
         None => Ok(()),
-        Some((pr, repo, head)) => ask_gate(&repo, pr, &head),
+        Some((pr, repo, head)) => ask_gate(&repo, pr, &head).map_err(|(verdict, why)| {
+            if verdict == "review_missing" {
+                super::Refusal::new(REVIEW_LINE, format!("gate verdict {verdict}"), why)
+            } else if verdict.is_empty() {
+                refusal(why)
+            } else {
+                super::Refusal::new(LINE, format!("gate verdict {verdict}"), why)
+            }
+        }),
     }
 }
 
@@ -693,8 +706,36 @@ fn refused_gh(args: &[Tok], redirections_certain: bool) -> Option<String> {
     }
 }
 
-/// Ask makibad's gate; `Ok` only for an answer that allows the merge.
-fn ask_gate(repo: &str, pr: i64, head: &str) -> Result<(), String> {
+/// Ask makibad's gate; `Ok` only for an answer that allows the merge. A refusal carries the
+/// gate's verdict, or an empty one when the gate could not be asked.
+fn ask_gate(repo: &str, pr: i64, head: &str) -> Result<(), (String, String)> {
+    let r = gate_answer(repo, pr, head).map_err(|why| (String::new(), why))?;
+    if r["allow"] == json!(true) {
+        // Issue 263: allowed, but the head has no passed diff review: the person is asked, with
+        // the gate's words, before the command runs.
+        if r["warn"] == json!(true) {
+            println!(
+                "{}",
+                json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": r["reason"].as_str().unwrap_or("")}})
+            );
+        }
+        return Ok(());
+    }
+    let verdict = r["verdict"].as_str().unwrap_or("?");
+    Err((
+        verdict.to_string(),
+        format!(
+            "ACCEPTANCE_GATE {verdict} for {repo}#{pr} (merge_approval_mode {}): {}",
+            r["mode"].as_str().unwrap_or("?"),
+            r["reason"].as_str().unwrap_or("")
+        ),
+    ))
+}
+
+/// The gate's result for the merge, or why it could not be had.
+fn gate_answer(repo: &str, pr: i64, head: &str) -> Result<Value, String> {
     let key = std::fs::read_to_string(crate::cli::gate_key_path())
         .map_err(|e| {
             format!(
@@ -724,24 +765,5 @@ fn ask_gate(repo: &str, pr: i64, head: &str) -> Result<(), String> {
             answer["error"]["message"].as_str().unwrap_or("no reason")
         ));
     }
-    let r = &answer["result"];
-    if r["allow"] == json!(true) {
-        // Issue 263: allowed, but the head has no passed diff review: the person is asked, with
-        // the gate's words, before the command runs.
-        if r["warn"] == json!(true) {
-            println!(
-                "{}",
-                json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                    "permissionDecisionReason": r["reason"].as_str().unwrap_or("")}})
-            );
-        }
-        return Ok(());
-    }
-    Err(format!(
-        "ACCEPTANCE_GATE {} for {repo}#{pr} (merge_approval_mode {}): {}",
-        r["verdict"].as_str().unwrap_or("?"),
-        r["mode"].as_str().unwrap_or("?"),
-        r["reason"].as_str().unwrap_or("")
-    ))
+    Ok(answer["result"].clone())
 }
