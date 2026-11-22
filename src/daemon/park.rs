@@ -58,7 +58,9 @@ fn parkable() -> String {
                      AND p.status = 'escalated' AND p.kind = 'question')
          AND NOT EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
                          AND (p.status = 'open' OR (p.status = 'escalated' AND p.kind = 'prompt')))
-         AND l.stage = 'verified'
+         AND l.stage = 'verified' AND l.conversation_id IS NOT NULL
+         AND NOT EXISTS (SELECT 1 FROM events g WHERE g.run_id = r.id AND g.kind = 'terminal_gone'
+                         AND json_extract(g.payload_json, '$.spawn_id') = l.spawn_id)
          AND NOT EXISTS (SELECT 1 FROM event_deliveries d
                          WHERE d.recipient = '{prefix}' || r.task_id AND d.status = 'pending')
          AND (SELECT json_extract(s.payload_json, '$.state') FROM events s
@@ -148,16 +150,20 @@ impl Park {
         let mut parked = Vec::new();
         for c in candidates {
             // The base once more: a turn the monitor has not written yet is not cut.
-            let quiet = terminals
+            // Exactly one terminal of the launch, alive: a worker that exited or vanished is the
+            // anomaly rules' and a failure, never parked.
+            let mine: Vec<_> = terminals
                 .iter()
                 .filter(|t| t.tags.get(TAG_SPAWN) == Some(&c.spawn))
-                .all(|t| {
-                    !t.alive
-                        || (t
-                            .status
+                .collect();
+            let quiet = mine.len() == 1
+                && mine.iter().all(|t| {
+                    t.alive
+                        && t.exit_code.is_none()
+                        && t.status
                             .as_ref()
                             .is_some_and(|s| matches!(s.state, State::Idle | State::Done))
-                            && t.turn.unwrap_or(0) <= c.turn)
+                        && t.turn.unwrap_or(0) <= c.turn
                 });
             if !quiet || !self.park(w, &c)? {
                 continue;
@@ -460,11 +466,73 @@ mod tests {
             .unwrap()
     }
 
+    /// One pass on a base where the launch `s1` has one terminal, alive and idle.
     fn park(w: &StateWriter) -> Vec<String> {
         let stub = crate::base::stub::Stub::new();
+        let t = terminal(&stub);
+        stub.set_state(&t, State::Idle);
         Park::new("/org", Duration::from_millis(1000))
             .pass(w, &stub)
             .unwrap()
+    }
+
+    fn terminal(stub: &crate::base::stub::Stub) -> crate::base::TerminalRef {
+        stub.launch(&crate::base::LaunchSpec {
+            argv: vec![],
+            cwd: "/".into(),
+            name: "w-t".into(),
+            tags: std::collections::BTreeMap::from([
+                (TAG_SPAWN.to_string(), "s1".to_string()),
+                (TAG_ORG.to_string(), "/org".to_string()),
+                (TAG_TASK_ID.to_string(), "t".to_string()),
+            ]),
+            env: std::collections::BTreeMap::new(),
+            unset: vec![],
+        })
+        .unwrap()
+    }
+
+    /// A verified launch with no conversation to resume, a terminal recorded gone, or a base with
+    /// no live terminal of the launch: the run is not parked (it would lose its context, or it is
+    /// a failure for the anomaly rules).
+    #[test]
+    fn a_run_that_could_not_come_back_or_whose_worker_is_gone_is_not_parked() {
+        let (_d, w) = org(5000);
+        entry(&w, "question", "escalated");
+        w.conn()
+            .execute("UPDATE run_launch SET conversation_id = NULL", [])
+            .unwrap();
+        assert!(park(&w).is_empty());
+
+        let (_d, w) = org(5000);
+        entry(&w, "question", "escalated");
+        w.conn()
+            .execute(
+                "INSERT INTO events (kind, run_id, payload_json)
+                 VALUES ('terminal_gone', 1, json_object('spawn_id', 's1', 'reason', 'finished'))",
+                [],
+            )
+            .unwrap();
+        assert!(park(&w).is_empty());
+
+        let once = |stub: &crate::base::stub::Stub| {
+            let (d, w) = org(5000);
+            entry(&w, "question", "escalated");
+            let out = Park::new("/org", Duration::from_millis(1000))
+                .pass(&w, stub)
+                .unwrap();
+            (d, w, out)
+        };
+        let stub = crate::base::stub::Stub::new();
+        let (_d, w, out) = once(&stub);
+        assert!(out.is_empty(), "no terminal at all");
+        assert_eq!(status(&w), "in_use");
+        let t = terminal(&stub);
+        stub.set_state(&t, State::Idle);
+        stub.exit(&t, 1);
+        let (_d, w, out) = once(&stub);
+        assert!(out.is_empty(), "an exited terminal");
+        assert_eq!(status(&w), "in_use");
     }
 
     #[test]
