@@ -555,7 +555,7 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
     let gr = &scan["goal_rank"];
     for u in arr(&gr["goal_unset_repos"]) {
         let reason = format!(
-            "no goal ledger, so the ready Issues of it ({}) are not ranked; write {}/{}.md (format in docs/goals.md)",
+            "no goal ledger, so the ready Issues of it ({}) are not ranked; use the skill makiba:goal-setup, which places {}/{}.md with the goal tool (format in docs/goals.md)",
             u["candidate_count"],
             goals.display(),
             s(&u["repo"])
@@ -563,7 +563,10 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
         leave(&u["repo"], Value::Null, "no_goal_ledger", reason);
     }
     for e in arr(&gr["goal_errors"]) {
-        let reason = format!("the goal ledger cannot be used: {}; fix it", s(&e["error"]));
+        let reason = format!(
+            "the goal ledger cannot be used: {}; fix it with the skill makiba:goal-setup",
+            s(&e["error"])
+        );
         leave(&e["repo"], Value::Null, "goal_ledger_error", reason);
     }
     for b in arr(&scan["excluded_blocked"]) {
@@ -683,6 +686,19 @@ fn notice(
     for sig in arr(&gr["signals"]) {
         out.push(format!("Goal signal: {}", s(&sig)));
     }
+    // Issues of a project that has a ledger but name no clause of it: the ledger may need a clause.
+    for g in arr(&gr["goals"]) {
+        let repo = s(&g["repo"]);
+        let n = candidates
+            .iter()
+            .filter(|c| s(&c["repo"]) == repo && !c["goal_clause"].is_object())
+            .count();
+        if n > 0 {
+            out.push(format!(
+                "{n} listed Issues of {repo} match no clause of its ledger: the skill makiba:goal-setup can add or revise clauses."
+            ));
+        }
+    }
     for d in arr(&scan["dependency_warnings"]) {
         out.push(format!(
             "Dependency warning: {}#{}: {}",
@@ -712,7 +728,7 @@ fn notice(
         let r = s(&u["repo"]);
         if new(format!("unset:{r}")) {
             out.push(format!(
-                "No goal ledger: {r} ({} candidates). Write {}/{r}.md (format in docs/goals.md).",
+                "No goal ledger: {r} ({} candidates). Use the skill makiba:goal-setup, which places {}/{r}.md with the goal tool (format in docs/goals.md).",
                 u["candidate_count"],
                 goals.display()
             ));
@@ -721,7 +737,10 @@ fn notice(
     for e in arr(&gr["goal_errors"]) {
         let r = s(&e["repo"]);
         if new(format!("error:{r}")) {
-            out.push(format!("Goal ledger error: {r}: {}.", s(&e["error"])));
+            out.push(format!(
+                "Goal ledger error: {r}: {}. Fix it with the skill makiba:goal-setup.",
+                s(&e["error"])
+            ));
         }
     }
     for slug in norepo {

@@ -81,7 +81,9 @@ pub fn read(path: &Path) -> Result<Value, String> {
         .into_iter()
         .map(|(slug, repo, branch)| {
             let hosts = crate::daemon::hosts_of(&conn, &slug).unwrap_or_default();
-            json!({"slug": slug, "repo": repo, "default_branch": branch, "network_hosts": hosts.join(",")})
+            let goal = ledger(&conn, repo.as_deref());
+            json!({"slug": slug, "repo": repo, "default_branch": branch, "network_hosts": hosts.join(","),
+                   "goal_ledger": goal})
         })
         .collect();
     let sql = |e: rusqlite::Error| format!("cannot read {}: {e}", path.display());
@@ -546,6 +548,45 @@ fn projects(conn: &Connection) -> Vec<(String, Option<String>, String)> {
     .unwrap_or_default()
 }
 
+/// A project's goal ledger as the scan would read it (`docs/goals.md`), and the newest placement
+/// through the verb `goal` (Issue 271): `state` is `none`, `ok` or `error`; `clauses` the number of
+/// clauses when `ok`; `placed_at` and `placed_by` null when no placement was recorded.
+fn ledger(conn: &Connection, repo: Option<&str>) -> Value {
+    use crate::work_discovery::goals::{GoalStatus, load_goals};
+    let Some(repo) = repo else {
+        return json!({"state": "none", "clauses": null, "placed_at": null, "placed_by": null});
+    };
+    let g = load_goals(&crate::cli::goals_dir(), repo);
+    let (state, clauses) = match g.status {
+        GoalStatus::Ok => ("ok", json!(g.clauses.len())),
+        GoalStatus::Unset => ("none", Value::Null),
+        GoalStatus::Error => ("error", Value::Null),
+    };
+    let placed: Option<(String, String)> = conn
+        .query_row(
+            "SELECT occurred_at, actor FROM events WHERE kind = 'goal_ledger_placed'
+             AND json_extract(payload_json, '$.repo') = ?1 ORDER BY id DESC LIMIT 1",
+            [repo.to_lowercase()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    json!({"state": state, "clauses": clauses,
+           "placed_at": placed.as_ref().map(|p| &p.0), "placed_by": placed.as_ref().map(|p| &p.1)})
+}
+
+/// The ledger's words for a project's text line.
+fn ledger_text(l: &Value) -> String {
+    let when = match (l["placed_at"].as_str(), l["placed_by"].as_str()) {
+        (Some(at), Some(by)) => format!(", placed {at} by {by}"),
+        _ => String::new(),
+    };
+    match l["state"].as_str() {
+        Some("ok") => format!("goal ledger: ok, {} clauses{when}", l["clauses"]),
+        Some("error") => format!("goal ledger: cannot be read{when}"),
+        _ => "goal ledger: none".into(),
+    }
+}
+
 /// The text lines of the projects: one line when there is none.
 fn projects_text(conn: &Connection) -> String {
     let rows = projects(conn);
@@ -560,12 +601,13 @@ fn projects_text(conn: &Connection) -> String {
         } else {
             hosts.join(", ")
         };
+        let goal = ledger_text(&ledger(conn, repo.as_deref()));
         match repo {
             Some(repo) => text.push_str(&format!(
-                "  {slug}: {repo} (default branch {branch}; network hosts: {hosts})\n"
+                "  {slug}: {repo} (default branch {branch}; network hosts: {hosts}; {goal})\n"
             )),
             None => text.push_str(&format!(
-                "  {slug}: repository not recorded (network hosts: {hosts})\n"
+                "  {slug}: repository not recorded (network hosts: {hosts}; {goal})\n"
             )),
         }
     }
