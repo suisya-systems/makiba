@@ -76,11 +76,25 @@ pub(crate) fn configure(conn: &Connection) -> Result<()> {
 }
 
 /// Open `path` with `foreign_keys` on, a 5 s busy timeout and WAL (readers and the writer do not block each other).
+/// A ledger already in WAL is only read: setting the mode takes the write lock (Issue 288).
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
-    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+    }
     Ok(conn)
+}
+
+/// Whether `e` is SQLite's "database is locked" (`SQLITE_BUSY` or `SQLITE_LOCKED`): another
+/// connection holds the lock asked for.
+pub fn is_busy(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// An in-memory database with the same pragmas (WAL does not apply to it).
@@ -121,11 +135,32 @@ fn ddl_of(table: &str) -> String {
     ddl
 }
 
+/// Whether every step of `migrate` is already done: versions 1 to 8 recorded, the session row and
+/// the delivery ledger present. It only reads, so a current ledger is opened without the write
+/// lock (Issue 288).
+fn is_current(conn: &Connection) -> Result<bool> {
+    for table in ["schema_migrations", "org_sessions", "event_deliveries"] {
+        if !has_table(conn, table)? {
+            return Ok(false);
+        }
+    }
+    let (versions, session): (i64, i64) = conn.query_row(
+        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 8),
+                (SELECT COUNT(*) FROM org_sessions WHERE id = 1)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(versions == 8 && session == 1)
+}
+
 /// Bring a database to v8: apply v3 to an empty one, upgrade an older one in place, then add v4 to v8.
 /// Idempotent. Refuses to run inside a transaction, where it could not leave the caller's writes alone.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     if !conn.is_autocommit() {
         return Err(Error::InTransaction("migrate"));
+    }
+    if is_current(conn)? {
+        return Ok(());
     }
     if !has_table(conn, "schema_migrations")? {
         conn.execute_batch(SCHEMA)?;
