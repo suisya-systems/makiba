@@ -208,6 +208,67 @@ pub fn find_manifest(
     Ok(Some((sha, clean)))
 }
 
+/// A commit of `base..head` with an `Acceptance-Test:` line that git does not read as a trailer of
+/// that key (a blank line inside the trailer block, as on pull request 308): its id. Such a
+/// branch would declare no test, and CI would print `ACCEPTANCE: none`. A valid trailer does not
+/// cover a second such line outside the trailer block: git reads only the valid one, and the
+/// manifest would leave the other test unprotected, so more lines than values read name the commit.
+pub fn stray_trailer(repo: &Path, base: &str, head: &str) -> Result<Option<String>, Reject> {
+    let format =
+        format!("--format=%H%x00%(trailers:key={TRAILER},valueonly,separator=%x1f)%x00%B%x1e");
+    let log = git(repo, &["log", &format, &format!("{base}..{head}")])?;
+    let key = format!("{}:", TRAILER.to_lowercase());
+    for rec in log.split('\u{1e}') {
+        let mut parts = rec.trim_start().splitn(3, '\0');
+        let (Some(sha), Some(read), Some(body)) = (parts.next(), parts.next(), parts.next()) else {
+            continue;
+        };
+        let lines = body
+            .lines()
+            .filter(|l| l.trim_start().to_lowercase().starts_with(&key))
+            .count();
+        let values = read
+            .split('\u{1f}')
+            .filter(|v| !v.trim().is_empty())
+            .count();
+        if lines > values {
+            return Ok(Some(sha.to_string()));
+        }
+    }
+    Ok(None)
+}
+
+/// Issue 307: whether `head` may be pushed or recorded before CI. Refused when a commit of
+/// `base..head` has an `Acceptance-Test:` line git does not read as a trailer, and when the branch
+/// declares a test in a commit M other than `head` with no failed CI run recorded at M (`failed`;
+/// `scope` says where it was looked for). The merge gate takes a test-first proof only from that
+/// failed run, and the order cannot be repaired once a later head is at origin.
+pub fn before_ci(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    failed: &dyn Fn(&str) -> bool,
+    scope: &str,
+) -> Result<(), Reject> {
+    if let Some(sha) = stray_trailer(repo, base, head)? {
+        return reject(format!(
+            "commit {} has an {TRAILER} line that git does not read as a trailer (a blank line inside the trailer block, such as one before Co-Authored-By, or a line outside the block?), so the branch would not declare every test it names: fix the message before it is pushed (git interpret-trailers --parse shows what git reads). Line L-K9: a merge needs CI on the exact head and the acceptance gate",
+            &sha[..sha.len().min(12)]
+        ));
+    }
+    let Some((m, paths)) = find_manifest(repo, base, head)? else {
+        return Ok(());
+    };
+    if m == head || failed(&m) {
+        return Ok(());
+    }
+    reject(format!(
+        "the branch declares its acceptance test in commit {} ({TRAILER}: {}), and no failed CI run is recorded at it {scope}: push the test commit alone first (push with head {m}), open or record the pull request at it and let CI fail there; then push the rest. Line L-K9: a merge needs CI on the exact head and the acceptance gate, which takes a test-first proof only from a failed CI run at the test commit",
+        &m[..12],
+        paths.join(", ")
+    ))
+}
+
 /// Condition (a): the protected entries are those of the manifest commit.
 fn check_protected(
     repo: &Path,
@@ -733,24 +794,7 @@ pub fn fetch(
     pr: i64,
     base_branch: &str,
 ) -> Result<(String, String), Reject> {
-    let urls = git(clone, &["config", "--get-all", "remote.origin.url"]).unwrap_or_default();
-    let urls: Vec<&str> = urls
-        .lines()
-        .map(str::trim)
-        .filter(|u| !u.is_empty())
-        .collect();
-    let [origin] = urls[..] else {
-        return reject(format!(
-            "the project's clone {} has no single origin URL ({urls:?}); the gate fetches only through an origin that names {repo}",
-            clone.display()
-        ));
-    };
-    if super::triage::owner_repo_from_url(origin).as_deref() != Some(repo.to_lowercase().as_str()) {
-        return reject(format!(
-            "the project's clone {} has origin {origin}, which is not {repo}; the gate fetches only through an origin that names the PR's repository",
-            clone.display()
-        ));
-    }
+    let origin = origin_of(clone, repo)?;
     let r = format!("refs/makiba/gate/{repo}/{pr}");
     let never = AtomicBool::new(false);
     let dir = clone.display().to_string();
@@ -784,6 +828,30 @@ pub fn fetch(
         )
     };
     Ok((id("base")?, id("head")?))
+}
+
+/// The clone's one origin URL, when it names `repo` (as configured, before `insteadOf`); the
+/// gate fetches only through such an origin, so it can pass no PR of a clone without one.
+pub fn origin_of(clone: &Path, repo: &str) -> Result<String, Reject> {
+    let urls = git(clone, &["config", "--get-all", "remote.origin.url"]).unwrap_or_default();
+    let urls: Vec<&str> = urls
+        .lines()
+        .map(str::trim)
+        .filter(|u| !u.is_empty())
+        .collect();
+    let [origin] = urls[..] else {
+        return reject(format!(
+            "the project's clone {} has no single origin URL ({urls:?}); the gate fetches only through an origin that names {repo}",
+            clone.display()
+        ));
+    };
+    if super::triage::owner_repo_from_url(origin).as_deref() != Some(repo.to_lowercase().as_str()) {
+        return reject(format!(
+            "the project's clone {} has origin {origin}, which is not {repo}; the gate fetches only through an origin that names the PR's repository",
+            clone.display()
+        ));
+    }
+    Ok(origin.to_string())
 }
 
 /// The project repository of `repo` in the repositories folder: an active project whose URL, or

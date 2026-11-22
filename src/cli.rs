@@ -260,6 +260,9 @@ pub enum Command {
     Push {
         #[arg(long)]
         task: String,
+        /// The branch's test commit (full id), pushed alone before the rest (Issue 307).
+        #[arg(long)]
+        head: Option<String>,
     },
     /// Have makibad merge the base into a pushed worker branch and push it, never forced.
     Update {
@@ -550,7 +553,11 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             "pr",
             json!({"state": state, "repo": repo, "pr": pr, "head": head, "task": task}),
         ),
-        Command::Push { task } => ("push", json!({"task": task})),
+        Command::Push { task, head: None } => ("push", json!({"task": task})),
+        Command::Push {
+            task,
+            head: Some(head),
+        } => ("push", json!({"task": task, "head": head})),
         Command::Review {
             task,
             allowed,

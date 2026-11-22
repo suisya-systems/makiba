@@ -602,7 +602,8 @@ fn symlinked_test_rejected() {
 fn event_recorded() {
     let c = Case::new("event");
     c.land();
-    let head = c.publish(12);
+    // Issue 307: a head past the test commit is recorded only after CI failed at the test commit.
+    let head = c.ci_all(12);
     c.door
         .handle(
             Some(&c.secretary),
@@ -612,7 +613,6 @@ fn event_recorded() {
             false,
         )
         .unwrap();
-    c.ci_all(12);
     assert_eq!(c.gate_at(12, &head)["verdict"], json!("passed"));
     let e = c.gate_events();
     let p = e.last().unwrap();

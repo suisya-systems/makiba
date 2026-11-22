@@ -17,12 +17,14 @@
 //! project's repository: it fetches the base and the branch from `origin` by their full refs,
 //! refuses a branch not at origin or one that moved there (not an ancestor of the worktree's
 //! head), merges `origin/<base>` when the head does not hold it (a merge commit made by
-//! `git merge-tree --write-tree` and `commit-tree`, never a rebase; a conflict names its files and
+//! `git merge-tree --write-tree` and `commit-tree`, as git's own identity or, where git has none,
+//! makiba <makiba@localhost>; never a rebase; a conflict names its files and
 //! leaves nothing behind), and pushes the result when origin does not have it, never forced. The
 //! worktree is not touched: the worker brings the new head in by a fast-forward of its own. Done:
 //! `branch_updated` with the old and new head, or, when nothing was merged or pushed, a notice
 //! naming origin's head. A restart runs it again. One job runs per worktree at a time.
 
+use super::gate;
 use super::prepare::Places;
 use super::run_repo;
 use crate::db::Result;
@@ -30,7 +32,7 @@ use crate::db::writer::{NewEvent, StateWriter};
 use crate::hooks::git_hook::find;
 use crate::spec::AGENT_SECRETARY;
 use serde_json::json;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -48,6 +50,73 @@ struct Job {
     worktree: Option<String>,
     /// `update`'s base branch.
     base: Option<String>,
+    /// `push`'s `head`: the branch's test commit, pushed alone (Issue 307).
+    head: Option<String>,
+    /// What the check before CI needs from `state.db`, read when the job starts.
+    before: Before,
+}
+
+/// Issue 307: the project's default branch and the heads with a failed CI run on any of the task's
+/// pull requests (`door::failed_heads`, the gate's reader).
+#[derive(Clone, Default)]
+struct Before {
+    default_branch: String,
+    failed: BTreeSet<String>,
+}
+
+impl Before {
+    fn read(w: &StateWriter, task: &str, default_branch: String) -> Result<Before> {
+        let c = w.conn();
+        let mut st = c.prepare(
+            "SELECT p.repo, p.pr FROM pr_watches p JOIN runs r ON r.id = p.run_id
+             WHERE r.task_id = ?1 ORDER BY p.id DESC",
+        )?;
+        let prs: Vec<(String, i64)> = st
+            .query_map([task], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let mut failed = BTreeSet::new();
+        for (repo, pr) in &prs {
+            failed.extend(super::door::failed_heads(c, repo, *pr)?);
+        }
+        Ok(Before {
+            default_branch,
+            failed,
+        })
+    }
+}
+
+/// The base the check before CI judges against, fetched from origin first: the project's default
+/// branch, the run's starting point. Nothing the secretary passes or records steers it: neither
+/// `update`'s base, which is only what is merged in, nor a recorded pull request's base, either of
+/// which could name a branch that already holds the test commit and so hide it. Its id; what
+/// cannot be read refuses.
+fn judged_base(dir: &Path, j: &Job) -> std::result::Result<String, String> {
+    let b = &j.before.default_branch;
+    let r = format!("refs/remotes/origin/{b}");
+    git(
+        dir,
+        &["fetch", "-q", "origin", &format!("+refs/heads/{b}:{r}")],
+    )
+    .map_err(|e| {
+        format!(
+            "the base {b} cannot be fetched from origin ({e}), so the branch cannot be checked \
+             before CI (Issue 307); nothing was pushed, push again"
+        )
+    })?;
+    git(dir, &["rev-parse", "--verify", &format!("{r}^{{commit}}")])
+}
+
+/// Issue 307: `sent` may go to origin only when it is the branch's test commit or a failed CI run
+/// is recorded at that commit on one of the task's pull requests (`gate::before_ci`).
+fn before_ci(dir: &Path, j: &Job, base: &str, sent: &str) -> std::result::Result<(), String> {
+    gate::before_ci(
+        dir,
+        base,
+        sent,
+        &|sha| j.before.failed.contains(sha),
+        "on this task's pull requests",
+    )
+    .map_err(|e| format!("{}; nothing was pushed", e.0))
 }
 
 /// What a thread did.
@@ -146,8 +215,36 @@ fn work(places: &Places, j: &Job) -> Outcome {
     let to = format!("refs/makiba/runs/{}", j.task);
     run_repo::deliver(&gitdir, &real, &repo, &head, &to, true)?;
     match j.base.as_deref() {
-        None => push_head(&repo, &head, &j.branch).map(|()| Done::Pushed(head)),
+        None => {
+            let base = judged_base(&repo, j)?;
+            let sent = match &j.head {
+                None => head,
+                Some(m) => {
+                    test_commit_of(&repo, &base, &head, m)?;
+                    m.clone()
+                }
+            };
+            before_ci(&repo, j, &base, &sent)?;
+            push_head(&repo, &sent, &j.branch).map(|()| Done::Pushed(sent))
+        }
         Some(base) => update(&repo, j, base, &head),
+    }
+}
+
+/// `push` with `head` (Issue 307): it must be the test commit of the branch at `head` (the commit
+/// with the `Acceptance-Test` trailer, as the gate finds it).
+fn test_commit_of(dir: &Path, base: &str, head: &str, m: &str) -> std::result::Result<(), String> {
+    let found = gate::find_manifest(dir, base, head).map_err(|e| e.0)?;
+    match found {
+        Some((t, _)) if t == m => Ok(()),
+        Some((t, _)) => Err(format!(
+            "head {m} is not the branch's test commit {t}: push names only the test commit with \
+             head; nothing was pushed"
+        )),
+        None => Err(format!(
+            "head {m} was given, but the branch declares no acceptance test: push without head; \
+             nothing was pushed"
+        )),
     }
 }
 
@@ -358,6 +455,8 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     if new == old {
         return Ok(Done::Current(new));
     }
+    let judged = judged_base(dir, j)?;
+    before_ci(dir, j, &judged, &new)?;
     push_head(dir, &new, &j.branch).map_err(|e| {
         format!("the merged head {new} was not pushed: {e}; nothing changed at origin, update or push again")
     })?;
@@ -407,18 +506,38 @@ fn merge(
         }
     }
     let message = format!("Merge origin/{base} into {}", j.branch);
+    // The merge commit is written as git's own identity (the repository's or the person's
+    // config). Only where git has none (a CI runner, a bare host) it is makiba <makiba@localhost>,
+    // so the merge is made instead of failing with "Author identity unknown".
+    let known = ["GIT_AUTHOR_IDENT", "GIT_COMMITTER_IDENT"]
+        .iter()
+        .all(|v| git(dir, &["var", v]).is_ok());
+    let fallback: &[&str] = if known {
+        &[]
+    } else {
+        &[
+            "-c",
+            "user.name=makiba",
+            "-c",
+            "user.email=makiba@localhost",
+        ]
+    };
     git(
         dir,
         &[
-            "commit-tree",
-            &tree,
-            "-p",
-            head,
-            "-p",
-            base_id,
-            "-m",
-            &message,
-        ],
+            fallback,
+            &[
+                "commit-tree",
+                &tree,
+                "-p",
+                head,
+                "-p",
+                base_id,
+                "-m",
+                &message,
+            ],
+        ]
+        .concat(),
     )
 }
 
@@ -516,7 +635,9 @@ impl Push {
                         (SELECT worktree FROM run_launch WHERE run_id = r.id AND kind = 'code'
                          ORDER BY id DESC LIMIT 1),
                         CASE c.verb WHEN 'update' THEN
-                          COALESCE(json_extract(c.args_json, '$.base'), '') END
+                          COALESCE(json_extract(c.args_json, '$.base'), '') END,
+                        CASE c.verb WHEN 'push' THEN json_extract(c.args_json, '$.head') END,
+                        COALESCE(p.default_branch, 'main')
                  FROM commands c JOIN runs r ON r.task_id = json_extract(c.args_json, '$.task')
                  LEFT JOIN projects p ON p.id = r.project_id
                  WHERE c.verb IN ('push', 'update') AND c.status = 'accepted' ORDER BY c.id",
@@ -530,16 +651,24 @@ impl Push {
                     project: r.get(4)?,
                     worktree: r.get(5)?,
                     base: r.get(6)?,
+                    head: r.get(7)?,
+                    // The rest of what the check before CI needs is read when the job starts.
+                    before: Before {
+                        default_branch: r.get(8)?,
+                        ..Default::default()
+                    },
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
         };
-        for j in jobs {
+        for mut j in jobs {
             if self.running.contains(&j.command)
                 || j.worktree.as_ref().is_some_and(|wt| self.busy.contains(wt))
             {
                 continue;
             }
+            let default_branch = std::mem::take(&mut j.before.default_branch);
+            j.before = Before::read(w, &j.task, default_branch)?;
             self.running.insert(j.command);
             if let Some(wt) = &j.worktree {
                 self.busy.insert(wt.clone());
