@@ -382,19 +382,47 @@ EOF
   unset MAKIBA_BASE MAKIBA_LAUNCH_AGENT MAKIBA_FAKE_AGENT
 }
 
+# scratch_holders: the pids of processes (other than this one) that carry this scratch place's base session
+# (HC_SESSION=<session>, as the core and its terminals do) or its folder in their command line. Read only: it
+# looks at /proc of this user and touches no session. One pid per line; nothing printed when none is left.
+scratch_holders() {
+  python3 -I -c 'import os, sys
+session, run = sys.argv[1].encode(), sys.argv[2].encode()
+me = os.getpid()
+for d in os.listdir("/proc"):
+    if not d.isdigit() or int(d) == me:
+        continue
+    try:
+        env = open("/proc/%s/environ" % d, "rb").read().split(b"\0")
+        cmd = open("/proc/%s/cmdline" % d, "rb").read()
+    except OSError:
+        continue
+    if b"HC_SESSION=" + session in env or (run and run in cmd):
+        print(d)' "${MAKIBA_BASE_SESSION:-}" "${RUN:-}"
+}
+
 # stop_org: ends the organization of this shell's environment (makiba down). 0: it is stopped, or never ran
-# here (no state.db); 1: makibad is still alive, or down failed in a place that has run (its terminals or
-# base may then remain, and the place is needed to retry).
+# here (no state.db), or makiba down failed but the place is SHOWN to hold nothing (see below); 1: makibad is
+# still alive, or down failed and that cannot be shown (its terminals or base may then remain, and the place is
+# needed to retry). makiba down exits non-zero when there is no daemon to talk to, so its exit code alone does
+# not say the place is in use: a failed down is ignored only when all of these hold: status says makibad is not
+# running, the pid it recorded is gone, and no process carries the place's base session or folder.
 stop_org() {
-  local pid rc=0
+  local pid st rc=0
   "$MK" down --secretary --stop-base >/dev/null 2>&1 || rc=$?
   if [ ! -f "$(db_path)" ]; then return 0; fi
-  pid=$("$MK" status 2>/dev/null | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p')
+  st=$("$MK" status 2>/dev/null || true)
+  pid=$(printf '%s\n' "$st" | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p')
   if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
     sleep 3
     if kill -0 "$pid" 2>/dev/null; then return 1; fi
   fi
-  [ "$rc" -eq 0 ]
+  if [ "$rc" -eq 0 ]; then return 0; fi
+  # down failed: removable only on evidence (the pid, if any, is gone: checked above)
+  printf '%s\n' "$st" | grep -q '^makibad is not running' || return 1
+  [ -z "$(scratch_holders)" ] || return 1
+  say "  makiba down exited $rc, but makibad is shown not to run here (status, its pid gone, no process holds the base session or the folder): the place is released"
+  return 0
 }
 
 # Stops only the organization whose environment this shell holds (the scratch one), then keeps the evidence.
@@ -727,7 +755,7 @@ stage_cleanup() {
     if [ "$DRY" = 1 ]; then plan "source $d/env.sh, run: $MK down --secretary --stop-base, then remove $d"; continue; fi
     # shellcheck source=/dev/null
     if ( . "$d/env.sh" && stop_org ); then remove_scratch "$d"
-    else check "cleanup-$(basename "$d")" FAIL "makibad of $d still runs (or its env.sh cannot be read); the place is kept: . $d/env.sh; $MK down --secretary --stop-base, then run cleanup again"; fi
+    else check "cleanup-$(basename "$d")" FAIL "makibad of $d still runs, or cannot be shown to be stopped (status gives no 'not running', a pid or a holder of its base session is left, or its env.sh cannot be read); the place is kept: . $d/env.sh; $MK down --secretary --stop-base, then run cleanup again"; fi
   done
   if [ "$found" = 0 ]; then say "  no scratch place left: nothing to do"; fi
   if [ "$DRY" = 1 ]; then plan "report done"
