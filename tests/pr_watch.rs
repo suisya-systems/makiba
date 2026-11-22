@@ -5,9 +5,12 @@
 //! (`MAKIBA_GH`): it answers the three calls the watch makes from files in a folder named by the
 //! repository, so no test reaches the network and no two tests share an answer.
 
+mod common;
+
+use common::makibad;
 use makiba::base::Base;
 use makiba::base::stub::Stub;
-use makiba::daemon::{self, door::Door, door::issue_key};
+use makiba::daemon::{door::Door, door::issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
 use rusqlite::Connection;
@@ -201,7 +204,7 @@ impl Daemon {
         let thread = {
             let (dir, stop) = (dir.to_path_buf(), Arc::clone(&stop));
             std::thread::spawn(move || {
-                daemon::run_until(&dir, &|| Box::new(Stub::new()) as Box<dyn Base>, stop)
+                makibad::run_until(&dir, &|| Box::new(Stub::new()) as Box<dyn Base>, stop)
             })
         };
         Daemon {

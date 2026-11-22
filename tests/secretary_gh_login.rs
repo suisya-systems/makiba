@@ -7,11 +7,13 @@
 //! base applies it (its `env`, then its `unset` through `env -u`), and the GitHub CLI's lookup of
 //! its configuration folder must land where the person's own shell would: never the base's folder.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use std::collections::BTreeMap;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -96,6 +98,7 @@ fn secretary_spec(root: &Path, xdg: Option<&Path>, gh: Option<&Path>) -> LaunchS
         &std::env::var_os("PATH").unwrap_or_default(),
     )))
     .unwrap();
+    let _held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
     // SAFETY: the only test of this binary, and no daemon of it runs while the environment changes.
     unsafe {
         std::env::set_var("PATH", &path);
@@ -105,7 +108,6 @@ fn secretary_spec(root: &Path, xdg: Option<&Path>, gh: Option<&Path>) -> LaunchS
         std::env::set_var("MAKIBA_DOCS_DIR", root.join("docs"));
         std::env::set_var("MAKIBA_WORKERS_DIR", root.join("workers"));
         std::env::set_var("MAKIBA_REPOS_DIR", root.join("repos"));
-        std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
         std::env::remove_var("MAKIBA_FAKE_AGENT");
         std::env::remove_var("MAKIBA_LAUNCH_AGENT");
         std::env::remove_var("MAKIBA_SECRETARY_REMOTE_CONTROL");
@@ -123,7 +125,7 @@ fn secretary_spec(root: &Path, xdg: Option<&Path>, gh: Option<&Path>) -> LaunchS
     let stop = Arc::new(AtomicBool::new(false));
     let daemon = {
         let (dir, base, stop) = (dir.clone(), base.clone(), Arc::clone(&stop));
-        std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), stop))
+        std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), stop))
     };
     let until = Instant::now() + Duration::from_secs(20);
     let spec = loop {

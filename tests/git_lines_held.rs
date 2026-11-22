@@ -12,8 +12,10 @@
 //! holder that is decided here but not built. The daemon runs in this process on the stand-in
 //! base, as in `tests/worktree_mcp_json_deny.rs`.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::daemon::launch::add_launch;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -147,7 +149,7 @@ fn written() -> &'static Written {
             (c, s)
         };
         let daemon_dir = dir.clone();
-        std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(Stub::new())));
+        std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(Stub::new())));
         let settings = dir.join("settings");
         Written {
             worker: wait_json(&settings.join("t1.json")),

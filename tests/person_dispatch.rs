@@ -8,6 +8,9 @@
 //! test agent with `MAKIBA_LAUNCH_AGENT=fake` (spec section 2); the tests that look at the
 //! `queued` run keep capacity at 0 so no pass takes it while they look.
 
+mod common;
+
+use common::makibad;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
@@ -65,13 +68,12 @@ impl Org {
             .local_addr()
             .unwrap()
             .port();
-        let mut c = Command::new(MAKIBA);
-        Org::env(&root, port, &mut c, agent, capacity);
+        let mut c = makibad::daemon(&root);
+        c.with(|c| Org::env(&root, port, c, agent, capacity));
         if !socket {
             c.env("MAKIBA_DOOR", "none");
         }
         let daemon = c
-            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

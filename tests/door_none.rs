@@ -3,6 +3,9 @@
 //! cannot create one. It runs the real binary, `makiba daemon` on the stand-in base, in a scratch
 //! folder that is also its `HOME` and its XDG folders.
 
+mod common;
+
+use common::makibad;
 use makiba::db::writer::StateWriter;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -143,11 +146,10 @@ fn makibad_starts_without_the_socket_and_the_person_command_says_why_it_cannot_c
     drop(w);
 
     let port = free_port();
-    let mut c = Command::new(MAKIBA);
-    env(&mut c, root, port);
+    let mut c = makibad::daemon(root);
+    c.with(|c| env(c, root, port));
     let _daemon = Daemon(
-        c.arg("daemon")
-            .stdin(Stdio::null())
+        c.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

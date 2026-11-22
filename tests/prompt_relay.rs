@@ -10,8 +10,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, State, TerminalRef};
-use makiba::daemon;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::{ErrorKind, Role};
@@ -96,7 +96,7 @@ fn org(task: &str, steps: &[&str]) -> Org {
     );
     let for_daemon = local.clone();
     let daemon_dir = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(for_daemon.clone())));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(for_daemon.clone())));
     Org {
         dir,
         work: root,

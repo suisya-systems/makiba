@@ -7,9 +7,11 @@
 //! the repository and refuses any other call, so no test reaches the network. The interval is cut
 //! to `INTERVAL` (`MAKIBA_TRIAGE_INTERVAL_MS`).
 
+mod common;
+
+use common::makibad;
 use makiba::base::Base;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use rusqlite::Connection;
 use serde_json::{Value, json};
@@ -232,7 +234,7 @@ impl Daemon {
         let thread = {
             let (dir, stop) = (dir.to_path_buf(), Arc::clone(&stop));
             std::thread::spawn(move || {
-                daemon::run_until(&dir, &|| Box::new(Stub::new()) as Box<dyn Base>, stop)
+                makibad::run_until(&dir, &|| Box::new(Stub::new()) as Box<dyn Base>, stop)
             })
         };
         Daemon {

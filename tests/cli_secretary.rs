@@ -7,7 +7,10 @@
 //! the stand-in base, and the person's `makiba`. The last part compares the clap definition of
 //! the person's command with the verb table of spec section 12, read from `docs/design/spec.md`.
 
+mod common;
+
 use clap::CommandFactory;
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{Base, LaunchSpec};
 use makiba::daemon::door::{Door, Response, issue_key, sha256_hex};
@@ -447,10 +450,9 @@ impl Daemon {
             socket,
             child: Command::new("true").spawn().unwrap(),
         };
-        let mut c = Command::new(MAKIBA);
-        d.env(&mut c);
+        let mut c = makibad::daemon(&d.root);
+        c.with(|c| d.env(c));
         d.child = c
-            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

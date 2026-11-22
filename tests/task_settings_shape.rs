@@ -4,11 +4,13 @@
 //! so its deny must name the place resolved when the settings are written, not the default one.
 //! Shape only: the host rerun of probes P1 and P11 shows what a sandboxed Bash can reach.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -173,7 +175,7 @@ fn the_settings_and_the_launch_written_for_a_run_have_their_shape() {
     let launched = Arc::new(Mutex::new(Vec::new()));
     let (for_daemon, daemon_dir) = (Arc::clone(&launched), dir.clone());
     std::thread::spawn(move || {
-        daemon::run(&daemon_dir, &|| {
+        makibad::run(&daemon_dir, &|| {
             Box::new(Recording {
                 stub: Stub::new(),
                 denies: denies.clone(),

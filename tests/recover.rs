@@ -13,8 +13,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, LaunchSpec, State, TerminalRef};
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -107,7 +107,7 @@ fn state_of(local: &Local, t: &TerminalRef) -> Option<State> {
 
 fn start(local: &Local, dir: &Path) -> std::thread::JoinHandle<Result<(), String>> {
     let (for_daemon, dir) = (local.clone(), dir.to_path_buf());
-    std::thread::spawn(move || daemon::run(&dir, &|| Box::new(for_daemon.clone())))
+    std::thread::spawn(move || makibad::run(&dir, &|| Box::new(for_daemon.clone())))
 }
 
 fn stop(daemon: std::thread::JoinHandle<Result<(), String>>) {
