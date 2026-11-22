@@ -7,24 +7,38 @@
 //! `true`; any other value is refused. For the older `Task`, whose default was the foreground, it
 //! must be `true`. Other tools pass; the names are matched exactly.
 
+use super::Refusal;
 use serde_json::Value;
 
-pub fn check(payload: &Value) -> Result<(), String> {
+/// The line this hook holds.
+const LINE: &str = "L-K8";
+
+pub fn check(payload: &Value) -> Result<(), Refusal> {
     let tool = super::field(payload, "/tool_name");
     if tool != "Agent" && tool != "Task" {
         return Ok(());
     }
     let Some(input) = payload.get("tool_input").and_then(Value::as_object) else {
-        return Err(format!("the {tool} payload has no tool_input object"));
+        return Err(Refusal::new(
+            super::FAIL_CLOSED,
+            "the hook payload",
+            format!("the {tool} payload has no tool_input object"),
+        ));
     };
     match input.get("run_in_background") {
         Some(Value::Bool(true)) => Ok(()),
         None if tool == "Agent" => Ok(()),
-        None => Err(format!(
-            "{tool} without run_in_background runs in the foreground; set it to true"
+        None => Err(Refusal::new(
+            LINE,
+            format!("{tool} with no run_in_background"),
+            format!("{tool} without run_in_background runs in the foreground; set it to true"),
         )),
-        Some(_) => Err(format!(
-            "{tool} with run_in_background other than true runs in the foreground; leave it out or set it to true"
+        Some(v) => Err(Refusal::new(
+            LINE,
+            format!("{tool} with run_in_background={v}"),
+            format!(
+                "{tool} with run_in_background other than true runs in the foreground; leave it out or set it to true"
+            ),
         )),
     }
 }

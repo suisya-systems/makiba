@@ -9,10 +9,18 @@
 //!
 //! The command is read as `deny-dangerous-git` reads it (see `shell`).
 
+use super::Refusal;
 use super::deny_dangerous_git::has_git_subcmd;
 use super::re::Re;
 use super::shell;
 use serde_json::Value;
+
+/// The line this hook holds.
+const LINE: &str = "L-K3";
+
+fn refuse(matched: impl Into<String>, reason: impl Into<String>) -> Result<(), Refusal> {
+    Err(Refusal::new(LINE, matched, reason))
+}
 
 fn has(text: &str, pattern: &str) -> bool {
     Re::new(pattern).any_line(text)
@@ -22,14 +30,14 @@ fn icase(text: &str, pattern: &str) -> bool {
     Re::icase(pattern).any_line(text)
 }
 
-pub fn check(payload: &Value) -> Result<(), String> {
+pub fn check(payload: &Value) -> Result<(), Refusal> {
     let command = super::command(payload);
     if command.is_empty() {
         return Ok(());
     }
     let (segments, assigns) = shell::segments_and_assignments(&command);
-    if let Some(why) = shell::unreadable(&segments, &assigns) {
-        return Err(why);
+    if let Some((matched, why)) = shell::unreadable_at(&segments, &assigns) {
+        return refuse(matched, why);
     }
     for segment in segments.iter().filter(|s| !s.is_empty()) {
         let flat = shell::flat_segment(segment, &assigns);
@@ -44,17 +52,21 @@ pub fn check(payload: &Value) -> Result<(), String> {
                 .find(|(_, s)| *s)
                 .map(|(n, _)| *n)
                 .unwrap_or("am");
-            return Err(format!(
-                "git {which} --no-verify skips the repository's hooks (the secret scanner among them); run it without the flag"
-            ));
+            return refuse(
+                flat.trim(),
+                format!(
+                    "git {which} --no-verify skips the repository's hooks (the secret scanner among them); run it without the flag"
+                ),
+            );
         }
         if subs[0]
             && (has(&flat, r"(^|[[:space:]])-n([[:space:]]|$)")
                 || has(&flat, r"(^|[[:space:]])-[a-zA-Z]*n[a-zA-Z]+([[:space:]]|$)")
                 || has(&flat, r"(^|[[:space:]])-[a-zA-Z]+n([[:space:]]|$)"))
         {
-            return Err(
-                "git commit -n is --no-verify; it skips the repository's hooks. Run it without the flag".into(),
+            return refuse(
+                flat.trim(),
+                "git commit -n is --no-verify; it skips the repository's hooks. Run it without the flag",
             );
         }
     }
@@ -72,9 +84,12 @@ pub fn check(payload: &Value) -> Result<(), String> {
     ) {
         for var in ["HUSKY", "SKIP_SECRET_SCAN", "NO_VERIFY"] {
             if has(&whole, &format!(r"(^|[[:space:]]){var}=")) {
-                return Err(format!(
-                    "{var}=... switches the repository's hooks off; run the command without it"
-                ));
+                return refuse(
+                    format!("{var}="),
+                    format!(
+                        "{var}=... switches the repository's hooks off; run the command without it"
+                    ),
+                );
             }
         }
     }
@@ -83,10 +98,13 @@ pub fn check(payload: &Value) -> Result<(), String> {
         && has(&whole, &format!(r"(^|[[:space:]]){any_sub}([[:space:]]|$)"))
     {
         if icase(&whole, r"(^|[[:space:]])-c[[:space:]]*core\.hookspath=") {
-            return Err("git -c core.hooksPath=... switches the repository's hooks off".into());
+            return refuse(
+                "-c core.hooksPath=",
+                "git -c core.hooksPath=... switches the repository's hooks off",
+            );
         }
         if icase(&whole, r"(^|[[:space:]])-c[[:space:]]*hook\.") {
-            return Err("git -c hook.* overrides the repository's hooks".into());
+            return refuse("-c hook.", "git -c hook.* overrides the repository's hooks");
         }
     }
     Ok(())
