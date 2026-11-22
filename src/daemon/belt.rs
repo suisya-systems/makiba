@@ -15,6 +15,19 @@
 //! - A run that waits only for the person (an escalated pending entry) counts in neither count.
 //! - The proof of a landing: the run's registered pull request, read merged (`pr_merged`).
 //! - The read surface's `ranges[]` (spec section 12, table "Range field").
+//!
+//! Step 2 (Issue 282): the stops `makibad` writes itself, each a pending entry escalated at once
+//! with `belt_stopped`, in the transaction of what caused it and before the fill there.
+//!
+//! - `gate_stop`: a refusal of the merge gate (line `gate`) or tests edited after the test commit
+//!   (line `tests`) on a range task's pull request, for the head recorded last.
+//! - `head_recorded`: the head that reaches the range's `budget_fixes` (line `budget`); the stops
+//!   of an older head go.
+//! - `fill`: `budget_hours`, and a budget of the range reached while a candidate is left (line
+//!   `budget`, no task).
+//! - The pauses: two refused pull requests in a row (`gate_stop`), two failed launches in a row
+//!   (`launch_failed`); a failed run holds no slot.
+//! - `stop_parts_missing`: what a range task's entry lacks to be escalated.
 
 use super::door::{Response, internal, refuse, str_arg, usage};
 use super::gh::{GhError, run_gh};
@@ -43,6 +56,8 @@ const PR_LIMIT: usize = 200;
 const NESTED_LIMIT: usize = 100;
 /// The kinds of a stop of line 1 (belt.md 5.2).
 const STOP_KINDS: [&str; 5] = ["design", "scope", "order", "naming", "other"];
+/// `budget_fixes` of a proposal that names none (belt.md 2.1).
+const DEFAULT_FIXES: i64 = 3;
 
 /// A run `r` waits only for the person: it has an escalated pending entry (belt.md 4.1). Such a
 /// run counts neither against its range's `at_once` nor against `max_concurrent_workers`.
@@ -56,6 +71,10 @@ const CHAIN: &str = "WITH RECURSIVE chain(id) AS (
     UNION SELECT g.replaces FROM ranges g JOIN chain c ON g.id = c.id
           JOIN ranges o ON o.id = g.replaces
           WHERE o.status = 'ended' AND o.ended_reason = 'replaced')";
+
+/// Whether the range `g` is past its `budget_hours`, counted from its approval (belt.md 2.1).
+const HOURS_PAST: &str = "(g.budget_hours IS NOT NULL AND g.approved_at IS NOT NULL
+    AND julianday('now') >= julianday(g.approved_at) + g.budget_hours / 24.0)";
 
 /// The reference a run's `issue_refs` holds for an Issue of a project: `<slug>#<n>`.
 pub fn issue_ref(slug: &str, issue: i64) -> String {
@@ -206,6 +225,21 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
     if budget < 1 {
         return Err(usage("budget_tasks is at least 1"));
     }
+    let hours = match args.get("budget_hours") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_f64()
+                .filter(|h| h.is_finite() && *h > 0.0)
+                .ok_or_else(|| usage("budget_hours is a number of hours above 0"))?,
+        ),
+    };
+    let fixes = match args.get("budget_fixes") {
+        None | Some(Value::Null) => DEFAULT_FIXES,
+        Some(v) => v
+            .as_i64()
+            .filter(|n| *n >= 1)
+            .ok_or_else(|| usage("budget_fixes is at least 1"))?,
+    };
     let head = str_arg(args, "brief_head")?;
     if head.trim().is_empty() {
         return Err(usage("the brief head is not empty"));
@@ -225,8 +259,8 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let store = || -> Result<i64> {
         w.conn().execute(
             "INSERT INTO ranges (project_id, issues_json, takes, at_once, budget_tasks, brief_head,
-                                 replaces, proposed_by)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                                 replaces, proposed_by, budget_hours, budget_fixes)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
             params![
                 project,
                 json!(issues).to_string(),
@@ -235,7 +269,9 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
                 budget,
                 head,
                 replaces.as_ref().map(|g| g.id),
-                actor
+                actor,
+                hours,
+                fixes
             ],
         )?;
         let id = w.conn().last_insert_rowid();
@@ -527,6 +563,414 @@ pub(super) fn stopped(w: &StateWriter, actor: &str, id: i64) -> Result<()> {
     Ok(())
 }
 
+/// What a range task's entry made by `pending add` still lacks to be escalated (belt.md 5.2): the
+/// stop's kind and the recommended answer, by the names `pending add` takes them. Empty for an
+/// entry of no range task, and for one made from a screen.
+pub(super) fn stop_parts_missing(c: &Connection, id: i64) -> rusqlite::Result<Vec<&'static str>> {
+    let row: Option<(Option<String>, Option<String>)> = c
+        .query_row(
+            "SELECT json_extract(p.context_json, '$.kind'),
+                    json_extract(p.context_json, '$.recommend_answer')
+             FROM pending p JOIN runs r ON r.id = p.run_id
+             WHERE p.id = ?1 AND r.range_id IS NOT NULL AND p.prompt_text IS NULL",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((kind, answer)) = row else {
+        return Ok(Vec::new());
+    };
+    let mut missing = Vec::new();
+    if kind.is_none() {
+        missing.push("stop_kind");
+    }
+    if answer.is_none() {
+        missing.push("recommend_answer");
+    }
+    Ok(missing)
+}
+
+// ---- the stops makibad writes itself (step 2, Issue 282) -------------------------------------
+
+/// A stop `makibad` writes (belt.md section 5): the question for the person with its context
+/// parts, as the secretary would have written them. `task` is `None` for a stop of the whole
+/// range. `key` names what is stopped: a second stop with the same key in the range is not written.
+struct Stop<'a> {
+    range: i64,
+    task: Option<&'a str>,
+    line: &'a str,
+    key: String,
+    question: String,
+    background: String,
+    if_yes: String,
+    if_no: String,
+    recommend: &'a str,
+    why: &'a str,
+    recommend_answer: &'a str,
+    /// More context keys (the pull request and head of a gate stop).
+    more: Value,
+}
+
+/// Write the stop inside the caller's transaction: a pending entry `escalated` at once (so its
+/// run waits only for the person and counts in neither count), `belt_stopped`, and a notice to
+/// the secretary, who puts it to the person. Returns the entry's id, and whether it is new.
+fn stop(w: &StateWriter, s: &Stop) -> Result<(i64, bool)> {
+    let known: Option<i64> = w
+        .conn()
+        .query_row(
+            "SELECT id FROM pending WHERE json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.key') = ?2 ORDER BY id LIMIT 1",
+            params![s.range, s.key],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if let Some(id) = known {
+        return Ok((id, false));
+    }
+    let to: Option<String> = w.conn().query_row(
+        "SELECT approved_by FROM ranges WHERE id = ?1",
+        [s.range],
+        |r| r.get(0),
+    )?;
+    let to = to.unwrap_or_else(|| crate::spec::AGENT_PERSON.to_string());
+    let mut context = json!({
+        "stop_line": s.line, "range_id": s.range, "to": to, "by": "makibad", "key": s.key,
+        "background": s.background, "if_yes": s.if_yes, "if_no": s.if_no,
+        "recommend": s.recommend, "why": s.why, "recommend_answer": s.recommend_answer,
+    });
+    if let (Value::Object(c), Value::Object(m)) = (&mut context, &s.more) {
+        c.extend(m.clone());
+    }
+    w.conn().execute(
+        "INSERT INTO pending (run_id, kind, question, context_json, status)
+         VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'question', ?2, ?3, 'escalated')",
+        params![s.task, s.question, context.to_string()],
+    )?;
+    let id = w.conn().last_insert_rowid();
+    let reason = s.question.lines().next().unwrap_or_default();
+    event(
+        w,
+        "belt_stopped",
+        "makibad",
+        s.task,
+        json!({"range_id": s.range, "task_id": s.task, "line": s.line, "reason": reason,
+               "pending_id": id}),
+    )?;
+    let body = format!(
+        "A stop on the belt (range {}, line {}), pending entry {id}: {} Put it to the person with its link; the answer comes back to you.",
+        s.range, s.line, s.question
+    );
+    match s.task {
+        Some(t) => super::door::notice(w, crate::spec::AGENT_SECRETARY, t, &body)?,
+        None => super::door::notice_untasked(w, crate::spec::AGENT_SECRETARY, &body)?,
+    };
+    Ok((id, true))
+}
+
+/// The range a run's range answers to now: itself while it has not ended, else the range that
+/// replaced it (and so on). A run keeps the range it was dispatched under, and counts for the
+/// one that replaced it; a pause for what that run did pauses that one.
+fn acting(w: &StateWriter, range: i64) -> Result<Option<(i64, String)>> {
+    let mut id = range;
+    // A chain is as long as the ranges of a project; the bound only guards a loop in the records.
+    for _ in 0..1000 {
+        let status: Option<String> = w
+            .conn()
+            .query_row("SELECT status FROM ranges WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        match status {
+            None => return Ok(None),
+            Some(s) if s != "ended" => return Ok(Some((id, s))),
+            Some(_) => {}
+        }
+        let next: Option<i64> = w
+            .conn()
+            .query_row(
+                "SELECT n.id FROM ranges n JOIN ranges o ON o.id = n.replaces
+                 WHERE n.replaces = ?1 AND o.ended_reason = 'replaced' AND n.approved_at IS NOT NULL
+                 ORDER BY n.id DESC LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()?;
+        match next {
+            Some(n) => id = n,
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
+}
+
+/// Pause an active range by `makibad` (belt.md 2.4): nothing new goes in until the person resumes
+/// it. The secretary is told.
+fn pause(w: &StateWriter, id: i64, reason: &str) -> Result<()> {
+    let changed = w.conn().execute(
+        "UPDATE ranges SET status = 'paused' WHERE id = ?1 AND status = 'active'",
+        [id],
+    )?;
+    if changed == 1 {
+        event(
+            w,
+            "range_paused",
+            "makibad",
+            None,
+            json!({"range_id": id, "reason": reason}),
+        )?;
+        super::door::notice_untasked(
+            w,
+            crate::spec::AGENT_SECRETARY,
+            &format!(
+                "Range {id} is paused by makibad: {reason}. Nothing new goes in; work already running goes on. Tell the person: only they resume it (makiba range resume {id})."
+            ),
+        )?;
+    }
+    Ok(())
+}
+
+/// The range of a task, when it is a range task.
+fn range_of(w: &StateWriter, task: &str) -> Result<Option<i64>> {
+    Ok(w.conn()
+        .query_row(
+            "SELECT range_id FROM runs WHERE task_id = ?1",
+            [task],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+/// The range of a task and the merge approval mode it was approved under, for the gate: `None`
+/// for a task of no range.
+pub(super) fn approval_of(w: &StateWriter, task: &str) -> Result<Option<(i64, Option<String>)>> {
+    Ok(w.conn()
+        .query_row(
+            "SELECT g.id, g.approval_mode FROM runs r JOIN ranges g ON g.id = r.range_id
+             WHERE r.task_id = ?1",
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// What the gate found about a range task's pull request, to be written as a stop.
+pub(super) struct GateStop<'a> {
+    pub task: &'a str,
+    pub repo: &'a str,
+    pub pr: i64,
+    pub head: &'a str,
+    /// The gate refused (line `gate`), or it reports only edited tests (line `tests`).
+    pub refused: bool,
+    pub reason: &'a str,
+    pub edited_tests: &'a [String],
+}
+
+/// The gate's answer about a range task's pull request as a stop (belt.md section 5, lines 5 and
+/// 6), in the gate's transaction: one per pull request and head, and only for the head recorded
+/// last for that pull request (a refusal of an older head is no stop: its subject is gone). Then
+/// the pause rule: two refusals in a row of different pull requests pause the range. The caller
+/// fills after this, so the refusal that pauses puts nothing in. Returns the entry's id.
+pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
+    let Some(range) = range_of(w, s.task)? else {
+        return Ok(None);
+    };
+    let newest: Option<String> = w
+        .conn()
+        .query_row(
+            "SELECT head_oid FROM pr_watches WHERE lower(repo) = lower(?1) AND pr = ?2
+             ORDER BY started_at DESC, id DESC LIMIT 1",
+            params![s.repo, s.pr],
+            |r| r.get(0),
+        )
+        .optional()?;
+    if newest.as_deref() != Some(s.head) {
+        return Ok(None);
+    }
+    let subject = format!("{}#{}", s.repo.to_lowercase(), s.pr);
+    let short = &s.head[..s.head.len().min(12)];
+    let tests = s.edited_tests.join(", ");
+    let more = json!({"pr": subject, "head": s.head});
+    let made = if s.refused {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: format!("gate:{subject}@{}", s.head),
+            question: format!(
+                "The merge gate refused {}#{} at {short}: {} Should it land as it is?",
+                s.repo,
+                s.pr,
+                sentence(s.reason)
+            ),
+            background: format!(
+                "makibad's merge gate refused the pull request of task {}: {}",
+                s.task, s.reason
+            ),
+            if_yes: "You merge it yourself in the GitHub web UI; the gate will not let the secretary.".into(),
+            if_no: "The secretary sends the worker back to fix what the gate named; the new head is judged again.".into(),
+            recommend: "No: fix what the gate named.",
+            why: "A refusal stands until its reason is gone.",
+            recommend_answer: "no",
+            more,
+        }
+    } else {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "tests",
+            key: format!("tests:{subject}@{}", s.head),
+            question: format!(
+                "{}#{} at {short} edits tests that were there before its test commit and are not declared: {tests}. Should it land?",
+                s.repo, s.pr
+            ),
+            background: format!(
+                "The merge gate compared the tests at the head of task {}'s pull request with those before its test commit. {}",
+                s.task,
+                sentence(s.reason)
+            ),
+            if_yes: "It lands with those edits (under merge_approval_mode acceptance you merge it yourself in the GitHub web UI).".into(),
+            if_no: "The secretary sends the worker back to leave those tests as they were.".into(),
+            recommend: "None: read the diff of those tests.",
+            why: "Only a reading tells a test repaired from a test weakened to pass.",
+            recommend_answer: "none",
+            more,
+        }
+    };
+    let (id, _) = stop(w, &made)?;
+    if let Some((acting, status)) = acting(w, range)?
+        && status == "active"
+    {
+        // The refusals of the range's pull requests since the last one read merged, newest first.
+        let mut q = w.conn().prepare(&format!(
+            "{CHAIN} SELECT e.kind, lower(json_extract(e.payload_json, '$.repo')) || '#'
+                            || json_extract(e.payload_json, '$.pr')
+             FROM events e WHERE e.run_id IN
+                   (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
+               AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
+                    AND json_extract(e.payload_json, '$.allow') = 0))
+             ORDER BY e.id DESC LIMIT 100"
+        ))?;
+        let rows: Vec<(String, Option<String>)> = q
+            .query_map([acting], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect::<std::result::Result<_, _>>()?;
+        let refused: BTreeSet<String> = rows
+            .into_iter()
+            .take_while(|(kind, _)| kind != "pr_merged")
+            .filter_map(|(_, pr)| pr)
+            .collect();
+        if refused.len() >= 2 {
+            pause(
+                w,
+                acting,
+                "the merge gate refused two pull requests of the range in a row",
+            )?;
+        }
+    }
+    Ok(Some(id))
+}
+
+/// `text` as one sentence: its first line, ended by a full stop.
+fn sentence(text: &str) -> String {
+    let line = text.lines().next().unwrap_or_default().trim();
+    if line.ends_with(['.', '!', '?']) {
+        line.to_string()
+    } else {
+        format!("{line}.")
+    }
+}
+
+/// A head recorded for a task's pull request (`pr opened` or `pushed`), in the verb's
+/// transaction. The open stops `makibad` wrote for an older head of that pull request are
+/// withdrawn: their subject is gone, and the run counts again. A `pushed` head that reaches
+/// `budget_fixes` (and each `budget_fixes` heads after it) is a stop of the task, line `budget`;
+/// the push itself is recorded as any other (belt.md 2.1).
+pub(super) fn head_recorded(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+) -> Result<()> {
+    let Some(range) = range_of(w, task)? else {
+        return Ok(());
+    };
+    w.conn().execute(
+        "UPDATE pending SET status = 'withdrawn' WHERE status = 'escalated'
+           AND json_extract(context_json, '$.by') = 'makibad'
+           AND json_extract(context_json, '$.stop_line') IN ('gate', 'tests')
+           AND json_extract(context_json, '$.pr') = ?1
+           AND json_extract(context_json, '$.head') != ?2",
+        params![format!("{}#{pr}", repo.to_lowercase()), head],
+    )?;
+    let budget: i64 = w.conn().query_row(
+        "SELECT budget_fixes FROM ranges WHERE id = ?1",
+        [range],
+        |r| r.get(0),
+    )?;
+    let fixes = count(
+        w,
+        "SELECT count(DISTINCT json_extract(e.payload_json, '$.head_oid')) FROM events e
+         JOIN runs r ON r.id = e.run_id WHERE e.kind = 'fix_pushed' AND r.task_id = ?1",
+        [task],
+    )?;
+    if fixes == 0 || fixes % budget != 0 {
+        return Ok(());
+    }
+    stop(
+        w,
+        &Stop {
+            range,
+            task: Some(task),
+            line: "budget",
+            key: format!("fixes:{task}:{fixes}"),
+            question: format!(
+                "Task {task} has pushed {fixes} head(s) to {repo}#{pr} after the first (budget_fixes {budget}). Should it go on?"
+            ),
+            background: format!(
+                "The range allows {budget} fix(es) of a task's pull request before it asks; makibad counted the heads recorded with pr pushed."
+            ),
+            if_yes: format!("The worker goes on; the next stop comes after {budget} more head(s)."),
+            if_no: "The secretary closes the task as abandoned, or you take the pull request over."
+                .into(),
+            recommend: "None: it depends on what the last fixes were.",
+            why: "The count says the task is not converging, not why.",
+            recommend_answer: "none",
+            more: json!({"pr": format!("{}#{pr}", repo.to_lowercase()), "head": head}),
+        },
+    )?;
+    Ok(())
+}
+
+/// A launch of `task` failed and its run is `failed`, in that transaction (belt.md 2.4): two
+/// launches of a range failed in a row (a verified one between them resets the count) pause the
+/// range. The failed run holds no slot, so the pause is what keeps a broken launch from spending
+/// the budget.
+pub(super) fn launch_failed(w: &StateWriter, task: &str) -> Result<()> {
+    let Some(range) = range_of(w, task)? else {
+        return Ok(());
+    };
+    let Some((acting, status)) = acting(w, range)? else {
+        return Ok(());
+    };
+    if status != "active" {
+        return Ok(());
+    }
+    let mut q = w.conn().prepare(&format!(
+        "{CHAIN} SELECT e.kind FROM events e
+         WHERE e.kind IN ('worker_spawn_failed', 'worker_spawn_verified') AND e.run_id IN
+               (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
+         ORDER BY e.id DESC LIMIT 2"
+    ))?;
+    let last: Vec<String> = q
+        .query_map([acting], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    if last.len() == 2 && last.iter().all(|k| k == "worker_spawn_failed") {
+        pause(w, acting, "two launches of the range failed in a row")?;
+    }
+    Ok(())
+}
+
 // ---- the fill ------------------------------------------------------------------------------
 
 /// The newest read of a range, when it may be dispatched from: complete, and started after the
@@ -570,15 +1014,14 @@ fn global_free(w: &StateWriter, capacity: usize) -> Result<usize> {
 }
 
 /// The runs of a range (and of the ranges it replaced) that count against its `at_once`: queued,
-/// at work, suspended, or failed and not yet closed (a failed launch holds its slot until the
-/// secretary closes it, so a broken launch cannot spend the budget), less those waiting only for
-/// the person.
+/// at work or suspended, less those waiting only for the person. A run whose launch failed holds
+/// no slot: two failures in a row pause the range instead (`launch_failed`).
 fn range_count(w: &StateWriter, id: i64) -> Result<i64> {
     count(
         w,
         &format!(
             "{CHAIN} SELECT count(*) FROM runs r WHERE r.range_id IN (SELECT id FROM chain)
-               AND r.status IN ('queued', 'in_use', 'suspended', 'failed') AND NOT {WAITING}"
+               AND r.status IN ('queued', 'in_use', 'suspended') AND NOT {WAITING}"
         ),
         [id],
     )
@@ -717,23 +1160,31 @@ fn dispatch(
 /// Called inside the caller's transaction. Returns the task ids dispatched.
 pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
     let capacity = super::dispatch::capacity_from_env();
-    let ranges: Vec<(i64, i64, i64, String, String)> = {
-        let mut q = w.conn().prepare(
-            "SELECT g.id, g.at_once, g.budget_tasks, g.brief_head, p.slug FROM ranges g
-             JOIN projects p ON p.id = g.project_id
-             WHERE g.status = 'active' ORDER BY g.approved_at, g.id",
-        )?;
+    let ranges: Vec<(i64, i64, i64, String, String, bool)> = {
+        let mut q = w.conn().prepare(&format!(
+            "SELECT g.id, g.at_once, g.budget_tasks, g.brief_head, p.slug, {HOURS_PAST}
+             FROM ranges g JOIN projects p ON p.id = g.project_id
+             WHERE g.status = 'active' ORDER BY g.approved_at, g.id"
+        ))?;
         q.query_map([], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+            Ok((
+                r.get(0)?,
+                r.get(1)?,
+                r.get(2)?,
+                r.get(3)?,
+                r.get(4)?,
+                r.get(5)?,
+            ))
         })?
         .collect::<std::result::Result<_, _>>()?
     };
     let mut out = Vec::new();
-    for (id, at_once, budget, head, slug) in ranges {
+    for (id, at_once, budget, head, slug, hours_past) in ranges {
         let taken =
             |w: &StateWriter| count(w, "SELECT count(*) FROM runs WHERE range_id = ?1", [id]);
         if fresh_read(w, id)?.is_some() {
-            while taken(w)? < budget
+            while !hours_past
+                && taken(w)? < budget
                 && range_count(w, id)? < at_once
                 && global_free(w, capacity)? > 0
             {
@@ -742,12 +1193,49 @@ pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
                 };
                 out.push(dispatch(w, agent, id, &slug, &head, &next)?);
             }
+            // A budget reached while it keeps a candidate out is a stop of the range (belt.md
+            // section 5, line 4): once per budget. A range that finishes what it planned asks nothing.
+            let spent = if taken(w)? >= budget {
+                Some("budget_tasks")
+            } else if hours_past {
+                Some("budget_hours")
+            } else {
+                None
+            };
+            if let Some(which) = spent
+                && let Some(next) = next_candidate(w, id, &slug)?
+            {
+                stop(
+                    w,
+                    &Stop {
+                        range: id,
+                        task: None,
+                        line: "budget",
+                        key: format!("{which}:{id}"),
+                        question: format!(
+                            "Range {id} of {slug} reached its {which}, and #{} (at least) is left inside it. Should a new range be proposed for what is left?",
+                            next.issue
+                        ),
+                        background: format!(
+                            "The range's {which} is spent: makibad puts nothing new in, and the range ends when its open tasks close."
+                        ),
+                        if_yes: "The secretary drafts a range that replaces this one, for you to approve.".into(),
+                        if_no: "The Issues left stay out until you say otherwise.".into(),
+                        recommend: "None: the budget was your bound.",
+                        why: "Only you widen a range.",
+                        recommend_answer: "none",
+                        more: json!({}),
+                    },
+                )?;
+            }
         }
         if open_runs(w, id)? > 0 {
             continue;
         }
         if taken(w)? >= budget {
             end_range(w, id, "budget_tasks", "makibad")?;
+        } else if hours_past {
+            end_range(w, id, "budget_hours", "makibad")?;
         } else if fresh_read(w, id)?.is_some()
             && next_candidate(w, id, &slug)?.is_none()
             && count(
@@ -1555,7 +2043,9 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 g.at_once, g.approval_mode, g.budget_tasks, g.approved_by, g.approved_at,
                 g.approved_read_id,
                 (SELECT occurred_at FROM events WHERE id = g.approved_read_id),
-                (SELECT count(*) FROM runs WHERE range_id = g.id)
+                (SELECT count(*) FROM runs WHERE range_id = g.id),
+                g.budget_hours, g.budget_fixes,
+                round((julianday(coalesce(g.ended_at, 'now')) - julianday(g.approved_at)) * 24.0, 3)
          FROM ranges g JOIN projects p ON p.id = g.project_id WHERE g.id = ?1",
         [id],
         |r| {
@@ -1566,11 +2056,12 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 "issues": serde_json::from_str::<Value>(&issues).unwrap_or(json!([])),
                 "takes": r.get::<_, String>(5)?, "brief_head": r.get::<_, String>(6)?,
                 "at_once": r.get::<_, i64>(7)?, "approval_mode": r.get::<_, Option<String>>(8)?,
-                "budget": {"tasks": r.get::<_, i64>(9)?},
+                "budget": {"tasks": r.get::<_, i64>(9)?, "hours": r.get::<_, Option<f64>>(15)?,
+                           "fixes": r.get::<_, i64>(16)?},
                 "approved_by": r.get::<_, Option<String>>(10)?,
                 "approved_at": r.get::<_, Option<String>>(11)?,
                 "approved_read_at": r.get::<_, Option<String>>(13)?,
-                "used": {"tasks": r.get::<_, i64>(14)?},
+                "used": {"tasks": r.get::<_, i64>(14)?, "hours": r.get::<_, Option<f64>>(17)?},
             }))
         },
     )?;
@@ -1769,7 +2260,11 @@ fn items(
     }
     placed.sort_by_key(|(e, _)| *e);
     let mut out: Vec<Value> = placed.into_iter().map(|(_, i)| i).collect();
-    let budget_spent = range["used"]["tasks"].as_i64() >= range["budget"]["tasks"].as_i64();
+    let budget_spent = range["used"]["tasks"].as_i64() >= range["budget"]["tasks"].as_i64()
+        || matches!(
+            (range["used"]["hours"].as_f64(), range["budget"]["hours"].as_f64()),
+            (Some(used), Some(budget)) if used >= budget
+        );
     let mut q = c.prepare(
         "SELECT issue, title, admitted, left_out_why FROM range_candidates
          WHERE range_id = ?1 ORDER BY position",
@@ -1996,6 +2491,272 @@ mod tests {
             })
             .unwrap();
         assert_eq!(status, "active");
+    }
+
+    /// A range of project `p`, made active as an approval would; its id.
+    fn active_range(w: &StateWriter, replaces: Option<i64>) -> i64 {
+        let id = range(
+            w,
+            "secretary",
+            Role::Secretary,
+            &json!({"action": "propose", "project": "p", "issues": [1], "at_once": 1,
+                    "budget_tasks": 9, "brief_head": "h", "replaces": replaces}),
+        )
+        .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        if let Some(old) = replaces {
+            end_range(w, old, "replaced", "person").unwrap();
+        }
+        w.conn()
+            .execute(
+                "UPDATE ranges SET status = 'active', approved_by = 'person',
+                   approved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
+                [id],
+            )
+            .unwrap();
+        id
+    }
+
+    /// A run of `range`, at work.
+    fn run_of(w: &StateWriter, range: i64, task: &str) {
+        w.upsert_run(&RunUpsert {
+            task_id: task,
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute(
+                "UPDATE runs SET range_id = ?2 WHERE task_id = ?1",
+                params![task, range],
+            )
+            .unwrap();
+    }
+
+    fn status_of(w: &StateWriter, id: i64) -> String {
+        w.conn()
+            .query_row("SELECT status FROM ranges WHERE id = ?1", [id], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// A launch outcome of `task` as `verify` records it, then the belt's part of a failure.
+    fn launch(w: &StateWriter, task: &str, failed: bool) {
+        if failed {
+            event(w, "worker_spawn_failed", "makibad", Some(task), json!({})).unwrap();
+            launch_failed(w, task).unwrap();
+            return;
+        }
+        // A verified launch names the turn of its terminal that proved it (migration v6).
+        let turn = event(
+            w,
+            "terminal_turn",
+            "makibad",
+            Some(task),
+            json!({"spawn_id": task}),
+        )
+        .unwrap();
+        event(
+            w,
+            "worker_spawn_verified",
+            "makibad",
+            Some(task),
+            json!({"spawn_id": task, "event_id": turn}),
+        )
+        .unwrap();
+    }
+
+    /// Two failed launches in a row pause the range; a verified one between them resets the count.
+    #[test]
+    fn two_failed_launches_in_a_row_pause_the_range() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        for t in ["a", "b", "c", "d"] {
+            run_of(&w, id, t);
+        }
+        launch(&w, "a", true);
+        assert_eq!(status_of(&w, id), "active", "one failure pauses nothing");
+        launch(&w, "b", false);
+        launch(&w, "c", true);
+        assert_eq!(status_of(&w, id), "active", "a verified launch reset it");
+        launch(&w, "d", true);
+        assert_eq!(status_of(&w, id), "paused");
+        let (actor, payload): (String, String) = w
+            .conn()
+            .query_row(
+                "SELECT actor, payload_json FROM events WHERE kind = 'range_paused'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(actor, "makibad");
+        let payload: Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(payload["range_id"], json!(id));
+        assert!(payload["reason"].as_str().unwrap().contains("launches"));
+    }
+
+    /// A run keeps the range it was dispatched under: its failures pause the range that replaced
+    /// that one, which is the one dispatching now.
+    #[test]
+    fn failures_of_a_replaced_ranges_runs_pause_the_range_that_replaced_it() {
+        let (_dir, w) = org();
+        let old = active_range(&w, None);
+        run_of(&w, old, "a");
+        run_of(&w, old, "b");
+        let new = active_range(&w, Some(old));
+        assert_eq!(acting(&w, old).unwrap(), Some((new, "active".into())));
+        launch(&w, "a", true);
+        launch(&w, "b", true);
+        assert_eq!(status_of(&w, old), "ended");
+        assert_eq!(status_of(&w, new), "paused");
+    }
+
+    fn watch(w: &StateWriter, task: &str, pr: i64, head: &str) {
+        w.conn()
+            .execute(
+                "INSERT INTO pr_watches (repo, pr, head_oid, run_id)
+                 VALUES ('o/p', ?2, ?3, (SELECT id FROM runs WHERE task_id = ?1))",
+                params![task, pr, head],
+            )
+            .unwrap();
+    }
+
+    fn refused(w: &StateWriter, task: &str, pr: i64, head: &str) -> Option<i64> {
+        event(
+            w,
+            "acceptance_gate",
+            "merge-gate",
+            Some(task),
+            json!({"repo": "o/p", "pr": pr, "head": head, "allow": false}),
+        )
+        .unwrap();
+        gate_stop(
+            w,
+            &GateStop {
+                task,
+                repo: "o/p",
+                pr,
+                head,
+                refused: true,
+                reason: "no passed CI",
+                edited_tests: &[],
+            },
+        )
+        .unwrap()
+    }
+
+    fn escalated(w: &StateWriter) -> i64 {
+        count(
+            w,
+            "SELECT count(*) FROM pending WHERE status = 'escalated'",
+            [],
+        )
+        .unwrap()
+    }
+
+    /// A refusal of a head that is no longer the pull request's recorded head is no stop; the stop
+    /// of a head goes when a newer head is recorded, and the run counts again.
+    #[test]
+    fn a_gate_stop_is_for_the_head_recorded_last_and_goes_with_a_newer_head() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
+        watch(&w, "a", 7, &h1);
+        watch(&w, "a", 7, &h2);
+        assert_eq!(refused(&w, "a", 7, &h1), None, "an older head: no stop");
+        assert_eq!(escalated(&w), 0);
+        let stop = refused(&w, "a", 7, &h2).expect("the newest head: a stop");
+        assert_eq!(refused(&w, "a", 7, &h2), Some(stop), "one per head");
+        assert_eq!(escalated(&w), 1);
+        assert_eq!(range_count(&w, id).unwrap(), 0, "it waits for the person");
+        let h3 = "3".repeat(40);
+        watch(&w, "a", 7, &h3);
+        head_recorded(&w, "a", "o/p", 7, &h3).unwrap();
+        assert_eq!(escalated(&w), 0, "the stop of the older head is withdrawn");
+        assert_eq!(range_count(&w, id).unwrap(), 1, "the run counts again");
+        assert_eq!(status_of(&w, id), "active", "one pull request: no pause");
+    }
+
+    /// Two refusals in a row of different pull requests pause the range that replaced the runs'
+    /// range; a merged pull request between them resets the count.
+    #[test]
+    fn refusals_count_across_a_replacement_and_a_merge_resets_them() {
+        let (_dir, w) = org();
+        let old = active_range(&w, None);
+        for t in ["a", "b", "c"] {
+            run_of(&w, old, t);
+        }
+        let new = active_range(&w, Some(old));
+        let h = "1".repeat(40);
+        watch(&w, "a", 7, &h);
+        watch(&w, "b", 8, &h);
+        watch(&w, "c", 9, &h);
+        refused(&w, "a", 7, &h).unwrap();
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("a"),
+            json!({"repo": "o/p", "pr": 7}),
+        )
+        .unwrap();
+        refused(&w, "b", 8, &h).unwrap();
+        assert_eq!(status_of(&w, new), "active", "the merge reset the count");
+        refused(&w, "c", 9, &h).unwrap();
+        assert_eq!(status_of(&w, new), "paused");
+    }
+
+    /// A range budget is a stop only while it keeps a candidate out, and once.
+    #[test]
+    fn a_spent_budget_is_a_stop_only_when_a_candidate_is_left() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        w.conn()
+            .execute("UPDATE ranges SET budget_tasks = 1 WHERE id = ?1", [id])
+            .unwrap();
+        let activation = event(
+            &w,
+            "range_approved",
+            "person",
+            None,
+            json!({"range_id": id}),
+        )
+        .unwrap();
+        let read = event(
+            &w,
+            "range_read",
+            "makibad",
+            None,
+            json!({"range_id": id, "complete": true, "activation": activation}),
+        )
+        .unwrap();
+        run_of(&w, id, "r-taken");
+        fill(&w, "fake").unwrap();
+        assert_eq!(escalated(&w), 0, "nothing is left: no question");
+        w.conn()
+            .execute(
+                "INSERT INTO range_candidates (range_id, read_id, position, issue, title, body,
+                   admitted) VALUES (?1, ?2, 0, 5, 't', '', 1)",
+                params![id, read],
+            )
+            .unwrap();
+        fill(&w, "fake").unwrap();
+        fill(&w, "fake").unwrap();
+        assert_eq!(escalated(&w), 1);
+        let (run, line): (Option<i64>, String) = w
+            .conn()
+            .query_row(
+                "SELECT run_id, json_extract(context_json, '$.stop_line') FROM pending",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!((run, line.as_str()), (None, "budget"));
     }
 
     #[test]

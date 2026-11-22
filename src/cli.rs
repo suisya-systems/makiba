@@ -348,6 +348,12 @@ pub enum Command {
         at_once: Option<i64>,
         #[arg(long)]
         budget_tasks: Option<i64>,
+        /// Wall-clock hours from approval after which nothing new goes in (none: no limit).
+        #[arg(long)]
+        budget_hours: Option<f64>,
+        /// Heads pushed to a task's pull request after the first before it is a stop (default 3).
+        #[arg(long)]
+        budget_fixes: Option<i64>,
         /// Read here; its content travels over the door.
         #[arg(long)]
         brief_head_file: Option<PathBuf>,
@@ -416,6 +422,8 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             takes,
             at_once,
             budget_tasks,
+            budget_hours,
+            budget_fixes,
             brief_head_file,
             replaces,
             reason,
@@ -447,11 +455,15 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             for (k, v) in [
                 ("at_once", at_once),
                 ("budget_tasks", budget_tasks),
+                ("budget_fixes", budget_fixes),
                 ("replaces", replaces),
             ] {
                 if let Some(v) = v {
                     args[k] = v.into();
                 }
+            }
+            if let Some(h) = budget_hours {
+                args["budget_hours"] = h.into();
             }
             ("range", args)
         }
@@ -657,6 +669,13 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
     println!(
         "At once: {}; tasks in all: {}",
         range["at_once"], range["budget"]["tasks"]
+    );
+    println!(
+        "Hours from approval: {}; fixes of a task's pull request before it asks: {}",
+        range["budget"]["hours"]
+            .as_f64()
+            .map_or("no limit".to_string(), |h| h.to_string()),
+        range["budget"]["fixes"]
     );
     println!(
         "Merge approval mode (this shell's; makibad records its own): {}",
