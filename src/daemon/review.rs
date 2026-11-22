@@ -13,8 +13,10 @@
 //! with the hardened git of `run_repo`, never a value the worker wrote) and the diff from the
 //! project clone's base into a folder of its own under `<state>/tmp`, and removes it after.
 //!
-//! An answer is `passed` (established) only when the reader exited 0, read the repository at
-//! least once (a successful command or tool result in its event stream) and ended with the line
+//! An answer is `passed` (established) only when the reader exited 0, opened at least one file
+//! of the change under review (the diff file or a file it changes; for a design the note), judged
+//! from its recorded commands or tool calls (a recognised read command with the file among its
+//! words that exited 0; a `Read` or file `Grep` whose result is not an error), and ended with the line
 //! `FINDINGS: blocker=<n> major=<n> minor=<n>`. An answer carrying a token shape of the secret
 //! scanner or the content of the person or gate key is withheld.
 
@@ -126,6 +128,8 @@ pub struct Snapshot {
     pub tree: PathBuf,
     pub base: String,
     pub head: String,
+    /// The files the diff changes (paths in the tree, as `git diff --name-only` gives them).
+    changed: Vec<String>,
     top: PathBuf,
 }
 
@@ -201,11 +205,12 @@ pub fn snapshot(
     let dir = top.join(format!("review-{task}-{stamp}"));
     let tree = dir.join("tree");
     std::fs::create_dir_all(&tree).map_err(|e| format!("{}: {e}", tree.display()))?;
-    let snap = Snapshot {
+    let mut snap = Snapshot {
         dir: std::path::absolute(&dir).unwrap_or(dir),
         tree: std::path::absolute(&tree).unwrap_or(tree),
         base,
         head,
+        changed: vec![],
         top,
     };
     // The tree at the head, without the folders an agent program reads its settings from.
@@ -229,6 +234,31 @@ pub fn snapshot(
             String::from_utf8_lossy(&d.stderr).trim()
         ));
     }
+    let names = run_repo::git(&gitdir, workplace)
+        .args([
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--no-ext-diff",
+            "--no-textconv",
+            &since,
+            &snap.head,
+        ])
+        .output()
+        .map_err(|e| format!("git diff --name-only: {e}"))?;
+    if !names.status.success() {
+        return Err(format!(
+            "git diff --name-only: {}",
+            String::from_utf8_lossy(&names.stderr).trim()
+        ));
+    }
+    snap.changed = names
+        .stdout
+        .split(|b| *b == 0)
+        .filter(|n| !n.is_empty())
+        .map(|n| String::from_utf8_lossy(n).into_owned())
+        .collect();
     // The tree is the worker's: a path of these names there (a link out of the folder, say) is
     // removed, and the file is made new, never written through what was there.
     let write = |name: &str, bytes: &[u8]| -> Result<(), String> {
@@ -429,13 +459,140 @@ pub struct Answer {
 /// What a reader's event stream showed.
 #[derive(Default)]
 struct Stream {
+    /// Successful actions that opened a file under review.
     reads: usize,
+    /// Every action seen (a command or a tool call), for the reason of a round without a read.
+    seen: Vec<String>,
     text: String,
     error: Option<String>,
 }
 
+/// The files whose opening proves a read: the canonical tree and the canonical files in it that
+/// the reader is meant to read (the diff and the files it changes; the design note for a design).
+struct Targets {
+    tree: PathBuf,
+    files: Vec<PathBuf>,
+}
+
+impl Targets {
+    fn of(snap: &Snapshot, design: bool) -> Targets {
+        let tree = std::fs::canonicalize(&snap.tree).unwrap_or_else(|_| snap.tree.clone());
+        let names: Vec<&str> = if design {
+            vec![NOTE_FILE]
+        } else {
+            std::iter::once(DIFF_FILE)
+                .chain(snap.changed.iter().map(String::as_str))
+                .collect()
+        };
+        let files = names
+            .into_iter()
+            .filter_map(|n| std::fs::canonicalize(tree.join(n)).ok())
+            .filter(|p| p.is_file() && p.starts_with(&tree))
+            .collect();
+        Targets { tree, files }
+    }
+
+    /// Does `path` (as the reader wrote it, relative to the tree) name one of the files? It is
+    /// resolved as the filesystem does, so `..` and a link cannot lead out of the tree.
+    fn names(&self, path: &str) -> bool {
+        std::fs::canonicalize(self.tree.join(path))
+            .map(|c| c.starts_with(&self.tree) && self.files.contains(&c))
+            .unwrap_or(false)
+    }
+}
+
+/// The programs whose operand files are read, and nothing else.
+const READERS: [&str; 10] = [
+    "cat", "head", "tail", "sed", "nl", "less", "more", "grep", "rg", "bat",
+];
+
+/// The simple commands of a shell string, each as its words, or `None` when the string is more
+/// than a sequence of plain commands (`;`, `&&`, `|` between them): no `||`, `&`, redirection,
+/// substitution, expansion, escape or subshell, so that what ran is what the words say. The shell
+/// of the reader's wrapper (`bash -lc '...'`) is looked through.
+fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
+    let words = |s: &str| -> Option<Vec<Vec<String>>> {
+        let s = s.replace(" 2>/dev/null", "").replace(" 2>&1", "");
+        let mut out: Vec<Vec<String>> = vec![];
+        let (mut cur, mut word, mut has) = (vec![], String::new(), false);
+        let mut quote = None;
+        let mut it = s.chars().peekable();
+        while let Some(c) = it.next() {
+            match (quote, c) {
+                (Some(q), c) if c == q => quote = None,
+                (Some('\''), c) => word.push(c),
+                (Some(_), '$' | '`' | '\\') => return None,
+                (Some(_), c) => word.push(c),
+                (None, '\'' | '"') => (quote, has) = (Some(c), true),
+                (None, '$' | '`' | '\\' | '<' | '>' | '(' | ')' | '\n') => return None,
+                (None, c) if c.is_whitespace() => {
+                    if has {
+                        cur.push(std::mem::take(&mut word));
+                        has = false;
+                    }
+                }
+                (None, '&' | '|' | ';') => {
+                    let doubled = it.peek() == Some(&c);
+                    if (c == '&' && !doubled) || (c == '|' && doubled) {
+                        return None;
+                    }
+                    if doubled {
+                        it.next();
+                    }
+                    if has {
+                        cur.push(std::mem::take(&mut word));
+                        has = false;
+                    }
+                    if cur.is_empty() {
+                        return None;
+                    }
+                    out.push(std::mem::take(&mut cur));
+                }
+                (None, c) => (word.push(c), has = true).1,
+            }
+        }
+        if quote.is_some() {
+            return None;
+        }
+        if has {
+            cur.push(word);
+        }
+        if !cur.is_empty() {
+            out.push(cur);
+        }
+        Some(out)
+    };
+    let outer = words(command)?;
+    if let [w] = outer.as_slice()
+        && w.len() == 3
+        && ["sh", "bash", "zsh", "dash"].contains(&w[0].rsplit('/').next().unwrap_or(""))
+        && ["-c", "-lc", "-ic", "-lic"].contains(&w[1].as_str())
+    {
+        return words(&w[2]);
+    }
+    Some(outer)
+}
+
+/// Did the shell string `command` (which exited 0) open a file of `t`? Only a reading program
+/// with the file among its words counts; a command that changes folder is not trusted at all.
+fn command_opens(command: &str, t: &Targets) -> bool {
+    let Some(cmds) = simple_commands(command) else {
+        return false;
+    };
+    let prog = |c: &Vec<String>| c[0].rsplit('/').next().unwrap_or("").to_string();
+    if cmds
+        .iter()
+        .any(|c| ["cd", "pushd", "popd"].contains(&prog(c).as_str()))
+    {
+        return false;
+    }
+    cmds.iter()
+        .filter(|c| READERS.contains(&prog(c).as_str()))
+        .any(|c| c[1..].iter().any(|w| t.names(w)))
+}
+
 /// `codex exec --json`: completed command executions and the last agent message.
-fn read_other(out: &str) -> Stream {
+fn read_other(out: &str, t: &Targets) -> Stream {
     let mut r = Stream::default();
     for v in out
         .lines()
@@ -443,10 +600,12 @@ fn read_other(out: &str) -> Stream {
     {
         let item = &v["item"];
         match (v["type"].as_str(), item["type"].as_str()) {
-            (Some("item.completed"), Some("command_execution"))
-                if item["exit_code"] == json!(0) =>
-            {
-                r.reads += 1
+            (Some("item.completed"), Some("command_execution")) => {
+                let command = item["command"].as_str().unwrap_or_default();
+                r.seen.push(command.to_string());
+                if item["exit_code"] == json!(0) && command_opens(command, t) {
+                    r.reads += 1
+                }
             }
             (Some("item.completed"), Some("agent_message")) => {
                 r.text = item["text"].as_str().unwrap_or_default().to_string()
@@ -459,20 +618,37 @@ fn read_other(out: &str) -> Stream {
     r
 }
 
-/// `claude -p --output-format stream-json`: tool results that are not errors, and the result.
-fn read_same(out: &str) -> Stream {
+/// `claude -p --output-format stream-json`: a `Read` of a file (or a `Grep` naming one) whose
+/// tool result is not an error, and the result.
+fn read_same(out: &str, t: &Targets) -> Stream {
     let mut r = Stream::default();
+    // tool_use id -> whether the call opened a file of `t`
+    let mut calls: std::collections::HashMap<String, bool> = Default::default();
     for v in out
         .lines()
         .filter_map(|l| serde_json::from_str::<Value>(l).ok())
     {
+        let blocks = v["message"]["content"].as_array().into_iter().flatten();
         match v["type"].as_str() {
+            Some("assistant") => {
+                for c in blocks.filter(|c| c["type"] == "tool_use") {
+                    let (name, input) = (c["name"].as_str().unwrap_or("?"), &c["input"]);
+                    let path = match name {
+                        "Read" => input["file_path"].as_str(),
+                        "Grep" => input["path"].as_str(),
+                        _ => None,
+                    };
+                    r.seen
+                        .push(format!("{name} {}", path.unwrap_or(&input.to_string())));
+                    if let Some(id) = c["id"].as_str() {
+                        calls.insert(id.into(), path.is_some_and(|p| t.names(p)));
+                    }
+                }
+            }
             Some("user") => {
-                r.reads += v["message"]["content"]
-                    .as_array()
-                    .into_iter()
-                    .flatten()
+                r.reads += blocks
                     .filter(|c| c["type"] == "tool_result" && c["is_error"] != json!(true))
+                    .filter(|c| c["tool_use_id"].as_str().and_then(|i| calls.get(i)) == Some(&true))
                     .count()
             }
             Some("result") => {
@@ -488,6 +664,31 @@ fn read_same(out: &str) -> Stream {
         }
     }
     r
+}
+
+/// What the reader did, for the reason of a round without a read: the first actions, each cut,
+/// the whole capped.
+fn seen_text(seen: &[String]) -> String {
+    if seen.is_empty() {
+        return "it did nothing".into();
+    }
+    let cut = |s: &String| -> String {
+        let one: String = s.split_whitespace().collect::<Vec<_>>().join(" ");
+        match one.char_indices().nth(120) {
+            Some((i, _)) => format!("{}...", &one[..i]),
+            None => one,
+        }
+    };
+    let mut t = String::new();
+    for (i, s) in seen.iter().enumerate() {
+        if i == 8 || t.len() > 600 {
+            t.push_str(&format!(" (and {} more)", seen.len() - i));
+            break;
+        }
+        t.push_str(if i == 0 { "" } else { "; " });
+        t.push_str(&cut(s));
+    }
+    format!("it ran: {t}")
 }
 
 /// The last `FINDINGS:` line of `text`.
@@ -574,7 +775,7 @@ fn run_other(
         &prompt(design),
     ]);
     let ran = bounded(c, None, until.saturating_duration_since(Instant::now()))?;
-    let read = read_other(&ran.out);
+    let read = read_other(&ran.out, &Targets::of(snap, design));
     Ok((ran, read))
 }
 
@@ -611,7 +812,7 @@ fn run_same(
         Some(&prompt(design)),
         until.saturating_duration_since(Instant::now()),
     )?;
-    let read = read_same(&ran.out);
+    let read = read_same(&ran.out, &Targets::of(snap, design));
     Ok((ran, read))
 }
 
@@ -633,7 +834,10 @@ fn judge(reader: String, ran: &Ran, read: Stream) -> Answer {
     } else if let Some(e) = &read.error {
         Some(e.clone())
     } else if read.reads == 0 {
-        Some("the reader read nothing of the repository (an empty pass)".into())
+        Some(format!(
+            "the reader opened no file of the change under review (an empty pass); {}",
+            seen_text(&read.seen)
+        ))
     } else if found.is_none() {
         Some("the answer has no FINDINGS line".into())
     } else {
