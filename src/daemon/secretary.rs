@@ -531,9 +531,16 @@ fn state_text(w: &StateWriter) -> Result<String> {
 /// (Issue 202); with none, what state.db holds open, as before. `renewal` is the `renew` row whose
 /// `received_at` the message window counts back from; none counts back from now.
 fn launch_brief(w: &StateWriter, handover: Option<&str>, renewal: Option<i64>) -> Result<String> {
+    // The ranges in force go first after the fixed line, so that no cut of the tail removes
+    // them (Issue 257); with none, the brief is as before.
+    let ranges = super::belt::in_force_line(w)?;
+    let first = |text: &str| match &ranges {
+        Some(line) => format!("{line}\n\n{text}"),
+        None => text.to_string(),
+    };
     Ok(match handover {
-        Some(h) => resume_brief_with(h, &records(w, renewal)?),
-        None => resume_brief(&state_text(w)?),
+        Some(h) => resume_brief_with(&first(h), &records(w, renewal)?),
+        None => resume_brief(&first(&state_text(w)?)),
     })
 }
 

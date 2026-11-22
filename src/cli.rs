@@ -171,6 +171,9 @@ pub enum Command {
         model: Option<String>,
         #[arg(long)]
         branch: Option<String>,
+        /// The Issue number the task works on, so that a range does not dispatch it again.
+        #[arg(long)]
+        issue: Option<i64>,
     },
     /// Close a task's run; refused before its done report unless --abandon.
     Close {
@@ -316,6 +319,37 @@ pub enum Command {
         #[arg(long)]
         project: Option<String>,
     },
+    /// A range of work approved once; makibad dispatches its next Issue when a slot frees.
+    /// approve shows the draft and makibad's newest read of it, and asks before it approves.
+    Range {
+        #[arg(value_parser = ["propose", "approve", "pause", "resume", "end", "skip"])]
+        action: String,
+        range_id: Option<i64>,
+        /// The Issue a skip takes out of the range.
+        issue: Option<i64>,
+        #[arg(long)]
+        project: Option<String>,
+        /// Issue numbers, comma-separated.
+        #[arg(long)]
+        issues: Option<String>,
+        /// A condition joined by AND: label:<l> no-label:<l> milestone:<m> clause:<=G<n>.
+        #[arg(long)]
+        takes: Option<String>,
+        #[arg(long)]
+        at_once: Option<i64>,
+        #[arg(long)]
+        budget_tasks: Option<i64>,
+        /// Read here; its content travels over the door.
+        #[arg(long)]
+        brief_head_file: Option<PathBuf>,
+        #[arg(long)]
+        replaces: Option<i64>,
+        #[arg(long)]
+        reason: Option<String>,
+        /// approve without asking (the draft and its read are still printed).
+        #[arg(long)]
+        yes: bool,
+    },
     /// Run the acceptance gate for a pull request at a head; merges nothing.
     Gate {
         #[arg(long)]
@@ -350,6 +384,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             project,
             model,
             branch,
+            issue,
         } => {
             let mut args = json!({"kind": kind, "task_id": task_id, "title": title,
                                   "brief": read(&brief_file)?});
@@ -358,7 +393,58 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
                     args[k] = v.into();
                 }
             }
+            if let Some(n) = issue {
+                args["issue"] = n.into();
+            }
             ("dispatch", args)
+        }
+        Command::Range {
+            action,
+            range_id,
+            issue,
+            project,
+            issues,
+            takes,
+            at_once,
+            budget_tasks,
+            brief_head_file,
+            replaces,
+            reason,
+            yes: _,
+        } => {
+            let mut args = json!({"action": action});
+            if let Some(id) = range_id {
+                args["id"] = id.into();
+            }
+            if let Some(n) = issue {
+                args["issue"] = n.into();
+            }
+            if let Some(list) = issues {
+                let numbers: Vec<i64> = list
+                    .split(',')
+                    .map(|n| n.trim().trim_start_matches('#').parse())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| format!("--issues is Issue numbers, comma-separated: {list:?}"))?;
+                args["issues"] = json!(numbers);
+            }
+            if let Some(f) = brief_head_file {
+                args["brief_head"] = read(&f)?.into();
+            }
+            for (k, v) in [("project", project), ("takes", takes), ("reason", reason)] {
+                if let Some(v) = v {
+                    args[k] = v.into();
+                }
+            }
+            for (k, v) in [
+                ("at_once", at_once),
+                ("budget_tasks", budget_tasks),
+                ("replaces", replaces),
+            ] {
+                if let Some(v) = v {
+                    args[k] = v.into();
+                }
+            }
+            ("range", args)
         }
         Command::Close { task_id, abandon } => {
             ("close", json!({"task_id": task_id, "abandon": abandon}))
@@ -524,15 +610,93 @@ pub fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+/// Before `range approve`: print the draft and `makibad`'s newest complete read of it, read from
+/// `state.db` as `status` reads it, and ask on the terminal unless `yes`. The read's id goes with
+/// the approval, so a read made since is refused (`stale`) instead of approved unseen.
+fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
+    let status = crate::status_local::read_here()?;
+    let range = status["ranges"]
+        .as_array()
+        .and_then(|a| a.iter().find(|r| r["id"] == json!(id)))
+        .ok_or_else(|| format!("no range {id} in state.db"))?;
+    let read = range["read_id"].as_i64().ok_or_else(|| {
+        format!("range {id} has no complete read yet; wait for makibad to read it")
+    })?;
+    let text = |k: &str| range[k].as_str().unwrap_or("-").to_string();
+    println!("Range {id} of {} ({})", text("project"), text("status"));
+    println!("Issues: {}", range["issues"]);
+    println!("Takes: {}", text("takes"));
+    println!(
+        "At once: {}; tasks in all: {}",
+        range["at_once"], range["budget"]["tasks"]
+    );
+    println!(
+        "Merge approval mode (this shell's; makibad records its own): {}",
+        status["merge_approval_mode"].as_str().unwrap_or("-")
+    );
+    println!("Brief head:\n{}", text("brief_head"));
+    println!(
+        "Read at {} - in the order they would go in:",
+        text("read_at")
+    );
+    for c in range["candidates"].as_array().into_iter().flatten() {
+        let what = if c["admitted"] == json!(true) {
+            "admitted".to_string()
+        } else {
+            format!("left out: {}", c["left_out_why"].as_str().unwrap_or("-"))
+        };
+        println!(
+            "  #{} {} - {what}",
+            c["issue"],
+            c["title"].as_str().unwrap_or("")
+        );
+    }
+    if yes {
+        return Ok(read);
+    }
+    print!("Approve range {id}? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("cannot read the answer: {e}"))?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        Ok(read)
+    } else {
+        Err("not approved".into())
+    }
+}
+
 /// A verb that goes over the door: send it and print the answer.
 pub fn main(c: Command) -> ExitCode {
-    let (verb, request) = match request(c) {
+    let preview = match &c {
+        Command::Range {
+            action,
+            range_id,
+            yes,
+            ..
+        } if action == "approve" => Some(((*range_id).ok_or("approve names a range id"), *yes)),
+        _ => None,
+    };
+    let (verb, mut request) = match request(c) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("makiba: usage: {e}");
             return exit(ErrorKind::Usage.exit_code());
         }
     };
+    if let Some((id, yes)) = preview {
+        match id
+            .map_err(String::from)
+            .and_then(|id| approve_preview(id, yes))
+        {
+            Ok(read) => request["read"] = read.into(),
+            Err(e) => {
+                eprintln!("makiba: {e}");
+                return exit(ErrorKind::Conflict.exit_code());
+            }
+        }
+    }
     match ask(verb, request) {
         Ok(answer) if answer["ok"] == json!(true) => {
             println!("{}", answer["result"]);

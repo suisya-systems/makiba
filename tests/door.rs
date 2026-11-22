@@ -440,6 +440,7 @@ fn each_role_is_listed_exactly_the_tools_of_its_verbs() {
             "project",
             "update",
             "candidate",
+            "range",
             "review"
         ])
     );
