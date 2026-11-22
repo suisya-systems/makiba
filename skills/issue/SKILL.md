@@ -24,3 +24,5 @@ The triage scan reads dependencies only from the same line as the keyword (`Bloc
 4. Write the body to a file in `$TMPDIR` and run `gh issue create --repo <owner>/<name> --title "<title>" --body-file <file>`. It prints the issue's link: use that.
 
 If `gh` is not there or the create fails, tell the person the reason; nothing was created.
+
+A repository may be public. An issue carries no operator-private content (the secretary's rules list it), and not the details of a defect that a dependency (the base, the agent program, a reader) has not fixed yet: whether a text is such a detail is judged by its meaning, before you write it, and such a defect goes to the person.

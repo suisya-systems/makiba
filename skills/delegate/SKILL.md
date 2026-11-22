@@ -39,6 +39,8 @@ Give the task one worker with an exact scope. Write it in English:
 3. How to check it: the repository's own tests and lint, and any test the task adds.
 4. How to report: `report` `done` with what changed, the commit, how it was checked and what was not done; `blocked` with one question when it cannot go on.
 5. The commit form the repository uses. Workers never push: you do (the pull-request skill).
+6. When the task is an Issue: the Issue's body, and the comments that bear on it, word for word (`gh issue view <N> --repo <owner>/<name> --json title,body,comments`), not your summary. The worker cannot read GitHub, and a summary drops the points it would have checked.
+7. When the branch is to declare an acceptance test (its first commit, which cannot change afterwards): write the test and the change uncommitted and see the test fail without the change and pass with it, with lint and format, before the first commit; keep the declared test to the Issue's definition of done; and report, before that commit, any reading of the Issue wider or narrower than its text and any premise it does not state.
 
 Never put a token, a password or a path of the person's own machine that the task does not need in a brief.
 
