@@ -512,7 +512,7 @@
 {"hook": "deny-no-verify", "from": "claude-org-ja .hooks/block-no-verify.sh:254", "expect": 2, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"git -c hook.pre-commit.command=true commit -m x\"}}"},
 {"hook": "deny-no-verify", "from": "claude-org-ja .hooks/block-no-verify.sh:176", "expect": 2, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"bash -c 'git commit --no-verify -m x'\"}}"},
 {"hook": "deny-no-verify", "from": "claude-org-ja .hooks/block-no-verify.sh:176", "expect": 2, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"F=--no-verify; git commit $F -m x\"}}"},
-{"hook": "deny-no-verify", "from": "a command that passes", "expect": 2, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"git commit -m 'fix -n handling'\"}}", "note": "the original reads quoted text as words, so -n inside a message is refused too"},
+{"hook": "deny-no-verify", "from": "a command that passes", "expect": 0, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"git commit -m 'fix -n handling'\"}}", "note": "the original reads quoted text as words and refused this; makiba reads git's arguments, so -n inside a message passes (Issue 300)"},
 {"hook": "deny-no-verify", "from": "a command that passes", "expect": 0, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"git commit -m x\"}}"},
 {"hook": "deny-no-verify", "from": "a command that passes", "expect": 0, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"git log -n 3\"}}"},
 {"hook": "deny-no-verify", "from": "a command that passes", "expect": 0, "payload": "{\"tool_name\": \"Bash\", \"tool_input\": {\"command\": \"grep -n no-verify README.md\"}}"},
