@@ -11,8 +11,10 @@
 //! in the repositories folder, a `gh` stand-in (`MAKIBA_GH`) answering `pr view` from files, and
 //! `makibad` in this process for `update`. No network and no socket.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -288,7 +290,7 @@ fn an_update_whose_base_is_the_branch_itself_does_not_hide_the_test_commit() {
 
     let stop = Arc::new(AtomicBool::new(false));
     let (dir, flag) = (state.clone(), stop.clone());
-    let d = std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(Stub::new()), flag));
+    let d = std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(Stub::new()), flag));
     let mut run = Run {
         state: state.clone(),
         daemon: Some((stop, d)),
