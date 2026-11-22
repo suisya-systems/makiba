@@ -903,6 +903,24 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     Ok(Some(id))
 }
 
+/// The gate allowed a range task's pull request at `head`, in the gate's transaction: the `gate`
+/// stops still escalated for that pull request and head are withdrawn (what they were refused
+/// for has arrived: a CI result, a review), so the run counts again. Marked as `makibad`'s own
+/// withdrawal, so that a later refusal of the same head is a stop again.
+pub(super) fn gate_allowed(w: &StateWriter, repo: &str, pr: i64, head: &str) -> Result<()> {
+    w.conn().execute(
+        "UPDATE pending SET status = 'withdrawn',
+           context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+         WHERE status = 'escalated'
+           AND json_extract(context_json, '$.by') = 'makibad'
+           AND json_extract(context_json, '$.stop_line') = 'gate'
+           AND json_extract(context_json, '$.pr') = ?1
+           AND json_extract(context_json, '$.head') = ?2",
+        params![format!("{}#{pr}", repo.to_lowercase()), head],
+    )?;
+    Ok(())
+}
+
 /// `text` as one sentence: its first line, ended by a full stop.
 fn sentence(text: &str) -> String {
     let line = text.lines().next().unwrap_or_default().trim();
@@ -1256,7 +1274,7 @@ pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
                         background: format!(
                             "The range's {which} is spent: makibad puts nothing new in, and the range ends when its open tasks close."
                         ),
-                        if_yes: "The secretary drafts a range that replaces this one, for you to approve.".into(),
+                        if_yes: "The secretary drafts a new range for what is left (one that replaces this one while it has not ended), for you to approve.".into(),
                         if_no: "The Issues left stay out until you say otherwise.".into(),
                         recommend: "None: the budget was your bound.",
                         why: "Only you widen a range.",
@@ -2871,6 +2889,31 @@ mod tests {
         assert_eq!(status_of(&w, id), "active", "one refusal since the resume");
         refused(&w, "c", 9, &h).unwrap();
         assert_eq!(status_of(&w, id), "paused", "two since the resume");
+    }
+
+    /// A refusal, then an allowance of the same head (the missing CI result or review arrived):
+    /// the stop goes and the run counts again; a later refusal of that head is a stop again.
+    #[test]
+    fn an_allowance_of_the_same_head_withdraws_its_gate_stop() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        run_of(&w, id, "b");
+        let h = "1".repeat(40);
+        watch(&w, "a", 7, &h);
+        watch(&w, "b", 8, &h);
+        let first = refused(&w, "a", 7, &h).unwrap();
+        refused(&w, "b", 8, &h).unwrap();
+        w.conn()
+            .execute("UPDATE ranges SET status = 'active' WHERE id = ?1", [id])
+            .unwrap();
+        assert_eq!(range_count(&w, id).unwrap(), 0);
+        gate_allowed(&w, "O/p", 7, &h).unwrap();
+        assert_eq!(escalated(&w), 1, "only the stop of that pull request goes");
+        assert_eq!(range_count(&w, id).unwrap(), 1, "its run counts again");
+        let again = refused(&w, "a", 7, &h).unwrap();
+        assert_ne!(again, first);
+        assert_eq!(escalated(&w), 2);
     }
 
     /// A range budget is a stop only while it keeps a candidate out, and once.
