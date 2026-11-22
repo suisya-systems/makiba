@@ -1,6 +1,6 @@
 # The screen: where the person puts work in, watches it and answers
 
-Status: design note for Issue 169, 2026-11-22. Nothing is built. The drawing is [screen-draft.html](screen-draft.html): a static page with sample data, no script and no request; open it in a browser 1440 px wide or wider. The owner agrees to the drawing before any code (the Issue). Read beside [belt.md](belt.md) (sections 1 and 7), [spec.md](spec.md) (section 12, the read surface) and the runbook [herdr-app.md](../runbooks/herdr-app.md).
+Status: design note for Issue 169, 2026-11-22. Nothing is built. The drawing is [screen-draft.html](screen-draft.html): a static page with sample data, no script and no request; open it in a browser 1440 px wide or wider. The owner agrees to the drawing before any code (the Issue). Read beside [belt.md](belt.md) (sections 1 and 7), [spec.md](spec.md) (section 12, the read surface) and the runbook [herdr-app.md](../runbooks/herdr-app.md). A design review (one round) was folded in: the repository in every match and request (3.1, 4), the brief head in the approval (3.1), a failed run told from a suspended one (3.3), concluded pull request watches (3.3), approving the read that was shown (4), the language (2) and the truncated scan (3.1).
 
 Two things are not decided here and stop the code: the drawing needs the owner's agreement, and where the screen runs needs a measurement on the owner's machine (section 5). A third is a boundary: the screen acting with the person key (section 4).
 
@@ -35,7 +35,7 @@ Rules of the look, which the drawing follows:
 - An empty list says why it is empty (the panel "nothing could go in"): the scan found nothing, failed, or has not run.
 - The range's list never reorders what has been admitted (belt.md 7.1); a row changes its mark, not its position.
 - Every time is an age ("6 min") beside the newest read's age in the top line, so an old screen cannot pass for a fresh one. When the heartbeat is old the screen says so over everything and greys what it last read (the panel "the dispatcher is silent").
-- Words are the person's, not the record's: "waits for you" for `waiting_person`, "not yet in" for `not_in`. The text follows `conversation_language` (spec section 13); the drawing is in English.
+- Words are the person's, not the record's: "waits for you" for `waiting_person`, "not yet in" for `not_in`. The text is meant to follow `conversation_language` (spec section 13), but neither output prints the language in force (the setting, or `makibad`'s environment when unset): missing (section 6). Until then the screen has a setting of its own, `--language`, and falls back to the environment of its own process, read as spec section 13 reads it. The drawing is in English.
 
 ## 3. Each part and its read field
 
@@ -49,11 +49,13 @@ The screen opens no table and no file. It reads `makiba status --json` on an int
 | Budget used | `ranges[].budget.tasks`, `.used.tasks` | Today (hours and fixes are belt step 2) |
 | Approved when | `ranges[].approved_at` | Today |
 | A proposed range and its read | `ranges[].candidates[]` (`issue`, `title`, `admitted`, `left_out_why`), `.read_id`, `.read_at`, `.read_complete` | Today |
-| Could go in now | `next_work.candidates[]`: `issue`, `title`, `clause_id`, `size`, `size_estimated`, `why`, `recommended` | Today |
-| Cannot go in yet | `next_work.left_out[]`: `issue`, `kind`, `reason`; the counts `candidates_not_recorded`, `left_out_not_recorded`, `input_truncated` shown as "and N more not listed" | Today (a left-out entry has no title: missing) |
+| What every task of the range starts from | `ranges[].brief_head`, whole, never cut: the approval covers it (belt.md section 1, "Approve"), so a proposed range shows it in full, scrolling inside its box, before the button can be pressed | Today |
+| Could go in now | `next_work.candidates[]`: `repo`, `issue`, `title`, `clause_id`, `size`, `size_estimated`, `why`, `recommended` | Today |
+| Cannot go in yet | `next_work.left_out[]`: `repo`, `issue`, `kind`, `reason`; `candidates_not_recorded` and `left_out_not_recorded`, both numbers, shown as "and N more not listed" | Today (a left-out entry has no title: missing) |
+| The scan read only part | `next_work.input_truncated`, a list of the reads cut short (`open_issues`, `open_prs`, `base_merges`), not a count: shown as its own warning, "the scan did not read every open Issue", naming the reads | Today |
 | Why the list is empty | `next_work` null (no scan yet), `.status` (`no_candidates`, `error`), `.error`, `.scanned_at`, `.trigger` | Today |
 
-While a range is active the list is headed "outside the range" (belt.md 7.1). An Issue the range would admit is marked in `next_work` by matching its number against `ranges[].items[]`, and shown once, in the range.
+While a range is active the list is headed "outside the range" (belt.md 7.1). An Issue the range would admit is shown once, in the range. The match is by repository and number, never by number alone: a range's repository is `projects[].repo` of its `ranges[].project`, and a candidate carries `next_work.candidates[].repo`. With more than one project registered every reference on the screen is written `OWNER/NAME#N`; with one, `#N` (as the drawing).
 
 One point where the owner's words and the record differ: the owner lists "matching no goal clause" among the reasons an Issue cannot go in. The scan does not leave such an Issue out: it is a candidate with `clause_id` null, ranked after the ones that name a clause. The drawing follows the record (a candidate tagged "no clause", ranked last). If the owner wants it under "cannot go in yet", that is a change to the scan, not to the screen.
 
@@ -78,14 +80,14 @@ One entry is shown large. Several are a list, oldest first, and the one opened i
 | Skipped, and why | `ranges[].skipped[]` | Today |
 | An ended range | `ranges[].status`, `.ended_reason`; its list stays while it is the project's newest (belt.md 7.1) | Today |
 | Went wrong: an open anomaly | `anomalies[]`: `task_id`, `rule`, `since` | Today |
-| Went wrong: a failed launch | `runs[].stage` `failed`; the reason from the newest `worker_spawn_failed` event of the task (`stage`, `reason`; its screen is masked) | Today, from two reads; a `runs[].launch_failed_reason` would make it one (section 6) |
+| Went wrong: a failed launch | `runs[].status` `failed`, never the stage alone: `makiba down` sets a launch's stage to `failed` while it suspends the run, and writes no `worker_spawn_failed`. A run `suspended` is shown as "suspended" under the runs, not as gone wrong. The reason is shown only from a `worker_spawn_failed` event whose `spawn_id` is the run's newest launch; an older launch's failure is never attached | The status today. The reason is missing: `runs[]` does not print the newest launch's `spawn_id` or its reason (section 6); until then the row says "launch failed" with no reason |
 | Went wrong: the dispatcher is silent | `makibad.running`, `.heartbeat_at` | Today |
 | Went wrong: the last scan failed | `next_work.status` `error`, `.error` | Today |
 | Runs outside a range, stopped first | `runs[]`: `task_id`, `kind`, `project`, `status`, `stage`; the worker's state and age from `terminals[]` by the name `w-<task_id>` | Today, without a title and without "since" for the run itself: missing |
 | Order "stopped first" | Failed launch, then an anomaly, then `waiting_person`, then a terminal `blocked` or `idle`, then the rest by age | Computed by the screen from the fields above |
 | Closed today | Events `run_closed` since local midnight | Today, from the events |
-| Pull requests: each watch and its head | `pr_watches[]`: `repo`, `pr`, `head_oid`, `task_id`, `started_at` | Today |
-| What CI concluded | The newest `ci_completed` event of that `repo`, `pr` and `head_oid`: `status`, `fail_count`, `total_checks` | Today, from the events; `pr_watches[].ci` would make it one read (section 6) |
+| Pull requests: the heads CI is running on | `pr_watches[]`: `repo`, `pr`, `head_oid`, `task_id`, `started_at`. Only watches still `watching` are listed: a watch leaves the list the moment CI concludes | Today |
+| Pull requests: what CI concluded | Not on `status`. The panel keeps its own list from the events: a `pr` event (`opened`, `pushed`) adds or replaces a row by `repo` and `pr`; `ci_completed` of the same `head_oid` sets its conclusion (`status`, `fail_count`, `total_checks`); `pr_merged` marks it merged; `run_closed` of its task with no merge removes it | Today from the events, as a stopgap; missing as a field (section 6), and built into the first version only with that field |
 | The trail of one run | Events with that `task_id`, oldest first | Today; the screen keeps the events it has read, since `events` has no filter by task (section 6) |
 
 The trail names each event in the person's words (`belt_dispatched`: "Dispatched by makibad"; `worker_spawn_verified`: "Launch verified"; `belt_stopped`: "Stopped for you"). A kind with no wording is shown by its name, never dropped.
@@ -104,11 +106,11 @@ Reading needs no key. Every act is a verb of the door, sent as the person's `mak
 | --- | --- | --- | --- |
 | Yes / No, with a note | `answer <pending id> yes\|no [--note]` | Person | `stale` or `conflict` is shown in the entry; nothing is retried. |
 | Talk it over first | none | none | Moves the focus to the conversation. |
-| Approve this read | `range approve <id>` with the read's id shown | Person | A newer read is `stale`: the screen shows the new read and asks again. |
+| Approve this read | The door's `range` `approve` with `read` set to the `ranges[].read_id` the screen showed | Person | A newer read is `stale`: the screen shows the new read and asks again. The person's command cannot say which read: `makiba range approve <id>` fetches the newest read itself, so with `--yes` it could approve a read the screen never showed. The screen therefore sends the door request, or the command gets a `--read <id>` argument first (part of the boundary design below). The read-only screen's line to type is `makiba range approve <id>` without `--yes`: the command prints its read and asks. |
 | Pause | `range pause <id> --reason` | Person | The reason is asked for; "paused from the screen" when left empty. |
 | Resume | `range resume <id>` | Person | |
 | End | `range end <id>` | Person | Asks once: work already running goes on to its end. |
-| Ask for this | `send secretary "<text>"` | Person | A fixed sentence naming the Issue: "Please take up Issue #N (<title>)." The secretary decides how; the screen dispatches nothing. |
+| Ask for this | `send secretary "<text>"` | Person | A fixed sentence naming the repository and the Issue: "Please take up OWNER/NAME#N (<title>)." The secretary decides how; the screen dispatches nothing. |
 
 "Ask for this" is a message and not a `dispatch` so that the secretary stays the one contact (goal G1) and the brief stays the secretary's work. A new range is drafted in the conversation (belt.md section 1); the screen has no form for one.
 
@@ -152,8 +154,9 @@ Each is a small addition to `status --json` with a row in the table `Status fiel
 | `runs[].title`, `runs[].since`, `runs[].issue`, `runs[].range_id` | "Other runs" and the trail's heading | A run outside a range is shown by its task id only, with its terminal's age. |
 | `next_work.left_out[].title` | "Cannot go in yet" | The row shows the number and the reason. |
 | `pending[].stop_line`, `.to`, and the `belt[]` rows (belt.md section 7, step 5) | The entry's range; what stopped and why, per task | Read from `ranges[].stops[]` and `ranges[].items[]`, which cover a first version. |
-| `pr_watches[].ci` (the newest conclusion at the head) | Pull requests | Folded from `ci_completed` events by the screen. |
-| `runs[].launch_failed_reason` | Went wrong | Folded from `worker_spawn_failed`. |
+| `pull_requests[]`: every pull request of a run not closed, with `repo`, `pr`, `head_oid`, `task_id`, `ci` (`running`, or the newest conclusion at that head) | Pull requests | `pr_watches[]` drops a watch when CI concludes, so the conclusion is folded from `pr`, `ci_completed` and `pr_merged` events by the screen. |
+| `runs[].launch_failed_reason` (the newest launch's `failed_reason`) | Went wrong | The row says "launch failed" with no reason: without the newest launch's `spawn_id` an event cannot be tied to it. |
+| `conversation_language`, as resolved | Every label | The screen's own `--language`, else its process's environment. |
 | `events --task <task_id>` | The trail of an old run | The screen keeps what it has read; a run older than its memory is read again from event 0. |
 | `closed_today[]`, or runs closed since a time | "Closed today" | Folded from `run_closed`. |
 

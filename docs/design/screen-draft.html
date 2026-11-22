@@ -250,13 +250,13 @@
     <section class="col centre">
       <div class="ask">
         <div class="over">Waits for you <span>#14 · task r2-169 · range 2 · asked 6 min ago by the secretary</span></div>
-        <p class="q">Build the first version of the screen as a page on 127.0.0.1, and put it into the app later?</p>
-        <p class="bg">The worker finished the design. Whether the app can read the read surface is not measured yet, and the measurement needs your machine. A page needs no measurement, but the conversation with the secretary would not sit inside it.</p>
+        <p class="q">Is the drawing of the screen agreed, so that the measurement on your machine comes next?</p>
+        <p class="bg">The worker finished the design note and the drawing. No code is written before you agree to the drawing, and where the screen runs is chosen only after four checks on the machine where the app runs.</p>
         <div class="ifs">
-          <div class="if rec"><h4>If yes · recommended</h4>The worker builds the page, read-only, behind <span class="mono">makiba screen</span>. Range 2 goes on; the measurement becomes its own Issue.</div>
-          <div class="if"><h4>If no</h4>The task parks until you have run the measurement. Its slot is given to the next Issue of the range.</div>
+          <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
+          <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
         </div>
-        <p class="rec-why"><b>Why yes:</b> the page and the app would show the same parts; only the frame differs, so nothing built for the page is thrown away.</p>
+        <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and the design review passed with its findings folded in.</p>
         <div class="act">
           <span class="btn primary">Yes</span>
           <span class="btn">No</span>
@@ -305,7 +305,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
           <div class="item landed"><span class="g">✓</span><span class="n">#270</span><span class="ti">The secretary's first-range line</span><span class="s">landed · 1 h</span>
             <span class="d">pull request 297 merged</span></div>
           <div class="item waiting_person"><span class="g">?</span><span class="n">#169</span><span class="ti">A screen for the person</span><span class="s">waits for you · 6 min</span>
-            <span class="d">a decision: where the first version runs</span></div>
+            <span class="d">a decision: is the drawing agreed</span></div>
           <div class="item in_work"><span class="g">●</span><span class="n">#272</span><span class="ti">Attention notifications</span><span class="s">at work · 14 min</span></div>
           <div class="item review"><span class="g">◆</span><span class="n">#273</span><span class="ti">A metrics report over the events</span><span class="s">review · CI running</span></div>
           <div class="item in_work"><span class="g" style="color:var(--red)">!</span><span class="n">#274</span><span class="ti">A defense report</span><span class="s" style="color:var(--red)">launch failed · 11 min</span></div>
@@ -338,7 +338,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
     <h2>Answer: several entries</h2>
     <p class="what">With more than one entry the place over the conversation is a list, oldest first; opening one shows it large, as above.</p>
     <div class="card">
-      <div class="row sel"><span class="q">Build the first version as a page on 127.0.0.1?</span><span class="s">6 min</span>
+      <div class="row sel"><span class="q">Is the drawing of the screen agreed?</span><span class="s">6 min</span>
         <span class="d">#14 · r2-169 · recommended: yes</span></div>
       <div class="row"><span class="q">May #272 add a dependency for desktop notices?</span><span class="s">2 min</span>
         <span class="d">#15 · r2-272 · recommended: no</span></div>
@@ -386,7 +386,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
 
   <div class="state">
     <h2>Put in: a range to approve</h2>
-    <p class="what">A range the secretary recorded as proposed. The screen shows the read makibad made for it; approving sends that read's id, with the person key.</p>
+    <p class="what">A range the secretary recorded as proposed. The screen shows the read makibad made for it and the text every task starts from; approving sends that read's id, with the person key.</p>
     <div class="card range">
       <div class="head"><b>Range 3</b><span class="chip wait">proposed</span><span style="flex:1"></span><span class="muted">makiba</span></div>
       <div class="terms">replaces range 2 · 3 at once · 30 tasks · merges: ask each time</div>
@@ -395,6 +395,8 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
       <div><span class="mono">#276</span> Stops written by code</div>
       <div class="muted"><span class="mono">#277</span> left out · waits for #276</div>
       <div class="muted"><span class="mono">#51</span>&nbsp; left out · label on-hold</div>
+      <div class="muted" style="font-size:12px; margin-top:8px">Every task starts from this text (whole, it scrolls):</div>
+      <div class="mono" style="border:1px solid var(--line); border-radius:6px; background:#fbf8ef; padding:6px 8px; margin-top:3px; max-height:74px; overflow:hidden; white-space:pre-wrap">You work on one Issue of suisya-systems/makiba in your own worktree. Read the Issue and the documents it names before you change anything. Keep the change to what the Issue asks; anything else goes into your done report …</div>
       <div class="foot"><span class="btn primary small">Approve this read</span><span class="btn small ghost">Change it with the secretary</span></div>
     </div>
   </div>
