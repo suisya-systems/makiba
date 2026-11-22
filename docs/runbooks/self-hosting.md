@@ -44,11 +44,12 @@ In a login shell on the host (not inside an agent), in the repository, at the co
 | First day | `bash scripts/runbooks/self-hosting.sh first-day` | The four checks before makiba's first range (section 10), in a scratch place like the rehearsal's: the build of this checkout, one real code worker that builds and asks for a diff review, the review by each reader, the landing gate's question. | none, but the trust entries of section 1 |
 | Register | `bash scripts/runbooks/self-hosting.sh register` | Starts the organization if it does not run, allows the owner `suisya-systems`, registers `makiba` with its network hosts, waits for the clone, places the ledger. | all of section 1 |
 | Triage | `bash scripts/runbooks/self-hosting.sh triage` | Dispatches one small document task, waits for its done report, closes it, waits for the scan, prints the scan's answer, checks two candidates with the GitHub CLI. | the events, notices and `out/` folder of section 1 |
+| Switch | `bash scripts/runbooks/self-hosting.sh switch --handover <file> [--issues 169,270]` | Restarts the real organization on `origin/main` with a new secretary, places the owner's private handover, and starts the count of Issue 51 (section 11). | all of section 11 |
 | Cleanup | `bash scripts/runbooks/self-hosting.sh cleanup` | Stops and removes the scratch places this script made (found by a marker file it wrote). Safe to run twice. It never touches the real organization. | none |
 
 Each takes `--dry-run`: it prints every command and runs none, and writes no file. Run that first if you want to see what a stage will do. `register` and `triage` also take `--yes`, which skips the question. `register --replace-ledger` replaces a different ledger already placed (the old one is kept beside it as `makiba.md.before-<UTC>`; without the flag a different ledger is kept and only the clause check applies).
 
-The order of the day: `check`, then `rehearse` (optional; whether to rehearse is the owner's choice on the day), then `register`, then `triage`. `first-day` (section 10) is its own line, run once before the owner moves makiba's development onto makiba (Issue 51); it needs none of the others. Each prints `RESULT self-hosting <stage>: ok` and the path of its results file, or `REFUSED: ... fix: ...`. A refusal changed nothing in that step; fix what it names and run the same line again. `register` and `triage` are safe to run again: an organization that runs is not started again, a project already registered with the same hosts is not registered again, and a ledger already placed is not replaced.
+The order of the day: `check`, then `rehearse` (optional; whether to rehearse is the owner's choice on the day), then `register`, then `triage`. `first-day` (section 10) is its own line, run once before the owner moves makiba's development onto makiba (Issue 51); it needs none of the others. `switch` (section 11) is the move itself, after `first-day`. Each prints `RESULT self-hosting <stage>: ok` and the path of its results file, or `REFUSED: ... fix: ...`. A refusal changed nothing in that step; fix what it names and run the same line again. `register` and `triage` are safe to run again: an organization that runs is not started again, a project already registered with the same hosts is not registered again, and a ledger already placed is not replaced.
 
 The results files are `.runbook-results/self-hosting-<stage>-<UTC>.txt` (not committed; `RUNBOOK_RESULTS_DIR` moves them). Every `CHECK <name>: PASS|FAIL|INFO` line there is a row of section 9. After a rehearsal the events and messages of the scratch organization are kept beside its file as `-events.txt` and `-messages.txt`.
 
@@ -189,3 +190,77 @@ The checks, each a `CHECK` line:
 4. **The landing gate's question reaches the person** (`gate-ask`, `gate-door`; the rest is a named step). The gate answers `ask` only for a real pull request: it reads `gh pr view`, needs a passed `ci_completed` at that head and fetches the head into the clone (`gate_outside` in `src/daemon/door.rs`), and anything less is a refusal the hook turns into a deny. So the script feeds the real hook, `makiba hook merge-gate`, the payload of the secretary's one allowed landing command, against a stand-in door in the scratch place that answers as the gate does under `merge_approval_mode` `human` for a head with no diff review (allow, warn, a reason holding `WARNING`), and reads the hook's JSON: `permissionDecision` `ask` with the `WARNING` line (`gate-ask`). It also asks the scratch organization's real door once for a pull request that does not exist, and expects the gate's refusal (`gate-door`: it shows the gate key and the door answer). **This proves the hook's answer. It does not prove the gate's decision on a real head, and it does not prove that Claude Code shows the question.** What remains is a named step for the person, printed as a `NOT SHOWN` line: in the real secretary's session, when the first pull request of a code task is to be landed with a head that has no passed diff review, the secretary runs `gh pr merge <n> --repo suisya-systems/makiba --squash --match-head-commit <full head sha>`; the person looks for a question that carries `WARNING review of <head>: none`. A command that runs with no question is a failure of the hook's wiring, to be written in the results.
 
 The verdict is `READY: every check passed`, or `READY on what a script can show; left for the person: the NOT SHOWN lines` (always the case until the named step is done), or `NOT READY` with the `NEXT` lines. The stage needs the preconditions of section 4 (the same as `rehearse`), and the worker works from the project's `origin/main` on GitHub, not from this checkout: only the `makibad` is this checkout's build.
+
+## 11. The switch (stage `switch`, Issue 51)
+
+The owner moves makiba's development onto makiba itself. The person types one line in a login shell on the host, in their checkout of this repository, and then two lines to the secretary and one to approve a range. Nothing long is written or copied by hand: the stage prints each line whole, with the paths filled in.
+
+```sh
+bash scripts/runbooks/self-hosting.sh switch --handover <the previous secretary's handover file> --issues 169,270
+```
+
+`--issues` is optional: without it the line to the secretary tells it to take the Issues from section 1 of the handover file (the script holds no Issue number). `--dry-run` prints every command and changes nothing. The stage asks once (`yes`, or `--yes`), after it has printed what it is about to change.
+
+### 11.1 What it does, in this order
+
+Everything that can refuse comes first, so a refusal stops nothing:
+
+1. **Read only.** Not inside an agent; the tools; no test seam; `makiba status --json`: a run in work (`queued`, `in_use`, `review`) or a pending entry unanswered refuses, with the list (a `suspended` or `failed` run is only noted: `up` brings a suspended run back). The checkout must be on `main`, with no uncommitted change to a tracked file, and `git fetch origin` must show `HEAD` an ancestor of `origin/main` (a fast-forward; the script never resets or merges). `MAKIBA_MERGE_APPROVAL_MODE` must be unset or `human` (11.4). The state folder must lie outside the checkout (a `MAKIBA_STATE_DIR` inside it refuses, since the handover and the start file would land in a public repository). The handover, when named, must be a readable, non-empty regular file, and lie outside the checkout; naming the file already placed is allowed and keeps it.
+2. **Confirm.** Then `makiba down --secretary`: `makibad` and the worker terminals stop and the old secretary's terminal ends, so that the new secretary starts on the new role files and hooks. The base is not stopped (an update of the base is one of the three events of Issue 51 and is made on its own).
+3. **`git merge --ff-only origin/main`, then `cargo build`.** The build waits until `makibad` is stopped: a binary replaced under a running `makibad` leaves its hook and channel paths stale (`docs/installing.md`: down, reinstall, up). `MK=<path>` names a binary that is used as it is, without a build.
+4. **`makiba up`** (with the secretary). The stage waits (up to 10 minutes, `WAIT_SECRETARY`) for a secretary launch newer than the last one to be `verified` (an observed first turn) and for its terminal to be listed by `makiba status`. It prints `CHECK merge-approval-mode` from `makibad`'s own environment (`/proc/<pid>/environ`).
+5. **The read surface.** `CHECK verb-range`, `verb-review` and `verb-goal`: each `PASS` when the new binary's `--help` lists it, else `FAIL` and the line that rebuilds. Then the full `makiba status`. A binary carries no commit (version 0.0.0), so the commits are in the start file (11.5), not in the binary.
+6. **The start file and the handover** (11.3 and 11.5), then the lines to type (11.2).
+
+Kept as they are, and said before the question: the goal ledger already placed (the stage never calls `place_ledger`), the project registration and its network hosts, the clone, the keys, the base, every event and message.
+
+**Every failure after the stop names the next line**: a `RECOVER:` line, then `RESULT self-hosting switch: failed`. A failed `down` (it waits until `makibad` has let go of its lock, ends the terminals itself, and its exit status is the answer; `makiba status` is not used, since it shows `makibad` as running for 30 seconds after a stop): `makiba status`, `makiba up` if the organization is not as it was, then run the stage again; the checkout and the binary were not touched. A failed fast-forward or build: the old binary is still at its place and nothing was suspended, so `makiba up` brings the organization back as it was; fix the cause and run the stage again. A failed `up`, or a secretary whose launch failed or was not ready: `makiba up` again (it asks for the secretary again; the screen is in the `worker_spawn_failed` event, `makiba events --after <id> --json`). The stage is safe to run again at each of these points. The script ends in `exit` inside its branch because the fast-forward can change the script's own file while the shell runs it.
+
+### 11.2 What the person types, in order
+
+The stage ends with these, filled in (the attach line is taken from the `secretary:` line of `makiba status`):
+
+1. `HC_SESSION=<session> hc attach secretary` in the login shell.
+2. To the secretary: `Read <state>/secretary/handover-owner.md first: it is the handover from the previous organization's secretary (my decisions and how I want to be spoken to). It is private: never copy it into a repository, an issue, a pull request, a document, a message to a worker or a note. Then call status and tell me in three lines where we stand.`
+3. To the secretary, the first range: `Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all, the brief head of our usual conventions. Show me what it admits and what it leaves out, with the reason.` (The owner's decision of 2026-11-22: two at once, every open Issue that needs no host and is not labelled `backlog`, and a budget of twenty tasks, the measure of Issue 51. With no `--issues` the line says "the Issues listed in section 1 of <the handover>".) The secretary records it with `range propose`, reads `makiba status` (`ranges[].candidates`: each Issue admitted, or left out with the reason) and shows the person that list. Nothing is dispatched.
+4. In the person's own shell, with the id the secretary names: `makiba range approve <id>`. Only the person's key approves. It prints, before it asks `Approve range <id>? [y/N]`: the project and status, `Issues:`, `Takes:`, `At once: 2; tasks in all: 20`, `Merge approval mode (this shell's; makibad records its own): <mode>`, the `Brief head:`, and `Read at <time> - in the order they would go in:` with one line per Issue, `#<n> <title> - admitted` or `left out: <why>`. The person checks: the mode is `human`; the Issues and the condition are what the owner decided; the order is acceptable; an Issue at a trust boundary (git, the sandbox, keys, the push line) says "stop after the design" in the brief head. Then `y`. `has no complete read yet` means wait for `makibad` to read the draft; `stale` means it read the draft again after the preview, so run the line again. A range is never widened afterwards: more Issues or budget is a new proposal, approved again.
+
+### 11.3 The handover: where it is placed, and why there
+
+The previous organization's secretary wrote a handover for makiba's secretary: the owner's decisions and how the owner wants to be spoken to. It is operator-private and the repository is public, so it must never be committed, quoted in an Issue or a pull request, or put in a document.
+
+Place: **`<state>/secretary/handover-owner.md`**, mode 0600 (`<state>` is `$MAKIBA_STATE_DIR`, default `${XDG_STATE_HOME:-~/.local/state}/makiba`). Why, from the code:
+
+- That folder is the secretary's own working folder and its write surface (`prepare.rs`: `write_dirs` starts with the launch's folder; spec section 2). It is outside every repository. `makibad` only creates it if it is missing (`create_dir_all`); it is not emptied at a launch, so the file survives a renewal and a restart.
+- The secretary's settings deny it `state.db` (and its `-wal`/`-shm`), the keys, the base's and the core's folders, and nothing else of the state folder, so it can read the file. Its rules say a folder outside the registered repositories is the person's own and is never read unless the person names that path: the first line of 11.2 names it.
+- The knowledge folder is not used: the curator reads and merges it, and its notes can become skill candidates, so private text would reach the curator. The documents folder holds the folders of document workers. The `note` verb needs a task, goes to the curator as a raw note with four headings, and is the wrong audience. `makiba renew --handover-file <file>` would also reach the secretary (as the first brief of a fresh secretary), but the text would be stored in a row of `state.db` for good and is limited to 32 KiB; it is not used.
+
+`--handover <file>` copies the file there with mode 0600, refuses a file inside the checkout, keeps an older different copy as `handover-owner.md.before-<UTC>`, and leaves the original where it is. Without the flag the stage prints the one line that does it: `mkdir -p -m 700 <state>/secretary && install -m 600 <file> <state>/secretary/handover-owner.md`.
+
+### 11.4 The merge approval mode: human first
+
+The first range runs under the `human` mode, the owner's decision of 2026-11-22. The purpose is to gather what is needed to decide on `acceptance`: (1) to see, on the first real code pull request, that the agent host shows the landing gate's question to the person (only the human mode can show it; `first-day` proved the hook's answer, not what Claude Code shows: section 10, check 4); (2) to judge the secretary's recommendations from the stops on record. After ten recorded stops the owner decides, from how many answers matched the recommendation, whether to switch to `acceptance`.
+
+Where it is set: **only** the environment variable `MAKIBA_MERGE_APPROVAL_MODE`, read by `makibad` from its own environment before every answer of the gate (`src/daemon/gate.rs`), which `makiba up` passes on from the shell that runs it. `config set merge_approval_mode` is "not built yet" and `config get` always answers null, so there is no second place and nothing to win over it. Unset, `human`, or any value but `acceptance` is `human`. `makiba status` and `makiba range approve` print the value of **their own** shell; the stage prints `makibad`'s from `/proc` after `up`. The stage refuses to go on when this shell holds a value that is not `human`, and says the one line that clears it: `unset MAKIBA_MERGE_APPROVAL_MODE`.
+
+The change to `acceptance` is the owner's, and it is this one line, typed when nothing is in work:
+
+```sh
+makiba down --secretary && MAKIBA_MERGE_APPROVAL_MODE=acceptance makiba up
+```
+
+A range approved under `human` does not widen when the mode changes: it needs its own approval again (`range` records the mode it was approved under).
+
+### 11.5 The record for Issue 51
+
+The stage writes **`<state>/self-hosting-start.txt`** once and never overwrites it (a second run prints the first): the UTC time, `origin/main` and the checkout's full commit, `count_after_event_id` (the newest event id after `up`), the base version of the newest `dispatcher_started`, and the mode in force. The count begins there and is read afterwards from the read surface only, never the tables:
+
+```sh
+sed -n 's/^count_after_event_id: //p' <state>/self-hosting-start.txt     # N
+makiba events --after N --json
+makiba status --json
+```
+
+- **Twenty pull requests landed through makiba:** the events of kind `pr_merged` after `N` (`makiba status --json`: `ranges[].items[].place` equal to `landed` shows the same landings per range). **`pr_merged` is written only for the tasks of a range** (spec section 5.8): a pull request landed from a one-off dispatch is not in it. The twenty are counted from range runs; a one-off landing is added by hand, with its pull request number, in `docs/reports/self-hosting-week.md`.
+- **The three events:** an update of the base is a `dispatcher_started` after `N` whose `base_version` differs from the start file's; a renewal of the secretary is `secretary_renewed`; a failed launch is `worker_spawn_failed`. One that has not happened by itself when the count is reached is brought about on purpose (Issue 51) and recorded as such.
+- Incidents met go to `docs/design/incidents.md` and an Issue for their test, as before.
