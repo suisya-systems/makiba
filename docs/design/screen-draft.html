@@ -6,162 +6,211 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <!--
   A drawn draft, not the screen: no script, no request, sample data only.
-  It goes with docs/design/screen.md, which names the read field behind every part.
-  Open it in a browser at 1440 px or wider.
+  It goes with docs/design/screen.md, which names the read field behind every part
+  and says what each place does when it is full (section 2.1).
+  Open it in a browser at 1440 px or wider. The two switches in the top line are drawn, not wired:
+  the dark variant is the third picture, and the wording stays English here (screen.md, section 2.2).
 -->
 <style>
+  :root, .light {
+    --paper: #f4f1e8; --panel: #fffdf7; --soft: #fbf8ef; --field: #ffffff;
+    --ink: #22261f; --ink2: #3d4138; --muted: #6c7064; --faint: #9a9d90;
+    --line: #e0dacb; --line2: #ece7da; --frame: #bdb8a8;
+    --grass: #3c7a4b; --grass-bg: #e6f0e3; --grass-soft: #f1f6ee; --work: #86b58f; --go: #3c7a4b; --go-ink: #ffffff;
+    --amber: #a9690c; --amber-bg: #fcefd2; --amber-line: #e9c47a; --wait-row: #fdf6e3;
+    --red: #ac3b2a; --red-bg: #f9e4df; --red-line: #e6b3a9; --red-line2: #f1d5cf; --alarm: #ac3b2a;
+    --slate: #46647f; --slate-bg: #e3ebf2; --idle: #d5d0c1; --thumb: #cfc9b8; --on-mark: #ffffff;
+    --term: #1c201b; --term-bar: #262b24; --term-ink: #d6dbcd; --term-dim: #8b9383; --term-line: #4a5145;
+  }
+  .dark {
+    --paper: #161915; --panel: #1e221d; --soft: #232822; --field: #161915;
+    --ink: #e5e8dd; --ink2: #c9cdbf; --muted: #9ba191; --faint: #70766a;
+    --line: #353b31; --line2: #2a2f27; --frame: #0b0d0a;
+    --grass: #86c692; --grass-bg: #213529; --grass-soft: #1d2b21; --work: #5c8f67; --go: #3f8250; --go-ink: #ffffff;
+    --amber: #e3ac52; --amber-bg: #3a2e14; --amber-line: #6d5521; --wait-row: #2c2616;
+    --red: #ea8a79; --red-bg: #3a1f1b; --red-line: #6a322a; --red-line2: #4a2620; --alarm: #9c3324;
+    --slate: #93b4d2; --slate-bg: #21303d; --idle: #454b40; --thumb: #4a5145; --on-mark: #10130f;
+    --term: #0e110d; --term-bar: #1a1e19; --term-ink: #d6dbcd; --term-dim: #8b9383; --term-line: #3d4439;
+  }
   :root {
-    --paper: #f4f1e8; --panel: #fffdf7; --ink: #22261f; --muted: #6c7064; --faint: #9a9d90;
-    --line: #e0dacb; --line2: #ece7da;
-    --grass: #3c7a4b; --grass-bg: #e6f0e3;
-    --amber: #a9690c; --amber-bg: #fcefd2; --amber-line: #e9c47a;
-    --red: #ac3b2a; --red-bg: #f9e4df;
-    --slate: #46647f; --slate-bg: #e3ebf2;
-    --term: #1c201b; --term-ink: #d6dbcd; --term-dim: #8b9383;
     --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
     --sans: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
   }
   * { box-sizing: border-box; }
-  body { margin: 0; background: #d9d5c8; color: var(--ink); font: 13px/1.45 var(--sans); }
-  h1, h2, h3, p, ul, ol { margin: 0; padding: 0; }
+  body { margin: 0; background: #d9d5c8; color: #22261f; font: 13px/1.45 var(--sans); }
+  h1, h2, h3, h4, p, ul, ol { margin: 0; padding: 0; }
   ul, ol { list-style: none; }
-  .note { max-width: 1440px; margin: 18px auto 8px; padding: 0 4px; color: #4d5046; font-size: 12.5px; }
-  .note b { color: var(--ink); }
+  .note { max-width: 1440px; margin: 22px auto 8px; padding: 0 4px; color: #4d5046; font-size: 12.5px; }
+  .note b { color: #22261f; }
 
-  /* ---------- the screen ---------- */
-  .screen { width: 1440px; height: 900px; margin: 0 auto; background: var(--paper);
-            display: grid; grid-template-rows: 44px 1fr; border: 1px solid #bdb8a8; overflow: hidden; }
-  .top { display: flex; align-items: center; gap: 14px; padding: 0 16px; background: var(--panel);
-         border-bottom: 1px solid var(--line); }
+  /* ---------- the screen: a fixed frame; nothing inside it is cut without a mark ---------- */
+  .screen { width: 1440px; height: 900px; margin: 0 auto; background: var(--paper); color: var(--ink);
+            display: grid; grid-template-rows: 44px minmax(0, 1fr); border: 1px solid var(--frame); overflow: hidden; }
+  .top { display: flex; align-items: center; gap: 12px; padding: 0 16px; background: var(--panel);
+         border-bottom: 1px solid var(--line); white-space: nowrap; }
   .brand { font-weight: 700; letter-spacing: .02em; font-size: 15px; }
   .brand i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--grass);
              margin-right: 7px; vertical-align: 1px; }
-  .top .org { color: var(--muted); }
-  .top .sp { flex: 1; }
+  .top .org { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+  .sp { flex: 1; }
   .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
-          font-size: 12px; font-weight: 600; border: 1px solid transparent; }
+          font-size: 12px; font-weight: 600; border: 1px solid transparent; white-space: nowrap; }
   .chip.wait { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-line); }
-  .chip.bad { background: var(--red-bg); color: var(--red); border-color: #e6b3a9; }
+  .chip.bad { background: var(--red-bg); color: var(--red); border-color: var(--red-line); }
   .chip.ok { background: var(--grass-bg); color: var(--grass); }
   .chip.quiet { color: var(--muted); border-color: var(--line); font-weight: 500; }
-  .cols { display: grid; grid-template-columns: 348px 1fr 432px; min-height: 0; }
-  .col { min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .set { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; }
+  .set span { padding: 3px 8px; color: var(--muted); border-left: 1px solid var(--line); }
+  .set span:first-child { border-left: 0; }
+  .set .on { background: var(--line2); color: var(--ink); font-weight: 600; }
+  .cols { display: grid; grid-template-columns: 348px minmax(0, 1fr) 432px; min-height: 0; }
+  .col { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
   .col.left { border-right: 1px solid var(--line); }
   .col.right { border-left: 1px solid var(--line); }
-  .role { display: flex; align-items: baseline; gap: 8px; padding: 12px 16px 8px; }
-  .role h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
-  .role span { color: var(--faint); font-size: 12px; }
-  .sect { padding: 0 16px 14px; }
-  .sect > h3 { font-size: 13px; font-weight: 650; margin: 2px 0 8px; display: flex; align-items: baseline; gap: 8px; }
-  .sect > h3 small { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .role { flex: none; display: flex; align-items: baseline; gap: 8px; padding: 12px 16px 8px; }
+  .role h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; white-space: nowrap; }
+  .role span { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .sect { flex: none; padding: 0 16px 12px; min-width: 0; }
+  .sect.grow { flex: 1 1 auto; min-height: 132px; display: flex; flex-direction: column; }
+  .sect > h3 { flex: none; font-size: 13px; font-weight: 650; margin: 2px 0 8px; display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+  .sect > h3 small { font-weight: 400; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
   .sect > h3 .more { margin-left: auto; font-weight: 500; font-size: 12px; color: var(--slate); }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
+  /* a list that may be longer than its place scrolls inside itself, with a bar that is drawn whenever it is longer than its place */
+  .scroll { overflow-y: auto; scrollbar-gutter: stable; min-height: 0; scrollbar-width: thin; scrollbar-color: var(--thumb) transparent; }
+  .scroll::-webkit-scrollbar { width: 9px; }
+  .scroll::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 5px; border: 2px solid var(--panel); }
+  .scroll::-webkit-scrollbar-track { background: transparent; }
+  .sect.grow > .card { flex: 0 1 auto; }
+  /* a list that is capped ends with the line that says how many it does not show */
+  .fold { display: flex; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--line2); color: var(--slate); font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .fold span { color: var(--muted); font-weight: 400; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
   .mono { font-family: var(--mono); font-size: 12px; }
   .muted { color: var(--muted); }
-  .btn { display: inline-block; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line);
+  .btn { display: inline-block; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); white-space: nowrap;
          background: var(--panel); color: var(--ink); font: 600 12.5px var(--sans); }
-  .btn.primary { background: var(--grass); border-color: var(--grass); color: #fff; }
+  .btn.primary { background: var(--go); border-color: var(--go); color: var(--go-ink); }
   .btn.small { padding: 2px 9px; font-size: 12px; font-weight: 550; }
   .btn.ghost { color: var(--muted); font-weight: 500; }
-  .key { font-size: 11px; color: var(--faint); margin-left: 6px; }
 
   /* ---------- put in ---------- */
   .range { padding: 12px 14px; }
-  .range .head { display: flex; align-items: center; gap: 8px; }
+  .range .head { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
   .range .head b { font-size: 14px; }
   .range .terms { color: var(--muted); margin-top: 3px; }
   .bar { height: 6px; border-radius: 3px; background: var(--line2); margin: 10px 0 4px; overflow: hidden; }
   .bar i { display: block; height: 100%; background: var(--grass); border-radius: 3px; }
   .range .foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-  .cand { padding: 9px 12px; border-top: 1px solid var(--line2); }
+  .cand { padding: 8px 12px; border-top: 1px solid var(--line2); min-width: 0; }
   .cand:first-child { border-top: 0; }
-  .cand .t { display: flex; gap: 8px; align-items: baseline; }
-  .cand .t .n { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; }
-  .cand .t .ti { font-weight: 550; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .cand .m { display: flex; gap: 6px; align-items: center; margin-top: 4px; color: var(--muted); font-size: 12px; }
-  .cand .m .why { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tag { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--line2); color: #55594d; flex: none; }
+  .cand .t, .out .t { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
+  /* the reference: as wide as its text, never wrapped; the title keeps 16 characters before it is cut */
+  .ref { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; min-width: 4.2ch; }
+  .cand .ti { font-weight: 550; flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .refline { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cand .m { display: flex; gap: 6px; align-items: center; margin-top: 4px; color: var(--muted); font-size: 12px; min-width: 0; }
+  .cand .m .why { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--line2); color: var(--ink2); flex: none; white-space: nowrap; }
   .tag.first { background: var(--grass-bg); color: var(--grass); }
-  .out { padding: 7px 12px; border-top: 1px solid var(--line2); display: grid; grid-template-columns: 44px 1fr; gap: 2px 8px; }
+  .tag.none { background: var(--amber-bg); color: var(--amber); }
+  .out { padding: 6px 12px; border-top: 1px solid var(--line2); min-width: 0; }
   .out:first-child { border-top: 0; }
-  .out .n { font-family: var(--mono); font-size: 12px; color: var(--faint); }
-  .out .ti { color: #4b4f44; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .out .why { grid-column: 2; font-size: 12px; color: var(--muted); }
-  .out .why b { font-weight: 600; color: #5c6055; }
+  .out .ti { color: var(--ink2); flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .out .why { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .out .why b { font-weight: 600; color: var(--ink2); }
 
   /* ---------- centre: answer, then the conversation ---------- */
   .centre { padding: 12px 16px 16px; gap: 12px; }
+  /* the card never takes more than half the column; its middle scrolls, the question and the buttons stay */
   .ask { background: var(--panel); border: 1px solid var(--amber-line); border-left: 5px solid var(--amber);
-         border-radius: 8px; padding: 12px 16px 12px 14px; flex: none; }
+         border-radius: 8px; flex: 0 1 auto; max-height: 52%; min-height: 0; display: flex; flex-direction: column; }
+  .ask .hd { flex: none; padding: 11px 16px 0 14px; }
   .ask .over { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--amber); font-weight: 650;
-               letter-spacing: .04em; text-transform: uppercase; }
-  .ask .over span { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
-  .ask .q { font-size: 17px; line-height: 1.35; font-weight: 650; margin: 5px 0 8px; }
-  .ask .bg { color: #3d4138; max-width: 86ch; }
+               letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
+  .ask .over span { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; overflow: hidden; text-overflow: ellipsis; }
+  .ask .over .nav { margin-left: auto; color: var(--slate); font-weight: 600; flex: none; }
+  .ask .q { font-size: 17px; line-height: 1.35; font-weight: 650; margin: 5px 0 8px;
+            display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical; overflow: hidden; }
+  .ask .bd { flex: 1 1 auto; padding: 0 8px 6px 14px; margin-right: 4px; }
+  .ask .bd.plain { overflow: visible; }
+  .ask .bg { color: var(--ink2); max-width: 86ch; }
+  .ask .bg + .bg { margin-top: 6px; }
+  .ask .whole { color: var(--ink2); border-left: 2px solid var(--line); padding-left: 10px; margin-bottom: 8px; max-width: 86ch; }
+  .ask .whole b { display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
   .ask .ifs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
-  .ask .if { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: #fbf8ef; }
+  .ask .if { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--soft); min-width: 0; }
   .ask .if h4 { margin: 0 0 2px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-  .ask .if.rec { border-color: var(--grass); background: #f1f6ee; }
+  .ask .if.rec { border-color: var(--grass); background: var(--grass-soft); }
   .ask .if.rec h4 { color: var(--grass); }
-  .ask .rec-why { color: #3d4138; }
+  .ask .rec-why { color: var(--ink2); }
   .ask .rec-why b { color: var(--grass); }
-  .ask .act { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-  .ask .act .field { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: var(--faint); background: #fff; }
-  .term { flex: 1; min-height: 0; background: var(--term); border-radius: 8px; color: var(--term-ink);
+  .ask .act { flex: none; display: flex; align-items: center; gap: 8px; padding: 9px 16px 11px 14px; border-top: 1px solid var(--line2); }
+  .ask .act .field { flex: 1 1 0; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: var(--faint);
+                     background: var(--field); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .term { flex: 1 1 0; min-height: 150px; background: var(--term); border-radius: 8px; color: var(--term-ink);
           font: 12.5px/1.55 var(--mono); display: flex; flex-direction: column; overflow: hidden; }
-  .term .bar2 { display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: #262b24; color: var(--term-dim);
-                font: 12px var(--sans); }
+  .term .bar2 { flex: none; display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: var(--term-bar); color: var(--term-dim);
+                font: 12px var(--sans); white-space: nowrap; }
   .term .bar2 b { color: #e8ecdf; font-weight: 600; }
   .term .bar2 .dot { width: 7px; height: 7px; border-radius: 50%; background: #7fbf7a; }
-  .term .body { padding: 12px 14px; flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+  .term .body { padding: 12px 14px; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
   .term .you { color: #f0f3e8; margin-top: 10px; }
   .term .you::before { content: "> "; color: var(--term-dim); }
   .term .sec { margin-top: 6px; white-space: pre-wrap; }
   .term .dim { color: var(--term-dim); }
-  .term .prompt { margin-top: 12px; border: 1px solid #4a5145; border-radius: 6px; padding: 7px 10px; color: #f0f3e8; }
+  .term .prompt { margin-top: 12px; border: 1px solid var(--term-line); border-radius: 6px; padding: 7px 10px; color: #f0f3e8; }
   .term .prompt::before { content: "> "; color: var(--term-dim); }
   .term .cursor { display: inline-block; width: 7px; height: 14px; background: #d6dbcd; vertical-align: -2px; }
 
   /* ---------- watch ---------- */
-  .belt { display: flex; gap: 3px; margin: 2px 0 6px; }
+  .belt { flex: none; display: flex; gap: 3px; margin: 2px 0 6px; }
   .belt i { flex: 1; height: 10px; border-radius: 2px; background: var(--line); }
-  .belt .landed { background: var(--grass); } .belt .review { background: var(--slate); }
-  .belt .in_work { background: #86b58f; } .belt .waiting_person { background: var(--amber); }
-  .belt .not_in { background: #d5d0c1; } .belt .skipped { background: repeating-linear-gradient(135deg, #d5d0c1 0 3px, #f4f1e8 3px 6px); }
-  .counts { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .belt .landed, .nums .landed { background: var(--grass); } .belt .review, .nums .review { background: var(--slate); }
+  .belt .in_work, .nums .in_work { background: var(--work); } .belt .waiting_person, .nums .waiting_person { background: var(--amber); }
+  .belt .failed, .nums .failed { background: var(--red); }
+  .belt .not_in, .nums .not_in { background: var(--idle); }
+  .belt .skipped, .nums .skipped { background: repeating-linear-gradient(135deg, var(--idle) 0 3px, var(--paper) 3px 6px); }
+  /* many items: one piece per place, as wide as its share, with its number written in it */
+  .nums { flex: none; display: flex; gap: 2px; margin: 2px 0 6px; height: 18px; }
+  .nums i { min-width: 20px; border-radius: 3px; font: 700 11px/18px var(--mono); font-style: normal; text-align: center; color: var(--on-mark); }
+  .nums .not_in, .nums .skipped { color: var(--ink); }
+  .counts { flex: none; display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
   .counts b { color: var(--ink); font-weight: 650; }
-  .item { display: grid; grid-template-columns: 18px 40px 1fr auto; gap: 0 6px; align-items: baseline; padding: 6px 12px;
-          border-top: 1px solid var(--line2); }
+  .item { display: flex; flex-wrap: wrap; gap: 0 7px; align-items: baseline; padding: 6px 12px; border-top: 1px solid var(--line2); min-width: 0; }
   .item:first-child { border-top: 0; }
-  .item .g { font-size: 12px; text-align: center; }
-  .item .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
-  .item .ti { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .item .s { font-size: 12px; color: var(--muted); white-space: nowrap; }
-  .item .d { grid-column: 3 / 5; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .g { flex: none; width: 14px; font-size: 12px; text-align: center; }
+  .item .ti { flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .s { flex: none; font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: auto; }
+  .item .d { flex: 0 0 100%; min-width: 0; padding-left: 21px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .d .mono { font-size: 11.5px; }
   .item.landed .g { color: var(--grass); } .item.review .g { color: var(--slate); }
-  .item.in_work .g { color: #5d9668; } .item.waiting_person .g, .item.waiting_person .s { color: var(--amber); font-weight: 600; }
-  .item.waiting_person { background: #fdf6e3; }
+  .item.in_work .g { color: var(--work); } .item.waiting_person .g, .item.waiting_person .s { color: var(--amber); font-weight: 600; }
+  .item.failed .g, .item.failed .s { color: var(--red); }
+  .item.waiting_person { background: var(--wait-row); }
   .item.not_in .ti, .item.skipped .ti { color: var(--muted); } .item.not_in .g, .item.skipped .g { color: var(--faint); }
-  .wrong { border-color: #e6b3a9; }
-  .w { padding: 8px 12px; border-top: 1px solid #f1d5cf; display: grid; grid-template-columns: 1fr auto; gap: 0 8px; }
+  .wrong { border-color: var(--red-line); }
+  .wrong .fold { border-top-color: var(--red-line2); }
+  .wrong.tight .w .d { -webkit-line-clamp: 1; }
+  .w { padding: 7px 12px; border-top: 1px solid var(--red-line2); display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; min-width: 0; }
   .w:first-child { border-top: 0; }
-  .w b { color: var(--red); font-weight: 650; }
-  .w .s { color: var(--muted); font-size: 12px; }
-  .w .d { grid-column: 1 / 3; color: #4b4f44; font-size: 12px; }
-  .inner { display: flex; gap: 6px; padding: 0 16px 14px; margin-top: auto; }
-  .inner .btn { flex: 1; text-align: center; font-weight: 550; }
+  .w b { color: var(--red); font-weight: 650; flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .w .s { color: var(--muted); font-size: 12px; flex: none; white-space: nowrap; }
+  .w .d { flex: 0 0 100%; color: var(--ink2); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+  .inner { flex: none; display: flex; gap: 6px; padding: 2px 16px 14px; margin-top: auto; }
+  .inner .btn { flex: 1 1 0; min-width: 0; text-align: center; font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
   .inner .btn small { display: block; font-weight: 400; color: var(--muted); font-size: 11.5px; }
 
   /* ---------- the other states ---------- */
-  .states { width: 1440px; margin: 14px auto 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
-  .state { background: var(--paper); border: 1px solid #bdb8a8; padding: 12px 14px 14px; }
+  .states { width: 1440px; margin: 14px auto 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; color: var(--ink); }
+  .state { background: var(--paper); border: 1px solid var(--frame); padding: 12px 14px 14px; min-width: 0; }
   .state > h2 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
-  .state > p.what { color: #4d5046; font-size: 12px; margin-bottom: 10px; min-height: 34px; }
-  .row { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; padding: 8px 12px; border-top: 1px solid var(--line2); }
+  .state > p.what { color: var(--ink2); font-size: 12px; margin-bottom: 10px; min-height: 34px; }
+  .state .item .n { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding: 8px 12px; border-top: 1px solid var(--line2); }
   .row:first-child { border-top: 0; }
   .row .q { font-weight: 600; } .row .s { color: var(--muted); font-size: 12px; white-space: nowrap; }
   .row .d { grid-column: 1 / 3; color: var(--muted); font-size: 12px; }
-  .row.sel { background: #fdf6e3; box-shadow: inset 3px 0 0 var(--amber); }
+  .row.sel { background: var(--wait-row); box-shadow: inset 3px 0 0 var(--amber); }
   .trail { padding: 10px 12px; }
   .trail li { display: grid; grid-template-columns: 42px 12px 1fr; gap: 0 8px; position: relative; padding-bottom: 9px; }
   .trail li .tm { font: 11.5px var(--mono); color: var(--faint); text-align: right; padding-top: 1px; }
@@ -171,18 +220,19 @@
   .trail li.stop .pt { border-color: var(--amber); background: var(--amber); }
   .trail li.bad .pt { border-color: var(--red); background: var(--red); }
   .trail li .k { font-weight: 600; } .trail li .p { display: block; color: var(--muted); font-size: 12px; }
-  .banner { background: var(--red); color: #fff; padding: 9px 12px; border-radius: 8px; margin-bottom: 8px; }
+  .banner { background: var(--alarm); color: #fff; padding: 9px 12px; border-radius: 8px; margin-bottom: 8px; }
   .banner b { display: block; font-size: 14px; } .banner code { white-space: nowrap; font-family: var(--mono); background: rgba(255,255,255,.18); padding: 0 5px; border-radius: 3px; }
-  .ci { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; }
+  .ci { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
   .ci.passed { background: var(--grass-bg); color: var(--grass); } .ci.failed { background: var(--red-bg); color: var(--red); }
   .ci.run { background: var(--slate-bg); color: var(--slate); }
+  .brief { border: 1px solid var(--line); border-radius: 6px; background: var(--soft); padding: 6px 8px; margin-top: 3px; max-height: 92px; white-space: pre-wrap; }
 </style>
 </head>
 <body>
 
-<p class="note"><b>Draft for Issue 169, sample data.</b> The main screen, with a range running, one entry waiting for the person and one thing gone wrong. Left: put in. Centre: the conversation with the secretary, and over it what waits for an answer. Right: watch. The six panels under it are the states the main picture does not show.</p>
+<p class="note"><b>Draft for Issue 169, sample data. 1. A quiet day.</b> One project, a range of seven, one entry waiting, one thing gone wrong. Left: put in. Centre: the conversation with the secretary, and over it what waits for an answer. Right: watch.</p>
 
-<div class="screen">
+<div class="screen light">
   <header class="top">
     <span class="brand"><i></i>makiba</span>
     <span class="org">suisya-systems/makiba</span>
@@ -190,139 +240,73 @@
     <span class="chip wait">1 waits for you</span>
     <span class="chip bad">1 went wrong</span>
     <span class="chip quiet">makibad running · read 3 s ago</span>
+    <span class="set"><span class="on">English</span><span>Japanese</span></span>
+    <span class="set"><span>Auto</span><span class="on">Light</span><span>Dark</span></span>
   </header>
-
   <div class="cols">
 
-    <!-- ================= PUT IN ================= -->
     <section class="col left">
       <div class="role"><h2>Put in</h2><span>hand work to the organization</span></div>
-
       <div class="sect">
         <div class="card range">
-          <div class="head"><b>Range 2</b><span class="chip ok">running</span><span class="sp" style="flex:1"></span><span class="muted">makiba</span></div>
+          <div class="head"><b>Range 2</b><span class="chip ok">running</span><span class="sp"></span><span class="muted">makiba</span></div>
           <div class="terms">Issues 169, 270 and 5 more · 2 at once</div>
           <div class="bar"><i style="width:25%"></i></div>
           <div class="muted" style="font-size:12px"><b style="color:var(--ink)">5</b> of 20 tasks used · approved today 09:12</div>
-          <div class="foot">
-            <span class="btn small">Pause</span>
-            <span class="btn small ghost">End</span>
-            <span class="sp" style="flex:1"></span>
-            <span class="muted" style="font-size:12px">widen it: ask the secretary</span>
-          </div>
+          <div class="foot"><span class="btn small">Pause</span><span class="btn small ghost">End</span><span class="sp"></span><span class="muted" style="font-size:12px">widen it: ask the secretary</span></div>
         </div>
       </div>
-
-      <div class="sect">
+      <div class="sect grow">
         <h3>Could go in now <small>4, outside the range</small></h3>
-        <div class="card">
-          <div class="cand">
-            <div class="t"><span class="n">#283</span><span class="ti">The gate reports edited tests</span></div>
-            <div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">first choice · follow-up of #257</span><span class="btn small">Ask for this</span></div>
-          </div>
-          <div class="cand">
-            <div class="t"><span class="n">#276</span><span class="ti">Stops written by code (belt step 2)</span></div>
-            <div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div>
-          </div>
-          <div class="cand">
-            <div class="t"><span class="n">#262</span><span class="ti">Status text lists the ranges</span></div>
-            <div class="m"><span class="tag" style="background:var(--amber-bg);color:var(--amber)">no clause</span><span class="tag">S~</span><span class="why">ranked last</span><span class="btn small">Ask for this</span></div>
-          </div>
-          <div class="cand">
-            <div class="t"><span class="n">#288</span><span class="ti">Runbook for a second project</span></div>
-            <div class="m"><span class="tag">G10</span><span class="tag">S</span><span class="why">documents only</span><span class="btn small">Ask for this</span></div>
-          </div>
-        </div>
+        <div class="card scroll"><div class="cand"><div class="t"><span class="ref">#283</span><span class="ti">The gate reports edited tests</span></div><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">first choice · follow-up of #257</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ref">#276</span><span class="ti">Stops written by code (belt step 2)</span></div><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ref">#262</span><span class="ti">Status text lists the ranges</span></div><div class="m"><span class="tag none">no clause</span><span class="tag">S~</span><span class="why">ranked last</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ref">#288</span><span class="ti">Runbook for a second project</span></div><div class="m"><span class="tag">G10</span><span class="tag">S</span><span class="why">documents only</span><span class="btn small">Ask for this</span></div></div></div>
       </div>
-
-      <div class="sect" style="min-height:0; overflow:hidden">
+      <div class="sect">
         <h3>Cannot go in yet <small>4</small><span class="more">scanned 10:41</span></h3>
-        <div class="card">
-          <div class="out"><span class="n">#277</span><span class="ti">Parking terminals</span><span class="why"><b>Held by a dependency</b> · waits for #276</span></div>
-          <div class="out"><span class="n">#279</span><span class="ti">A server installation</span><span class="why"><b>Held by a dependency</b> · waits for #62</span></div>
-          <div class="out"><span class="n">#51</span><span class="ti">Thirty landed pull requests</span><span class="why"><b>Put aside</b> · label on-hold, set by you</span></div>
-          <div class="out"><span class="n">—</span><span class="ti">suisya-systems/libretto</span><span class="why"><b>No goal ledger</b> · 7 Issues not ranked</span></div>
-        </div>
+        <div class="card"><div class="out"><div class="t"><span class="ref">#277</span><span class="ti">Parking terminals</span></div><span class="why"><b>Held by a dependency</b> · waits for #276</span></div><div class="out"><div class="t"><span class="ref">#279</span><span class="ti">A server installation</span></div><span class="why"><b>Held by a dependency</b> · waits for #62</span></div><div class="out"><div class="t"><span class="ref">#51</span><span class="ti">Thirty landed pull requests</span></div><span class="why"><b>Put aside</b> · label on-hold, set by you</span></div><div class="out"><div class="t"><span class="ti mono">suisya-systems/libretto</span></div><span class="why"><b>No goal ledger</b> · 7 Issues not ranked</span></div></div>
       </div>
     </section>
 
-    <!-- ================= CENTRE ================= -->
     <section class="col centre">
       <div class="ask">
-        <div class="over">Waits for you <span>#14 · task r2-169 · range 2 · asked 6 min ago by the secretary</span></div>
-        <p class="q">Is the drawing of the screen agreed, so that the measurement on your machine comes next?</p>
-        <p class="bg">The worker finished the design note and the drawing. No code is written before you agree to the drawing, and where the screen runs is chosen only after four checks on the machine where the app runs.</p>
-        <div class="ifs">
-          <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
-          <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
+        <div class="hd">
+          <div class="over">Waits for you <span>#14 · task r2-169 · range 2 · asked 6 min ago by the secretary</span></div>
+          <p class="q">Is the drawing of the screen agreed, so that the measurement on your machine comes next?</p>
         </div>
-        <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and the design review passed with its findings folded in.</p>
-        <div class="act">
-          <span class="btn primary">Yes</span>
-          <span class="btn">No</span>
-          <span class="field">a note to go with the answer (optional)</span>
-          <span class="btn ghost">Talk it over first</span>
+        <div class="bd plain">
+          <p class="bg">The worker finished the design note and the drawing. No code is written before you agree to the drawing, and where the screen runs is chosen only after four checks on the machine where the app runs.</p>
+          <div class="ifs">
+            <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
+            <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
+          </div>
+          <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and the design review passed with its findings folded in.</p>
         </div>
+        <div class="act"><span class="btn primary">Yes</span><span class="btn">No</span><span class="field">a note to go with the answer (optional)</span><span class="btn ghost">Talk it over first</span></div>
       </div>
-
       <div class="term">
-        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span style="flex:1"></span><span>the secretary's own terminal</span></div>
-        <div class="body">
-          <div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
+        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span class="sp"></span><span>the secretary's own terminal</span></div>
+        <div class="body"><div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
           <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
 Left out: 279 (waits for #62), 251 (needs a host).
 <span class="dim">Approve it on the left, or tell me what to change.</span></div>
           <div class="you">Approved. Keep going.</div>
           <div class="sec">Range 2 is running. 270 landed as pull request 297.
 One question from r2-169 needs you; it is shown above with my recommendation (yes).
-<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div>
-          <div class="prompt"><span class="cursor"></span></div>
-        </div>
+<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div><div class="prompt"><span class="cursor"></span></div></div>
       </div>
     </section>
 
-    <!-- ================= WATCH ================= -->
     <section class="col right">
       <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
-
-      <div class="sect">
-        <h3>Went wrong <small>1</small></h3>
-        <div class="card wrong">
-          <div class="w"><b>r2-274 · launch failed</b><span class="s">11 min ago</span>
-            <span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div>
-        </div>
-      </div>
-
-      <div class="sect">
+      <div class="sect"><h3>Went wrong <small>1</small></h3><div class="card wrong"><div class="w"><b>r2-274 · launch failed</b><span class="s">11 min ago</span><span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div></div></div>
+      <div class="sect grow">
         <h3>Range 2, the whole of it <small>7 Issues</small></h3>
-        <div class="belt" aria-hidden="true">
-          <i class="landed"></i><i class="waiting_person"></i><i class="in_work"></i><i class="review"></i><i class="in_work" style="background:var(--red)"></i><i class="not_in"></i><i class="skipped"></i>
-        </div>
-        <div class="counts">
-          <span><b>1</b> landed</span><span><b>1</b> waits for you</span><span><b>1</b> in review</span><span><b>2</b> in work <span style="color:var(--red)">(1 failed to start)</span></span><span><b>1</b> not yet in</span><span><b>1</b> skipped</span>
-        </div>
-        <div class="card">
-          <div class="item landed"><span class="g">✓</span><span class="n">#270</span><span class="ti">The secretary's first-range line</span><span class="s">landed · 1 h</span>
-            <span class="d">pull request 297 merged</span></div>
-          <div class="item waiting_person"><span class="g">?</span><span class="n">#169</span><span class="ti">A screen for the person</span><span class="s">waits for you · 6 min</span>
-            <span class="d">a decision: is the drawing agreed</span></div>
-          <div class="item in_work"><span class="g">●</span><span class="n">#272</span><span class="ti">Attention notifications</span><span class="s">at work · 14 min</span></div>
-          <div class="item review"><span class="g">◆</span><span class="n">#273</span><span class="ti">A metrics report over the events</span><span class="s">review · CI running</span></div>
-          <div class="item in_work"><span class="g" style="color:var(--red)">!</span><span class="n">#274</span><span class="ti">A defense report</span><span class="s" style="color:var(--red)">launch failed · 11 min</span></div>
-          <div class="item not_in"><span class="g">○</span><span class="n">#279</span><span class="ti">A server installation</span><span class="s">not yet in</span>
-            <span class="d">waits for #62</span></div>
-          <div class="item skipped"><span class="g">–</span><span class="n">#251</span><span class="ti">Host record of the app check</span><span class="s">skipped</span>
-            <span class="d">needs a host</span></div>
-        </div>
+        <div class="belt" aria-hidden="true"><i class="landed"></i><i class="waiting_person"></i><i class="in_work"></i><i class="review"></i><i class="failed"></i><i class="not_in"></i><i class="skipped"></i></div><div class="counts"><span><b>1</b> landed</span><span><b>1</b> waits for you</span><span><b>1</b> in review</span><span><b>1</b> in work</span><span><b>1</b> failed to start</span><span><b>1</b> not yet in</span><span><b>1</b> skipped</span></div>
+        <div class="card scroll"><div class="item landed"><span class="g">✓</span><span class="ref">#270</span><span class="ti">The secretary&#x27;s first-range line</span><span class="s">landed · 1 h</span><span class="d">pull request 297 merged</span></div><div class="item waiting_person"><span class="g">?</span><span class="ref">#169</span><span class="ti">A screen for the person</span><span class="s">waits for you · 6 min</span><span class="d">a decision: is the drawing agreed</span></div><div class="item in_work"><span class="g">●</span><span class="ref">#272</span><span class="ti">Attention notifications</span><span class="s">at work · 14 min</span></div><div class="item review"><span class="g">◆</span><span class="ref">#273</span><span class="ti">A metrics report over the events</span><span class="s">review · CI running</span></div><div class="item failed"><span class="g">!</span><span class="ref">#274</span><span class="ti">A defense report</span><span class="s">launch failed · 11 min</span></div><div class="item not_in"><span class="g">○</span><span class="ref">#279</span><span class="ti">A server installation</span><span class="s">not yet in</span><span class="d">waits for #62</span></div><div class="item skipped"><span class="g">–</span><span class="ref">#251</span><span class="ti">Host record of the app check</span><span class="s">skipped</span><span class="d">needs a host</span></div></div>
       </div>
-
       <div class="sect">
-        <h3>Other runs <small>stopped first</small></h3>
-        <div class="card">
-          <div class="item in_work"><span class="g">●</span><span class="n" style="grid-column:2/4">docs-goals <span class="muted" style="font-family:var(--sans)">· document · at work</span></span><span class="s">32 min</span></div>
-        </div>
+        <h3>Other runs <small>1, stopped first</small></h3>
+        <div class="card"><div class="item in_work"><span class="g">●</span><span class="ti"><span class="mono">docs-goals</span> <span class="muted">· document · at work</span></span><span class="s">32 min</span></div></div>
       </div>
-
       <div class="inner">
         <span class="btn">Pull requests<small>2 watched</small></span>
         <span class="btn">Trail of a run<small>from the events</small></span>
@@ -331,8 +315,178 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
   </div>
 </div>
 
-<!-- ================= the other states ================= -->
-<div class="states">
+<p class="note"><b>2. A full day.</b> Two projects, so every reference is written <span style="font-family:var(--mono)">OWNER/NAME#N</span> on a line of its own. Fourteen candidates and five that cannot go in; a range of twenty; six things gone wrong; five other runs; three entries waiting, the open one long. A list that is the point of its place scrolls there, with its bar drawn; a list at the side is capped and ends in a line that counts the rest; the buttons at the foot stay.</p>
+
+<div class="screen light">
+  <header class="top">
+    <span class="brand"><i></i>makiba</span>
+    <span class="org">suisya-systems · 2 projects</span>
+    <span class="sp"></span>
+    <span class="chip wait">3 wait for you</span>
+    <span class="chip bad">6 went wrong</span>
+    <span class="chip quiet">makibad running · read 3 s ago</span>
+    <span class="set"><span class="on">English</span><span>Japanese</span></span>
+    <span class="set"><span>Auto</span><span class="on">Light</span><span>Dark</span></span>
+  </header>
+  <div class="cols">
+
+    <section class="col left">
+      <div class="role"><h2>Put in</h2><span>hand work to the organization</span></div>
+      <div class="sect">
+        <div class="card range">
+          <div class="head"><b>Range 2</b><span class="chip ok">running</span><span class="sp"></span><span class="muted">makiba</span></div>
+          <div class="terms">Issues 169, 270 and takes no-label:backlog · 3 at once</div>
+          <div class="bar"><i style="width:56%"></i></div>
+          <div class="muted" style="font-size:12px"><b style="color:var(--ink)">17</b> of 30 tasks used · approved today 09:12</div>
+          <div class="foot"><span class="btn small">Pause</span><span class="btn small ghost">End</span><span class="sp"></span><span class="muted" style="font-size:12px">widen it: ask the secretary</span></div>
+        </div>
+      </div>
+      <div class="sect grow">
+        <h3>Could go in now <small>14, outside the range</small></h3>
+        <div class="card scroll"><div class="cand"><div class="t"><span class="ti">The gate reports edited tests</span></div><span class="refline">suisya-systems/makiba#283</span><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">first choice · follow-up of #257</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Stops written by code (belt step 2)</span></div><span class="refline">suisya-systems/makiba#276</span><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Parking terminals for a task that waits on the person</span></div><span class="refline">suisya-systems/makiba#277</span><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Design ahead for a dependent candidate</span></div><span class="refline">suisya-systems/libretto#44</span><div class="m"><span class="tag">G2</span><span class="tag">M</span><span class="why">follow-up of #276</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">A budget of hours and of fixes per range</span></div><span class="refline">suisya-systems/makiba#284</span><div class="m"><span class="tag">G2</span><span class="tag">M~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Status text lists the ranges</span></div><span class="refline">suisya-systems/makiba#262</span><div class="m"><span class="tag">G7</span><span class="tag">S~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Runbook for a second project</span></div><span class="refline">suisya-systems/makiba#288</span><div class="m"><span class="tag">G10</span><span class="tag">S</span><span class="why">documents only</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">The read surface names each run&#x27;s title and age</span></div><span class="refline">suisya-systems/makiba#303</span><div class="m"><span class="tag">G7</span><span class="tag">S</span><span class="why">follow-up of #169</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Pull requests on the read surface, with what CI concluded</span></div><span class="refline">suisya-systems/libretto#49</span><div class="m"><span class="tag">G7</span><span class="tag">M</span><span class="why">follow-up of #169</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Events filtered by task</span></div><span class="refline">suisya-systems/makiba#304</span><div class="m"><span class="tag">G6</span><span class="tag">S</span><span class="why">follow-up of #169</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">The language in force on the read surface</span></div><span class="refline">suisya-systems/makiba#306</span><div class="m"><span class="tag">G1</span><span class="tag">S~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">A notice when the dispatcher restarts</span></div><span class="refline">suisya-systems/makiba#307</span><div class="m"><span class="tag">G7</span><span class="tag">S</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Follow-ups inside a range by default</span></div><span class="refline">suisya-systems/libretto#53</span><div class="m"><span class="tag">G2</span><span class="tag">M~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">The curator&#x27;s threshold as a setting</span></div><span class="refline">suisya-systems/makiba#308</span><div class="m"><span class="tag none">no clause</span><span class="tag">S~</span><span class="why">ranked last</span><span class="btn small">Ask for this</span></div></div></div>
+      </div>
+      <div class="sect">
+        <h3>Cannot go in yet <small>5</small><span class="more">scanned 10:41</span></h3>
+        <div class="card"><div class="out"><div class="t"><span class="ti">Parking terminals</span></div><span class="refline">suisya-systems/makiba#277</span><span class="why"><b>Held by a dependency</b> · waits for #276</span></div><div class="out"><div class="t"><span class="ti">A server installation</span></div><span class="refline">suisya-systems/makiba#279</span><span class="why"><b>Held by a dependency</b> · waits for #62</span></div><div class="fold">and 3 more<span>1 held by a dependency, 2 put aside</span></div></div>
+      </div>
+    </section>
+
+    <section class="col centre">
+      <div class="ask">
+        <div class="hd">
+          <div class="over">Waits for you <span>#14 · task r2-169 · range 2 · asked 6 min ago by the secretary</span><span class="nav">1 of 3 · next ›</span></div>
+          <p class="q">Is the drawing of the screen agreed, with the full day and the dark variant added, the reference written whole on its own line when more than one project is registered, and every list either scrolling in its own place or ending in a line that counts what it does not show, so that the four checks on the machine where the app runs come next and the code can be planned against their result?</p>
+        </div>
+        <div class="bd scroll">
+          <p class="whole"><b>The question, whole</b>Is the drawing of the screen agreed, with the full day and the dark variant added, the reference written whole on its own line when more than one project is registered, and every list either scrolling in its own place or ending in a line that counts what it does not show, so that the four checks on the machine where the app runs come next and the code can be planned against their result?</p><p class="bg">The worker finished the design note and the drawing, and redrew it after your first reading: with twelve candidates a section vanished, and with a range of twenty items only eight were shown. Each column now says what it does when it is full.</p><p class="bg">No code is written before you agree to the drawing, and where the screen runs is chosen only after four checks on the machine where the app runs: whether the app can obtain the status, whether it can answer as you, whether it can show a local page beside a terminal, and what an addition to the app is made of.</p><p class="bg">A long entry such as this one scrolls here, inside the card. The first three lines of the question and the answer buttons stay where they are.</p>
+          <div class="ifs">
+            <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
+            <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
+          </div>
+          <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and both reviews passed with their findings folded in.</p>
+        </div>
+        <div class="act"><span class="btn primary">Yes</span><span class="btn">No</span><span class="field">a note to go with the answer (optional)</span><span class="btn ghost">Talk it over first</span></div>
+      </div>
+      <div class="term">
+        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span class="sp"></span><span>the secretary's own terminal</span></div>
+        <div class="body"><div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
+          <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
+Left out: 279 (waits for #62), 251 (needs a host).
+<span class="dim">Approve it on the left, or tell me what to change.</span></div>
+          <div class="you">Approved. Keep going.</div>
+          <div class="sec">Range 2 is running. 270 landed as pull request 297.
+One question from r2-169 needs you; it is shown above with my recommendation (yes).
+<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div><div class="prompt"><span class="cursor"></span></div></div>
+      </div>
+    </section>
+
+    <section class="col right">
+      <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
+      <div class="sect"><h3>Went wrong <small>6</small></h3><div class="card wrong tight"><div class="w"><b>makiba · r2-274 · launch failed</b><span class="s">11 min ago</span><span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div><div class="w"><b>makiba · r2-243 · no status for 12 min</b><span class="s">12 min ago</span><span class="d">The worker&#x27;s terminal reports nothing; the secretary is looking.</span></div><div class="w"><b>The last scan failed</b><span class="s">3 min ago</span><span class="d">gh issue list: could not reach suisya-systems/libretto. The lists on the left are from the scan before it.</span></div><div class="fold">and 3 more<span>oldest 52 min · 2 launches, 1 anomaly</span></div></div></div>
+      <div class="sect grow">
+        <h3>Range 2, the whole of it <small>20 Issues</small></h3>
+        <div class="nums" aria-hidden="true"><i class="landed" style="flex:7 1 0">7</i><i class="waiting_person" style="flex:2 1 0">2</i><i class="review" style="flex:3 1 0">3</i><i class="in_work" style="flex:2 1 0">2</i><i class="failed" style="flex:1 1 0">1</i><i class="not_in" style="flex:3 1 0">3</i><i class="skipped" style="flex:2 1 0">2</i></div><div class="counts"><span><b>7</b> landed</span><span><b>2</b> wait for you</span><span><b>3</b> in review</span><span><b>2</b> in work</span><span><b>1</b> failed to start</span><span><b>3</b> not yet in</span><span><b>2</b> skipped</span></div>
+        <div class="card scroll"><div class="item landed"><span class="g">✓</span><span class="ti">The secretary&#x27;s first-range line</span><span class="s">landed · 3 h</span><span class="d"><span class="mono">suisya-systems/makiba#270</span> · pull request 297 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">The checks before the first range, as one line</span><span class="s">landed · 3 h</span><span class="d"><span class="mono">suisya-systems/makiba#291</span> · pull request 291 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">A role&#x27;s settings allow its own door tools</span><span class="s">landed · 2 h</span><span class="d"><span class="mono">suisya-systems/makiba#292</span> · pull request 293 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">The landing gate names a head with no passed review</span><span class="s">landed · 2 h</span><span class="d"><span class="mono">suisya-systems/makiba#263</span> · pull request 281 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">A review passes only when the reader read the change</span><span class="s">landed · 2 h</span><span class="d"><span class="mono">suisya-systems/makiba#280</span> · pull request 290 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">The switch stage of the self-hosting runbook</span><span class="s">landed · 1 h</span><span class="d"><span class="mono">suisya-systems/makiba#294</span> · pull request 294 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">What was not moved from the predecessor: thirty entries</span><span class="s">landed · 1 h</span><span class="d"><span class="mono">suisya-systems/makiba#267</span> · pull request 267 merged</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti">A screen for the person that shows the whole organization</span><span class="s">waits for you · 6 min</span><span class="d"><span class="mono">suisya-systems/makiba#169</span> · a decision: is the drawing agreed</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti">Attention notifications that call the person back</span><span class="s">waits for you · 2 min</span><span class="d"><span class="mono">suisya-systems/makiba#272</span> · a decision: may it add a dependency</span></div><div class="item review"><span class="g">◆</span><span class="ti">A metrics report over the events</span><span class="s">review · 9 min</span><span class="d"><span class="mono">suisya-systems/makiba#273</span> · CI running</span></div><div class="item review"><span class="g">◆</span><span class="ti">A defense report with a count per line</span><span class="s">review · 21 min</span><span class="d"><span class="mono">suisya-systems/makiba#274</span> · CI passed · to land</span></div><div class="item review"><span class="g">◆</span><span class="ti">The acceptance checker prints the folder of each build</span><span class="s">review · 4 min</span><span class="d"><span class="mono">suisya-systems/makiba#232</span> · no pull request yet</span></div><div class="item in_work"><span class="g">●</span><span class="ti">A temporary folder per launch</span><span class="s">at work · 14 min</span><span class="d"><span class="mono">suisya-systems/makiba#243</span></span></div><div class="item failed"><span class="g">!</span><span class="ti">The network allow-list reports the refused host</span><span class="s">launch failed · 11 min</span><span class="d"><span class="mono">suisya-systems/makiba#301</span></span></div><div class="item in_work"><span class="g">●</span><span class="ti">A strict network allow-list, hosts per project</span><span class="s">at work · 38 min</span><span class="d"><span class="mono">suisya-systems/makiba#244</span></span></div><div class="item not_in"><span class="g">○</span><span class="ti">A server installation</span><span class="s">not yet in</span><span class="d"><span class="mono">suisya-systems/makiba#279</span> · waits for #62</span></div><div class="item not_in"><span class="g">○</span><span class="ti">Docker distribution</span><span class="s">not yet in</span><span class="d"><span class="mono">suisya-systems/makiba#278</span> · waits for #279</span></div><div class="item not_in"><span class="g">○</span><span class="ti">More than one machine</span><span class="s">not yet in</span><span class="d"><span class="mono">suisya-systems/makiba#302</span> · no slot</span></div><div class="item skipped"><span class="g">–</span><span class="ti">Host record of the app check</span><span class="s">skipped</span><span class="d"><span class="mono">suisya-systems/makiba#251</span> · needs a host</span></div><div class="item skipped"><span class="g">–</span><span class="ti">A second base</span><span class="s">skipped</span><span class="d"><span class="mono">suisya-systems/makiba#295</span> · put aside by you</span></div></div>
+      </div>
+      <div class="sect">
+        <h3>Other runs <small>5, stopped first</small></h3>
+        <div class="card"><div class="item failed"><span class="g">!</span><span class="ti"><span class="mono">libretto-58</span> <span class="muted">· code · launch failed</span></span><span class="s">52 min</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti"><span class="mono">docs-goals</span> <span class="muted">· document · waits for you</span></span><span class="s">1 min</span></div><div class="item in_work"><span class="g">●</span><span class="ti"><span class="mono">libretto-44</span> <span class="muted">· code · at work</span></span><span class="s">47 min</span></div><div class="fold">and 2 more<span>2 at work</span></div></div>
+      </div>
+      <div class="inner">
+        <span class="btn">Pull requests<small>5 open · 1 failed</small></span>
+        <span class="btn">Trail of a run<small>from the events</small></span>
+      </div>
+    </section>
+  </div>
+</div>
+
+<p class="note"><b>3. The same full day, dark.</b> The same parts and the same meanings of amber, red and green.</p>
+
+<div class="screen dark">
+  <header class="top">
+    <span class="brand"><i></i>makiba</span>
+    <span class="org">suisya-systems · 2 projects</span>
+    <span class="sp"></span>
+    <span class="chip wait">3 wait for you</span>
+    <span class="chip bad">6 went wrong</span>
+    <span class="chip quiet">makibad running · read 3 s ago</span>
+    <span class="set"><span class="on">English</span><span>Japanese</span></span>
+    <span class="set"><span>Auto</span><span>Light</span><span class="on">Dark</span></span>
+  </header>
+  <div class="cols">
+
+    <section class="col left">
+      <div class="role"><h2>Put in</h2><span>hand work to the organization</span></div>
+      <div class="sect">
+        <div class="card range">
+          <div class="head"><b>Range 2</b><span class="chip ok">running</span><span class="sp"></span><span class="muted">makiba</span></div>
+          <div class="terms">Issues 169, 270 and takes no-label:backlog · 3 at once</div>
+          <div class="bar"><i style="width:56%"></i></div>
+          <div class="muted" style="font-size:12px"><b style="color:var(--ink)">17</b> of 30 tasks used · approved today 09:12</div>
+          <div class="foot"><span class="btn small">Pause</span><span class="btn small ghost">End</span><span class="sp"></span><span class="muted" style="font-size:12px">widen it: ask the secretary</span></div>
+        </div>
+      </div>
+      <div class="sect grow">
+        <h3>Could go in now <small>14, outside the range</small></h3>
+        <div class="card scroll"><div class="cand"><div class="t"><span class="ti">The gate reports edited tests</span></div><span class="refline">suisya-systems/makiba#283</span><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">first choice · follow-up of #257</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Stops written by code (belt step 2)</span></div><span class="refline">suisya-systems/makiba#276</span><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Parking terminals for a task that waits on the person</span></div><span class="refline">suisya-systems/makiba#277</span><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Design ahead for a dependent candidate</span></div><span class="refline">suisya-systems/libretto#44</span><div class="m"><span class="tag">G2</span><span class="tag">M</span><span class="why">follow-up of #276</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">A budget of hours and of fixes per range</span></div><span class="refline">suisya-systems/makiba#284</span><div class="m"><span class="tag">G2</span><span class="tag">M~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Status text lists the ranges</span></div><span class="refline">suisya-systems/makiba#262</span><div class="m"><span class="tag">G7</span><span class="tag">S~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Runbook for a second project</span></div><span class="refline">suisya-systems/makiba#288</span><div class="m"><span class="tag">G10</span><span class="tag">S</span><span class="why">documents only</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">The read surface names each run&#x27;s title and age</span></div><span class="refline">suisya-systems/makiba#303</span><div class="m"><span class="tag">G7</span><span class="tag">S</span><span class="why">follow-up of #169</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Pull requests on the read surface, with what CI concluded</span></div><span class="refline">suisya-systems/libretto#49</span><div class="m"><span class="tag">G7</span><span class="tag">M</span><span class="why">follow-up of #169</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Events filtered by task</span></div><span class="refline">suisya-systems/makiba#304</span><div class="m"><span class="tag">G6</span><span class="tag">S</span><span class="why">follow-up of #169</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">The language in force on the read surface</span></div><span class="refline">suisya-systems/makiba#306</span><div class="m"><span class="tag">G1</span><span class="tag">S~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">A notice when the dispatcher restarts</span></div><span class="refline">suisya-systems/makiba#307</span><div class="m"><span class="tag">G7</span><span class="tag">S</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">Follow-ups inside a range by default</span></div><span class="refline">suisya-systems/libretto#53</span><div class="m"><span class="tag">G2</span><span class="tag">M~</span><span class="why">size estimated</span><span class="btn small">Ask for this</span></div></div><div class="cand"><div class="t"><span class="ti">The curator&#x27;s threshold as a setting</span></div><span class="refline">suisya-systems/makiba#308</span><div class="m"><span class="tag none">no clause</span><span class="tag">S~</span><span class="why">ranked last</span><span class="btn small">Ask for this</span></div></div></div>
+      </div>
+      <div class="sect">
+        <h3>Cannot go in yet <small>5</small><span class="more">scanned 10:41</span></h3>
+        <div class="card"><div class="out"><div class="t"><span class="ti">Parking terminals</span></div><span class="refline">suisya-systems/makiba#277</span><span class="why"><b>Held by a dependency</b> · waits for #276</span></div><div class="out"><div class="t"><span class="ti">A server installation</span></div><span class="refline">suisya-systems/makiba#279</span><span class="why"><b>Held by a dependency</b> · waits for #62</span></div><div class="fold">and 3 more<span>1 held by a dependency, 2 put aside</span></div></div>
+      </div>
+    </section>
+
+    <section class="col centre">
+      <div class="ask">
+        <div class="hd">
+          <div class="over">Waits for you <span>#14 · task r2-169 · range 2 · asked 6 min ago by the secretary</span><span class="nav">1 of 3 · next ›</span></div>
+          <p class="q">Is the drawing of the screen agreed, with the full day and the dark variant added, the reference written whole on its own line when more than one project is registered, and every list either scrolling in its own place or ending in a line that counts what it does not show, so that the four checks on the machine where the app runs come next and the code can be planned against their result?</p>
+        </div>
+        <div class="bd scroll">
+          <p class="whole"><b>The question, whole</b>Is the drawing of the screen agreed, with the full day and the dark variant added, the reference written whole on its own line when more than one project is registered, and every list either scrolling in its own place or ending in a line that counts what it does not show, so that the four checks on the machine where the app runs come next and the code can be planned against their result?</p><p class="bg">The worker finished the design note and the drawing, and redrew it after your first reading: with twelve candidates a section vanished, and with a range of twenty items only eight were shown. Each column now says what it does when it is full.</p><p class="bg">No code is written before you agree to the drawing, and where the screen runs is chosen only after four checks on the machine where the app runs: whether the app can obtain the status, whether it can answer as you, whether it can show a local page beside a terminal, and what an addition to the app is made of.</p><p class="bg">A long entry such as this one scrolls here, inside the card. The first three lines of the question and the answer buttons stay where they are.</p>
+          <div class="ifs">
+            <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
+            <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
+          </div>
+          <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and both reviews passed with their findings folded in.</p>
+        </div>
+        <div class="act"><span class="btn primary">Yes</span><span class="btn">No</span><span class="field">a note to go with the answer (optional)</span><span class="btn ghost">Talk it over first</span></div>
+      </div>
+      <div class="term">
+        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span class="sp"></span><span>the secretary's own terminal</span></div>
+        <div class="body"><div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
+          <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
+Left out: 279 (waits for #62), 251 (needs a host).
+<span class="dim">Approve it on the left, or tell me what to change.</span></div>
+          <div class="you">Approved. Keep going.</div>
+          <div class="sec">Range 2 is running. 270 landed as pull request 297.
+One question from r2-169 needs you; it is shown above with my recommendation (yes).
+<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div><div class="prompt"><span class="cursor"></span></div></div>
+      </div>
+    </section>
+
+    <section class="col right">
+      <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
+      <div class="sect"><h3>Went wrong <small>6</small></h3><div class="card wrong tight"><div class="w"><b>makiba · r2-274 · launch failed</b><span class="s">11 min ago</span><span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div><div class="w"><b>makiba · r2-243 · no status for 12 min</b><span class="s">12 min ago</span><span class="d">The worker&#x27;s terminal reports nothing; the secretary is looking.</span></div><div class="w"><b>The last scan failed</b><span class="s">3 min ago</span><span class="d">gh issue list: could not reach suisya-systems/libretto. The lists on the left are from the scan before it.</span></div><div class="fold">and 3 more<span>oldest 52 min · 2 launches, 1 anomaly</span></div></div></div>
+      <div class="sect grow">
+        <h3>Range 2, the whole of it <small>20 Issues</small></h3>
+        <div class="nums" aria-hidden="true"><i class="landed" style="flex:7 1 0">7</i><i class="waiting_person" style="flex:2 1 0">2</i><i class="review" style="flex:3 1 0">3</i><i class="in_work" style="flex:2 1 0">2</i><i class="failed" style="flex:1 1 0">1</i><i class="not_in" style="flex:3 1 0">3</i><i class="skipped" style="flex:2 1 0">2</i></div><div class="counts"><span><b>7</b> landed</span><span><b>2</b> wait for you</span><span><b>3</b> in review</span><span><b>2</b> in work</span><span><b>1</b> failed to start</span><span><b>3</b> not yet in</span><span><b>2</b> skipped</span></div>
+        <div class="card scroll"><div class="item landed"><span class="g">✓</span><span class="ti">The secretary&#x27;s first-range line</span><span class="s">landed · 3 h</span><span class="d"><span class="mono">suisya-systems/makiba#270</span> · pull request 297 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">The checks before the first range, as one line</span><span class="s">landed · 3 h</span><span class="d"><span class="mono">suisya-systems/makiba#291</span> · pull request 291 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">A role&#x27;s settings allow its own door tools</span><span class="s">landed · 2 h</span><span class="d"><span class="mono">suisya-systems/makiba#292</span> · pull request 293 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">The landing gate names a head with no passed review</span><span class="s">landed · 2 h</span><span class="d"><span class="mono">suisya-systems/makiba#263</span> · pull request 281 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">A review passes only when the reader read the change</span><span class="s">landed · 2 h</span><span class="d"><span class="mono">suisya-systems/makiba#280</span> · pull request 290 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">The switch stage of the self-hosting runbook</span><span class="s">landed · 1 h</span><span class="d"><span class="mono">suisya-systems/makiba#294</span> · pull request 294 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti">What was not moved from the predecessor: thirty entries</span><span class="s">landed · 1 h</span><span class="d"><span class="mono">suisya-systems/makiba#267</span> · pull request 267 merged</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti">A screen for the person that shows the whole organization</span><span class="s">waits for you · 6 min</span><span class="d"><span class="mono">suisya-systems/makiba#169</span> · a decision: is the drawing agreed</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti">Attention notifications that call the person back</span><span class="s">waits for you · 2 min</span><span class="d"><span class="mono">suisya-systems/makiba#272</span> · a decision: may it add a dependency</span></div><div class="item review"><span class="g">◆</span><span class="ti">A metrics report over the events</span><span class="s">review · 9 min</span><span class="d"><span class="mono">suisya-systems/makiba#273</span> · CI running</span></div><div class="item review"><span class="g">◆</span><span class="ti">A defense report with a count per line</span><span class="s">review · 21 min</span><span class="d"><span class="mono">suisya-systems/makiba#274</span> · CI passed · to land</span></div><div class="item review"><span class="g">◆</span><span class="ti">The acceptance checker prints the folder of each build</span><span class="s">review · 4 min</span><span class="d"><span class="mono">suisya-systems/makiba#232</span> · no pull request yet</span></div><div class="item in_work"><span class="g">●</span><span class="ti">A temporary folder per launch</span><span class="s">at work · 14 min</span><span class="d"><span class="mono">suisya-systems/makiba#243</span></span></div><div class="item failed"><span class="g">!</span><span class="ti">The network allow-list reports the refused host</span><span class="s">launch failed · 11 min</span><span class="d"><span class="mono">suisya-systems/makiba#301</span></span></div><div class="item in_work"><span class="g">●</span><span class="ti">A strict network allow-list, hosts per project</span><span class="s">at work · 38 min</span><span class="d"><span class="mono">suisya-systems/makiba#244</span></span></div><div class="item not_in"><span class="g">○</span><span class="ti">A server installation</span><span class="s">not yet in</span><span class="d"><span class="mono">suisya-systems/makiba#279</span> · waits for #62</span></div><div class="item not_in"><span class="g">○</span><span class="ti">Docker distribution</span><span class="s">not yet in</span><span class="d"><span class="mono">suisya-systems/makiba#278</span> · waits for #279</span></div><div class="item not_in"><span class="g">○</span><span class="ti">More than one machine</span><span class="s">not yet in</span><span class="d"><span class="mono">suisya-systems/makiba#302</span> · no slot</span></div><div class="item skipped"><span class="g">–</span><span class="ti">Host record of the app check</span><span class="s">skipped</span><span class="d"><span class="mono">suisya-systems/makiba#251</span> · needs a host</span></div><div class="item skipped"><span class="g">–</span><span class="ti">A second base</span><span class="s">skipped</span><span class="d"><span class="mono">suisya-systems/makiba#295</span> · put aside by you</span></div></div>
+      </div>
+      <div class="sect">
+        <h3>Other runs <small>5, stopped first</small></h3>
+        <div class="card"><div class="item failed"><span class="g">!</span><span class="ti"><span class="mono">libretto-58</span> <span class="muted">· code · launch failed</span></span><span class="s">52 min</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti"><span class="mono">docs-goals</span> <span class="muted">· document · waits for you</span></span><span class="s">1 min</span></div><div class="item in_work"><span class="g">●</span><span class="ti"><span class="mono">libretto-44</span> <span class="muted">· code · at work</span></span><span class="s">47 min</span></div><div class="fold">and 2 more<span>2 at work</span></div></div>
+      </div>
+      <div class="inner">
+        <span class="btn">Pull requests<small>5 open · 1 failed</small></span>
+        <span class="btn">Trail of a run<small>from the events</small></span>
+      </div>
+    </section>
+  </div>
+</div>
+
+<p class="note"><b>4. The states the pictures above do not show.</b></p>
+<div class="states light">
 
   <div class="state">
     <h2>Answer: several entries</h2>
@@ -378,7 +532,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
     <h2>Went wrong: the dispatcher is silent</h2>
     <p class="what">When the heartbeat is old, the screen says so before anything else; what it shows under it is the last read, marked old.</p>
     <div class="banner"><b>makibad has not written for 4 min</b>Nothing is dispatched, delivered or watched. In your shell: <code>makiba up</code></div>
-    <div class="card" style="opacity:.55">
+    <div class="card" style="opacity:.5">
       <div class="item in_work"><span class="g">●</span><span class="n">#272</span><span class="ti">Attention notifications</span><span class="s">as of 10:44</span></div>
       <div class="item review"><span class="g">◆</span><span class="n">#273</span><span class="ti">A metrics report</span><span class="s">as of 10:44</span></div>
     </div>
@@ -388,15 +542,15 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
     <h2>Put in: a range to approve</h2>
     <p class="what">A range the secretary recorded as proposed. The screen shows the read makibad made for it and the text every task starts from; approving sends that read's id, with the person key.</p>
     <div class="card range">
-      <div class="head"><b>Range 3</b><span class="chip wait">proposed</span><span style="flex:1"></span><span class="muted">makiba</span></div>
+      <div class="head"><b>Range 3</b><span class="chip wait">proposed</span><span class="sp"></span><span class="muted">makiba</span></div>
       <div class="terms">replaces range 2 · 3 at once · 30 tasks · merges: ask each time</div>
       <div class="muted" style="font-size:12px; margin-top:8px">Read 10:52, complete. It would admit, in this order:</div>
       <div style="margin:4px 0 0"><span class="mono">#283</span> The gate reports edited tests</div>
       <div><span class="mono">#276</span> Stops written by code</div>
       <div class="muted"><span class="mono">#277</span> left out · waits for #276</div>
       <div class="muted"><span class="mono">#51</span>&nbsp; left out · label on-hold</div>
-      <div class="muted" style="font-size:12px; margin-top:8px">Every task starts from this text (whole, it scrolls):</div>
-      <div class="mono" style="border:1px solid var(--line); border-radius:6px; background:#fbf8ef; padding:6px 8px; margin-top:3px; max-height:74px; overflow:hidden; white-space:pre-wrap">You work on one Issue of suisya-systems/makiba in your own worktree. Read the Issue and the documents it names before you change anything. Keep the change to what the Issue asks; anything else goes into your done report …</div>
+      <div class="muted" style="font-size:12px; margin-top:8px">Every task starts from this text, whole; it scrolls in its box:</div>
+      <div class="mono brief scroll">You work on one Issue of suisya-systems/makiba in your own worktree. Read the Issue and the documents it names before you change anything. Keep the change to what the Issue asks; anything else goes into your done report as a proposed follow-up, not into the diff. Follow the repository's conventions and run its checks before you report. Never push; the secretary has the branch pushed.</div>
       <div class="foot"><span class="btn primary small">Approve this read</span><span class="btn small ghost">Change it with the secretary</span></div>
     </div>
   </div>
@@ -416,5 +570,6 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
   </div>
 
 </div>
+
 </body>
 </html>

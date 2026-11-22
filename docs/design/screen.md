@@ -1,6 +1,6 @@
 # The screen: where the person puts work in, watches it and answers
 
-Status: design note for Issue 169, 2026-11-22. Nothing is built. The drawing is [screen-draft.html](screen-draft.html): a static page with sample data, no script and no request; open it in a browser 1440 px wide or wider. The owner agrees to the drawing before any code (the Issue). Read beside [belt.md](belt.md) (sections 1 and 7), [spec.md](spec.md) (section 12, the read surface) and the runbook [herdr-app.md](../runbooks/herdr-app.md). A design review (one round) was folded in: the repository in every match and request (3.1, 4), the brief head in the approval (3.1), a failed run told from a suspended one (3.3), concluded pull request watches (3.3), approving the read that was shown (4), the language (2) and the truncated scan (3.1).
+Status: design note for Issue 169, 2026-11-22; redrawn on 2026-11-23 after the owner's first reading (what each place does when it is full, 2.1; the language and light or dark, 2.2). Nothing is built. The drawing is [screen-draft.html](screen-draft.html): a static page with sample data, no script and no request; open it in a browser 1440 px wide or wider. It holds a quiet day, a full day (two projects, fourteen candidates, a range of twenty, six things gone wrong, a long question), the same full day dark, and six panels for the other states. The owner agrees to the drawing before any code (the Issue). Read beside [belt.md](belt.md) (sections 1 and 7), [spec.md](spec.md) (section 12, the read surface) and the runbook [herdr-app.md](../runbooks/herdr-app.md). A design review (one round) was folded in: the repository in every match and request (3.1, 4), the brief head in the approval (3.1), a failed run told from a suspended one (3.3), concluded pull request watches (3.3), approving the read that was shown (4), the language (2) and the truncated scan (3.1).
 
 Two things are not decided here and stop the code: the drawing needs the owner's agreement, and where the screen runs needs a measurement on the owner's machine (section 5). A third is a boundary: the screen acting with the person key (section 4).
 
@@ -23,7 +23,7 @@ One screen, no pages to move between for the three roles. A top line and three c
 
 | Part | What it holds | Why there |
 | --- | --- | --- |
-| Top line | The organization's name; "N waits for you"; "N went wrong"; the dispatcher's heartbeat and the age of the read. | The two counts are the only things that call for the person; they are readable from across the room and repeat nothing else. |
+| Top line | The organization's name; "N waits for you"; "N went wrong"; the dispatcher's heartbeat and the age of the read; the two switches of 2.2. | The two counts are the only things that call for the person; they are readable from across the room and repeat nothing else. |
 | Left, **Put in** | The range (its terms, the budget used, pause and end; a proposed range with the read to approve); "Could go in now"; "Cannot go in yet" with the reason of each. | Putting in is the most frequent act, and reading starts at the left. |
 | Centre, **the conversation** | The secretary's terminal, as it is. Over it, **what waits for the person**. | Asking is done by talking to the secretary. A question arrives there too (belt.md section 1, "Answer"), so the entry and the conversation it came from are seen together. With nothing waiting, the conversation takes the whole column. |
 | Right, **Watch** | "Went wrong" (only when there is something); the range, whole: a strip of one mark per Issue, the count per place, then every item; the runs outside a range, stopped ones first. At the foot, the two steps further in: pull requests, the trail of a run. | The person decides nothing here (the owner: its purpose is reassurance), so it sits at the side, always in view, and asks for no click. |
@@ -35,7 +35,41 @@ Rules of the look, which the drawing follows:
 - An empty list says why it is empty (the panel "nothing could go in"): the scan found nothing, failed, or has not run.
 - The range's list never reorders what has been admitted (belt.md 7.1); a row changes its mark, not its position.
 - Every time is an age ("6 min") beside the newest read's age in the top line, so an old screen cannot pass for a fresh one. When the heartbeat is old the screen says so over everything and greys what it last read (the panel "the dispatcher is silent").
-- Words are the person's, not the record's: "waits for you" for `waiting_person`, "not yet in" for `not_in`. The text is meant to follow `conversation_language` (spec section 13), but neither output prints the language in force (the setting, or `makibad`'s environment when unset): missing (section 6). Until then the screen has a setting of its own, `--language`, and falls back to the environment of its own process, read as spec section 13 reads it. The drawing is in English.
+- Words are the person's, not the record's: "waits for you" for `waiting_person`, "not yet in" for `not_in`.
+
+### 2.1 When a place is full
+
+The owner drew the first draft with larger counts and it broke (2026-11-23): with twelve candidates a whole section vanished, and of a range of twenty only eight items showed. The rule since: the frame is fixed, and nothing that does not fit may vanish without a mark. Each place does one of two things, and the drawing's second and third pictures show them.
+
+- **It scrolls in its own place** when the whole list is the point of the place. The heading over it carries the full count, and the bar is drawn whenever the list is longer than its place, so a cut list is never mistaken for a short one.
+- **It is capped and ends in a line "and N more"** when it sits at the side of something else. The line says what the rest is (how old, of which kind) and opens the whole list in that place.
+
+| Place | When full | Why |
+| --- | --- | --- |
+| Put in: the range | Never folded. | One card; a second range of another project is one line under it (id, project, status, budget used) that opens it. |
+| Put in: "Could go in now" | Scrolls; it takes the height the column has left. | The owner asked for every Issue that could go in, not the top few, and the order is the scan's ranking: the top stays in view, the rest is one scroll away. |
+| Put in: "Cannot go in yet" | Capped at the foot of the column: as many rows as fit in a quarter of the column (two when the candidates are many), then "and N more" with the count per reason. Opening it swaps the two lists: it scrolls, and "Could go in now" folds to its heading and count. | It is the answer to "why not that one", looked up now and then. Its heading and count never leave the column, which is what vanished in the first draft. |
+| Answer: the entry | The card takes at most half of the centre column. The first three lines of the question and the answer buttons stay; the middle (the question whole when it was cut, the background, what each answer does, the reason) scrolls inside the card. | The buttons must never scroll away from the question, and the conversation under it must keep its place. |
+| Answer: several entries | The list is capped at four rows and scrolls; the open entry shows "1 of 3" and "next". | One is answered at a time. |
+| The conversation | Never less than a quarter of the column. | It is the centre. |
+| Watch: "Went wrong" | Capped at three, newest first except a silent dispatcher, which is always first; then "and N more" with the oldest's age and the count per kind. With more than three, each row's detail is one line. The count in the top line is always the full count. | Three fit beside the range; a long list of failures must not push the range out of view. |
+| Watch: the range, whole | Scrolls; it takes the height the column has left, never less than three rows. The strip and the counts over it always cover every item. It opens scrolled to the first item that has not landed, with the landed ones above it. | The whole range is its point (the owner: reassurance), and its order is fixed, so it cannot be cut by importance. |
+| Watch: the strip | One mark per Issue up to twelve items. Above twelve, one piece per place, as wide as its share, with its number written in it. The counts in words stay under it in both forms. | Twenty marks of a few pixels say less than seven numbers. |
+| Watch: "Other runs" | Capped at three, stopped ones first; then "and N more" with what they are doing. | Stopped runs are the ones looked for; they are first, so the cap cuts only moving ones. |
+| Watch: the two steps further in | Always at the foot of the column. | They vanished in the first draft. |
+
+Widths follow the same rule: nothing is cut without a mark, and nothing wraps over its neighbour.
+
+- A reference is never wrapped and never given a fixed width: its cell is as wide as its text. A title beside it keeps at least sixteen characters before it is cut with an ellipsis, and a cut title shows whole on hover.
+- With one project registered a reference is `#N`, in a cell before the title. With more than one it is `OWNER/NAME#N`, too long to sit before a title in a column of this width: it goes on a line of its own under the title, whole, in every list. The form is chosen by the number of projects, not row by row, so the rows of one list have one shape.
+- A state at the right of a row ("waits for you · 6 min") is never cut; the title gives way first.
+- A label longer than the drawing's English (another language) wraps inside its own cell or is cut with an ellipsis; no layout depends on a label's length. The section headings, the buttons and the top line are one line each and cut the least important part first (the explanation after a heading, then the organization's name).
+
+### 2.2 Language and light or dark
+
+- **Language.** The screen's wording switches with the display-language setting, from the top line. All wording is kept in one place: one table per language, keyed by what is said (a place, a stage, a reason, an event kind, a button, a heading), as `roles/locale/` does for the sentences of spec section 13; no view holds a sentence of its own, so a language is added by adding a table and the layout is tested with the longest of them. A key with no wording in the chosen language is shown in English, and one with none at all by its record name, never dropped. What comes from the records is shown as written: titles, questions, reasons, the secretary's terminal. The setting starts from `conversation_language` (spec section 13); neither output prints the language in force (the setting, or `makibad`'s environment when unset), which is missing (section 6), so until then it starts from the environment of the screen's own process, read as spec section 13 reads it. The choice is the screen's own and changes nothing in the organization. The drawing is in English only: the repository's language check allows no other text under `docs/`, and the owner checks a long Japanese wording against the layout on their side.
+- **Light or dark.** Three choices in the top line: follow the system (the default), light, dark. Every colour is a named value with one light and one dark figure; no part has a colour of its own. The meanings do not change: amber waits for the person, red went wrong, green moves or landed. The conversation is dark in both.
+- Both switches are drawn in the drawing and not wired: it carries no script. The dark variant is its third picture.
 
 ## 3. Each part and its read field
 
@@ -54,6 +88,7 @@ The screen opens no table and no file. It reads `makiba status --json` on an int
 | Cannot go in yet | `next_work.left_out[]`: `repo`, `issue`, `kind`, `reason`; `candidates_not_recorded` and `left_out_not_recorded`, both numbers, shown as "and N more not listed" | Today (a left-out entry has no title: missing) |
 | The scan read only part | `next_work.input_truncated`, a list of the reads cut short (`open_issues`, `open_prs`, `base_merges`), not a count: shown as its own warning, "the scan did not read every open Issue", naming the reads | Today |
 | Why the list is empty | `next_work` null (no scan yet), `.status` (`no_candidates`, `error`), `.error`, `.scanned_at`, `.trigger` | Today |
+| A scan recorded before the lists were kept | `next_work.candidates` and `.left_out` null while `.candidate_count` is above 0 (a scan older than Issue 256): shown as "N found; their details were not recorded, the next scan will list them", never as "nothing could go in" | Today |
 
 While a range is active the list is headed "outside the range" (belt.md 7.1). An Issue the range would admit is shown once, in the range. The match is by repository and number, never by number alone: a range's repository is `projects[].repo` of its `ranges[].project`, and a candidate carries `next_work.candidates[].repo`. With more than one project registered every reference on the screen is written `OWNER/NAME#N`; with one, `#N` (as the drawing).
 
@@ -156,7 +191,7 @@ Each is a small addition to `status --json` with a row in the table `Status fiel
 | `pending[].stop_line`, `.to`, and the `belt[]` rows (belt.md section 7, step 5) | The entry's range; what stopped and why, per task | Read from `ranges[].stops[]` and `ranges[].items[]`, which cover a first version. |
 | `pull_requests[]`: every pull request of a run not closed, with `repo`, `pr`, `head_oid`, `task_id`, `ci` (`running`, or the newest conclusion at that head) | Pull requests | `pr_watches[]` drops a watch when CI concludes, so the conclusion is folded from `pr`, `ci_completed` and `pr_merged` events by the screen. |
 | `runs[].launch_failed_reason` (the newest launch's `failed_reason`) | Went wrong | The row says "launch failed" with no reason: without the newest launch's `spawn_id` an event cannot be tied to it. |
-| `conversation_language`, as resolved | Every label | The screen's own `--language`, else its process's environment. |
+| `conversation_language`, as resolved | Where the display language starts (2.2) | It starts from the environment of the screen's own process; the switch in the top line overrides it. |
 | `events --task <task_id>` | The trail of an old run | The screen keeps what it has read; a run older than its memory is read again from event 0. |
 | `closed_today[]`, or runs closed since a time | "Closed today" | Folded from `run_closed`. |
 
@@ -169,7 +204,7 @@ Nothing starts before the owner agrees to the drawing.
 | Step | What | Needs | Declared test |
 | --- | --- | --- | --- |
 | 0 | The drawing agreed; the measurement of section 5 run and recorded. | The owner | none (documents) |
-| 1 | The model: from `status --json` and `events --json` to the parts of section 3. Read-only. | Step 0; the read surface as it is | `tests/screen_model.rs`: from a recorded status with one escalated entry, one failed launch and a range of mixed places, the model gives the entry with its context, "went wrong" with the launch's reason, the range's rows in the read's order, and the runs with the stopped ones first; from a status with `next_work` null, in error and with no candidates, three different reasons for the empty list. |
+| 1 | The model: from `status --json` and `events --json` to the parts of section 3. Read-only. | Step 0; the read surface as it is | `tests/screen_model.rs`: from a recorded status with one escalated entry, one failed launch and a range of mixed places, the model gives the entry with its context, "went wrong" with the failed launch, the range's rows in the read's order, and the runs with the stopped ones first; from a status with `next_work` null, in error, with no candidates, and with a positive count but null lists, four different lines for the empty list; a failed run shown as "launch failed" with no reason (the reason is asserted only once `runs[].launch_failed_reason` exists, section 6) and a suspended run not shown as gone wrong; with two projects, every reference as `OWNER/NAME#N`; the caps of 2.1 (three of six things gone wrong and "3 more", the strip as numbers above twelve items); and every wording read from the one table of 2.2, with a missing key shown by its record name. |
 | 2 | The frame chosen in step 0 (the page behind `makiba screen`, or the app's), read-only, each control showing the line to type. | Step 1 | Depends on the frame; for the page, a test that it answers on 127.0.0.1 only and serves what the model gives. |
 | 3 | The missing read fields of section 6, each its own Issue. | - | `tests/read_surface.rs` grows. |
 | 4 | Acting from the screen (section 4), after its own design and the owner's agreement. | M6-1; the boundary design | Its own. |
