@@ -68,6 +68,10 @@ pub const UNSET: &[&str] = &[
     "HC_TERMINAL_SOCKET",
 ];
 
+/// Spec section 6.4: given to the secretary as `makibad` has them, removed when it has none, so
+/// the base's configuration folder its terminals inherit does not reach it (Issue 295).
+pub const PERSON_CONFIG: &[&str] = &["XDG_CONFIG_HOME", "GH_CONFIG_DIR"];
+
 /// What a resumed worker is given in place of its brief (Issue 41): the conversation already holds
 /// the task, and the brief again reads as a second request.
 pub const RESUME_PROMPT: &str = "The organization was restarted. Go on with the task you were working on in this conversation. If it is already done and reported, do nothing and do not report again.";
@@ -279,6 +283,7 @@ impl Launch {
             "MAKIBA_SHARE_DIR".to_string(),
             crate::cli::share_dir().display().to_string(),
         )]);
+        let mut unset: Vec<String> = UNSET.iter().map(|v| v.to_string()).collect();
         // Workers and the curator get an empty GH_CONFIG_DIR (spec section 6.4).
         if role != Role::Secretary {
             env.insert("GH_CONFIG_DIR".to_string(), String::new());
@@ -286,6 +291,16 @@ impl Launch {
         // The secretary's merge gate hook finds its key file and the door where this process
         // put them (spec section 3): the paths, never the key.
         if role == Role::Secretary {
+            // The person's own configuration folders, as makibad has them, over the base's that
+            // its terminals inherit (Issue 295): set when makibad has one, removed when not.
+            for var in PERSON_CONFIG {
+                match std::env::var(var).ok().filter(|v| !v.is_empty()) {
+                    Some(v) => {
+                        env.insert(var.to_string(), v);
+                    }
+                    None => unset.push(var.to_string()),
+                }
+            }
             let abs = |p: PathBuf| std::path::absolute(&p).unwrap_or(p).display().to_string();
             env.insert(
                 "MAKIBA_GATE_KEY".to_string(),
@@ -309,7 +324,7 @@ impl Launch {
             name: row.name(),
             tags,
             env,
-            unset: UNSET.iter().map(|v| v.to_string()).collect(),
+            unset,
         }
     }
 
