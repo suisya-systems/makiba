@@ -851,6 +851,7 @@ stage_switch() {
     git -C "$REPO" merge-base --is-ancestor HEAD origin/main || refuse "$REPO holds changes origin/main lacks: it cannot fast-forward" "move them to a branch yourself (git -C $REPO branch <name>), put main on origin/main, then run this line again; this script never resets or merges"
     old=$(git -C "$REPO" rev-parse --short HEAD); new=$(git -C "$REPO" rev-parse --short origin/main)
     check checkout INFO "$REPO: main $old, origin/main $new; a fast-forward is possible"
+    case "$(realpath -m "$state")/" in "$(realpath "$REPO")"/*) refuse "the state folder $state lies inside this repository ($REPO), which is public: the handover and the start file would be placed in it" "unset MAKIBA_STATE_DIR or point it outside the checkout, then run this line again" ;; esac
     if [ -n "$SWITCH_HANDOVER" ]; then
       [ -s "$SWITCH_HANDOVER" ] || refuse "the handover $SWITCH_HANDOVER does not exist or is empty" "name the file the previous secretary wrote: --handover <file>"
       case "$(realpath "$SWITCH_HANDOVER")/" in "$(realpath "$REPO")"/*) refuse "the handover lies inside this repository ($REPO), which is public" "move it outside the checkout (for example your home folder) and name that path" ;; esac
@@ -943,11 +944,14 @@ Kept as they are: the goal ledger already placed, the project registration, the 
     plan "copy $SWITCH_HANDOVER to $hand (mode 0600); an older different one is kept beside it as handover-owner.md.before-<UTC>"
   else
     mkdir -p "$sec_dir"; chmod 700 "$sec_dir"
-    if [ -e "$hand" ] && ! cmp -s "$SWITCH_HANDOVER" "$hand"; then
+    if [ -e "$hand" ] && ! [ "$SWITCH_HANDOVER" -ef "$hand" ] && ! cmp -s "$SWITCH_HANDOVER" "$hand"; then
       cp "$hand" "$hand.before-$(date -u +%Y%m%dT%H%M%SZ)"
     fi
-    install -m 600 "$SWITCH_HANDOVER" "$hand"
-    check handover PASS "placed $hand (mode 600, $(wc -c < "$hand") bytes); the original $SWITCH_HANDOVER is untouched"
+    if [ "$SWITCH_HANDOVER" -ef "$hand" ]; then chmod 600 "$hand"; check handover INFO "$hand is the file named: already placed, kept (mode set to 600)"
+    else
+      install -m 600 "$SWITCH_HANDOVER" "$hand"
+      check handover PASS "placed $hand (mode 600, $(wc -c < "$hand") bytes); the original $SWITCH_HANDOVER is untouched"
+    fi
   fi
 
   switch_next_steps "$hand" "$start" "$mode"
