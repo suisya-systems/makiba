@@ -516,7 +516,6 @@ const READERS: [&str; 10] = [
 /// of the reader's wrapper (`bash -lc '...'`) is looked through.
 fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
     let words = |s: &str| -> Option<Vec<Vec<String>>> {
-        let s = s.replace(" 2>/dev/null", "").replace(" 2>&1", "");
         let mut out: Vec<Vec<String>> = vec![];
         let (mut cur, mut word, mut has) = (vec![], String::new(), false);
         let mut quote = None;
@@ -528,6 +527,23 @@ fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
                 (Some(_), '$' | '`' | '\\') => return None,
                 (Some(_), c) => word.push(c),
                 (None, '\'' | '"') => (quote, has) = (Some(c), true),
+                // `2>/dev/null` and `2>&1` as words of their own (outside quotes) are no operand.
+                (None, '>') if has && word == "2" => {
+                    let rest: String = it.clone().collect();
+                    let n = ["/dev/null", "&1"]
+                        .iter()
+                        .find(|r| {
+                            rest.strip_prefix(**r).is_some_and(|a| {
+                                a.chars()
+                                    .next()
+                                    .is_none_or(|c| c.is_whitespace() || c == ';' || c == '|')
+                            })
+                        })
+                        .map(|r| r.len())?;
+                    it.nth(n - 1);
+                    word.clear();
+                    has = false;
+                }
                 (None, '$' | '`' | '\\' | '<' | '>' | '(' | ')' | '\n') => return None,
                 // A comment: what follows is never run.
                 (None, '#') if !has => return None,
@@ -977,6 +993,7 @@ mod tests {
         };
         for yes in [
             "cat a.txt",
+            "cat a.txt 2>/dev/null; pwd 2>&1",
             "pwd; sed -n '1,5p' a.txt",
             "/bin/bash -lc \"nl -ba a.txt | head\"",
         ] {
@@ -992,6 +1009,7 @@ mod tests {
             "echo a.txt",
             "cd .. ; cat a.txt",
             "cat a.txt > /dev/null",
+            "cat 'a.txt 2>/dev/null'; pwd",
             "cat $f",
             "cat ../a.txt",
         ] {
