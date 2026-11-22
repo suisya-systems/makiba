@@ -33,6 +33,7 @@ STAGE=""
 SCRATCH_PREFIX=makiba-rehearsal-
 ORIG_TMP=${TMPDIR:-/tmp}   # scratch_env moves TMPDIR; the scratch folders are named from this one
 BRIEF=""                   # the temporary brief of the triage task, removed at exit
+SCRATCH_DRY=0           # 1 in a dry run of a scratch stage: paths are printed in their scratch form
 SCRATCH_RUN=""             # the scratch folder of this rehearsal, stopped and (when clean) removed at exit
 
 usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
@@ -168,6 +169,8 @@ lines_changed() { # lines_changed <what this stage is about to change>: shown be
 
 place_ledger() {
   local goals=${MAKIBA_GOALS_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/makiba/goals}
+  # A dry run does not create the scratch place, so its paths would be the real ones: print the scratch form.
+  if [ "$DRY" = 1 ] && [ "$SCRATCH_DRY" = 1 ]; then goals='<scratch>/config/makiba/goals'; fi
   local src=$REPO/goals/suisya-systems/makiba.md dst=$goals/suisya-systems/makiba.md
   say "== place the goal ledger: $dst"
   if [ "$DRY" = 1 ]; then
@@ -352,6 +355,7 @@ stage_triage() {
 
 scratch_env() {
   if [ "$DRY" = 1 ]; then
+    SCRATCH_DRY=1
     say "+ mktemp -d $ORIG_TMP/${SCRATCH_PREFIX}XXXXXX   (the scratch place; its env.sh holds every MAKIBA_* variable, XDG_* and TMPDIR, moved into it)"
     return 0
   fi
