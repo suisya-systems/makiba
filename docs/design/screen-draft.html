@@ -198,6 +198,16 @@
   .item.not_in .ti, .item.skipped .ti { color: var(--muted); } .item.not_in .g, .item.skipped .g { color: var(--faint); }
   .wrong { border-color: var(--red-line); }
   .wrong .fold { border-top-color: var(--red-line2); }
+  /* who is handling a row, and what can be done about it, in the row */
+  .w .h { flex: 0 0 100%; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px; }
+  .who { font-size: 11.5px; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
+  .who.none { background: var(--alarm); color: #fff; font-weight: 700; }
+  .who.sec { border: 1px solid var(--line); color: var(--ink2); font-weight: 500; }
+  .who.you { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line); }
+  .w .cmd { flex: 0 0 100%; margin-top: 6px; font: 11.5px/1.45 var(--mono); background: var(--soft); border: 1px solid var(--line); border-radius: 5px;
+            padding: 4px 8px; color: var(--ink2); overflow-wrap: anywhere; }
+  .w .cmd b { font-family: var(--sans); font-weight: 600; color: var(--muted); display: block; }
+  .fold .bad { color: var(--red); font-weight: 700; }
   .wrong.tight .w .d { -webkit-line-clamp: 1; }
   .w { padding: 7px 12px; border-top: 1px solid var(--red-line2); display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; min-width: 0; }
   .w:first-child { border-top: 0; }
@@ -330,7 +340,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
 
     <section class="col right">
       <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
-      <div class="sect" data-region="went-wrong"><h3>Went wrong <small>1</small></h3><div class="card wrong"><div class="w"><b>r2-274 · launch failed</b><span class="s">11 min ago</span><span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div></div></div>
+      <div class="sect" data-region="went-wrong"><h3>Went wrong <small>1</small></h3><div class="card wrong"><div class="w"><b title="r2-274 · launch failed">r2-274 · launch failed</b><span class="s">11 min ago</span><span class="h"><span class="who sec">With the secretary · told 11 min ago</span><span class="btn small">Ask the secretary</span><span class="btn small">Open the task</span><span class="btn small">Give up…</span></span></div></div></div>
       <div class="sect" data-region="range-band">
         <h3>Range 2 <small>7 Issues</small><span class="more">every item: the tab Range</span></h3>
         <div class="belt" aria-hidden="true"><i class="landed"></i><i class="waiting_person"></i><i class="in_work"></i><i class="review"></i><i class="failed"></i><i class="not_in"></i><i class="skipped"></i></div><div class="counts"><span><b>1</b> landed</span><span><b>1</b> waits for you</span><span><b>1</b> in review</span><span><b>2</b> in work <span class="bad">(1 failed to start)</span></span><span><b>1</b> not yet in</span><span><b>1</b> skipped</span></div>
@@ -343,7 +353,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
   </div>
 </div>
 
-<p class="note"><b>2. A full day, the tab "Other runs" open.</b> Two projects, so every reference is written <span style="font-family:var(--mono)">OWNER/NAME#N</span> on a line of its own (a long one is cut at its start, so the number stays). Fourteen candidates, three shown when nothing is open and one beside an open tab; a range of twenty, eight of them in work; six things gone wrong, three shown. The headings of "Range", "Other runs" and "Pull requests" are red because something behind each failed; a heading with only something waiting for you would be amber.</p>
+<p class="note"><b>2. A full day, the tab "Other runs" open.</b> Two projects, so every reference is written <span style="font-family:var(--mono)">OWNER/NAME#N</span> on a line of its own (a long one is cut at its start, so the number stays). Fourteen candidates, three shown when nothing is open and one beside an open tab; a range of twenty, eight of them in work; six things gone wrong, three shown, each saying who is handling it (nobody, the secretary, or you) with what can be done in the row; the first row shows the line to type for "Ask the secretary", as the read-only screen does. "Told N min ago" is drawn as it will read once the read surface says whether a row was told (screen.md, section 6); until then such a row reads "No sign that anyone is acting". The headings of "Range", "Other runs" and "Pull requests" are red because something behind each failed; a heading with only something waiting for you would be amber.</p>
 
 <div class="screen light">
   <header class="top" data-region="top-line">
@@ -351,7 +361,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
     <span class="org">suisya-systems · 2 projects</span>
     <span class="sp"></span>
     <span class="chip wait">3 wait for you</span>
-    <span class="chip bad">6 went wrong</span>
+    <span class="chip bad">6 went wrong · nobody on 2</span>
     <span class="chip quiet">makibad running · read 3 s ago</span>
     <span class="set"><span class="on">English</span><span>Japanese</span></span>
     <span class="set"><span>Auto</span><span class="on">Light</span><span>Dark</span></span>
@@ -408,7 +418,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
 
     <section class="col right">
       <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
-      <div class="sect" data-region="went-wrong"><h3>Went wrong <small>6</small></h3><div class="card wrong tight"><div class="w"><b>makiba · r2-301 · launch failed</b><span class="s">11 min ago</span><span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div><div class="w"><b>makiba · r2-243 · no status for 12 min</b><span class="s">12 min ago</span><span class="d">The worker&#x27;s terminal reports nothing; the secretary is looking.</span></div><div class="w"><b>The last scan failed</b><span class="s">3 min ago</span><span class="d">gh issue list: could not reach the second project&#x27;s repository. The candidates are from the scan before it.</span></div><div class="fold">and 3 more<span>oldest 52 min · 2 launches, 1 anomaly</span></div></div></div>
+      <div class="sect" data-region="went-wrong"><h3>Went wrong <small>6</small></h3><div class="card wrong"><div class="w"><b title="makiba · r2-301 · launch failed">makiba · r2-301 · launch failed</b><span class="s">11 min ago</span><span class="h"><span class="who none">Nobody is acting</span><span class="btn small">Ask the secretary</span><span class="btn small">Open the task</span><span class="btn small">Give up…</span></span><span class="cmd"><b>In your shell:</b> makiba send secretary 'Please look at launch_failed on task r2-301.'</span></div><div class="w"><b title="makiba · r2-243 · no status for 12 min">makiba · r2-243 · no status for 12 min</b><span class="s">12 min ago</span><span class="h"><span class="who sec">With the secretary · told 12 min ago, looking</span><span class="btn small">Ask the secretary</span><span class="btn small">Open the task</span></span></div><div class="w"><b title="docs-goals · stopped at a login">docs-goals · stopped at a login</b><span class="s">1 min ago</span><span class="h"><span class="who you">Waits for your decision</span><span class="btn small">Go to its question</span></span></div><div class="fold">and 3 more<span><b class="bad">1 with nobody acting</b> · oldest 52 min</span></div></div></div>
       <div class="sect" data-region="range-band">
         <h3>Range 2 <small>20 Issues</small><span class="more">every item: the tab Range</span></h3>
         <div class="nums" aria-hidden="true"><i class="landed" style="flex:6 1 0">6</i><i class="closed" style="flex:1 1 0">1</i><i class="waiting_person" style="flex:2 1 0">2</i><i class="review" style="flex:3 1 0">3</i><i class="in_work" style="flex:2 1 0">2</i><i class="failed" style="flex:1 1 0">1</i><i class="not_in" style="flex:3 1 0">3</i><i class="skipped" style="flex:2 1 0">2</i></div><div class="counts"><span><b>6</b> landed</span><span><b>1</b> closed</span><span><b>2</b> wait for you</span><span><b>3</b> in review</span><span><b>3</b> in work <span class="bad">(1 failed to start)</span></span><span><b>3</b> not yet in</span><span><b>2</b> skipped</span></div>
@@ -429,7 +439,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
     <span class="org">suisya-systems · 2 projects</span>
     <span class="sp"></span>
     <span class="chip wait">3 wait for you</span>
-    <span class="chip bad">6 went wrong</span>
+    <span class="chip bad">6 went wrong · nobody on 2</span>
     <span class="chip quiet">makibad running · read 3 s ago</span>
     <span class="set"><span class="on">English</span><span>Japanese</span></span>
     <span class="set"><span>Auto</span><span>Light</span><span class="on">Dark</span></span>
@@ -486,7 +496,7 @@ One question from r2-169 needs you; it is shown above with my recommendation (ye
 
     <section class="col right">
       <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
-      <div class="sect" data-region="went-wrong"><h3>Went wrong <small>6</small></h3><div class="card wrong tight"><div class="w"><b>makiba · r2-301 · launch failed</b><span class="s">11 min ago</span><span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div><div class="w"><b>makiba · r2-243 · no status for 12 min</b><span class="s">12 min ago</span><span class="d">The worker&#x27;s terminal reports nothing; the secretary is looking.</span></div><div class="w"><b>The last scan failed</b><span class="s">3 min ago</span><span class="d">gh issue list: could not reach the second project&#x27;s repository. The candidates are from the scan before it.</span></div><div class="fold">and 3 more<span>oldest 52 min · 2 launches, 1 anomaly</span></div></div></div>
+      <div class="sect" data-region="went-wrong"><h3>Went wrong <small>6</small></h3><div class="card wrong"><div class="w"><b title="makiba · r2-301 · launch failed">makiba · r2-301 · launch failed</b><span class="s">11 min ago</span><span class="h"><span class="who none">Nobody is acting</span><span class="btn small">Ask the secretary</span><span class="btn small">Open the task</span><span class="btn small">Give up…</span></span><span class="cmd"><b>In your shell:</b> makiba send secretary 'Please look at launch_failed on task r2-301.'</span></div><div class="w"><b title="makiba · r2-243 · no status for 12 min">makiba · r2-243 · no status for 12 min</b><span class="s">12 min ago</span><span class="h"><span class="who sec">With the secretary · told 12 min ago, looking</span><span class="btn small">Ask the secretary</span><span class="btn small">Open the task</span></span></div><div class="w"><b title="docs-goals · stopped at a login">docs-goals · stopped at a login</b><span class="s">1 min ago</span><span class="h"><span class="who you">Waits for your decision</span><span class="btn small">Go to its question</span></span></div><div class="fold">and 3 more<span><b class="bad">1 with nobody acting</b> · oldest 52 min</span></div></div></div>
       <div class="sect" data-region="range-band">
         <h3>Range 2 <small>20 Issues</small><span class="more">every item: the tab Range</span></h3>
         <div class="nums" aria-hidden="true"><i class="landed" style="flex:6 1 0">6</i><i class="closed" style="flex:1 1 0">1</i><i class="waiting_person" style="flex:2 1 0">2</i><i class="review" style="flex:3 1 0">3</i><i class="in_work" style="flex:2 1 0">2</i><i class="failed" style="flex:1 1 0">1</i><i class="not_in" style="flex:3 1 0">3</i><i class="skipped" style="flex:2 1 0">2</i></div><div class="counts"><span><b>6</b> landed</span><span><b>1</b> closed</span><span><b>2</b> wait for you</span><span><b>3</b> in review</span><span><b>3</b> in work <span class="bad">(1 failed to start)</span></span><span><b>3</b> not yet in</span><span><b>2</b> skipped</span></div>
