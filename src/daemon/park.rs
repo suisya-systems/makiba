@@ -282,6 +282,24 @@ pub fn unpark(w: &StateWriter, task: &str, reason: &str, detail: Value) -> Resul
     })
 }
 
+/// `unpark` for something makibad saw itself (a failed CI, a landing), with a notice to the woken
+/// worker saying what, so that its first turn has the reason to read. Nothing for a run not parked.
+pub fn wake_with_notice(
+    w: &StateWriter,
+    task: &str,
+    reason: &str,
+    detail: Value,
+    body: &str,
+) -> Result<bool> {
+    w.transaction(|w| {
+        if !unpark(w, task, reason, detail)? {
+            return Ok(false);
+        }
+        super::door::notice(w, &crate::spec::worker_agent_id(task), task, body)?;
+        Ok(true)
+    })
+}
+
 /// The parked run of the worker `agent` (`w-<task_id>`), if it is one.
 pub fn parked_worker(w: &StateWriter, agent: &str) -> Result<Option<String>> {
     let Some(task) = agent.strip_prefix(crate::spec::WORKER_AGENT_PREFIX) else {

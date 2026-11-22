@@ -453,11 +453,12 @@ fn apply(w: &StateWriter, d: &Done) -> Result<()> {
         if let (Outcome::Concluded(s, _), Some(task)) = (&d.outcome, &task)
             && s.status == "failed"
         {
-            super::park::unpark(
+            super::park::wake_with_notice(
                 w,
                 task,
                 "ci_failed",
                 json!({"repo": d.repo, "pr": d.pr, "head_oid": d.head}),
+                &body,
             )?;
         }
         // The notice (spec 5.4): the event, the message, the pending delivery with no attempt.
@@ -734,5 +735,79 @@ esac"#,
             0,
             "the descendant is still there"
         );
+    }
+
+    /// A failed CI of a parked run's pull request wakes it with the reason `ci_failed` and leaves
+    /// its worker a notice with the result; a watch that ended without a result wakes nothing
+    /// (Issue 283).
+    #[test]
+    fn a_failed_ci_wakes_a_parked_run_and_tells_its_worker() {
+        for (outcome, woken) in [
+            (
+                Outcome::Concluded(
+                    Summary {
+                        status: "failed",
+                        fail_count: 1,
+                        pending_count: 0,
+                        total: 2,
+                    },
+                    1,
+                ),
+                true,
+            ),
+            (Outcome::Failed("gone".into()), false),
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: "t",
+                project_slug: "p",
+                status: Some("in_use"),
+                ..Default::default()
+            })
+            .unwrap();
+            w.conn()
+                .execute_batch(
+                    "UPDATE runs SET status = 'parked';
+                     INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage, conversation_id)
+                     VALUES (1, 's1', 'fake', 'b', '/w', 'verified', 'c1');
+                     INSERT INTO pending (run_id, kind, question, status) VALUES (1, 'question', 'q', 'escalated');
+                     INSERT INTO pr_watches (repo, pr, head_oid, run_id) VALUES ('o/r', 5, 'abc', 1);",
+                )
+                .unwrap();
+            let stamp: String = w
+                .conn()
+                .query_row("SELECT started_at FROM pr_watches", [], |r| r.get(0))
+                .unwrap();
+            apply(
+                &w,
+                &Done {
+                    id: 1,
+                    stamp,
+                    repo: "o/r".into(),
+                    pr: 5,
+                    head: "abc".into(),
+                    outcome,
+                },
+            )
+            .unwrap();
+            let n = |sql: &str| -> i64 { w.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+            let status: String = w
+                .conn()
+                .query_row("SELECT status FROM runs", [], |r| r.get(0))
+                .unwrap();
+            assert_eq!(status, if woken { "suspended" } else { "parked" });
+            assert_eq!(
+                n("SELECT count(*) FROM events WHERE kind = 'run_unparked'
+                   AND json_extract(payload_json, '$.reason') = 'ci_failed'"),
+                woken as i64
+            );
+            assert_eq!(
+                n(
+                    "SELECT count(*) FROM messages WHERE recipient = 'w-t' AND body LIKE 'CI failed%'"
+                ),
+                woken as i64
+            );
+        }
     }
 }
