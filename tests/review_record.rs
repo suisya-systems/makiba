@@ -84,13 +84,14 @@ fn root() -> &'static Path {
 }
 
 /// What the "other" stand-in does when asked to review.
-const OTHER_OK: &str = r#"printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"cat review.diff","exit_code":0,"status":"completed"}}'
+const OTHER_OK: &str = r#"printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"cat MAKIBA_REVIEW.diff","exit_code":0,"status":"completed"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"cat MAKIBA_DESIGN.md","exit_code":0,"status":"completed"}}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"[Major] file.txt:1 - a finding - a fix\nFINDINGS: blocker=0 major=1 minor=0"}}'"#;
 
 /// What the "same" stand-in does: one successful read, then its result.
 const SAME_OK: &str = r#"cat > "$0.stdin"
 prev=; for a in "$@"; do [ "$prev" = --settings ] && cp "$a" "$0.settings"; prev=$a; done
-printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u1","name":"Read","input":{"file_path":"review.diff"}}]}}'
+printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id":"u1","name":"Read","input":{"file_path":"MAKIBA_REVIEW.diff"}}]}}'
 printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":"the diff"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"FINDINGS: blocker=0 major=0 minor=0"}'"#;
 
@@ -435,7 +436,7 @@ fn the_snapshot_keeps_files_the_export_attributes_would_drop() {
         &o.other,
         0,
         r#"cp hidden.txt "$0.hidden"; cp subst.txt "$0.subst"
-printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"cat x","exit_code":0,"status":"completed"}}'
+printf '%s\n' '{"type":"item.completed","item":{"type":"command_execution","command":"cat MAKIBA_REVIEW.diff","exit_code":0,"status":"completed"}}'
 printf '%s\n' '{"type":"item.completed","item":{"type":"agent_message","text":"FINDINGS: blocker=0 major=0 minor=0"}}'"#,
     );
     assert_eq!(o.diff().unwrap()["verdict"], "passed");
