@@ -726,6 +726,16 @@ fn ask_gate(repo: &str, pr: i64, head: &str) -> Result<(), String> {
     }
     let r = &answer["result"];
     if r["allow"] == json!(true) {
+        // Issue 263: allowed, but the head has no passed diff review: the person is asked, with
+        // the gate's words, before the command runs.
+        if r["warn"] == json!(true) {
+            println!(
+                "{}",
+                json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
+                    "permissionDecision": "ask",
+                    "permissionDecisionReason": r["reason"].as_str().unwrap_or("")}})
+            );
+        }
         return Ok(());
     }
     Err(format!(
