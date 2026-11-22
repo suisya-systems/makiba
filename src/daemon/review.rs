@@ -501,6 +501,10 @@ impl Targets {
     }
 }
 
+/// Programs that only look and never end or steer the shell: a command string with any other
+/// program (`exit`, `false`, `if`, `eval`, a script) is not trusted to have run what it says.
+const LOOKERS: [&str; 7] = ["pwd", "ls", "echo", "wc", "find", "tree", "sort"];
+
 /// The programs whose operand files are read, and nothing else.
 const READERS: [&str; 10] = [
     "cat", "head", "tail", "sed", "nl", "less", "more", "grep", "rg", "bat",
@@ -577,7 +581,8 @@ fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
 }
 
 /// Did the shell string `command` (which exited 0) open a file of `t`? Only a reading program
-/// with the file among its words counts; a command that changes folder is not trusted at all.
+/// with the file among its words counts; a string with any program that is neither a reader nor
+/// a looker (`LOOKERS`), or that changes folder, is not trusted at all.
 fn command_opens(command: &str, t: &Targets) -> bool {
     let Some(cmds) = simple_commands(command) else {
         return false;
@@ -586,6 +591,12 @@ fn command_opens(command: &str, t: &Targets) -> bool {
     if cmds
         .iter()
         .any(|c| ["cd", "pushd", "popd"].contains(&prog(c).as_str()))
+    {
+        return false;
+    }
+    if cmds
+        .iter()
+        .any(|c| !READERS.contains(&prog(c).as_str()) && !LOOKERS.contains(&prog(c).as_str()))
     {
         return false;
     }
@@ -975,6 +986,9 @@ mod tests {
             "false && cat a.txt; true",
             "true || cat a.txt",
             "true # cat a.txt",
+            "exit 0; cat a.txt",
+            "if false; then true; cat a.txt; fi",
+            "false; cat a.txt",
             "echo a.txt",
             "cd .. ; cat a.txt",
             "cat a.txt > /dev/null",
