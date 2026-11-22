@@ -29,14 +29,24 @@ const WRAPPERS: &[&str] = &[
 ];
 
 /// `Ok` when the payload's command names none of the base's commands; else the reason.
-pub fn check(payload: &Value) -> Result<(), String> {
+pub fn check(payload: &Value) -> Result<(), super::Refusal> {
     let command = payload
         .pointer("/tool_input/command")
         .and_then(Value::as_str)
-        .ok_or("the hook payload has no string tool_input.command")?;
+        .ok_or_else(|| {
+            super::Refusal::new(
+                super::FAIL_CLOSED,
+                "the hook payload",
+                "the hook payload has no string tool_input.command",
+            )
+        })?;
     match named(command, &crate::base::worker_denies().commands) {
-        Some(name) => Err(format!(
-            "`{name}` is the base's command; no agent role may run it (spec section 1). Ask through the door's tools instead"
+        Some(name) => Err(super::Refusal::new(
+            "L-N2",
+            format!("the command word {name}"),
+            format!(
+                "`{name}` is the base's command; no agent role may run it (spec section 1). Ask through the door's tools instead"
+            ),
         )),
         None => Ok(()),
     }

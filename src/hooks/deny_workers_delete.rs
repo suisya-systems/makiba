@@ -27,7 +27,7 @@ fn folder(var: &str, default: &str) -> (String, PathBuf) {
     (raw, resolve(&expanded))
 }
 
-pub fn check(payload: &Value) -> Result<(), String> {
+pub fn check(payload: &Value) -> Result<(), super::Refusal> {
     if super::field(payload, "/tool_name") != "Bash" {
         return Ok(());
     }
@@ -56,12 +56,16 @@ pub fn check(payload: &Value) -> Result<(), String> {
             forms.push(format!("$HOME/{rest}"));
             forms.push(format!("${{HOME}}/{rest}"));
         }
-        if forms
+        if let Some(form) = forms
             .iter()
-            .any(|f| !f.is_empty() && command.split('\n').any(|l| l.contains(f.as_str())))
+            .find(|f| !f.is_empty() && command.split('\n').any(|l| l.contains(f.as_str())))
         {
-            return Err(format!(
-                "a recursive rm naming {real} could delete other tasks' work; a person deletes there by hand if it must go"
+            return Err(super::Refusal::new(
+                "L-K6",
+                format!("rm recursive, naming {form}"),
+                format!(
+                    "a recursive rm naming {real} could delete other tasks' work; a person deletes there by hand if it must go"
+                ),
             ));
         }
     }

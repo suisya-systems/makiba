@@ -12,6 +12,7 @@
 //! (exit 1) naming the file, the line and the shape, never the matched text. Anything that cannot
 //! be read refuses too.
 
+use super::Refusal;
 use regex::bytes::Regex;
 use std::path::Path;
 use std::process::{Command, ExitCode, Stdio};
@@ -107,15 +108,22 @@ fn staged() -> Result<Vec<(String, String)>, String> {
     Ok(out)
 }
 
-fn check(name: &str, args: &[String]) -> Result<(), String> {
+/// The line the scanner holds.
+const LINE: &str = "L-K12";
+
+fn check(name: &str, args: &[String]) -> Result<(), Refusal> {
     let found = if name == "commit-msg" || name == "applypatch-msg" {
-        let file = args.first().ok_or("git named no message file")?;
-        let text = std::fs::read(file).map_err(|e| format!("cannot read {file}: {e}"))?;
+        let cannot = |why: String| Refusal::new(LINE, "the commit message file", why);
+        let file = args
+            .first()
+            .ok_or_else(|| cannot("git named no message file".into()))?;
+        let text = std::fs::read(file).map_err(|e| cannot(format!("cannot read {file}: {e}")))?;
         find(&text).map(|(shape, line)| ("the commit message".to_string(), shape, line))
     } else {
+        let cannot = |why: String| Refusal::new(LINE, "the staged files", why);
         let mut found = None;
-        for (path, oid) in staged()? {
-            let bytes = git(&["cat-file", "blob", &oid])?;
+        for (path, oid) in staged().map_err(cannot)? {
+            let bytes = git(&["cat-file", "blob", &oid]).map_err(cannot)?;
             if let Some((shape, line)) = find(&bytes) {
                 found = Some((path, shape, line));
                 break;
@@ -125,9 +133,14 @@ fn check(name: &str, args: &[String]) -> Result<(), String> {
     };
     match found {
         None => Ok(()),
-        Some((what, shape, line)) => Err(format!(
-            "{what} holds a line shaped like {shape} (line {line}); a secret must not enter the git history. \
-             Take it out, or build test data at run time; a person commits a false positive themselves"
+        // The file, the line and the shape; never the matched text, which may be a secret.
+        Some((what, shape, line)) => Err(Refusal::new(
+            LINE,
+            format!("{what}, line {line}, {shape}"),
+            format!(
+                "{what} holds a line shaped like {shape} (line {line}); a secret must not enter the git history. \
+                 Take it out, or build test data at run time; a person commits a false positive themselves"
+            ),
         )),
     }
 }
@@ -136,11 +149,19 @@ fn check(name: &str, args: &[String]) -> Result<(), String> {
 pub fn main(name: &str, args: &[String]) -> ExitCode {
     match check(name, args) {
         Ok(()) => ExitCode::SUCCESS,
-        Err(why) => {
-            eprintln!("makiba: refused: {why}");
+        Err(refusal) => {
+            eprintln!("{}", refusal.message(name));
             ExitCode::from(1)
         }
     }
+}
+
+/// The shell text of a refusal by the script of hook `name`, as `Refusal::message` writes it;
+/// `reason` and `matched` may hold shell expansions (inside double quotes).
+fn script_refusal(name: &str, reason: &str, matched: &str) -> String {
+    format!(
+        "echo \"makiba: refused by hook {name} (line {LINE} in docs/design/lines.md): {reason}. Matched: \\\"{matched}\\\"\" >&2"
+    )
 }
 
 /// Shell single quotes around `s`.
@@ -181,11 +202,16 @@ pub const PROJECT_KEY: &str = "makiba.projectHooksPath";
 fn forward(name: &str, last: bool) -> String {
     let run = if last { "exec " } else { "" };
     let then = if last { "" } else { " || exit $?" };
+    let refused = script_refusal(
+        name,
+        &format!("{PROJECT_KEY} names the secret scanner's own folder $d"),
+        &format!("{PROJECT_KEY}=$d"),
+    );
     format!(
         "d=$(git config --get {PROJECT_KEY}) || exit 0\n\
          [ -x \"$d/{name}\" ] || exit 0\n\
          if [ \"$d/{name}\" -ef \"$0\" ]; then\n\
-         \x20 echo \"makiba: refused: {PROJECT_KEY} names the secret scanner's own folder $d\" >&2\n\
+         \x20 {refused}\n\
          \x20 exit 1\n\
          fi\n\
          {run}\"$d/{name}\" \"$@\"{then}\n"
@@ -202,20 +228,28 @@ pub fn install(dir: &Path, makiba: &Path) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
     let m = quoted(&makiba.to_string_lossy());
-    let head = format!(
-        "#!/bin/sh\n\
-         # Written by makibad (Issues 136, 236): the secret scanner of a code run, then the project's own hook. Preparing a worktree rewrites it.\n\
-         m={m}\n\
-         if [ ! -x \"$m\" ]; then\n\
-         \x20 echo \"makiba: refused: the secret scanner $m is missing or cannot run; install makiba at that path again, or restart makibad from the installed binary and prepare a worktree, which rewrites this hook\" >&2\n\
-         \x20 exit 1\n\
-         fi\n"
-    );
+    let head = |name: &str| {
+        let refused = script_refusal(
+            name,
+            "the secret scanner $m is missing or cannot run; install makiba at that path again, or restart makibad from the installed binary and prepare a worktree, which rewrites this hook",
+            "$m",
+        );
+        format!(
+            "#!/bin/sh\n\
+             # Written by makibad (Issues 136, 236): the secret scanner of a code run, then the project's own hook. Preparing a worktree rewrites it.\n\
+             m={m}\n\
+             if [ ! -x \"$m\" ]; then\n\
+             \x20 {refused}\n\
+             \x20 exit 1\n\
+             fi\n"
+        )
+    };
     let scripts = NAMES
         .iter()
         .map(|name| {
             let script = format!(
-                "{head}\"$m\" hook {name} \"$@\" || exit $?\n{}exec \"$m\" hook {name} \"$@\"\n",
+                "{}\"$m\" hook {name} \"$@\" || exit $?\n{}exec \"$m\" hook {name} \"$@\"\n",
+                head(name),
                 forward(name, false)
             );
             (name, script)
