@@ -4,6 +4,7 @@
 #![allow(dead_code)]
 
 pub mod local;
+pub mod makibad;
 
 use makiba::base::stub::Stub;
 use makiba::base::version::checked_hello;
