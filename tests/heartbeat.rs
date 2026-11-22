@@ -3,6 +3,9 @@
 //! binary: `makiba daemon` on the stand-in base (`MAKIBA_BASE=stub`, whose first `Resync` comes
 //! after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`), and `makiba status`.
 
+mod common;
+
+use common::makibad;
 use rusqlite::{Connection, OpenFlags};
 use std::path::Path;
 use std::process::{Child, Command, Output, Stdio};
@@ -48,8 +51,20 @@ impl Drop for Daemon {
 
 fn command(dir: &Path, args: &[&str], delay_ms: u64) -> Command {
     let mut c = Command::new(MAKIBA);
-    c.args(args)
-        .env("MAKIBA_STATE_DIR", dir)
+    c.args(args);
+    env(&mut c, dir, delay_ms);
+    c
+}
+
+/// `makibad` itself, with the knowledge folder of the helper.
+fn daemon(dir: &Path, delay_ms: u64) -> makibad::Makibad {
+    let mut c = makibad::daemon(dir);
+    c.with(|c| env(c, dir, delay_ms));
+    c
+}
+
+fn env(c: &mut Command, dir: &Path, delay_ms: u64) {
+    c.env("MAKIBA_STATE_DIR", dir)
         // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
         .env("MAKIBA_DOOR", "none")
         .env("MAKIBA_PORT", "0")
@@ -57,11 +72,10 @@ fn command(dir: &Path, args: &[&str], delay_ms: u64) -> Command {
         .env("MAKIBA_BASE", "stub")
         .env("MAKIBA_STUB_SUBSCRIBE_DELAY_MS", delay_ms.to_string())
         .stdin(Stdio::null());
-    c
 }
 
 fn start(dir: &Path, delay_ms: u64) -> Daemon {
-    let child = command(dir, &["daemon"], delay_ms)
+    let child = daemon(dir, delay_ms)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -135,7 +149,7 @@ fn a_second_makibad_names_the_first_ones_pid() {
         || row(dir.path()).filter(|r| r.subscribed == 1),
     );
 
-    let second = command(dir.path(), &["daemon"], 0).output().unwrap();
+    let second = daemon(dir.path(), 0).output().unwrap();
     assert!(
         !second.status.success(),
         "a second makibad must exit non-zero"

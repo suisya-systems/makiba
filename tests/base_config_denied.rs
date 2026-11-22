@@ -4,11 +4,13 @@
 //! and by the per-task settings written for a run (at the place resolved when they are written).
 //! One test: it changes the environment in turn, before and while the daemon runs.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use serde_json::Value;
 use std::path::{Path, PathBuf};
@@ -174,7 +176,7 @@ fn the_base_configuration_folder_is_denied_by_every_role_and_by_the_task_setting
             .unwrap();
     }
     let daemon_dir: PathBuf = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(RealDenies(Stub::new()))));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(RealDenies(Stub::new()))));
     let file = dir.join("settings/t1.json");
     assert!(wait_for(&file), "no settings written within 20 s");
     // The file is written whole once; read it until it parses.

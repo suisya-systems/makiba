@@ -11,13 +11,15 @@
 //! Which recipients have a channel is given by the test agent module: `Fake::with_channel`
 //! says whether the program has one, and the channel of the child says whether it is connected.
 
+mod common;
+
+use common::makibad;
 use makiba::agents::Agent;
 use makiba::agents::fake::Fake;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::daemon::delivery::{Channel, Delivery};
 use makiba::db::writer::{NewEvent, StateWriter};
 use rusqlite::{Connection, OpenFlags, params};
@@ -158,7 +160,7 @@ fn child_daemon() {
     let typed = dir.join("typed.log");
     let delivery =
         Delivery::new(Box::new(TestChannel::from_env())).with_window(Duration::from_millis(window));
-    let _ = daemon::run_with(
+    let _ = makibad::run_with(
         &dir,
         &|| {
             Box::new(Guarded {

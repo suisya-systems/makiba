@@ -14,10 +14,10 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -103,6 +103,7 @@ struct Org {
     person: String,
     daemon: Option<Daemon>,
     _tmp: tempfile::TempDir,
+    _knowledge: makibad::Knowledge,
     _env: MutexGuard<'static, ()>,
 }
 
@@ -166,6 +167,7 @@ fn org(verify_ms: u64, worker: bool) -> Org {
         }
     }
     let agent = json!([AGENT, "record", format!("steps:{}", steps.display())]).to_string();
+    let held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
     // SAFETY: the lock above is held for the whole test; no daemon of an earlier test is running.
     unsafe {
         std::env::set_var("MAKIBA_FAKE_AGENT", agent);
@@ -177,7 +179,6 @@ fn org(verify_ms: u64, worker: bool) -> Org {
         std::env::set_var("MAKIBA_DOCS_DIR", root.join("docs"));
         std::env::set_var("MAKIBA_WORKERS_DIR", root.join("workers"));
         std::env::set_var("MAKIBA_REPOS_DIR", root.join("repos"));
-        std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
         std::env::set_var("MAKIBA_CURATOR_TIMEOUT_MS", "600000");
         std::env::remove_var("MAKIBA_SECRETARY_REMOTE_CONTROL");
     }
@@ -193,6 +194,7 @@ fn org(verify_ms: u64, worker: bool) -> Org {
         person,
         daemon: None,
         _tmp: tmp,
+        _knowledge: held_knowledge,
         _env: env,
     };
     o.set_steps(RUNS);
@@ -208,7 +210,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let (dir, base, flag) = (self.dir.clone(), self.base.clone(), Arc::clone(&stop));
         let daemon =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         self.daemon = Some((stop, daemon));
         // The daemon opens the database as it starts: a busy open is tried again.
         let until = Instant::now() + WAIT;
@@ -371,6 +373,22 @@ impl Org {
     /// `makiba` run by the person, with this organization's folders and nothing of this process's
     /// environment.
     fn makiba(&self, args: &[&str]) -> Output {
+        let mut c = Command::new(MAKIBA);
+        c.args(args);
+        self.env(&mut c);
+        c.output().unwrap()
+    }
+
+    /// `makiba up`, which starts makibad, with the knowledge folder of the helper.
+    fn up(&self) -> Output {
+        let mut c = makibad::up(&self.root);
+        c.with(|c| self.env(c))
+            .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(&self.root));
+        c.output().unwrap()
+    }
+
+    /// Only what is set here: the person's environment is cleared.
+    fn env(&self, cmd: &mut Command) {
         let bin = self.root.join("bin");
         std::fs::create_dir_all(&bin).unwrap();
         let (a, b, c) = makiba::agents::version::LOWEST;
@@ -379,9 +397,7 @@ impl Org {
             &format!("echo '{a}.{b}.{c} (Claude Code)'"),
         );
         script(&bin.join("hc"), "exit 0");
-        Command::new(MAKIBA)
-            .args(args)
-            .env_clear()
+        cmd.env_clear()
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("HOME", self.root.join("home"))
             .env("XDG_CONFIG_HOME", self.root.join("config"))
@@ -389,9 +405,7 @@ impl Org {
             .env("MAKIBA_STATE_DIR", &self.dir)
             .env("MAKIBA_PERSON_KEY", self.root.join("config/person.key"))
             .env("HC_BIN", bin.join("hc"))
-            .env("MAKIBA_DOOR", "none")
-            .output()
-            .unwrap()
+            .env("MAKIBA_DOOR", "none");
     }
 }
 
@@ -575,7 +589,7 @@ fn after_two_failed_relaunches_none_until_up() {
 
     // The person runs `makiba up`: makibad runs, so it is asked by a row and launches one.
     o.set_steps(RUNS);
-    let up = o.makiba(&["up"]);
+    let up = o.up();
     assert!(up.status.success(), "{}", text(&up));
     let back = o.running_secretary();
     assert_eq!(launched_after(&o), 3);

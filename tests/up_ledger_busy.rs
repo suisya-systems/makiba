@@ -6,11 +6,14 @@
 //! The stand-ins are those of `tests/up.rs`; the stand-in `claude` also leaves a mark, so the test
 //! knows `up` has started. The lock is taken before `up` starts, so `up` always meets it.
 
+mod common;
+
+use common::makibad;
 use rusqlite::Connection;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
 
 /// Longer than the 5 s busy timeout of every connection (src/db/mod.rs).
@@ -54,9 +57,9 @@ impl Setup {
 
     fn spawn_up(&self) -> Child {
         let _ = fs::remove_file(self.path("claude.mark"));
-        Command::new(env!("CARGO_BIN_EXE_makiba"))
-            .arg("up")
+        makibad::up(self.root.path())
             .env_clear()
+            .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(self.root.path()))
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),

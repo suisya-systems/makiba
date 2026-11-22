@@ -3,10 +3,13 @@
 //! `makibad` runs on the in-process stand-in base without a socket (`MAKIBA_DOOR=none`) and is
 //! ended by the test that started it.
 
+mod common;
+
+use common::makibad;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::time::{Duration, Instant};
 
 /// What `claude --version` prints for the lowest supported version.
@@ -42,9 +45,9 @@ impl Setup {
     }
 
     fn up(&self, extra: &[(&str, &str)]) -> Output {
-        let mut c = Command::new(env!("CARGO_BIN_EXE_makiba"));
-        c.arg("up")
-            .env_clear()
+        let mut c = makibad::up(self.root.path());
+        c.env_clear()
+            .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(self.root.path()))
             .env(
                 "PATH",
                 format!("{}:/usr/bin:/bin", self.path("bin").display()),

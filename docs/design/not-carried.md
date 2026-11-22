@@ -156,6 +156,7 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 - In claude-org-ja: `knowledge/curated/`, `knowledge/raw/`.
 - Nearest in makiba: the curator writes `<knowledge>/raw` and `curated` for new work (spec sections 2 and 12); the old notes are Japanese and are not copied.
 - Mark: **build**, as a review pass before M7-3; Issue #270.
+- Done: the record of the pass is [notes-pass.md](notes-pass.md); rules a to e are in `roles/curator/rules.md`, `roles/worker/rules.md`, `roles/secretary/rules.md` and `skills/curate/SKILL.md`, and the verb `candidate` takes `deferred`. Rule f's first half (archived notes never move back) is one clause of the curator's rules; its second half (naming curated topics) was not carried.
 - What the pass is: not a copy of the notes and not a translation of all of them. Each note is either dropped (it is about a layer makiba lacks, or code or a test already holds it) or carried to a named place: a rule in `roles/`, a skill, an incident row with a test, or a curated note. The pass leaves a short record of what was done with each note.
 - Reason: what the old notes learned is worth keeping only where it changes what makiba does; copying them would keep the layers makiba dropped.
 - Also in this pass: compare claude-org-ja's `docs/contracts/knowledge-curation-contract.md` with `roles/curator/rules.md` and `skills/curate/SKILL.md`. These rules of the contract are missing from makiba's curator rules and skill, and are listed as the rules to carry:

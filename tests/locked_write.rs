@@ -9,8 +9,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, LaunchSpec};
-use makiba::daemon;
 use makiba::db::writer::{NewEvent, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use std::collections::BTreeMap;
@@ -36,6 +36,7 @@ struct Org {
     base: Local,
     daemon: Option<Daemon>,
     _tmp: tempfile::TempDir,
+    _knowledge: makibad::Knowledge,
     _env: MutexGuard<'static, ()>,
 }
 
@@ -61,9 +62,9 @@ fn org(retry_ms: Option<u64>) -> Org {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::create_dir_all(&knowledge).unwrap();
     drop(StateWriter::open(&dir.join("state.db")).unwrap());
+    let held_knowledge = makibad::use_knowledge(&knowledge);
     // SAFETY: the lock above is held for the whole test; no daemon of an earlier test is running.
     unsafe {
-        std::env::set_var("MAKIBA_KNOWLEDGE_DIR", &knowledge);
         match retry_ms {
             Some(ms) => std::env::set_var("MAKIBA_WRITE_RETRY_MS", ms.to_string()),
             None => std::env::remove_var("MAKIBA_WRITE_RETRY_MS"),
@@ -74,12 +75,13 @@ fn org(retry_ms: Option<u64>) -> Org {
         base: Local::new(),
         daemon: None,
         _tmp: tmp,
+        _knowledge: held_knowledge,
         _env: env,
     };
     let stop = Arc::new(AtomicBool::new(false));
     let (d, base, flag) = (org.dir.clone(), org.base.clone(), Arc::clone(&stop));
     let daemon =
-        std::thread::spawn(move || daemon::run_until(&d, &|| Box::new(base.clone()), flag));
+        std::thread::spawn(move || makibad::run_until(&d, &|| Box::new(base.clone()), flag));
     org.daemon = Some((stop, daemon));
     org.until("the first resync", |o| {
         o.count("SELECT count(*) FROM events WHERE kind = 'base_resynced'") >= 1

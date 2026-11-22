@@ -7,9 +7,11 @@
 //! (no Unix socket is needed), called over the MCP port with the agents' tokens. The triage lines
 //! run in this process on the stand-in base, with a stand-in `gh`, as in `triage_forward.rs`.
 
+mod common;
+
+use common::makibad;
 use makiba::base::Base;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use makiba::work_discovery::goals::{GoalStatus, load_goals};
 use rusqlite::{Connection, OpenFlags};
@@ -23,8 +25,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once, OnceLock};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 
 const SECRETARY_KEY: &str = "5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5";
 const WORKER_KEY: &str = "0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a";
@@ -148,7 +148,7 @@ impl Org {
         drop(w);
         let port = free_port();
         let daemon = Daemon(
-            Command::new(MAKIBA)
+            makibad::daemon(&root)
                 .env("HOME", root.join("home"))
                 .env("MAKIBA_STATE_DIR", root.join("state"))
                 .env("XDG_STATE_HOME", root.join("xdg-state"))
@@ -161,7 +161,6 @@ impl Org {
                 .env("MAKIBA_BASE", "stub")
                 .env("MAKIBA_STUB_SUBSCRIBE_DELAY_MS", "0")
                 .env_remove("MAKIBA_PERSON_KEY")
-                .arg("daemon")
                 .stdin(Stdio::null())
                 .stdout(Stdio::null())
                 .stderr(Stdio::null())
@@ -472,7 +471,7 @@ fn notice_for(name: &str, ledger: Option<&str>, issues: &[Value]) -> String {
     let thread: JoinHandle<Result<(), String>> = {
         let (dir, stop) = (dir.clone(), Arc::clone(&stop));
         std::thread::spawn(move || {
-            daemon::run_until(&dir, &|| Box::new(Stub::new()) as Box<dyn Base>, stop)
+            makibad::run_until(&dir, &|| Box::new(Stub::new()) as Box<dyn Base>, stop)
         })
     };
     let db = Connection::open(dir.join("state.db")).unwrap();
