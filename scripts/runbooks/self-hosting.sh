@@ -432,6 +432,7 @@ FD_NEXT=()   # what to do next, one per FAIL
 FD_GAPS=()   # what no script shows (named steps) or what stays unproven
 FD_READER=""     # the reader the newest diff review of this stage used
 FD_VERDICT=""    # its verdict
+FD_DONE=0        # 1 once every check was made: a stage that stopped earlier is never READY
 # The words a refused or unreachable host leaves in cargo's, git's or curl's own text.
 NET_ERR='resolve host|resolve hostname|[Ff]ailed to connect|onnection refused|CONNECT|[Pp]roxy|tunnel|spurious network error|failed to download|unable to update registry'
 
@@ -445,14 +446,16 @@ fd() {
 }
 
 # The last lines of the results: one line per check, what to do for each FAIL, one verdict to relay as it is.
-fd_summary() {
+fd_summary() { # fd_summary <exit status of the stage>
   if [ "$STAGE" != first-day ] || [ "$DRY" = 1 ] || [ "${#FD_SUM[@]}" -eq 0 ]; then return 0; fi
   local l v
   say "== summary (first-day, commit $COMMIT)"
   for l in "${FD_SUM[@]}"; do say "SUMMARY $l"; done
   for l in "${FD_NEXT[@]+"${FD_NEXT[@]}"}"; do say "NEXT $l"; done
   for l in "${FD_GAPS[@]+"${FD_GAPS[@]}"}"; do say "NOT SHOWN $l"; done
-  if [ "$FAILS" -gt 0 ]; then v="NOT READY: $FAILS check(s) failed; the NEXT lines say what to do, then run the line again"
+  if [ "${1:-0}" -ne 0 ] && [ "$FD_DONE" != 1 ]; then v="NOT READY: the run stopped before every check was made (exit $1; the lines above say why); fix that and run the line again"
+  elif [ "$FD_DONE" != 1 ]; then v="NOT READY: the run ended before every check was made; run the line again"
+  elif [ "$FAILS" -gt 0 ]; then v="NOT READY: $FAILS check(s) failed; the NEXT lines say what to do, then run the line again"
   elif [ "${#FD_GAPS[@]}" -gt 0 ]; then v="READY on what a script can show; left for the person: the NOT SHOWN lines"
   else v="READY: every check passed"; fi
   say "VERDICT first-day: $v"
@@ -699,6 +702,7 @@ stage_first_day() {
       ;;
   esac
   fd_check_gate_ask
+  FD_DONE=1
 }
 
 stage_cleanup() {
@@ -731,7 +735,7 @@ on_exit() {
     else say "scratch place kept for inspection: $SCRATCH_RUN (the cleanup stage removes it)"; fi
   fi
   if [ "$FAILS" -gt 0 ] && [ "$rc" -eq 0 ]; then rc=1; fi
-  fd_summary   # first-day only: the last lines of the results file, after the teardown
+  fd_summary "$rc"   # first-day only: the last lines of the results file, after the teardown
   exit "$rc"
 }
 trap on_exit EXIT
