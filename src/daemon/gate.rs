@@ -358,6 +358,31 @@ pub fn docs_only(repo: &Path, base: &str, head: &str) -> bool {
     }
 }
 
+/// The own changes of `a` and of `b` against `base` are byte-equal (Issue 263): what each adds to
+/// the merge base it has with `base`, blob ids and modes included, no text conversion, renames or
+/// hidden submodule change. A join commit of the base into `a`, or a rebase, keeps them; a failed
+/// git (an id the clone does not hold) is not equal.
+pub fn same_changes(repo: &Path, base: &str, a: &str, b: &str) -> bool {
+    let own = |x: &str| -> Option<String> {
+        let mb = git(repo, &["merge-base", base, x]).ok()?;
+        git(
+            repo,
+            &[
+                "diff",
+                "--binary",
+                "--no-textconv",
+                "--no-ext-diff",
+                "--no-renames",
+                "--ignore-submodules=none",
+                mb.trim(),
+                x,
+            ],
+        )
+        .ok()
+    };
+    matches!((own(a), own(b)), (Some(x), Some(y)) if x == y)
+}
+
 // ---- GitHub --------------------------------------------------------------------------------------
 
 /// One JSON value per line of `gh api --paginate <path> --jq <jq>`.
