@@ -716,7 +716,7 @@ When the secretary's terminal is gone (`secretary_gone` open for the newest secr
 
 ## 12. The `makiba` command and the tools
 
-`makiba` is the person's command. An agent makes the same requests by a tool of the same name. The MCP server is named `makiba`, so Claude Code lists the tool `send` as `mcp__makiba__send`. A role is listed only the tools of its own verbs (section 4).
+`makiba` is the person's command. An agent makes the same requests by a tool of the same name. The MCP server is named `makiba`, so Claude Code lists the tool `send` as `mcp__makiba__send`. A role is listed only the tools of its own verbs (section 4). The settings written for a launch (`permissions.allow`) allow exactly those tools by their full names, `mcp__makiba__<verb>`, generated from the same verb table (Issue 292): no wildcard, no entry for the whole server, no tool of another role, and nothing for the channel server. An allow rule resolves a call before the auto mode classifier sees it (Claude Code's "How the classifier evaluates actions", <https://code.claude.com/docs/en/permission-modes.md>; recorded in `docs/upgrading-claude-code.md`), so the classifier no longer stands between an agent and `makibad`; it still judges every action that is not the role's own door tool. A door call that `makibad` refuses and the corrected call after it need nothing more: the refusal is an ordinary tool result. The second reader of a review is given the worker's settings and so the same entries, but its MCP configuration lists no server, so they allow nothing it can call.
 
 | Verb | Arguments | Does | Tool for agents |
 | --- | --- | --- | --- |
