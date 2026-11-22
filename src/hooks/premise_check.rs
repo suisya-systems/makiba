@@ -42,7 +42,7 @@ fn patterns() -> &'static [Regex; 3] {
             Regex::new(r#"[A-Za-z_][\w.-]*\s*=\s*[\w"'./-]|[A-Za-z_][\w.-]*: *\d"#).unwrap(),
             // A word that states how something is or should be.
             Regex::new(&format!(
-                r"(?i){B}(?:should be|should assume|is set to|defaults? to|the default|threshold|upper limit|lower limit|premise|assum(?:e|ing|ption)|supposed to|isn't it|right\?|specification){B}|\x{{306F}}\x{{305A}}|\x{{306E}}\x{{3067}}\x{{306F}}|\x{{3058}}\x{{3083}}\x{{306A}}\x{{3044}}[\x{{FF1F}}?]|\x{{3067}}\x{{3059}}\x{{3088}}\x{{306D}}|\x{{3060}}\x{{3088}}\x{{306D}}|\x{{3067}}\x{{3057}}\x{{3087}}|\x{{524D}}\x{{63D0}}|\x{{4ED5}}\x{{69D8}}|\x{{65E2}}\x{{5B9A}}|\x{{30C7}}\x{{30D5}}\x{{30A9}}\x{{30EB}}\x{{30C8}}|\x{{95BE}}\x{{5024}}|\x{{4E0A}}\x{{9650}}|\x{{4E0B}}\x{{9650}}|\x{{8A2D}}\x{{5B9A}}\x{{5024}}"
+                r"(?i){B}(?:should be|should assume|is set to|defaults? to|the default|threshold|upper limit|lower limit|premise|assum(?:e|ing|ption)|supposed to|isn't it|specification){B}|{B}right\?|\x{{306F}}\x{{305A}}|\x{{306E}}\x{{3067}}\x{{306F}}|\x{{3058}}\x{{3083}}\x{{306A}}\x{{3044}}[\x{{FF1F}}?]|\x{{3067}}\x{{3059}}\x{{3088}}\x{{306D}}|\x{{3060}}\x{{3088}}\x{{306D}}|\x{{3067}}\x{{3057}}\x{{3087}}|\x{{524D}}\x{{63D0}}|\x{{4ED5}}\x{{69D8}}|\x{{65E2}}\x{{5B9A}}|\x{{30C7}}\x{{30D5}}\x{{30A9}}\x{{30EB}}\x{{30C8}}|\x{{95BE}}\x{{5024}}|\x{{4E0A}}\x{{9650}}|\x{{4E0B}}\x{{9650}}|\x{{8A2D}}\x{{5B9A}}\x{{5024}}"
             ))
             .unwrap(),
         ]

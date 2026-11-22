@@ -52,3 +52,15 @@ fn a_japanese_message_without_a_claim_gets_nothing() {
         assert_eq!(hook(text), (0, String::new()), "{text}");
     }
 }
+
+#[test]
+fn a_tag_question_alone_gets_the_line() {
+    for text in [
+        "Retries are disabled, right?",
+        "Retries are disabled, right? ",
+    ] {
+        let (code, out) = hook(text);
+        assert_eq!(code, 0, "{text}");
+        assert!(out.starts_with("VERIFY_BEFORE_AGREE"), "{text}: {out:?}");
+    }
+}
