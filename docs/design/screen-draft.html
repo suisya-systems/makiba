@@ -1,0 +1,418 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>makiba: the screen for the person (draft, Issue 169)</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<!--
+  A drawn draft, not the screen: no script, no request, sample data only.
+  It goes with docs/design/screen.md, which names the read field behind every part.
+  Open it in a browser at 1440 px or wider.
+-->
+<style>
+  :root {
+    --paper: #f4f1e8; --panel: #fffdf7; --ink: #22261f; --muted: #6c7064; --faint: #9a9d90;
+    --line: #e0dacb; --line2: #ece7da;
+    --grass: #3c7a4b; --grass-bg: #e6f0e3;
+    --amber: #a9690c; --amber-bg: #fcefd2; --amber-line: #e9c47a;
+    --red: #ac3b2a; --red-bg: #f9e4df;
+    --slate: #46647f; --slate-bg: #e3ebf2;
+    --term: #1c201b; --term-ink: #d6dbcd; --term-dim: #8b9383;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: #d9d5c8; color: var(--ink); font: 13px/1.45 var(--sans); }
+  h1, h2, h3, p, ul, ol { margin: 0; padding: 0; }
+  ul, ol { list-style: none; }
+  .note { max-width: 1440px; margin: 18px auto 8px; padding: 0 4px; color: #4d5046; font-size: 12.5px; }
+  .note b { color: var(--ink); }
+
+  /* ---------- the screen ---------- */
+  .screen { width: 1440px; height: 900px; margin: 0 auto; background: var(--paper);
+            display: grid; grid-template-rows: 44px 1fr; border: 1px solid #bdb8a8; overflow: hidden; }
+  .top { display: flex; align-items: center; gap: 14px; padding: 0 16px; background: var(--panel);
+         border-bottom: 1px solid var(--line); }
+  .brand { font-weight: 700; letter-spacing: .02em; font-size: 15px; }
+  .brand i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--grass);
+             margin-right: 7px; vertical-align: 1px; }
+  .top .org { color: var(--muted); }
+  .top .sp { flex: 1; }
+  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+          font-size: 12px; font-weight: 600; border: 1px solid transparent; }
+  .chip.wait { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-line); }
+  .chip.bad { background: var(--red-bg); color: var(--red); border-color: #e6b3a9; }
+  .chip.ok { background: var(--grass-bg); color: var(--grass); }
+  .chip.quiet { color: var(--muted); border-color: var(--line); font-weight: 500; }
+  .cols { display: grid; grid-template-columns: 348px 1fr 432px; min-height: 0; }
+  .col { min-height: 0; overflow: hidden; display: flex; flex-direction: column; }
+  .col.left { border-right: 1px solid var(--line); }
+  .col.right { border-left: 1px solid var(--line); }
+  .role { display: flex; align-items: baseline; gap: 8px; padding: 12px 16px 8px; }
+  .role h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; }
+  .role span { color: var(--faint); font-size: 12px; }
+  .sect { padding: 0 16px 14px; }
+  .sect > h3 { font-size: 13px; font-weight: 650; margin: 2px 0 8px; display: flex; align-items: baseline; gap: 8px; }
+  .sect > h3 small { font-weight: 400; color: var(--muted); font-size: 12px; }
+  .sect > h3 .more { margin-left: auto; font-weight: 500; font-size: 12px; color: var(--slate); }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; }
+  .mono { font-family: var(--mono); font-size: 12px; }
+  .muted { color: var(--muted); }
+  .btn { display: inline-block; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line);
+         background: var(--panel); color: var(--ink); font: 600 12.5px var(--sans); }
+  .btn.primary { background: var(--grass); border-color: var(--grass); color: #fff; }
+  .btn.small { padding: 2px 9px; font-size: 12px; font-weight: 550; }
+  .btn.ghost { color: var(--muted); font-weight: 500; }
+  .key { font-size: 11px; color: var(--faint); margin-left: 6px; }
+
+  /* ---------- put in ---------- */
+  .range { padding: 12px 14px; }
+  .range .head { display: flex; align-items: center; gap: 8px; }
+  .range .head b { font-size: 14px; }
+  .range .terms { color: var(--muted); margin-top: 3px; }
+  .bar { height: 6px; border-radius: 3px; background: var(--line2); margin: 10px 0 4px; overflow: hidden; }
+  .bar i { display: block; height: 100%; background: var(--grass); border-radius: 3px; }
+  .range .foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .cand { padding: 9px 12px; border-top: 1px solid var(--line2); }
+  .cand:first-child { border-top: 0; }
+  .cand .t { display: flex; gap: 8px; align-items: baseline; }
+  .cand .t .n { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: none; }
+  .cand .t .ti { font-weight: 550; flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .cand .m { display: flex; gap: 6px; align-items: center; margin-top: 4px; color: var(--muted); font-size: 12px; }
+  .cand .m .why { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tag { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--line2); color: #55594d; flex: none; }
+  .tag.first { background: var(--grass-bg); color: var(--grass); }
+  .out { padding: 7px 12px; border-top: 1px solid var(--line2); display: grid; grid-template-columns: 44px 1fr; gap: 2px 8px; }
+  .out:first-child { border-top: 0; }
+  .out .n { font-family: var(--mono); font-size: 12px; color: var(--faint); }
+  .out .ti { color: #4b4f44; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .out .why { grid-column: 2; font-size: 12px; color: var(--muted); }
+  .out .why b { font-weight: 600; color: #5c6055; }
+
+  /* ---------- centre: answer, then the conversation ---------- */
+  .centre { padding: 12px 16px 16px; gap: 12px; }
+  .ask { background: var(--panel); border: 1px solid var(--amber-line); border-left: 5px solid var(--amber);
+         border-radius: 8px; padding: 12px 16px 12px 14px; flex: none; }
+  .ask .over { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--amber); font-weight: 650;
+               letter-spacing: .04em; text-transform: uppercase; }
+  .ask .over span { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; }
+  .ask .q { font-size: 17px; line-height: 1.35; font-weight: 650; margin: 5px 0 8px; }
+  .ask .bg { color: #3d4138; max-width: 86ch; }
+  .ask .ifs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
+  .ask .if { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: #fbf8ef; }
+  .ask .if h4 { margin: 0 0 2px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  .ask .if.rec { border-color: var(--grass); background: #f1f6ee; }
+  .ask .if.rec h4 { color: var(--grass); }
+  .ask .rec-why { color: #3d4138; }
+  .ask .rec-why b { color: var(--grass); }
+  .ask .act { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .ask .act .field { flex: 1; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: var(--faint); background: #fff; }
+  .term { flex: 1; min-height: 0; background: var(--term); border-radius: 8px; color: var(--term-ink);
+          font: 12.5px/1.55 var(--mono); display: flex; flex-direction: column; overflow: hidden; }
+  .term .bar2 { display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: #262b24; color: var(--term-dim);
+                font: 12px var(--sans); }
+  .term .bar2 b { color: #e8ecdf; font-weight: 600; }
+  .term .bar2 .dot { width: 7px; height: 7px; border-radius: 50%; background: #7fbf7a; }
+  .term .body { padding: 12px 14px; flex: 1; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
+  .term .you { color: #f0f3e8; margin-top: 10px; }
+  .term .you::before { content: "> "; color: var(--term-dim); }
+  .term .sec { margin-top: 6px; white-space: pre-wrap; }
+  .term .dim { color: var(--term-dim); }
+  .term .prompt { margin-top: 12px; border: 1px solid #4a5145; border-radius: 6px; padding: 7px 10px; color: #f0f3e8; }
+  .term .prompt::before { content: "> "; color: var(--term-dim); }
+  .term .cursor { display: inline-block; width: 7px; height: 14px; background: #d6dbcd; vertical-align: -2px; }
+
+  /* ---------- watch ---------- */
+  .belt { display: flex; gap: 3px; margin: 2px 0 6px; }
+  .belt i { flex: 1; height: 10px; border-radius: 2px; background: var(--line); }
+  .belt .landed { background: var(--grass); } .belt .review { background: var(--slate); }
+  .belt .in_work { background: #86b58f; } .belt .waiting_person { background: var(--amber); }
+  .belt .not_in { background: #d5d0c1; } .belt .skipped { background: repeating-linear-gradient(135deg, #d5d0c1 0 3px, #f4f1e8 3px 6px); }
+  .counts { display: flex; flex-wrap: wrap; gap: 4px 12px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+  .counts b { color: var(--ink); font-weight: 650; }
+  .item { display: grid; grid-template-columns: 18px 40px 1fr auto; gap: 0 6px; align-items: baseline; padding: 6px 12px;
+          border-top: 1px solid var(--line2); }
+  .item:first-child { border-top: 0; }
+  .item .g { font-size: 12px; text-align: center; }
+  .item .n { font-family: var(--mono); font-size: 12px; color: var(--muted); }
+  .item .ti { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item .s { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .item .d { grid-column: 3 / 5; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .item.landed .g { color: var(--grass); } .item.review .g { color: var(--slate); }
+  .item.in_work .g { color: #5d9668; } .item.waiting_person .g, .item.waiting_person .s { color: var(--amber); font-weight: 600; }
+  .item.waiting_person { background: #fdf6e3; }
+  .item.not_in .ti, .item.skipped .ti { color: var(--muted); } .item.not_in .g, .item.skipped .g { color: var(--faint); }
+  .wrong { border-color: #e6b3a9; }
+  .w { padding: 8px 12px; border-top: 1px solid #f1d5cf; display: grid; grid-template-columns: 1fr auto; gap: 0 8px; }
+  .w:first-child { border-top: 0; }
+  .w b { color: var(--red); font-weight: 650; }
+  .w .s { color: var(--muted); font-size: 12px; }
+  .w .d { grid-column: 1 / 3; color: #4b4f44; font-size: 12px; }
+  .inner { display: flex; gap: 6px; padding: 0 16px 14px; margin-top: auto; }
+  .inner .btn { flex: 1; text-align: center; font-weight: 550; }
+  .inner .btn small { display: block; font-weight: 400; color: var(--muted); font-size: 11.5px; }
+
+  /* ---------- the other states ---------- */
+  .states { width: 1440px; margin: 14px auto 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; }
+  .state { background: var(--paper); border: 1px solid #bdb8a8; padding: 12px 14px 14px; }
+  .state > h2 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
+  .state > p.what { color: #4d5046; font-size: 12px; margin-bottom: 10px; min-height: 34px; }
+  .row { display: grid; grid-template-columns: 1fr auto; gap: 0 8px; padding: 8px 12px; border-top: 1px solid var(--line2); }
+  .row:first-child { border-top: 0; }
+  .row .q { font-weight: 600; } .row .s { color: var(--muted); font-size: 12px; white-space: nowrap; }
+  .row .d { grid-column: 1 / 3; color: var(--muted); font-size: 12px; }
+  .row.sel { background: #fdf6e3; box-shadow: inset 3px 0 0 var(--amber); }
+  .trail { padding: 10px 12px; }
+  .trail li { display: grid; grid-template-columns: 42px 12px 1fr; gap: 0 8px; position: relative; padding-bottom: 9px; }
+  .trail li .tm { font: 11.5px var(--mono); color: var(--faint); text-align: right; padding-top: 1px; }
+  .trail li .pt { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--grass); background: var(--panel); margin-top: 4px; z-index: 1; }
+  .trail li::before { content: ""; position: absolute; left: 54px; top: 8px; bottom: -4px; width: 1px; background: var(--line); }
+  .trail li:last-child::before { display: none; }
+  .trail li.stop .pt { border-color: var(--amber); background: var(--amber); }
+  .trail li.bad .pt { border-color: var(--red); background: var(--red); }
+  .trail li .k { font-weight: 600; } .trail li .p { display: block; color: var(--muted); font-size: 12px; }
+  .banner { background: var(--red); color: #fff; padding: 9px 12px; border-radius: 8px; margin-bottom: 8px; }
+  .banner b { display: block; font-size: 14px; } .banner code { white-space: nowrap; font-family: var(--mono); background: rgba(255,255,255,.18); padding: 0 5px; border-radius: 3px; }
+  .ci { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; }
+  .ci.passed { background: var(--grass-bg); color: var(--grass); } .ci.failed { background: var(--red-bg); color: var(--red); }
+  .ci.run { background: var(--slate-bg); color: var(--slate); }
+</style>
+</head>
+<body>
+
+<p class="note"><b>Draft for Issue 169, sample data.</b> The main screen, with a range running, one entry waiting for the person and one thing gone wrong. Left: put in. Centre: the conversation with the secretary, and over it what waits for an answer. Right: watch. The six panels under it are the states the main picture does not show.</p>
+
+<div class="screen">
+  <header class="top">
+    <span class="brand"><i></i>makiba</span>
+    <span class="org">suisya-systems/makiba</span>
+    <span class="sp"></span>
+    <span class="chip wait">1 waits for you</span>
+    <span class="chip bad">1 went wrong</span>
+    <span class="chip quiet">makibad running · read 3 s ago</span>
+  </header>
+
+  <div class="cols">
+
+    <!-- ================= PUT IN ================= -->
+    <section class="col left">
+      <div class="role"><h2>Put in</h2><span>hand work to the organization</span></div>
+
+      <div class="sect">
+        <div class="card range">
+          <div class="head"><b>Range 2</b><span class="chip ok">running</span><span class="sp" style="flex:1"></span><span class="muted">makiba</span></div>
+          <div class="terms">Issues 169, 270 and 5 more · 2 at once</div>
+          <div class="bar"><i style="width:25%"></i></div>
+          <div class="muted" style="font-size:12px"><b style="color:var(--ink)">5</b> of 20 tasks used · approved today 09:12</div>
+          <div class="foot">
+            <span class="btn small">Pause</span>
+            <span class="btn small ghost">End</span>
+            <span class="sp" style="flex:1"></span>
+            <span class="muted" style="font-size:12px">widen it: ask the secretary</span>
+          </div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h3>Could go in now <small>4, outside the range</small></h3>
+        <div class="card">
+          <div class="cand">
+            <div class="t"><span class="n">#283</span><span class="ti">The gate reports edited tests</span></div>
+            <div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">first choice · follow-up of #257</span><span class="btn small">Ask for this</span></div>
+          </div>
+          <div class="cand">
+            <div class="t"><span class="n">#276</span><span class="ti">Stops written by code (belt step 2)</span></div>
+            <div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">dependencies closed</span><span class="btn small">Ask for this</span></div>
+          </div>
+          <div class="cand">
+            <div class="t"><span class="n">#262</span><span class="ti">Status text lists the ranges</span></div>
+            <div class="m"><span class="tag" style="background:var(--amber-bg);color:var(--amber)">no clause</span><span class="tag">S~</span><span class="why">ranked last</span><span class="btn small">Ask for this</span></div>
+          </div>
+          <div class="cand">
+            <div class="t"><span class="n">#288</span><span class="ti">Runbook for a second project</span></div>
+            <div class="m"><span class="tag">G10</span><span class="tag">S</span><span class="why">documents only</span><span class="btn small">Ask for this</span></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="sect" style="min-height:0; overflow:hidden">
+        <h3>Cannot go in yet <small>4</small><span class="more">scanned 10:41</span></h3>
+        <div class="card">
+          <div class="out"><span class="n">#277</span><span class="ti">Parking terminals</span><span class="why"><b>Held by a dependency</b> · waits for #276</span></div>
+          <div class="out"><span class="n">#279</span><span class="ti">A server installation</span><span class="why"><b>Held by a dependency</b> · waits for #62</span></div>
+          <div class="out"><span class="n">#51</span><span class="ti">Thirty landed pull requests</span><span class="why"><b>Put aside</b> · label on-hold, set by you</span></div>
+          <div class="out"><span class="n">—</span><span class="ti">suisya-systems/libretto</span><span class="why"><b>No goal ledger</b> · 7 Issues not ranked</span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= CENTRE ================= -->
+    <section class="col centre">
+      <div class="ask">
+        <div class="over">Waits for you <span>#14 · task r2-169 · range 2 · asked 6 min ago by the secretary</span></div>
+        <p class="q">Build the first version of the screen as a page on 127.0.0.1, and put it into the app later?</p>
+        <p class="bg">The worker finished the design. Whether the app can read the read surface is not measured yet, and the measurement needs your machine. A page needs no measurement, but the conversation with the secretary would not sit inside it.</p>
+        <div class="ifs">
+          <div class="if rec"><h4>If yes · recommended</h4>The worker builds the page, read-only, behind <span class="mono">makiba screen</span>. Range 2 goes on; the measurement becomes its own Issue.</div>
+          <div class="if"><h4>If no</h4>The task parks until you have run the measurement. Its slot is given to the next Issue of the range.</div>
+        </div>
+        <p class="rec-why"><b>Why yes:</b> the page and the app would show the same parts; only the frame differs, so nothing built for the page is thrown away.</p>
+        <div class="act">
+          <span class="btn primary">Yes</span>
+          <span class="btn">No</span>
+          <span class="field">a note to go with the answer (optional)</span>
+          <span class="btn ghost">Talk it over first</span>
+        </div>
+      </div>
+
+      <div class="term">
+        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span style="flex:1"></span><span>the secretary's own terminal</span></div>
+        <div class="body">
+          <div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
+          <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
+Left out: 279 (waits for #62), 251 (needs a host).
+<span class="dim">Approve it on the left, or tell me what to change.</span></div>
+          <div class="you">Approved. Keep going.</div>
+          <div class="sec">Range 2 is running. 270 landed as pull request 297.
+One question from r2-169 needs you; it is shown above with my recommendation (yes).
+<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div>
+          <div class="prompt"><span class="cursor"></span></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ================= WATCH ================= -->
+    <section class="col right">
+      <div class="role"><h2>Watch</h2><span>what was handed over is moving</span></div>
+
+      <div class="sect">
+        <h3>Went wrong <small>1</small></h3>
+        <div class="card wrong">
+          <div class="w"><b>r2-274 · launch failed</b><span class="s">11 min ago</span>
+            <span class="d">Stage dialog_passed: no first turn within the time allowed. The secretary has been told.</span></div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h3>Range 2, the whole of it <small>7 Issues</small></h3>
+        <div class="belt" aria-hidden="true">
+          <i class="landed"></i><i class="waiting_person"></i><i class="in_work"></i><i class="review"></i><i class="in_work" style="background:var(--red)"></i><i class="not_in"></i><i class="skipped"></i>
+        </div>
+        <div class="counts">
+          <span><b>1</b> landed</span><span><b>1</b> waits for you</span><span><b>1</b> in review</span><span><b>2</b> in work <span style="color:var(--red)">(1 failed to start)</span></span><span><b>1</b> not yet in</span><span><b>1</b> skipped</span>
+        </div>
+        <div class="card">
+          <div class="item landed"><span class="g">✓</span><span class="n">#270</span><span class="ti">The secretary's first-range line</span><span class="s">landed · 1 h</span>
+            <span class="d">pull request 297 merged</span></div>
+          <div class="item waiting_person"><span class="g">?</span><span class="n">#169</span><span class="ti">A screen for the person</span><span class="s">waits for you · 6 min</span>
+            <span class="d">a decision: where the first version runs</span></div>
+          <div class="item in_work"><span class="g">●</span><span class="n">#272</span><span class="ti">Attention notifications</span><span class="s">at work · 14 min</span></div>
+          <div class="item review"><span class="g">◆</span><span class="n">#273</span><span class="ti">A metrics report over the events</span><span class="s">review · CI running</span></div>
+          <div class="item in_work"><span class="g" style="color:var(--red)">!</span><span class="n">#274</span><span class="ti">A defense report</span><span class="s" style="color:var(--red)">launch failed · 11 min</span></div>
+          <div class="item not_in"><span class="g">○</span><span class="n">#279</span><span class="ti">A server installation</span><span class="s">not yet in</span>
+            <span class="d">waits for #62</span></div>
+          <div class="item skipped"><span class="g">–</span><span class="n">#251</span><span class="ti">Host record of the app check</span><span class="s">skipped</span>
+            <span class="d">needs a host</span></div>
+        </div>
+      </div>
+
+      <div class="sect">
+        <h3>Other runs <small>stopped first</small></h3>
+        <div class="card">
+          <div class="item in_work"><span class="g">●</span><span class="n" style="grid-column:2/4">docs-goals <span class="muted" style="font-family:var(--sans)">· document · at work</span></span><span class="s">32 min</span></div>
+        </div>
+      </div>
+
+      <div class="inner">
+        <span class="btn">Pull requests<small>2 watched</small></span>
+        <span class="btn">Trail of a run<small>from the events</small></span>
+      </div>
+    </section>
+  </div>
+</div>
+
+<!-- ================= the other states ================= -->
+<div class="states">
+
+  <div class="state">
+    <h2>Answer: several entries</h2>
+    <p class="what">With more than one entry the place over the conversation is a list, oldest first; opening one shows it large, as above.</p>
+    <div class="card">
+      <div class="row sel"><span class="q">Build the first version as a page on 127.0.0.1?</span><span class="s">6 min</span>
+        <span class="d">#14 · r2-169 · recommended: yes</span></div>
+      <div class="row"><span class="q">May #272 add a dependency for desktop notices?</span><span class="s">2 min</span>
+        <span class="d">#15 · r2-272 · recommended: no</span></div>
+      <div class="row"><span class="q">Allow Bash: cargo install cargo-deny</span><span class="s">1 min</span>
+        <span class="d">#16 · r2-273 · a permission prompt · no context recorded</span></div>
+    </div>
+  </div>
+
+  <div class="state">
+    <h2>Watch: the trail of one run</h2>
+    <p class="what">One step further in, from a row of the range or of the runs: r2-169 from dispatch to now.</p>
+    <div class="card">
+      <ol class="trail">
+        <li><span class="tm">09:14</span><span class="pt"></span><span><span class="k">Dispatched by makibad</span><span class="p">range 2 · Issue 169</span></span></li>
+        <li><span class="tm">09:15</span><span class="pt"></span><span><span class="k">Launch verified</span><span class="p">first turn seen after 41 s</span></span></li>
+        <li><span class="tm">09:16</span><span class="pt"></span><span><span class="k">Reported start</span></span></li>
+        <li><span class="tm">10:02</span><span class="pt"></span><span><span class="k">Design review passed</span><span class="p">round 1 · 0 blockers, 1 major</span></span></li>
+        <li class="stop"><span class="tm">10:35</span><span class="pt"></span><span><span class="k">Stopped for you</span><span class="p">entry #14 · a decision</span></span></li>
+      </ol>
+    </div>
+  </div>
+
+  <div class="state">
+    <h2>Watch: pull requests</h2>
+    <p class="what">One step further in: each watch with its head and what CI concluded.</p>
+    <div class="card">
+      <div class="row"><span class="q">#298 <span class="muted" style="font-weight:400">A metrics report over the events</span></span><span class="s"><span class="ci run">CI running</span></span>
+        <span class="d">r2-273 · head <span class="mono">4be19c7</span> · watched 9 min</span></div>
+      <div class="row"><span class="q">#299 <span class="muted" style="font-weight:400">Goals: wording of G7</span></span><span class="s"><span class="ci failed">CI failed · 1 of 6</span></span>
+        <span class="d">docs-goals · head <span class="mono">a03f5d1</span> · watched 27 min</span></div>
+      <div class="row"><span class="q">#297 <span class="muted" style="font-weight:400">The secretary's first-range line</span></span><span class="s"><span class="ci passed">merged</span></span>
+        <span class="d">r2-270 · landed 1 h ago</span></div>
+    </div>
+  </div>
+
+  <div class="state">
+    <h2>Went wrong: the dispatcher is silent</h2>
+    <p class="what">When the heartbeat is old, the screen says so before anything else; what it shows under it is the last read, marked old.</p>
+    <div class="banner"><b>makibad has not written for 4 min</b>Nothing is dispatched, delivered or watched. In your shell: <code>makiba up</code></div>
+    <div class="card" style="opacity:.55">
+      <div class="item in_work"><span class="g">●</span><span class="n">#272</span><span class="ti">Attention notifications</span><span class="s">as of 10:44</span></div>
+      <div class="item review"><span class="g">◆</span><span class="n">#273</span><span class="ti">A metrics report</span><span class="s">as of 10:44</span></div>
+    </div>
+  </div>
+
+  <div class="state">
+    <h2>Put in: a range to approve</h2>
+    <p class="what">A range the secretary recorded as proposed. The screen shows the read makibad made for it; approving sends that read's id, with the person key.</p>
+    <div class="card range">
+      <div class="head"><b>Range 3</b><span class="chip wait">proposed</span><span style="flex:1"></span><span class="muted">makiba</span></div>
+      <div class="terms">replaces range 2 · 3 at once · 30 tasks · merges: ask each time</div>
+      <div class="muted" style="font-size:12px; margin-top:8px">Read 10:52, complete. It would admit, in this order:</div>
+      <div style="margin:4px 0 0"><span class="mono">#283</span> The gate reports edited tests</div>
+      <div><span class="mono">#276</span> Stops written by code</div>
+      <div class="muted"><span class="mono">#277</span> left out · waits for #276</div>
+      <div class="muted"><span class="mono">#51</span>&nbsp; left out · label on-hold</div>
+      <div class="foot"><span class="btn primary small">Approve this read</span><span class="btn small ghost">Change it with the secretary</span></div>
+    </div>
+  </div>
+
+  <div class="state">
+    <h2>Put in: nothing could go in</h2>
+    <p class="what">The list is never just empty: it says whether the scan found nothing, failed, or has not run, and what would change that.</p>
+    <div class="card" style="padding:12px 14px">
+      <b>Nothing could go in now</b>
+      <div class="muted" style="margin-top:2px">Scanned 10:41 after the close of r2-270: none ready.</div>
+      <div style="margin-top:8px">6 are held by a dependency, 2 are put aside. They are listed under "Cannot go in yet".</div>
+    </div>
+    <div class="card wrong" style="padding:10px 14px; margin-top:8px">
+      <b style="color:var(--red)">The last scan failed</b> <span class="muted">· 10:58</span>
+      <div class="muted">gh issue list: could not reach the repository. Nothing is listed until a scan succeeds.</div>
+    </div>
+  </div>
+
+</div>
+</body>
+</html>
