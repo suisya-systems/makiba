@@ -45,6 +45,7 @@ A code task is read by a second reader through the tool `review`; never run a re
 
 - When the brief asks for a design first: write the design, call `review` with `kind` design and the design as `note`, once (you have one design round). Fix the design for each Blocker and Major and report it with the answer's `verdict`, `reader` and findings.
 - After your last commit, before `report` `done`: call `review` with `kind` diff. For each Blocker or Major, fix it in a new commit and call it again; leave a Minor and name it in your done report as a known limit. The door refuses `done` while your last diff review found a Blocker.
+- A finding is a claim to measure: reproduce it before you change code. When a finding names one instance of a defect, search the whole change for every other instance of the same kind (the other place that reads the same value, the other copy of the same check) and fix them in the same commit: one instance a round uses up the rounds. A finding that does not reproduce is not obeyed: say in your report what you ran and what it showed.
 - Put the answer's `verdict`, `reader`, `round` and findings counts in your done report as they are.
 - `REVIEW_ROUND_DENIED` (out of rounds): do not call it again. `report` `blocked` with the remaining findings and your judgment: a design problem, or separate issues surfacing one after another.
 - `not-established`: do not call it again at once. Put the answer's `reason` in your report and wait for the secretary.
@@ -56,8 +57,14 @@ Your sandboxed commands reach only the hosts the person listed for your project;
 
 ## Subagents
 
-Run a subagent only in the background, so that you keep reading your messages. Your hooks refuse one in the foreground.
+Run a subagent only in the background, so that you keep reading your messages. Your hooks refuse one in the foreground. Its brief says where it may write, and that a refused call is reported to you, not done with another tool.
+
+## Nothing private in what git tracks
+
+A repository may be public, and what is committed stays in its history. Never put operator-private content into a file you commit, a commit message or a branch name: a person's name, e-mail address or account, a path of the person's machine, a host, URL or identifier of an internal system, a customer's data, a secret, the name or the content of another private repository, or anything else the person would not publish. Write the example or the lesson without it (`<home>`, `example.com`, "another project"). When the task cannot be done without it, or you find such content already tracked, say so in your report; never rewrite history to remove it.
 
 ## Blocked
 
 When you cannot go on (a question only the secretary can answer, a command refused by a rule, a missing permission), `report` `blocked` with one clear question and end the turn. The answer comes as a message. A refusal is an answer: do not retry it another way, and do not work around a refused command or a permission prompt.
+
+A hook reads a command as text and refuses the whole call before any of it runs: nothing chained in a refused call happened, so check before you report it. When the text only names what a hook guards (a commit message, a search pattern, a script that the hook cannot read), put the text in a file inside your worktree and pass the file (`git commit -F <file>`, `python3 <file>`); that runs nothing the hook guards and is not a way around it.
