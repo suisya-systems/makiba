@@ -7,7 +7,13 @@
 //!   reads its options;
 //! - a here-document fed to a text program whose output reaches a shell later in the command: a
 //!   pipe through other text programs, a group piped on, a file written and then run, a value kept
-//!   and then evaluated.
+//!   and then evaluated;
+//! - (after the second and third reviews) a substitution in arithmetic, a variable set outside a
+//!   substitution, another interpreter's code, text a text program prints into a shell, and a
+//!   shell's options before `-c`.
+//!
+//! Where any program that runs code is in the command, the text is read as before Issue 300 (and
+//! the arguments as well), so only a command of text programs and git gains the argument reading.
 
 use std::io::Write;
 use std::process::{Command, Stdio};
@@ -50,6 +56,15 @@ fn the_flag_reaching_a_shell_by_another_way_is_refused() {
         "F=--no-verify; bash <<EOF\ngit commit $F -m x\nEOF",
         "python3 -c 'import os; os.system(\"git commit -n -m x\")'",
         "node -e \"require('child_process').execSync('git commit --no-verify -m x')\"",
+        // After the third: text a text program prints into a shell, and a shell's options
+        // before -c.
+        "echo 'git commit -n -m x' | bash",
+        "printf '%s\\n' 'git commit --no-verify -m x' | sh",
+        "bash -o errexit -c 'git commit -n -m x'",
+        "bash -O extglob -c 'git commit --no-verify -m x'",
+        // Where a program that runs code is in the command, the text is read as before Issue
+        // 300: a here-document piped into a text program is refused when a shell follows.
+        "cat <<'EOF' | wc -l\ngit commit -n -m x\nEOF\nbash scripts/check.sh",
     ];
     let passed: Vec<&str> = commands.into_iter().filter(|c| hook(c) != 2).collect();
     assert!(passed.is_empty(), "not refused: {passed:#?}");
@@ -62,10 +77,10 @@ fn data_that_names_the_flag_still_passes() {
         "echo \"${v:-bash -n}\"",
         "cat <<'EOF' | grep -c rule\nThe rule: git commit -n is --no-verify.\nEOF",
         "git commit -F - <<'EOF'\nci: bash -n\nEOF",
-        // A message git keeps is data, whatever runs after it.
-        "git commit -F - <<'EOF'\ndocs: git commit -n is --no-verify\nEOF\ncargo test",
-        "git commit -F - <<'EOF'\ndocs: git commit -n is --no-verify\nEOF\nbash scripts/check.sh",
+        // A message git keeps, in a command where nothing runs code, is data.
+        "git commit -F - <<'EOF'\ndocs: git commit -n is --no-verify\nEOF\ngit log -1",
         "cat <<'EOF' > notes.md\ngit commit -n is refused\nEOF\nwc -l notes.md",
+        "git commit -m 'ci: bash -n on the scripts' && git status",
     ];
     let refused: Vec<&str> = commands.into_iter().filter(|c| hook(c) != 0).collect();
     assert!(refused.is_empty(), "refused: {refused:#?}");

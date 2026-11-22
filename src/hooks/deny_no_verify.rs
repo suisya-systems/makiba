@@ -24,6 +24,12 @@
 //! expansion with an operator is refused, since its value is not known. What the reading cannot
 //! follow, or nests too deeply, leans to refusing.
 //!
+//! The argument reading stands in for the text reading only where nothing in the command runs
+//! code (`pure`): every program is a text program or git with a subcommand that runs none, and no
+//! word names a shell, `eval`, `source` or an interpreter, in the command or any substitution. In
+//! any other command the text is read as before Issue 300 (`legacy`), and the arguments too, so
+//! the hook refuses no less than before; there the letters in a message are refused as before.
+//!
 //! The variable and `-c` checks still read the text (`shell`).
 
 use super::Refusal;
@@ -61,6 +67,11 @@ pub fn check(payload: &Value) -> Result<(), Refusal> {
     let (segments, assigns) = shell::segments_and_assignments(&command);
     if let Some((matched, why)) = shell::unreadable_at(&segments, &assigns) {
         return refuse(matched, why);
+    }
+    // The arguments are read in place of the text only where nothing in the command runs code;
+    // anywhere else the text is read as before Issue 300, and the arguments as well.
+    if !pure(&command, 0) {
+        legacy(&command)?;
     }
     read(&command, Ctx::Data, 0, &Vars::new())?;
     let mut whole = shell::plain_git(&shell::flatten_text(&command));
@@ -177,21 +188,51 @@ fn ctx_of(program: Option<&str>) -> Ctx {
     }
 }
 
-/// Shell and other code a command's output or input may reach: (a shell, another program).
-type Reach = (bool, bool);
+/// The programs a command may run for its argument reading to stand in for the text reading:
+/// they print, filter or keep text and run nothing (git is judged by its subcommand, below).
+const PURE: &[&str] = &[
+    "cat", "tee", "head", "tail", "wc", "grep", "egrep", "fgrep", "zgrep", "rg", "sort", "uniq",
+    "cut", "tr", "jq", "diff", "true", "false", "echo", "printf", "git", "gh", "base64", "fold",
+    "fmt", "nl", "column", "rev", "tac", "ls", "pwd", "test", "[", "cd", "mkdir", "touch", "cp",
+    "mv", "rm", "chmod", "date", "basename", "dirname", "realpath", "readlink", "stat", "file",
+];
 
-fn reach_of(c: Ctx) -> Reach {
-    (c == Ctx::Shell, c == Ctx::Other)
-}
+/// git's subcommands that run no program the command names.
+const GIT_PURE: &[&str] = &[
+    "commit",
+    "push",
+    "merge",
+    "pull",
+    "am",
+    "add",
+    "status",
+    "log",
+    "diff",
+    "show",
+    "fetch",
+    "branch",
+    "switch",
+    "checkout",
+    "restore",
+    "rm",
+    "mv",
+    "tag",
+    "rev-parse",
+    "ls-files",
+    "blame",
+    "reset",
+    "stash",
+    "init",
+    "remote",
+    "describe",
+    "shortlog",
+    "cherry-pick",
+    "revert",
+];
 
-fn either(a: Reach, b: Reach) -> Reach {
-    (a.0 || b.0, a.1 || b.1)
-}
-
-/// Read `text` as shell commands whose output goes to `out`, with the variables `inherited`
-/// from the text it is part of (a substitution and a shell's body see them).
-fn read(text: &str, out: Ctx, depth: usize, inherited: &Vars) -> Result<(), Refusal> {
-    // The reading nests a reader per substitution, so a deep nesting is refused before it.
+/// Whether `text` nests `$(` or `${` deeper than the reading follows: it nests a reader per
+/// substitution, so such a text is refused before it is read.
+fn too_deep(text: &str) -> bool {
     let mut open = 0usize;
     let mut deepest = 0usize;
     let mut prev = ' ';
@@ -206,7 +247,131 @@ fn read(text: &str, out: Ctx, depth: usize, inherited: &Vars) -> Result<(), Refu
         }
         prev = c;
     }
-    if depth > DEPTH || deepest > 4 * DEPTH {
+    deepest > 4 * DEPTH
+}
+
+/// Programs that run code they are given, wherever their name stands among the words.
+fn runs_code(word: &str) -> bool {
+    let p = program(word);
+    SHELLS.contains(&p.as_str())
+        || p.starts_with("python")
+        || [
+            "node",
+            "nodejs",
+            "deno",
+            "bun",
+            "perl",
+            "ruby",
+            "php",
+            "lua",
+            "awk",
+            "gawk",
+            "mawk",
+            "nawk",
+            "sed",
+            "tclsh",
+            "rscript",
+            "osascript",
+            "pwsh",
+            "powershell",
+            "xargs",
+            "parallel",
+            "find",
+            "env",
+            "sudo",
+            "doas",
+            "exec",
+            "command",
+            "builtin",
+            "nohup",
+            "time",
+            "timeout",
+            "nice",
+            "ionice",
+            "stdbuf",
+            "setsid",
+            "watch",
+            "script",
+        ]
+        .contains(&p.as_str())
+}
+
+/// Whether nothing in `text` runs code: every command's program is one of `PURE` (or none, an
+/// assignment alone); no word anywhere names a shell, `eval`, `source` or an interpreter; git runs
+/// one of `GIT_PURE` with no `-c` or alias; gh defines no alias or extension; and the same holds
+/// for every substitution, also in an expanding here-document. A reading that gets lost is not.
+fn pure(text: &str, depth: usize) -> bool {
+    if depth > DEPTH || too_deep(text) {
+        return false;
+    }
+    let parsed = words::parse(text, &Vars::new());
+    if parsed.lost {
+        return false;
+    }
+    for cmd in &parsed.cmds {
+        let words: Vec<&str> = cmd.words.iter().map(|w| w.text.as_str()).collect();
+        if words.iter().any(|w| runs_code(w)) {
+            return false;
+        }
+        let start = words
+            .iter()
+            .position(|w| words::assignment(w).is_none())
+            .unwrap_or(words.len());
+        if let Some(first) = words.get(start) {
+            let p = program(first);
+            if !PURE.contains(&p.as_str()) {
+                return false;
+            }
+            let rest = &words[start + 1..];
+            let ok = match p.as_str() {
+                "git" => {
+                    let sub = rest.iter().find(|w| !w.starts_with('-'));
+                    !rest.iter().any(|w| {
+                        *w == "-c" || w.starts_with("-c") && w.len() > 2 && !w.starts_with("--")
+                    }) && !rest
+                        .iter()
+                        .any(|w| w.starts_with("--config-env") || w.starts_with("--exec-path"))
+                        && sub.is_some_and(|s| GIT_PURE.contains(s))
+                }
+                "gh" => !rest
+                    .iter()
+                    .any(|w| matches!(*w, "alias" | "extension" | "ext")),
+                "rg" => !rest.iter().any(|w| w.starts_with("--pre")),
+                "sort" => !rest.iter().any(|w| w.starts_with("--compress")),
+                _ => true,
+            };
+            if !ok {
+                return false;
+            }
+        }
+        if !cmd.substs.iter().all(|b| pure(b, depth + 1)) {
+            return false;
+        }
+        for doc in cmd.heredocs.iter().filter(|d| !d.quoted) {
+            match words::substitutions(&doc.body) {
+                Some(bodies) if bodies.iter().all(|b| pure(b, depth + 1)) => {}
+                _ => return false,
+            }
+        }
+    }
+    true
+}
+
+/// Shell and other code a command's output or input may reach: (a shell, another program).
+type Reach = (bool, bool);
+
+fn reach_of(c: Ctx) -> Reach {
+    (c == Ctx::Shell, c == Ctx::Other)
+}
+
+fn either(a: Reach, b: Reach) -> Reach {
+    (a.0 || b.0, a.1 || b.1)
+}
+
+/// Read `text` as shell commands whose output goes to `out`, with the variables `inherited`
+/// from the text it is part of (a substitution and a shell's body see them).
+fn read(text: &str, out: Ctx, depth: usize, inherited: &Vars) -> Result<(), Refusal> {
+    if depth > DEPTH || too_deep(text) {
         return refuse(
             text,
             "the command nests substitutions, shells or aliases too deeply to read; write it plainly",
@@ -341,10 +506,15 @@ fn shell_bodies(cmd: &Cmd, prog: &str) -> Vec<String> {
             }
             break;
         }
-        if !w.starts_with('-') {
+        if !w.starts_with(['-', '+']) {
             break;
         }
-        i += 1;
+        // `-o <option>`, `-O <shopt>` and their `+` forms take the next word.
+        i += if matches!(*w, "-o" | "+o" | "-O" | "+O") {
+            2
+        } else {
+            1
+        };
     }
     out
 }
