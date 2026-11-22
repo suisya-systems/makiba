@@ -507,8 +507,8 @@ const READERS: [&str; 10] = [
 ];
 
 /// The simple commands of a shell string, each as its words, or `None` when the string is more
-/// than a sequence of plain commands (`;`, `&&`, `|` between them): no `||`, `&`, redirection,
-/// substitution, expansion, escape or subshell, so that what ran is what the words say. The shell
+/// than a sequence of plain commands (`;` or `|` between them): no `&&`, `||`, `&`, comment,
+/// redirection, substitution, expansion, escape or subshell, so that what ran is what the words say. The shell
 /// of the reader's wrapper (`bash -lc '...'`) is looked through.
 fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
     let words = |s: &str| -> Option<Vec<Vec<String>>> {
@@ -525,6 +525,8 @@ fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
                 (Some(_), c) => word.push(c),
                 (None, '\'' | '"') => (quote, has) = (Some(c), true),
                 (None, '$' | '`' | '\\' | '<' | '>' | '(' | ')' | '\n') => return None,
+                // A comment: what follows is never run.
+                (None, '#') if !has => return None,
                 (None, c) if c.is_whitespace() => {
                     if has {
                         cur.push(std::mem::take(&mut word));
@@ -532,8 +534,9 @@ fn simple_commands(command: &str) -> Option<Vec<Vec<String>>> {
                     }
                 }
                 (None, '&' | '|' | ';') => {
+                    // `&&` and `||` run the next command only on a condition: not trusted.
                     let doubled = it.peek() == Some(&c);
-                    if (c == '&' && !doubled) || (c == '|' && doubled) {
+                    if c == '&' || (c == '|' && doubled) {
                         return None;
                     }
                     if doubled {
@@ -950,5 +953,35 @@ mod tests {
             Some([1, 2, 3])
         );
         assert_eq!(findings("FINDINGS: none"), None);
+    }
+
+    #[test]
+    fn only_a_command_that_surely_ran_opens_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a\n").unwrap();
+        let tree = std::fs::canonicalize(dir.path()).unwrap();
+        let t = Targets {
+            files: vec![tree.join("a.txt")],
+            tree,
+        };
+        for yes in [
+            "cat a.txt",
+            "pwd; sed -n '1,5p' a.txt",
+            "/bin/bash -lc \"nl -ba a.txt | head\"",
+        ] {
+            assert!(command_opens(yes, &t), "{yes}");
+        }
+        for no in [
+            "false && cat a.txt; true",
+            "true || cat a.txt",
+            "true # cat a.txt",
+            "echo a.txt",
+            "cd .. ; cat a.txt",
+            "cat a.txt > /dev/null",
+            "cat $f",
+            "cat ../a.txt",
+        ] {
+            assert!(!command_opens(no, &t), "{no}");
+        }
     }
 }
