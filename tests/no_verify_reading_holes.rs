@@ -43,6 +43,13 @@ fn the_flag_reaching_a_shell_by_another_way_is_refused() {
         "cat > run.sh <<'EOF'\ngit commit -n -m x\nEOF\nbash run.sh",
         "X=$(cat <<'EOF'\ngit commit -n -m x\nEOF\n)\neval \"$X\"",
         "$(cat <<'EOF'\ngit commit -n -m x\nEOF\n)",
+        // After the second diff review: a substitution inside arithmetic, a variable set
+        // outside a substitution, and code given to another interpreter.
+        "echo \"$(( $(git commit -n -m x >/dev/null) + 0 ))\"",
+        "F=-n; echo \"$(git commit $F -m x)\"",
+        "F=--no-verify; bash <<EOF\ngit commit $F -m x\nEOF",
+        "python3 -c 'import os; os.system(\"git commit -n -m x\")'",
+        "node -e \"require('child_process').execSync('git commit --no-verify -m x')\"",
     ];
     let passed: Vec<&str> = commands.into_iter().filter(|c| hook(c) != 2).collect();
     assert!(passed.is_empty(), "not refused: {passed:#?}");
@@ -55,6 +62,10 @@ fn data_that_names_the_flag_still_passes() {
         "echo \"${v:-bash -n}\"",
         "cat <<'EOF' | grep -c rule\nThe rule: git commit -n is --no-verify.\nEOF",
         "git commit -F - <<'EOF'\nci: bash -n\nEOF",
+        // A message git keeps is data, whatever runs after it.
+        "git commit -F - <<'EOF'\ndocs: git commit -n is --no-verify\nEOF\ncargo test",
+        "git commit -F - <<'EOF'\ndocs: git commit -n is --no-verify\nEOF\nbash scripts/check.sh",
+        "cat <<'EOF' > notes.md\ngit commit -n is refused\nEOF\nwc -l notes.md",
     ];
     let refused: Vec<&str> = commands.into_iter().filter(|c| hook(c) != 0).collect();
     assert!(refused.is_empty(), "refused: {refused:#?}");

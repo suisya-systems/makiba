@@ -39,6 +39,8 @@ pub struct Cmd {
     pub heredocs: Vec<Heredoc>,
     /// Its output goes to the next command through a pipe.
     pub piped: bool,
+    /// It redirects its output to a file (`>`, `>>`, `&>`; not `>&2`).
+    pub writes: bool,
 }
 
 /// A reading of a command line.
@@ -60,7 +62,10 @@ pub fn parse(text: &str, vars: &Vars) -> Parsed {
         cmds: lx
             .cmds
             .into_iter()
-            .filter(|c| !c.words.is_empty() || !c.substs.is_empty() || !c.heredocs.is_empty())
+            // An empty command that ends with a pipe is kept: `(cat <<EOF) | sh` pipes there.
+            .filter(|c| {
+                !c.words.is_empty() || !c.substs.is_empty() || !c.heredocs.is_empty() || c.piped
+            })
             .collect(),
         lost: lx.lost,
     }
@@ -368,6 +373,7 @@ impl<'a> Lexer<'a> {
             return i;
         }
         // `<`, `>`, `>>`, `>|`, `<>`, `<&`, `>&`.
+        let out = self.at(i) == Some('>') || self.at(i + 1) == Some('>');
         i += 1;
         if matches!(self.at(i), Some('>' | '|'))
             || (self.at(i - 1) == Some('<') && self.at(i) == Some('>'))
@@ -381,8 +387,12 @@ impl<'a> Lexer<'a> {
                 i += 1;
             }
             if i > start {
+                // A descriptor duplicated or closed: no file.
                 return i;
             }
+        }
+        if out {
+            self.cur.writes = true;
         }
         self.target = true;
         i
@@ -513,8 +523,19 @@ impl<'a> Lexer<'a> {
                     self.lost = true;
                 }
                 let end = (j + 2).min(self.c.len());
+                // The substitutions inside the expression run.
+                let inner: String = self.c[(i + 3).min(end)..j.min(self.c.len())]
+                    .iter()
+                    .collect();
+                match substitutions(&inner) {
+                    Some(bodies) => self.cur.substs.extend(bodies),
+                    None => self.lost = true,
+                }
                 let text: String = self.c[i..end].iter().collect();
                 self.push_str(&text);
+                if let Some(w) = self.word.as_mut() {
+                    w.built = true;
+                }
                 end
             }
             Some('(') => {

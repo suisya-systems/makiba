@@ -13,14 +13,16 @@
 //! the flag. The command is read as the shell splits it (`words`): quotes keep a word whole,
 //! redirections are dropped, an option's value (`-m <message>`) is skipped, and git's word is
 //! looked for at any position, so a wrapper (`env`, `sudo`, `xargs`) needs no list. The bodies of
-//! command substitutions (also inside `${v:-...}`), of `eval`, `bash -c`, here-documents and
-//! here-strings fed to a shell, and the values of git aliases defined in the command are read
-//! again as commands. A here-document or here-string fed to a text program is data, unless a shell
-//! runs anywhere later in the command (a pipe, a group, a file written and then run) or the text
-//! is itself shell code's input; then it is read as commands, and where another program
-//! (`python`) runs later, or is fed it, it is read as text, as before. A word where git reads
-//! options that starts with a substitution or an expansion with an operator is refused, since its
-//! value is not known. What the reading cannot follow, or nests too deeply, leans to refusing.
+//! command substitutions (also inside `${v:-...}` and `$((...))`), of `eval`, `bash -c`,
+//! here-documents and here-strings fed to a shell, and the values of git aliases defined in the
+//! command are read again as commands, with the variables of the text around them. The arguments
+//! of another program (`python3 -c`, `node -e`) and a here-document fed to it are read as text,
+//! as before. A here-document fed to a program that keeps it (git, gh) is data; one fed to a
+//! text program that passes it on (`cat`) is data unless it reaches a shell: through a pipe after
+//! it, through the output of the text it is part of, or, when it writes a file, through a shell
+//! run later in the command. A word where git reads options that starts with a substitution or an
+//! expansion with an operator is refused, since its value is not known. What the reading cannot
+//! follow, or nests too deeply, leans to refusing.
 //!
 //! The variable and `-c` checks still read the text (`shell`).
 
@@ -60,7 +62,7 @@ pub fn check(payload: &Value) -> Result<(), Refusal> {
     if let Some((matched, why)) = shell::unreadable_at(&segments, &assigns) {
         return refuse(matched, why);
     }
-    read(&command, Ctx::Data, 0)?;
+    read(&command, Ctx::Data, 0, &Vars::new())?;
     let mut whole = shell::plain_git(&shell::flatten_text(&command));
     if !assigns.is_empty() {
         whole = shell::expand(&whole, &assigns);
@@ -118,6 +120,10 @@ const TEXT: &[&str] = &[
     "base64", "fold", "fmt", "nl", "column", "rev", "tac",
 ];
 
+/// Of `TEXT`, the programs that keep the input they are fed (a commit message to git, an
+/// Issue's body to gh): none of it goes on to their output, to a pipe or to a file.
+const SINKS: &[&str] = &["git", "gh", "wc", "true", "false"];
+
 /// Programs whose input or arguments are shell code.
 const SHELLS: &[&str] = &[
     "bash", "sh", "zsh", "dash", "ksh", "mksh", "ash", "busybox", "eval", "source", ".",
@@ -171,8 +177,20 @@ fn ctx_of(program: Option<&str>) -> Ctx {
     }
 }
 
-/// Read `text` as shell commands whose output goes to `out`.
-fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
+/// Shell and other code a command's output or input may reach: (a shell, another program).
+type Reach = (bool, bool);
+
+fn reach_of(c: Ctx) -> Reach {
+    (c == Ctx::Shell, c == Ctx::Other)
+}
+
+fn either(a: Reach, b: Reach) -> Reach {
+    (a.0 || b.0, a.1 || b.1)
+}
+
+/// Read `text` as shell commands whose output goes to `out`, with the variables `inherited`
+/// from the text it is part of (a substitution and a shell's body see them).
+fn read(text: &str, out: Ctx, depth: usize, inherited: &Vars) -> Result<(), Refusal> {
     // The reading nests a reader per substitution, so a deep nesting is refused before it.
     let mut open = 0usize;
     let mut deepest = 0usize;
@@ -194,8 +212,9 @@ fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
             "the command nests substitutions, shells or aliases too deeply to read; write it plainly",
         );
     }
-    let first = words::parse(text, &Vars::new());
-    let mut vars = Vars::new();
+    let first = words::parse(text, inherited);
+    let mut vars = inherited.clone();
+    let mut own = std::collections::BTreeSet::new();
     for (name, value) in words::assignments(&first) {
         if name == "IFS" {
             return refuse(
@@ -203,7 +222,8 @@ fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
                 "IFS changes how the shell splits words, so the hook cannot read them; leave it as it is",
             );
         }
-        if vars.insert(name.clone(), value).is_some() {
+        vars.insert(name.clone(), value);
+        if !own.insert(name.clone()) {
             return refuse(
                 format!("{name}= twice"),
                 format!(
@@ -222,44 +242,65 @@ fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
         .iter()
         .map(|c| command_program(&c.words))
         .collect();
-    // For each command, the contexts of the commands after it (counted once, from the end).
-    let mut later = vec![(false, false); progs.len() + 1];
-    for k in (0..progs.len()).rev() {
-        let c = ctx_of(progs[k].as_deref());
-        later[k] = (
-            later[k + 1].0 || c == Ctx::Shell,
-            later[k + 1].1 || c == Ctx::Other,
-        );
+    // Counted once, from the end, for each command `k`: what the commands from `k` on reach
+    // (`all`), and what a command after `k` reaches through a pipe that starts at `k` or later
+    // (`piped`; a group piped on, `{ cat; } | sh`, is a pipe after the command).
+    let n = progs.len();
+    let mut all = vec![(false, false); n + 1];
+    let mut piped = vec![(false, false); n + 1];
+    for k in (0..n).rev() {
+        all[k] = either(all[k + 1], reach_of(ctx_of(progs[k].as_deref())));
+        piped[k] = if parsed.cmds[k].piped {
+            all[k + 1]
+        } else {
+            piped[k + 1]
+        };
     }
     for (k, cmd) in parsed.cmds.iter().enumerate() {
         let prog = progs[k].as_deref();
         let own = ctx_of(prog);
-        check_git(cmd, depth)?;
-        if own == Ctx::Shell {
-            for body in shell_bodies(cmd, prog.unwrap_or_default()) {
-                read(&body, Ctx::Shell, depth + 1)?;
+        check_git(cmd, depth, &vars)?;
+        match own {
+            Ctx::Shell => {
+                for body in shell_bodies(cmd, prog.unwrap_or_default()) {
+                    read(&body, Ctx::Shell, depth + 1, &vars)?;
+                }
             }
+            // Another program's arguments may be code (`python3 -c '...'`): read as text, as
+            // before Issue 300.
+            Ctx::Other => {
+                for w in cmd.words.iter().skip(1) {
+                    legacy(&w.text)?;
+                }
+            }
+            Ctx::Data => {}
         }
         // A substitution runs; its output becomes a word of this command, or, with no program
         // (`$(...)` alone, or an assignment's value kept for later), may be run as a command.
         let subst_out = if prog.is_none() { Ctx::Shell } else { own };
         for body in &cmd.substs {
-            read(body, subst_out, depth + 1)?;
+            read(body, subst_out, depth + 1, &vars)?;
         }
-        // Where a here-document (or here-string) fed to a text program may end up: where this
-        // text's output goes, or any later command of it (through a pipe, a group, or a file
-        // written now and run after), so a shell or another program anywhere after it counts.
-        let (to_shell, to_other) = if own == Ctx::Data {
-            (
-                out == Ctx::Shell || later[k + 1].0,
-                out == Ctx::Other || later[k + 1].1,
-            )
-        } else {
-            (own == Ctx::Shell, own == Ctx::Other)
+        // Where a here-document (or here-string) fed to a program goes. A shell runs it and
+        // another program reads it as its code. A text program that keeps it (git, gh) ends it.
+        // One that passes it on sends it where this text's output goes, through a pipe after it
+        // to the commands there, and, when it writes a file, to any later command (a file
+        // written now and run after).
+        let sink = prog.is_some_and(|p| SINKS.contains(&p));
+        let (to_shell, to_other) = match own {
+            Ctx::Data if sink => (false, false),
+            Ctx::Data => {
+                let mut r = either(reach_of(out), piped[k]);
+                if cmd.writes {
+                    r = either(r, all[k + 1]);
+                }
+                r
+            }
+            _ => reach_of(own),
         };
         for doc in &cmd.heredocs {
             if to_shell {
-                read(&doc.body, Ctx::Shell, depth + 1)?;
+                read(&doc.body, Ctx::Shell, depth + 1, &vars)?;
             }
             if to_other {
                 legacy(&doc.body)?;
@@ -271,7 +312,7 @@ fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
             match words::substitutions(&doc.body) {
                 Some(bodies) => {
                     for b in bodies {
-                        read(&b, Ctx::Data, depth + 1)?;
+                        read(&b, Ctx::Data, depth + 1, &vars)?;
                     }
                 }
                 None => legacy(&doc.body)?,
@@ -309,7 +350,7 @@ fn shell_bodies(cmd: &Cmd, prog: &str) -> Vec<String> {
 }
 
 /// Each git of `cmd` (at any position): its subcommand's options, and the aliases it defines.
-fn check_git(cmd: &Cmd, depth: usize) -> Result<(), Refusal> {
+fn check_git(cmd: &Cmd, depth: usize, vars: &Vars) -> Result<(), Refusal> {
     let words = &cmd.words;
     for (i, w) in words.iter().enumerate() {
         if program(&w.text) != "git" {
@@ -322,12 +363,12 @@ fn check_git(cmd: &Cmd, depth: usize) -> Result<(), Refusal> {
                 if o == "-c"
                     && let Some(v) = words.get(j + 1)
                 {
-                    alias(&v.text, depth)?;
+                    alias(&v.text, depth, vars)?;
                 }
                 j += 2;
             } else {
                 if let Some(v) = o.strip_prefix("-c") {
-                    alias(v, depth)?;
+                    alias(v, depth, vars)?;
                 }
                 j += 1;
             }
@@ -347,7 +388,7 @@ fn check_git(cmd: &Cmd, depth: usize) -> Result<(), Refusal> {
                     .position(|a| a.text.to_lowercase().starts_with("alias."))
                     && let Some(v) = args.get(k + 1)
                 {
-                    alias(&format!("{}={}", args[k].text, v.text), depth)?;
+                    alias(&format!("{}={}", args[k].text, v.text), depth, vars)?;
                 }
             }
             _ => {}
@@ -358,7 +399,7 @@ fn check_git(cmd: &Cmd, depth: usize) -> Result<(), Refusal> {
 
 /// A configuration `key=value` set in the command: an alias's value is read as git's arguments,
 /// or with a leading `!` as a shell command.
-fn alias(setting: &str, depth: usize) -> Result<(), Refusal> {
+fn alias(setting: &str, depth: usize, vars: &Vars) -> Result<(), Refusal> {
     let Some((key, value)) = setting.split_once('=') else {
         return Ok(());
     };
@@ -366,8 +407,8 @@ fn alias(setting: &str, depth: usize) -> Result<(), Refusal> {
         return Ok(());
     }
     match value.trim_start().strip_prefix('!') {
-        Some(code) => read(code, Ctx::Shell, depth + 1),
-        None => read(&format!("git {value}"), Ctx::Data, depth + 1),
+        Some(code) => read(code, Ctx::Shell, depth + 1, vars),
+        None => read(&format!("git {value}"), Ctx::Data, depth + 1, vars),
     }
 }
 
