@@ -326,6 +326,49 @@ impl Door {
         if v == Verb::Review && role == Role::Worker {
             return self.review(w, &actor, &args, idem);
         }
+        // Issue 307: the check before CI reads GitHub and git with the lock released, as the gate.
+        let w = match (v, gate_args(&args)) {
+            (Verb::Pr, Ok((repo, pr, head))) => {
+                let read = (|| -> rusqlite::Result<_> {
+                    let projects: Vec<(String, Option<String>)> = w
+                        .conn()
+                        .prepare(
+                            "SELECT slug, origin_url FROM projects WHERE status = 'active' ORDER BY slug",
+                        )?
+                        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    Ok((projects, failed_heads(w.conn(), &repo, pr)?))
+                })();
+                let (projects, failed) = read.map_err(internal)?;
+                let before = newest_watch(&w, &repo, pr).map_err(internal)?;
+                drop(w);
+                let mut found = pr_before_ci(&projects, &failed, &repo, pr, &head);
+                let w = self.writer();
+                // The same request may have been recorded while the lock was released.
+                if let Some(idem) = idem
+                    && let Some(first) = replay(&w, &actor, idem).map_err(internal)?
+                {
+                    return first;
+                }
+                // Another record of this pull request went in meanwhile: this one may be older.
+                if found.is_ok() && newest_watch(&w, &repo, pr).map_err(internal)? != before {
+                    found = Err(format!(
+                        "{repo}#{pr} was recorded again while this record was checked; nothing was recorded, record the newest head again"
+                    ));
+                }
+                if let Err(why) = found {
+                    let r = Err(refuse(
+                        ErrorKind::Conflict,
+                        why,
+                        "push the test commit alone with push and head, record it with pr, and record a later head once CI failed there",
+                    ));
+                    let _ = record(&w, &actor, verb, &args, idem, &r);
+                    return r;
+                }
+                w
+            }
+            _ => w,
+        };
         if v == Verb::Events {
             // A read that a client repeats: recorded, it would write a row and an event per
             // poll and show the client its own polls (spec section 3). Refusals are recorded above.
@@ -2033,6 +2076,17 @@ fn publish_note(raw: &Path, stem: &str, staged: &Path) -> std::io::Result<String
 /// thread of its own (push.rs) and ends the command `done` or `failed` with a notice.
 fn push(w: &StateWriter, args: &Value) -> Response {
     let task = str_arg(args, "task")?;
+    // Issue 307: `head`, the branch's test commit pushed alone (push.rs checks it is that).
+    if let Some(h) = args.get("head").filter(|h| !h.is_null()) {
+        let ok = h.as_str().is_some_and(|h| {
+            h.len() == 40 && h.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+        });
+        if !ok {
+            return Err(usage(format!(
+                "head is a full commit id (40 lowercase hex), not {h}"
+            )));
+        }
+    }
     let worktree: Option<Option<String>> = w
         .conn()
         .query_row(
@@ -2282,6 +2336,7 @@ fn same_pr(p: &Value, repo: &str, pr: i64) -> bool {
 
 fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows> {
     let c = w.conn();
+    let ci = ci_rows(c, repo, pr)?;
     let payloads = |kind: &str| -> rusqlite::Result<Vec<(i64, Value)>> {
         let mut st =
             c.prepare("SELECT id, payload_json FROM events WHERE kind = ?1 ORDER BY id")?;
@@ -2299,7 +2354,6 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         }
         Ok(out)
     };
-    let ci = payloads("ci_completed")?;
     let text = |v: &Value, k: &str| v[k].as_str().unwrap_or_default().to_string();
     let pin = payloads("acceptance_gate")?
         .into_iter()
@@ -2348,16 +2402,106 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         latest_ci: ci
             .last()
             .map(|(_, v)| (text(v, "status"), text(v, "head_oid"))),
-        failed: ci
-            .iter()
-            .filter(|(_, v)| v["status"] == json!("failed"))
-            .map(|(_, v)| text(v, "head_oid"))
-            .collect(),
+        failed: failed_of(&ci),
         pin,
         projects,
         task,
         review,
     })
+}
+
+/// The id of the newest record of `repo#pr` (`pr_opened` or `fix_pushed`, which every
+/// `prwatch::register` writes, also when it takes up an older watch row again), if any.
+fn newest_watch(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<Option<i64>> {
+    w.conn().query_row(
+        "SELECT max(id) FROM events WHERE kind IN ('pr_opened', 'fix_pushed')
+           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+           AND json_extract(payload_json, '$.pr') = ?2",
+        params![repo, pr],
+        |r| r.get(0),
+    )
+}
+
+/// The heads of the failed `ci_completed` events among `ci` (one pull request's).
+fn failed_of(ci: &[(i64, Value)]) -> std::collections::BTreeSet<String> {
+    ci.iter()
+        .filter(|(_, v)| v["status"] == json!("failed"))
+        .filter_map(|(_, v)| v["head_oid"].as_str().map(String::from))
+        .collect()
+}
+
+/// The `ci_completed` payloads of `repo#pr`, oldest first.
+fn ci_rows(c: &Connection, repo: &str, pr: i64) -> rusqlite::Result<Vec<(i64, Value)>> {
+    let mut st =
+        c.prepare("SELECT id, payload_json FROM events WHERE kind = 'ci_completed' ORDER BY id")?;
+    let rows = st.query_map([], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, Option<String>>(1)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (id, text) = row?;
+        if let Some(v) = text.and_then(|t| serde_json::from_str::<Value>(&t).ok())
+            && same_pr(&v, repo, pr)
+        {
+            out.push((id, v));
+        }
+    }
+    Ok(out)
+}
+
+/// The heads with a failed `ci_completed` for `repo#pr`: what the merge gate takes as the failed
+/// run at a test commit (`GateRows::failed`), and what Issue 307's check before CI reads.
+pub(super) fn failed_heads(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+) -> rusqlite::Result<std::collections::BTreeSet<String>> {
+    Ok(failed_of(&ci_rows(c, repo, pr)?))
+}
+
+/// Issue 307, before `pr opened|pushed` is recorded (outside the door's lock: it reads GitHub and
+/// git). Let through only what the merge gate can never pass: a repository that is no project's,
+/// or a project clone whose origin does not name it (the gate fetches only through such an
+/// origin). Otherwise the pull request is read and fetched as the gate does, and
+/// `gate::before_ci` judges the head against the failed runs recorded for this pull request; what
+/// cannot be read refuses.
+fn pr_before_ci(
+    projects: &[(String, Option<String>)],
+    failed: &std::collections::BTreeSet<String>,
+    repo: &str,
+    pr: i64,
+    head: &str,
+) -> Result<(), String> {
+    use super::gate;
+    let repos = super::prepare::Places::from_env(Path::new("")).repos;
+    let Some(clone) = gate::clone_of(projects, &repos, &repo.to_lowercase()) else {
+        return Ok(());
+    };
+    if gate::origin_of(&clone, repo).is_err() {
+        return Ok(());
+    }
+    let why = |e: gate::Reject| {
+        format!(
+            "{repo}#{pr} cannot be checked before CI (Issue 307): {}; nothing was recorded",
+            e.0
+        )
+    };
+    let program = super::gh::program();
+    let (_url, base_branch, _) = gate::pr_view(&program, repo, pr).map_err(why)?;
+    let (base, fetched) = gate::fetch(&clone, repo, pr, &base_branch).map_err(why)?;
+    if fetched != head {
+        return Err(format!(
+            "{repo}#{pr} has the head {fetched} at origin, not {head}; record the head the pull request has (once makibad's push notice names it)"
+        ));
+    }
+    gate::before_ci(
+        &clone,
+        &base,
+        head,
+        &|sha| failed.contains(sha),
+        &format!("for {repo}#{pr}"),
+    )
+    .map_err(|e| e.0)
 }
 
 /// `(repo, pr, head)` of a `gate` request.
@@ -3511,8 +3655,8 @@ fn tool(v: Verb) -> Value {
             &["state", "repo", "pr", "head", "task"],
         ),
         Verb::Push => (
-            "Have makibad push a worker's branch: the run's worktree, on its branch, clean, pushed as its head to the same branch at origin, never forced. Answers accepted; a notice tells you the head pushed (then record it with pr) or why it failed.",
-            Map::from_iter([("task".into(), text.clone())]),
+            "Have makibad push a worker's branch: the run's worktree, on its branch, clean, pushed as its head to the same branch at origin, never forced. With head (the full id of the branch's test commit, the one with the Acceptance-Test trailer), that commit alone is pushed. A head past the test commit is refused until a failed CI run is recorded at the test commit on one of the task's pull requests. Answers accepted; a notice tells you the head pushed (then record it with pr) or why it failed.",
+            Map::from_iter([("task".into(), text.clone()), ("head".into(), text.clone())]),
             &["task"],
         ),
         Verb::Update => (
