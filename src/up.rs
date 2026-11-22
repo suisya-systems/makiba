@@ -44,6 +44,62 @@ fn unavailable<E: std::fmt::Display>(what: &str) -> impl Fn(E) -> Failure + '_ {
     move |e| (ErrorKind::Unavailable, format!("{what}: {e}"))
 }
 
+/// How long `up` waits in all for the ledger's write lock when another process (a running
+/// `makibad`, a `makiba` command) holds it, longer than one connection's 5 s busy timeout (Issue 288).
+const LEDGER_WAIT: Duration = Duration::from_secs(30);
+
+/// Run `f` on `state.db` in `dir` inside one write transaction, committed when `f` succeeds. The
+/// write lock is waited for up to `LEDGER_WAIT`, each try's busy timeout cut to what is left of
+/// it; when the wait runs out the ledger is said to be busy, not an internal error.
+fn with_ledger<T>(
+    dir: &Path,
+    mut f: impl FnMut(&StateWriter) -> Result<T, Failure>,
+) -> Result<T, Failure> {
+    let path = dir.join("state.db");
+    let until = Instant::now() + LEDGER_WAIT;
+    loop {
+        let locked = StateWriter::open(&path).and_then(|w| {
+            let left = until.saturating_duration_since(Instant::now());
+            w.conn()
+                .busy_timeout(left.min(Duration::from_secs(5)))
+                .map_err(crate::db::Error::from)?;
+            w.begin()?;
+            Ok(w)
+        });
+        let w = match locked {
+            Ok(w) => w,
+            Err(e) if crate::db::is_busy(&e) && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(50));
+                continue;
+            }
+            Err(e) if crate::db::is_busy(&e) => {
+                return Err((
+                    ErrorKind::Unavailable,
+                    format!(
+                        "the ledger {} is busy: another makiba process has held its write lock for {} s; \
+                         wait a moment and run `makiba up` again (`makiba status` shows what runs)",
+                        path.display(),
+                        LEDGER_WAIT.as_secs()
+                    ),
+                ));
+            }
+            Err(e) => {
+                return Err((ErrorKind::Internal, format!("cannot open state.db: {e}")));
+            }
+        };
+        let out = f(&w);
+        match &out {
+            Ok(_) => w
+                .commit()
+                .map_err(|e| (ErrorKind::Internal, format!("cannot write state.db: {e}")))?,
+            Err(_) => {
+                let _ = w.rollback();
+            }
+        }
+        return out;
+    }
+}
+
 /// `claude --version` must be at or above the lowest supported version and not refused by name;
 /// a version newer than the newest checked one is said so in one line and accepted.
 fn check_claude() -> Result<(), Failure> {
@@ -192,12 +248,10 @@ fn run(secretary: bool) -> Result<(), Failure> {
     check_git()?;
     let dir = daemon::state_dir();
     std::fs::create_dir_all(&dir).map_err(unavailable("cannot create the state folder"))?;
-    {
-        let w = StateWriter::open(&dir.join("state.db"))
-            .map_err(|e| (ErrorKind::Internal, format!("cannot open state.db: {e}")))?;
-        person_key::ensure(&w, &crate::cli::person_key_path())
-            .map_err(|e| (ErrorKind::Internal, e))?;
-    }
+    // The key file is written under the ledger's lock; a try that waited finds it there and keeps it.
+    with_ledger(&dir, |w| {
+        person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
+    })?;
     let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
     let the_base = base::connect_session_for_start(&session, Duration::from_secs(10));
     // Nothing listening at the base's socket: the base is stopped, and its programs with it.
@@ -211,15 +265,16 @@ fn run(secretary: bool) -> Result<(), Failure> {
     // A stopped core left a shell in place of a kept secretary terminal: its launch is failed, so
     // `makibad` ends that terminal and launches a new secretary.
     if stopped {
-        let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
-        crate::down::suspend(&w).map_err(internal)?;
-        w.conn()
-            .execute(
-                "UPDATE run_launch SET stage = 'failed', failed_reason = 'the base was stopped'
-                 WHERE role = 'secretary' AND stage != 'failed'",
-                [],
-            )
-            .map_err(|e| internal(e.into()))?;
+        with_ledger(&dir, |w| {
+            crate::down::suspend(w).map_err(internal)?;
+            w.conn()
+                .execute(
+                    "UPDATE run_launch SET stage = 'failed', failed_reason = 'the base was stopped'
+                     WHERE role = 'secretary' AND stage != 'failed'",
+                    [],
+                )
+                .map_err(|e| internal(e.into()))
+        })?;
     }
     the_base.start().map_err(|e| {
         (
@@ -232,26 +287,24 @@ fn run(secretary: bool) -> Result<(), Failure> {
         "app: to see this organization in the app, run on the app's machine: {}",
         base::app_register_command(&session)
     );
-    {
-        let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
-        let resumed = resume(&w).map_err(internal)?;
-        if !resumed.is_empty() {
-            println!("resumed: {}", resumed.join(" "));
-        }
+    let resumed = with_ledger(&dir, |w| resume(w).map_err(internal))?;
+    if !resumed.is_empty() {
+        println!("resumed: {}", resumed.join(" "));
     }
     if daemon_running(&dir)? {
         println!("makibad: already running");
         if secretary {
             // The running makibad's secretary pass takes the row up (Issue 46): it launches one
             // unless one runs, as at its start.
-            let w = StateWriter::open(&dir.join("state.db")).map_err(internal)?;
-            w.conn()
-                .execute(
-                    "INSERT INTO commands (actor, verb, args_json, status)
-                     VALUES ('person', 'up', '{\"secretary\":true}', 'accepted')",
-                    [],
-                )
-                .map_err(|e| internal(e.into()))?;
+            with_ledger(&dir, |w| {
+                w.conn()
+                    .execute(
+                        "INSERT INTO commands (actor, verb, args_json, status)
+                         VALUES ('person', 'up', '{\"secretary\":true}', 'accepted')",
+                        [],
+                    )
+                    .map_err(|e| internal(e.into()))
+            })?;
             println!(
                 "secretary: asked of the running makibad, launched unless one runs (see makiba status)"
             );
