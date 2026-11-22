@@ -2384,10 +2384,13 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
     })
 }
 
-/// The id of the newest watch of `repo#pr`, if any.
+/// The id of the newest record of `repo#pr` (`pr_opened` or `fix_pushed`, which every
+/// `prwatch::register` writes, also when it takes up an older watch row again), if any.
 fn newest_watch(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<Option<i64>> {
     w.conn().query_row(
-        "SELECT max(id) FROM pr_watches WHERE lower(repo) = lower(?1) AND pr = ?2",
+        "SELECT max(id) FROM events WHERE kind IN ('pr_opened', 'fix_pushed')
+           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+           AND json_extract(payload_json, '$.pr') = ?2",
         params![repo, pr],
         |r| r.get(0),
     )
