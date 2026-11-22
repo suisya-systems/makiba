@@ -78,11 +78,25 @@ pub(crate) fn configure(conn: &Connection) -> Result<()> {
 }
 
 /// Open `path` with `foreign_keys` on, a 5 s busy timeout and WAL (readers and the writer do not block each other).
+/// A ledger already in WAL is only read: setting the mode takes the write lock (Issue 288).
 pub fn open(path: &Path) -> Result<Connection> {
     let conn = Connection::open(path)?;
     configure(&conn)?;
-    conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+    let mode: String = conn.pragma_query_value(None, "journal_mode", |r| r.get(0))?;
+    if !mode.eq_ignore_ascii_case("wal") {
+        conn.pragma_update_and_check(None, "journal_mode", "WAL", |_| Ok(()))?;
+    }
     Ok(conn)
+}
+
+/// Whether `e` is SQLite's "database is locked" (`SQLITE_BUSY` or `SQLITE_LOCKED`): another
+/// connection holds the lock asked for.
+pub fn is_busy(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::Sqlite(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+    )
 }
 
 /// An in-memory database with the same pragmas (WAL does not apply to it).
@@ -123,11 +137,32 @@ fn ddl_of(table: &str) -> String {
     ddl
 }
 
+/// Whether every step of `migrate` is already done: versions 1 to 9 recorded, the session row and
+/// the delivery ledger present. It only reads, so a current ledger is opened without the write
+/// lock (Issue 288).
+fn is_current(conn: &Connection) -> Result<bool> {
+    for table in ["schema_migrations", "org_sessions", "event_deliveries"] {
+        if !has_table(conn, table)? {
+            return Ok(false);
+        }
+    }
+    let (versions, session): (i64, i64) = conn.query_row(
+        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 9),
+                (SELECT COUNT(*) FROM org_sessions WHERE id = 1)",
+        [],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok(versions == 9 && session == 1)
+}
+
 /// Bring a database to v9: apply v3 to an empty one, upgrade an older one in place, then add v4 to v9.
 /// Idempotent. Refuses to run inside a transaction, where it could not leave the caller's writes alone.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     if !conn.is_autocommit() {
         return Err(Error::InTransaction("migrate"));
+    }
+    if is_current(conn)? {
+        return Ok(());
     }
     if !has_table(conn, "schema_migrations")? {
         conn.execute_batch(SCHEMA)?;
@@ -230,6 +265,43 @@ pub(crate) fn query_rows(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A ledger complete at v8 (every step of v8's `migrate` done) is not current: the fast path
+    /// of Issue 288 does not skip it, and `migrate` brings it to v9, after which it is current.
+    #[test]
+    fn a_complete_v8_ledger_is_not_current_and_is_migrated_to_v9() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO org_sessions (id, status, last_writer_at)
+             VALUES (1, 'IDLE', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (2, 'v2'), (3, 'v3');",
+        )
+        .unwrap();
+        for script in [SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8] {
+            conn.execute_batch(script).unwrap();
+        }
+        let n = |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 8"
+            ),
+            8,
+            "the ledger is complete at v8"
+        );
+        assert!(!is_current(&conn).unwrap());
+        migrate(&mut conn).unwrap();
+        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 9);
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM pragma_table_info('ranges') WHERE name = 'budget_fixes'"
+            ),
+            1
+        );
+        assert!(is_current(&conn).unwrap());
+    }
 
     /// v9 makes `ranges` again: a range of a v8 database keeps its fields, its candidates and its
     /// runs, takes the default `budget_fixes`, may end `budget_hours`, and the foreign keys hold
