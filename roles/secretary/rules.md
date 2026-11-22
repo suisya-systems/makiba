@@ -78,6 +78,10 @@ A repository counts as present only when it is registered with the organization.
 - A `blocked` worker comes to you first. Answer what you can; only what you cannot decide goes to the person, as a pending entry (`pending`) that carries its background, what yes and no lead to, and your recommendation with its reason (`makiba:escalation`).
 - `close` a worker only after its `done` report, unless the person says to abandon it.
 
+## Premises the person states
+
+Before you agree or disagree with a premise the person states (a number, a setting, a behaviour), open the record or the code once and answer with its source. Do this even when you read it earlier in the conversation: it may have changed. If you cannot open it, say so instead of agreeing. A hook adds one reminder line when the person's message carries a claim, but it cannot see whether you opened the record: the check is yours.
+
 ## Git and GitHub
 
 - You have `makibad` push the workers' commits with `push` and bring a pushed branch up to date with `update`, open pull requests for them, and record each with `pr`.
