@@ -29,6 +29,10 @@ When a run finds a version whose sandbox or launch is worse than the last checke
 
 The tests of the refused list pass their own list to `check_with` and never add an entry to the shipped one. One assertion of `tests/claude_no_upper_bound_160.rs` (the shipped list is empty) fails when the first real entry is added; that failure is the signal, and the declared test is not edited without the owner's decision.
 
+## A behaviour of the agent host that makiba depends on
+
+An allow rule takes a call out of the auto mode classifier's hands (Issue 292). Claude Code's documentation, "How the classifier evaluates actions" (<https://code.claude.com/docs/en/permission-modes.md>), says each action goes through a fixed order in which the first matching step wins: step 1 is "Actions matching your allow, ask, or deny rules resolve immediately", and step 3 is "Everything else goes to the classifier". It also says that on entering auto mode only the broad allow rules that grant arbitrary code execution are dropped, which an exact `mcp__makiba__<tool>` entry is not. makiba's role settings rely on this: each role allows exactly its own door tools (spec section 12), so the classifier does not stand between an agent and `makibad`. A new version could change the order or the rules that are dropped. The probe is the self-hosting first-day check `review-diff` (Issue 51): a worker's own `review` call must reach `makibad` and not be refused by the classifier. This is the documentation's word until a host run records it.
+
 ## History: the move to 2.1.328
 
 The range moved from 2.1.326 to 2.1.328 (Issue 153, 2026-11-20) on a partial rerun, because the host was on 2.1.328 and the run of M4-5 (Issue 35) could not start while `makiba up` refused it. Rerun on 2.1.328 (rows in probes.md section 4): P1 and P11 (M4-2, commit 4f95687); `door-and-base-reach` (13 of 13 cases before the role hooks were wired into the launch; steps 1 to 9 as before and steps 14 and 15 after Issue 144; steps 10 to 13 are tracked in Issue 150); `shell-mode-reach`. Not rerun: P3, P4, P5, P7 to P10 as their own probes, paddock's carried probes, and the first-worker runbook.

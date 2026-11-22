@@ -564,8 +564,14 @@ fn the_secretarys_settings_allow_api_github_com_and_still_refuse_what_they_refus
     }
 }
 
-/// 7. A worker's settings are what main built before this change.
+/// 7. A worker's settings are what main built before this change, apart from the allow list of
+///    its own door tools (Issue 292), which `tests/door_tools_allowed.rs` covers.
 #[test]
 fn a_workers_settings_are_unchanged() {
-    assert_eq!(built(agents::Role::Worker), fixture("worker"));
+    let mut now = built(agents::Role::Worker);
+    now["permissions"]
+        .as_object_mut()
+        .expect("permissions")
+        .remove("allow");
+    assert_eq!(now, fixture("worker"));
 }
