@@ -30,7 +30,7 @@ One screen, no pages to move between for the three roles. A top line and three c
 
 Rules of the look, which the drawing follows:
 
-- A state is never colour alone: each place has a mark, a word and a colour (`✓ landed`, `? waits for you`, `● at work`, `◆ review`, `○ not yet in`, `– skipped`, `! failed`).
+- A state is never colour alone: each place has a mark, a word and a colour (`✓ landed`, `□ closed`, `? waits for you`, `● in work`, `◆ review`, `○ not yet in`, `– skipped`): the seven places of `ranges[].places`, each drawn, none merged into another. "Failed to start" (`!`, red) is not a place: it is an item in work whose stage is `launch_failed`, marked inside the in-work part (3.3).
 - Amber means "waits for the person" and nothing else. Red means "went wrong" and nothing else. Green is work that moves or landed. Everything else is ink on paper.
 - An empty list says why it is empty (the panel "nothing could go in"): the scan found nothing, failed, or has not run.
 - The range's list never reorders what has been admitted (belt.md 7.1); a row changes its mark, not its position.
@@ -54,14 +54,14 @@ The owner drew the first draft with larger counts and it broke (2026-11-23): wit
 | The conversation | Never less than a quarter of the column. | It is the centre. |
 | Watch: "Went wrong" | Capped at three, newest first except a silent dispatcher, which is always first; then "and N more" with the oldest's age and the count per kind. With more than three, each row's detail is one line. The count in the top line is always the full count. | Three fit beside the range; a long list of failures must not push the range out of view. |
 | Watch: the range, whole | Scrolls; it takes the height the column has left, never less than three rows. The strip and the counts over it always cover every item. It opens scrolled to the first item that has not landed, with the landed ones above it. | The whole range is its point (the owner: reassurance), and its order is fixed, so it cannot be cut by importance. |
-| Watch: the strip | One mark per Issue up to twelve items. Above twelve, one piece per place, as wide as its share, with its number written in it. The counts in words stay under it in both forms. | Twenty marks of a few pixels say less than seven numbers. |
+| Watch: the strip | One mark per Issue up to twelve items. Above twelve, one piece per place, as wide as its share, with its number written in it; the in-work piece is drawn as two when some of its items failed to start, the moving ones and the failed ones in red. The counts in words stay under it in both forms. | Twenty marks of a few pixels say less than seven numbers. |
 | Watch: "Other runs" | Capped at three, stopped ones first; then "and N more" with what they are doing. | Stopped runs are the ones looked for; they are first, so the cap cuts only moving ones. |
 | Watch: the two steps further in | Always at the foot of the column. | They vanished in the first draft. |
 
 Widths follow the same rule: nothing is cut without a mark, and nothing wraps over its neighbour.
 
 - A reference is never wrapped and never given a fixed width: its cell is as wide as its text. A title beside it keeps at least sixteen characters before it is cut with an ellipsis, and a cut title shows whole on hover.
-- With one project registered a reference is `#N`, in a cell before the title. With more than one it is `OWNER/NAME#N`, too long to sit before a title in a column of this width: it goes on a line of its own under the title, whole, in every list. The form is chosen by the number of projects, not row by row, so the rows of one list have one shape.
+- With one project registered a reference is `#N`, in a cell before the title. With more than one it is `OWNER/NAME#N`, too long to sit before a title in a column of this width: it goes on a line of its own under the title, whole, in every list; one longer than the row is cut at its start, never its end, so the number always stays, and shows whole on hover. The form is chosen by the number of projects, not row by row, so the rows of one list have one shape.
 - A state at the right of a row ("waits for you · 6 min") is never cut; the title gives way first.
 - A label longer than the drawing's English (another language) wraps inside its own cell or is cut with an ellipsis; no layout depends on a label's length. The section headings, the buttons and the top line are one line each and cut the least important part first (the explanation after a heading, then the organization's name).
 
@@ -111,7 +111,8 @@ One entry is shown large. Several are a list, oldest first, and the one opened i
 | Part | Read field | State |
 | --- | --- | --- |
 | The range, whole: one row per Issue with its place, stage, reason, age, pull request | `ranges[].items[]`: `issue`, `title`, `place`, `stage`, `why`, `since`, `task_id`, `pr`, `pr_title` | Today |
-| The strip and the counts | `ranges[].places` | Today |
+| The strip and the counts | `ranges[].places`, as it is: one count per place, all seven (`landed`, `closed`, `waiting_person`, `review`, `in_work`, `not_in`, `skipped`), in that order. `closed` (completed with no merge recorded) is shown apart from `landed`, with the mark `□`, the word "closed" and "no merge recorded" in its row: a close is not a landing (belt.md 7.1) | Today |
+| "Failed to start" inside the in-work count | Not a place and not in `places`: the items of `ranges[].items[]` with `place` `in_work` and `stage` `launch_failed`, counted by the screen. Shown as "3 in work (1 failed to start)", the red part of the in-work piece of the strip and a red `!` on the row; the same run is in "Went wrong" | Today |
 | Skipped, and why | `ranges[].skipped[]` | Today |
 | An ended range | `ranges[].status`, `.ended_reason`; its list stays while it is the project's newest (belt.md 7.1) | Today |
 | Went wrong: an open anomaly | `anomalies[]`: `task_id`, `rule`, `since` | Today |
@@ -204,7 +205,7 @@ Nothing starts before the owner agrees to the drawing.
 | Step | What | Needs | Declared test |
 | --- | --- | --- | --- |
 | 0 | The drawing agreed; the measurement of section 5 run and recorded. | The owner | none (documents) |
-| 1 | The model: from `status --json` and `events --json` to the parts of section 3. Read-only. | Step 0; the read surface as it is | `tests/screen_model.rs`: from a recorded status with one escalated entry, one failed launch and a range of mixed places, the model gives the entry with its context, "went wrong" with the failed launch, the range's rows in the read's order, and the runs with the stopped ones first; from a status with `next_work` null, in error, with no candidates, and with a positive count but null lists, four different lines for the empty list; a failed run shown as "launch failed" with no reason (the reason is asserted only once `runs[].launch_failed_reason` exists, section 6) and a suspended run not shown as gone wrong; with two projects, every reference as `OWNER/NAME#N`; the caps of 2.1 (three of six things gone wrong and "3 more", the strip as numbers above twelve items); and every wording read from the one table of 2.2, with a missing key shown by its record name. |
+| 1 | The model: from `status --json` and `events --json` to the parts of section 3. Read-only. | Step 0; the read surface as it is | `tests/screen_model.rs`: from a recorded status with one escalated entry, one failed launch and a range of mixed places, the model gives the entry with its context, "went wrong" with the failed launch, the range's rows in the read's order, and the runs with the stopped ones first; from a status with `next_work` null, in error, with no candidates, and with a positive count but null lists, four different lines for the empty list; a failed run shown as "launch failed" with no reason (the reason is asserted only once `runs[].launch_failed_reason` exists, section 6) and a suspended run not shown as gone wrong; with two projects, every reference as `OWNER/NAME#N`; a range whose `places` holds a `closed` item and an in-work item of stage `launch_failed`: the counts are those of `places` with `closed` on its own, and the in-work count carries "1 failed to start" without leaving the in-work total; the caps of 2.1 (three of six things gone wrong and "3 more", the strip as numbers above twelve items); and every wording read from the one table of 2.2, with a missing key shown by its record name. |
 | 2 | The frame chosen in step 0 (the page behind `makiba screen`, or the app's), read-only, each control showing the line to type. | Step 1 | Depends on the frame; for the page, a test that it answers on 127.0.0.1 only and serves what the model gives. |
 | 3 | The missing read fields of section 6, each its own Issue. | - | `tests/read_surface.rs` grows. |
 | 4 | Acting from the screen (section 4), after its own design and the owner's agreement. | M6-1; the boundary design | Its own. |
