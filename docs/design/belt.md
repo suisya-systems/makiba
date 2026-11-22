@@ -1,6 +1,6 @@
 # The belt: work inside an approved range
 
-Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Step 1 is built (Issue 257): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
+Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Steps 1 and 2 are built (Issues 257 and 282): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
 
 Today the person is the clock: a run closes, `makibad` scans, the secretary proposes, the person picks. The conveyor skill lets the secretary keep going inside a scope, but the scope lives in the conversation, the count of slots is the secretary's own, and every stop holds a slot. On 2026-11-21 claude-org-ja ran this belt by hand over about a dozen makiba Issues; this note says what of that becomes a record or a verb here.
 
@@ -330,12 +330,39 @@ The nine findings of the design review (Issue 248, 2026-11-22):
 
 | # | Finding | In step 1 |
 | --- | --- | --- |
-| 1 | Rework and suspended runs in the count | Built. `report start` from `review` puts a run back `in_use`; the range's count takes `queued`, `in_use`, `suspended` and `failed` (until closed, so a broken launch cannot spend the budget before the automatic pause of step 2), less runs waiting only for the person. |
+| 1 | Rework and suspended runs in the count | Built. `report start` from `review` puts a run back `in_use`; the range's count takes `queued`, `in_use`, `suspended` and `failed` (until closed, so a broken launch cannot spend the budget before the automatic pause of step 2), less runs waiting only for the person. Step 2 built that pause, and `failed` left the count (11.1). |
 | 2 | A one-off dispatch and `runs.issue_refs` | Built. `dispatch --issue` fills `issue_refs`; a range leaves out and never dispatches an Issue an open run names. A one-off without `--issue` stays unseen (the delegate skill asks for it). |
 | 3 | Replacing a range, its budget | Built: runs keep their range; `at_once` counts the replaced chain; the budget counts the range's own dispatches. |
 | 4 | A failed read | Built. A failed or truncated read is recorded `complete` false and keeps the candidates, which are not dispatched from: a range dispatches only from a newest read that is complete and was started after its newest approval or resume. Only a complete read ends a range `used_up`. |
 | 5 | What proves a landing | Built. `pr_merged`, from the run's recorded pull request read merged; `landed` needs it, `closed` otherwise. |
 | 6 | A parked run and another open stop | Deferred to step 3, which parks. In step 1 nothing parks; a run with any escalated entry counts in neither count until every one is answered. |
-| 7 | What the gate holds | Section 5 now says what it does not hold (`Cargo.toml`, the lock file, a script on disk); the gate's check of edited tests is step 2. |
+| 7 | What the gate holds | Section 5 now says what it does not hold (`Cargo.toml`, the lock file, a script on disk); the gate's check of edited tests is step 2 (built, 11.1). |
 | 8 | The resume brief | Built. A renewed secretary's brief names the ranges in force first, right after its fixed line, and says to read `status` before anything else. |
 | 9 | `budget_hours`, "ended" and "ending" | Worded in 2.4: "ending" is the stretch before the last task closes, never a status. `budget_hours` is not built in step 1. |
+
+### 11.1 Step 2 as built (Issue 282)
+
+Built: the stops `makibad` writes itself (spec section 5.8), the budgets `budget_hours` and `budget_fixes` (migration v9, which makes `ranges` again to add `budget_hours` to the reasons a range ends), the two pauses of 2.4, the gate's report of edited tests, and the three sentences step 1 left in the rules and skills.
+
+| Part | As built |
+| --- | --- |
+| A stop written by code | One function writes all of them: a pending entry made `escalated` at once (`context_json`: `stop_line`, `range_id`, `to`, `by` `makibad`, the five context parts, `recommend_answer`), `belt_stopped` by `makibad`, a notice to the secretary, and the fill, in the transaction of what caused it. One per subject: a pull request and head, a task's count of fixes, a budget of a range. A stop of a whole range has no run. |
+| Line 6, the gate | Every answer of `gate` writes an `acceptance_gate` row, the refusals decided before the git checks included. `allow` false on a range task's pull request is a stop of line `gate`, recommended answer `no`. |
+| Line 5, edited tests | `gate` reports the files under a folder `tests` that were there before the test commit, are not declared, differ at head and did not come from the base. For a range task it is a stop of a line of its own, `tests`, recommended answer `none`. |
+| Line 4, the budgets | `budget_fixes`: the head recorded with `pr pushed` that reaches it (and each `budget_fixes` heads after) is a stop of the task; the push is never refused. `budget_tasks` and `budget_hours`: a stop of the range when the budget is reached while a candidate the dispatch would take is left; a range that takes all it holds ends without a question. `budget_hours` past: nothing new goes in, and the range ends `budget_hours` when its last task closes. |
+| The pauses (2.4) | Two launches failed in a row, or two pull requests refused in a row with none read merged between, pause the range; a run whose launch failed no longer holds a slot (the guard of step 1, finding 1). The range paused is the one not ended that the run's range is or was replaced by. The refusal that pauses dispatches nothing: the stop, then the pause, then the fill. |
+| Rework counted again | Built in step 1 (`report start` from `review`). Step 2 adds: a head recorded for a pull request withdraws the `gate` and `tests` stops of its older heads, so a run sent back counts again once its new head is recorded. |
+| The mode (section 5, last row) | `gate` reads the range's `approval_mode` for a range task's pull request. An answer that allows carries `warn`, which the merge-gate hook turns into a question to the person, unless the range's mode and the mode read now are both `acceptance`. |
+| `escalate` | Refuses a range task's entry made by `add` without the stop's kind and the recommended answer. |
+| The answer | `answer` on a stop `makibad` wrote goes to the secretary, not to the worker, and a stop with no run can be answered. An answer changes no range. |
+| The skill `conveyor` | Shrunk by what is now held: the pair of modes, the stop fields, the counts of fixes and failures. |
+
+Choices of the build beyond this note, made with the secretary's answer of 2026-11-22:
+
+- The mode pair as `warn`, not as a refusal. Section 5 found that putting `human` in place of the mode read would refuse less. So the checks stay those of the mode read now, and a pair that is not `acceptance` twice only adds the hook's question to the person; neither this nor the edited tests ever turns a refusal into an allowance.
+- Edited tests under `human` are allowed with `warn` (the person is asked at the hook) and still a stop; under `acceptance` they are refused (`tests_edited`), since there nobody is asked.
+- A `gate` or `tests` stop is written only for the head recorded last for the pull request. A refusal of an older head is recorded (`acceptance_gate`) and is no stop: its subject is gone, and a stop would keep the run out of the count with nothing to answer.
+- A budget of the range is a stop only while it keeps a candidate out, so that a range that finishes what it planned asks nothing.
+- `budget_fixes` stops again after each further `budget_fixes` heads: a yes buys that many more.
+
+Deferred, with their steps unchanged: parking and unparking (step 3); `design_ahead` and `follow_ups: inside` (step 4); the `belt[]` and `pending[].stop_line` read fields (step 5); `dispatch` naming a range; `answers: recommend`. Not held by the report of edited tests: a test kept outside a folder `tests` (the unit tests inside a source file), and `Cargo.toml` or the lock file (section 5, line 3). A stop of a whole range is not on `ranges[].items[]`, which lists Issues; it is in `pending` and in `belt_stopped`.

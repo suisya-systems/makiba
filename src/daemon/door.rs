@@ -383,9 +383,11 @@ impl Door {
                         recipient(&w, role, to)?;
                         Ok(Some((to.to_string(), text.to_string(), None)))
                     }),
-                Verb::Answer => {
-                    question(&w, &args).map(|q| q.map(|q| (q.to.clone(), q.body.clone(), Some(q))))
-                }
+                // An answer to a stop makibad wrote goes to the secretary, as a message: never typed.
+                Verb::Answer => question(&w, &args).map(|q| {
+                    q.filter(|q| q.to != crate::spec::AGENT_SECRETARY)
+                        .map(|q| (q.to.clone(), q.body.clone(), Some(q)))
+                }),
                 _ => Ok(None),
             };
             match target {
@@ -685,9 +687,10 @@ fn run(
         Verb::Review => review_allowance(w, actor, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
     }?;
-    // A done report, a close and an escalation free a slot: the belt fills it in the same
-    // transaction (belt.md 3.4, 4.1). Any other answer of these verbs fills nothing new.
-    if matches!(v, Verb::Report | Verb::Close | Verb::Pending) {
+    // A done report, a close, an escalation and a stop written for a recorded head free a slot:
+    // the belt fills it in the same transaction (belt.md 3.4, 4.1). Any other answer of these
+    // verbs fills nothing new.
+    if matches!(v, Verb::Report | Verb::Close | Verb::Pending | Verb::Pr) {
         super::belt::fill(w, agent).map_err(internal)?;
     }
     Ok(r)
@@ -855,6 +858,19 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
             let id = id_arg(args)?;
             if action == "escalate" {
                 missing_context(c, id)?;
+                // A range task's stop is recorded with its kind and the recommended answer
+                // (belt.md 5.2): whether the person takes the recommendation is counted from them.
+                let missing = super::belt::stop_parts_missing(c, id).map_err(internal)?;
+                if !missing.is_empty() {
+                    return Err(refuse(
+                        ErrorKind::Usage,
+                        format!(
+                            "pending entry {id} is a stop of a range task and cannot be escalated without {}",
+                            missing.join(" and ")
+                        ),
+                        "add them with pending add (the same task and question): stop_kind is design, scope, order, naming or other; recommend_answer is yes, no or none",
+                    ));
+                }
             }
             let (to, from) = if action == "escalate" {
                 ("escalated", "('open')")
@@ -971,7 +987,7 @@ struct Question {
     id: i64,
     answer: String,
     to: String,
-    task: String,
+    task: Option<String>,
     body: String,
 }
 
@@ -1009,17 +1025,19 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
         .get("note")
         .and_then(Value::as_str)
         .filter(|n| !n.is_empty());
-    let row: Option<(String, String, Option<String>, String)> = w
+    let row: Option<(String, String, Option<String>, String, bool)> = w
         .conn()
         .query_row(
-            "SELECT p.kind, p.status, r.task_id, p.question FROM pending p
-             LEFT JOIN runs r ON r.id = p.run_id WHERE p.id = ?1",
+            "SELECT p.kind, p.status, r.task_id, p.question,
+                    coalesce(json_extract(p.context_json, '$.by') = 'makibad'
+                             AND json_extract(p.context_json, '$.range_id') IS NOT NULL, 0)
+             FROM pending p LEFT JOIN runs r ON r.id = p.run_id WHERE p.id = ?1",
             [id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
         )
         .optional()
         .map_err(internal)?;
-    let Some((kind, status, task, question)) = row else {
+    let Some((kind, status, task, question, belt_stop)) = row else {
         return Err(refuse(
             ErrorKind::NotFound,
             format!("no pending entry {id}"),
@@ -1033,6 +1051,22 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
             "",
         ));
     }
+    // The question goes with the answer: two answers of one task are told apart.
+    let mut body = format!("Answer to pending entry {id} ({question}): {answer}");
+    if let Some(note) = note {
+        body.push_str(&format!("\nNote: {note}"));
+    }
+    // A stop makibad wrote itself (a gate refusal, a budget; belt.md section 5) is answered to
+    // the secretary, who acts on it; it may be a stop of a whole range, with no task.
+    if belt_stop && kind == "question" {
+        return Ok(Some(Question {
+            id,
+            answer: answer.to_string(),
+            to: crate::spec::AGENT_SECRETARY.to_string(),
+            task,
+            body,
+        }));
+    }
     let Some(task) = task else {
         return Err(refuse(
             ErrorKind::Conflict,
@@ -1043,16 +1077,11 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
     if kind == "prompt" {
         return Ok(None);
     }
-    // The question goes with the answer: two answers of one task are told apart.
-    let mut body = format!("Answer to pending entry {id} ({question}): {answer}");
-    if let Some(note) = note {
-        body.push_str(&format!("\nNote: {note}"));
-    }
     Ok(Some(Question {
         id,
         answer: answer.to_string(),
         to: worker_agent_id(&task),
-        task,
+        task: Some(task),
         body,
     }))
 }
@@ -1063,7 +1092,7 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
 /// and nothing is pressed.
 fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Response {
     if let Some(q) = question(w, args)? {
-        let id = store_message(w, actor, &q.to, "message", Some(&q.task), &q.body)?;
+        let id = store_message(w, actor, &q.to, "message", q.task.as_deref(), &q.body)?;
         return q.answered(w, actor, id);
     }
     let id = id_arg(args)?;
@@ -1586,6 +1615,9 @@ fn pr(w: &StateWriter, args: &Value) -> Response {
         return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
     }
     let r = super::prwatch::register(w, kind, task, repo, number, head).map_err(internal)?;
+    // The belt (Issue 282): the stops of an older head go, and a head that reaches the range's
+    // `budget_fixes` is a stop of the task. The push is recorded whatever the count.
+    super::belt::head_recorded(w, task, repo, number, head).map_err(internal)?;
     Ok(json!({"watch_id": r.watch_id, "status": r.status}))
 }
 
@@ -2535,7 +2567,7 @@ fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
 /// What the gate found outside the door's lock: refused before the git checks, or their verdict.
 enum Found {
     Before(String),
-    Ran(super::gate::Verdict, bool, Value),
+    Ran(Box<super::gate::Verdict>, bool, Value),
 }
 
 /// The review state of the PR's head `head` (Issue 263), from the task's last diff review: `state`
@@ -2697,10 +2729,23 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         v.result = "rejected".into();
         v.reason = e.0;
     }
+    // The tests edited after the test commit (Issue 282). A comparison that cannot be made is
+    // never read as "none edited".
+    match gate::edited_tests(&clone, &base, head, v.manifest_commit.as_deref(), &v.paths) {
+        Ok(edited) => v.edited_tests = edited,
+        Err(e) if v.result != "rejected" => {
+            v.result = "rejected".into();
+            v.reason = format!(
+                "the tests at head could not be compared with those before the test commit: {}",
+                e.0
+            );
+        }
+        Err(_) => {}
+    }
     let docs = gate::docs_only(&clone, &base, head);
     let review = gate_review(rows, &clone, &base, head, docs);
     let docs_pass = v.result == "no_manifest" && docs;
-    Found::Ran(v, docs_pass, review)
+    Found::Ran(Box::new(v), docs_pass, review)
 }
 
 impl Door {
@@ -2795,11 +2840,64 @@ impl Door {
                 reason = format!("{reason}; {line}");
             }
         }
-        if let Some(v) = &event {
-            let mut payload = json!({
+        // Issue 282: a test that was there before the test commit, is not declared and differs at
+        // head (belt.md section 5, line 5). Under acceptance no person is asked, so it is refused;
+        // under human the hook asks them. An earlier refusal keeps its verdict and names the files.
+        let edited: Vec<String> = event
+            .as_ref()
+            .map(|v| v.edited_tests.clone())
+            .unwrap_or_default();
+        if !edited.is_empty() {
+            let line = format!(
+                "tests edited after the test commit and not declared: {}",
+                edited.join(", ")
+            );
+            if allow && mode == "acceptance" {
+                allow = false;
+                verdict = "tests_edited".into();
+                reason = format!(
+                    "{line}; merge_approval_mode acceptance lets no pull request that edits an existing test land without the person: the person merges it in the GitHub web UI ({reason})"
+                );
+            } else if allow {
+                warn = true;
+                reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
+        // Issue 282: a range task's pull request lands without the person only when the range was
+        // approved under acceptance and the mode read now is acceptance too. The checks above are
+        // those of the mode read now; a pair that is not both only adds the question to the person.
+        let range = match now.task.as_deref().map(|t| super::belt::approval_of(&w, t)) {
+            None => None,
+            Some(Ok(r)) => r,
+            Some(Err(e)) => {
+                let _ = w.rollback();
+                return fail(&w, Err(internal(e)));
+            }
+        };
+        if let Some((id, range_mode)) = &range {
+            let approved = range_mode.as_deref().unwrap_or("human");
+            if allow && !(approved == "acceptance" && mode == "acceptance") {
+                warn = true;
+                reason = format!(
+                    "{reason}; WARNING range {id} was approved under merge_approval_mode {approved} and the mode now is {mode}: the person decides this landing"
+                );
+            }
+        }
+        // Every answer is a record: a refusal decided before the git checks too (no base, no
+        // manifest: it is never the PR's pin).
+        let mut payload = match &event {
+            Some(v) => json!({
                 "repo": repo, "pr": pr, "base": v.base, "head": v.head, "result": v.result,
                 "reason": v.reason, "mode": mode, "allow": allow,
-            });
+            }),
+            None => json!({
+                "repo": repo, "pr": pr, "base": null, "head": head, "result": "rejected",
+                "reason": reason, "mode": mode, "allow": allow,
+            }),
+        };
+        if let Some(v) = &event {
             if let Some(m) = &v.manifest_commit {
                 payload["manifest_commit"] = json!(m);
                 payload["paths"] = json!(v.paths);
@@ -2807,34 +2905,90 @@ impl Door {
             if let Some(d) = &v.manifest_digest {
                 payload["manifest_digest"] = json!(d);
             }
-            if let Some(t) = &now.task {
-                payload["task"] = json!(t);
+        }
+        if !edited.is_empty() {
+            payload["edited_tests"] = json!(edited);
+        }
+        if let Some(t) = &now.task {
+            payload["task"] = json!(t);
+        }
+        if let Some((id, range_mode)) = &range {
+            payload["range_id"] = json!(id);
+            payload["range_mode"] = json!(range_mode);
+        }
+        if let Some(rv) = &review {
+            payload["review"] = rv.clone();
+        }
+        let written = w.append_event(&NewEvent {
+            kind: "acceptance_gate",
+            actor: Some(actor),
+            payload: Some(&payload),
+            run_task_id: now.task.as_deref(),
+            ..Default::default()
+        });
+        if let Err(e) = written {
+            let _ = w.rollback();
+            return fail(
+                &w,
+                Err(internal(format!(
+                    "the verdict (this PR's pin) could not be recorded: {e}"
+                ))),
+            );
+        }
+        // The belt: a refusal, or edited tests, on a range task's pull request is a stop written
+        // here, then the pause rule, then the fill (belt.md 3.4), all with the verdict's record.
+        let mut pending_id = None;
+        if let Some(t) = now.task.as_deref().filter(|_| range.is_some())
+            && (!allow || !edited.is_empty())
+        {
+            let stop = super::belt::GateStop {
+                task: t,
+                repo: &repo,
+                pr,
+                head: &head,
+                allow,
+                refused: !allow && verdict != "tests_edited",
+                reason: &reason,
+                edited_tests: &edited,
+            };
+            let stopped = super::belt::gate_stop(&w, &stop)
+                .and_then(|id| super::belt::fill(&w, &self.agent).map(|_| id));
+            match stopped {
+                Ok(id) => pending_id = id,
+                Err(e) => {
+                    let _ = w.rollback();
+                    return fail(
+                        &w,
+                        Err(internal(format!("the stop could not be recorded: {e}"))),
+                    );
+                }
             }
-            if let Some(rv) = &review {
-                payload["review"] = rv.clone();
-            }
-            let written = w.append_event(&NewEvent {
-                kind: "acceptance_gate",
-                actor: Some(actor),
-                payload: Some(&payload),
-                run_task_id: now.task.as_deref(),
-                ..Default::default()
-            });
-            if let Err(e) = written {
-                let _ = w.rollback();
-                return fail(
-                    &w,
-                    Err(internal(format!(
-                        "the verdict (this PR's pin) could not be recorded: {e}"
-                    ))),
-                );
-            }
+        }
+        // An allowance of a head refused before: its gate stop is withdrawn with this verdict, and
+        // its tests stop too when no edited test is reported any more.
+        if allow
+            && range.is_some()
+            && let Err(e) = super::belt::gate_allowed(&w, &repo, pr, &head, edited.is_empty())
+        {
+            let _ = w.rollback();
+            return fail(
+                &w,
+                Err(internal(format!("the stop could not be withdrawn: {e}"))),
+            );
         }
         let mut answer = json!({"verdict": verdict, "allow": allow, "reason": reason,
                                 "mode": mode, "repo": repo, "pr": pr, "head": head});
         if let Some(rv) = review {
             answer["review"] = rv;
             answer["warn"] = json!(warn);
+        } else if warn {
+            answer["warn"] = json!(warn);
+        }
+        if let Some((_, range_mode)) = &range {
+            answer["range_mode"] = json!(range_mode);
+        }
+        if let Some(id) = pending_id {
+            answer["pending_id"] = json!(id);
         }
         let r: Response = Ok(answer);
         if !record(&w, actor, "gate", args, idem, &r) || w.conn().is_autocommit() {
@@ -3778,7 +3932,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: heads pushed to a task's pull request after the first before it is a stop, default 3): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -3793,6 +3947,8 @@ fn tool(v: Verb) -> Value {
                 ("takes".into(), text.clone()),
                 ("at_once".into(), json!({"type": "integer"})),
                 ("budget_tasks".into(), json!({"type": "integer"})),
+                ("budget_hours".into(), json!({"type": "number"})),
+                ("budget_fixes".into(), json!({"type": "integer"})),
                 ("brief_head".into(), text.clone()),
                 ("replaces".into(), json!({"type": "integer"})),
                 ("issue".into(), json!({"type": "integer"})),

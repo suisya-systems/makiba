@@ -22,6 +22,10 @@
 //! What it does not prove: that the declared test itself ran in CI. A change outside the protected
 //! paths can drop it from discovery. And it is not the bound: GitHub's branch protection is.
 //!
+//! Edited tests (Issue 282): a test that was there before the test commit, is not declared and
+//! differs at head is reported (`edited_tests`); under `acceptance` such a pull request is refused,
+//! under `human` the person is asked. A test kept outside a folder `tests` is not seen.
+//!
 //! Pin: the first verdict that saw a manifest records a digest of the declared files; a later
 //! verdict for the same PR whose digest differs, or that finds no manifest, is rejected.
 
@@ -588,6 +592,45 @@ pub struct Verdict {
     pub manifest_commit: Option<String>,
     pub paths: Vec<String>,
     pub manifest_digest: Option<String>,
+    /// The tests that were there before the test commit, are not declared and differ at head
+    /// (`edited_tests`); the door decides what they mean under the mode.
+    pub edited_tests: Vec<String>,
+}
+
+/// A file under a folder `tests`: what the gate reports when a pull request edits it without
+/// declaring it. Tests kept elsewhere (inline unit tests) are not seen.
+fn is_test(path: &str) -> bool {
+    path.starts_with("tests/") || path.contains("/tests/")
+}
+
+/// The tests a pull request edited after its test commit (Issue 282, belt.md section 5 line 5):
+/// every file under a folder `tests` that exists at `P` and is changed or gone at `head`, where
+/// `P` is the parent of the test commit `msha`, or the merge base of `base` and `head` when no
+/// test is declared. Left out: the declared paths (condition (a) holds them), and a file `head`
+/// holds exactly as `base` does (the base brought that change, as in `check_protected`). A new
+/// test is not an edited one. A moved test is reported at the path it left.
+pub fn edited_tests(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    msha: Option<&str>,
+    manifest: &[String],
+) -> Result<Vec<String>, Reject> {
+    let before = match msha {
+        Some(m) => git(repo, &["rev-parse", &format!("{m}^")])?,
+        None => git(repo, &["merge-base", base, head])?,
+    };
+    let (tp, th, tb) = (
+        tree(repo, before.trim())?,
+        tree(repo, head)?,
+        tree(repo, base)?,
+    );
+    Ok(tp
+        .iter()
+        .filter(|(p, _)| is_test(p) && !manifest.iter().any(|m| under(p, m)))
+        .filter(|(p, e)| th.get(*p) != Some(*e) && th.get(*p) != tb.get(*p))
+        .map(|(p, _)| p.clone())
+        .collect())
 }
 
 /// The first earlier verdict for the PR that saw a manifest: its commit, paths and digest.
