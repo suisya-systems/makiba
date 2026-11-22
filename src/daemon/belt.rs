@@ -754,6 +754,36 @@ pub(super) fn approval_of(w: &StateWriter, task: &str) -> Result<Option<(i64, Op
         .optional()?)
 }
 
+/// The head recorded last for a pull request: that of its newest `pr opened` or `pr pushed`
+/// (every registration writes its event, also one that returns to a head watched before, whose
+/// watch row is then left as it was). Without any such event, the newest watch's head.
+fn recorded_head(w: &StateWriter, repo: &str, pr: i64) -> Result<Option<String>> {
+    let by_event: Option<String> = w
+        .conn()
+        .query_row(
+            "SELECT json_extract(payload_json, '$.head_oid') FROM events
+             WHERE kind IN ('pr_opened', 'fix_pushed')
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![repo, pr],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten();
+    if by_event.is_some() {
+        return Ok(by_event);
+    }
+    Ok(w.conn()
+        .query_row(
+            "SELECT head_oid FROM pr_watches WHERE lower(repo) = lower(?1) AND pr = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![repo, pr],
+            |r| r.get(0),
+        )
+        .optional()?)
+}
+
 /// What the gate found about a range task's pull request, to be written as a stop.
 pub(super) struct GateStop<'a> {
     pub task: &'a str,
@@ -775,16 +805,7 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let Some(range) = range_of(w, s.task)? else {
         return Ok(None);
     };
-    let newest: Option<String> = w
-        .conn()
-        .query_row(
-            "SELECT head_oid FROM pr_watches WHERE lower(repo) = lower(?1) AND pr = ?2
-             ORDER BY started_at DESC, id DESC LIMIT 1",
-            params![s.repo, s.pr],
-            |r| r.get(0),
-        )
-        .optional()?;
-    if newest.as_deref() != Some(s.head) {
+    if recorded_head(w, s.repo, s.pr)?.as_deref() != Some(s.head) {
         return Ok(None);
     }
     let subject = format!("{}#{}", s.repo.to_lowercase(), s.pr);
@@ -2680,6 +2701,29 @@ mod tests {
         assert_eq!(escalated(&w), 0, "the stop of the older head is withdrawn");
         assert_eq!(range_count(&w, id).unwrap(), 1, "the run counts again");
         assert_eq!(status_of(&w, id), "active", "one pull request: no pause");
+    }
+
+    /// A pull request that returns to a head recorded before (its watch row is left as it was):
+    /// that head is the one recorded last again, and its refusal is a stop.
+    #[test]
+    fn a_head_recorded_again_is_the_head_recorded_last() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
+        for (kind, head) in [("pr_opened", &h1), ("fix_pushed", &h2)] {
+            super::super::prwatch::register(&w, kind, "a", "o/p", 7, head).unwrap();
+        }
+        w.conn()
+            .execute("UPDATE pr_watches SET status = 'completed'", [])
+            .unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "a", "O/p", 7, &h1).unwrap();
+        assert_eq!(recorded_head(&w, "o/p", 7).unwrap(), Some(h1.clone()));
+        assert_eq!(refused(&w, "a", 7, &h2), None, "the head it left: no stop");
+        assert!(
+            refused(&w, "a", 7, &h1).is_some(),
+            "the head it returned to"
+        );
     }
 
     /// Two refusals in a row of different pull requests pause the range that replaced the runs'
