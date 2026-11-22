@@ -566,7 +566,7 @@ $texts" | tr '\n' ' ')
 # Check 3, read from the answer the door stored (commands) and the round's event; the reason whole.
 fd_check_review() { # fd_check_review <task> <check name> <expected reader: any|fresh>
   local task=$1 name=$2 want=$3 row verdict reader round reason fb st
-  row=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.verdict'), ''), coalesce(json_extract(result_json, '\$.result.reader'), ''), coalesce(json_extract(result_json, '\$.result.round'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' ORDER BY id DESC LIMIT 1")
+  row=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.verdict'), ''), coalesce(json_extract(result_json, '\$.result.reader'), ''), coalesce(json_extract(result_json, '\$.result.round'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' AND json_extract(result_json, '\$.result.kind') = 'diff' ORDER BY id DESC LIMIT 1")
   FD_READER=""; FD_VERDICT=""
   say "  codex_round events of $task:"
   sq "SELECT id, kind, payload_json FROM events WHERE kind IN ('codex_round_started', 'codex_round_denied') AND json_extract(payload_json, '\$.task') = '$task' ORDER BY id" | sed 's/^/    | /' | tee -a "${RESULT:-/dev/null}" || true
@@ -579,8 +579,8 @@ fd_check_review() { # fd_check_review <task> <check name> <expected reader: any|
 $row
 EOF
   FD_READER=$reader; FD_VERDICT=$verdict
-  reason=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.reason'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' ORDER BY id DESC LIMIT 1")
-  fb=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.fallback_reason'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' ORDER BY id DESC LIMIT 1")
+  reason=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.reason'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' AND json_extract(result_json, '\$.result.kind') = 'diff' ORDER BY id DESC LIMIT 1")
+  fb=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.fallback_reason'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' AND json_extract(result_json, '\$.result.kind') = 'diff' ORDER BY id DESC LIMIT 1")
   if [ "$verdict" = passed ]; then
     if [ "$want" = fresh ] && [ "$reader" != fresh-session ]; then
       fd "$name" FAIL "passed by $reader, not by the fresh session: hiding the other model's program did not take effect" "check MAKIBA_REVIEW_OTHER in makibad's environment (src/daemon/review.rs, Programs::from_env) and run the line again"
