@@ -3,8 +3,8 @@
 //! The SQL is carried from claude-org-ja and kept as SQL: `schema.sql` is v1 to v3, `schema_v4.sql`
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
 //! `schema_v5.sql` adds the launch identity to `agents`, `schema_v6.sql` the triggers that keep a
-//! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt. `open` opens a
-//! database with the project's pragmas and `migrate` brings it to v8.
+//! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt, `schema_v9.sql` their budgets. `open` opens a
+//! database with the project's pragmas and `migrate` brings it to v9.
 
 use std::fmt;
 use std::path::Path;
@@ -30,6 +30,8 @@ pub const SCHEMA_V6: &str = include_str!("schema_v6.sql");
 pub const SCHEMA_V7: &str = include_str!("schema_v7.sql");
 /// v8: `ranges`, `range_candidates` and `runs.range_id`, the belt (Issue 257).
 pub const SCHEMA_V8: &str = include_str!("schema_v8.sql");
+/// v9: `ranges.budget_hours`, `ranges.budget_fixes` and the ended reason `budget_hours` (Issue 282).
+pub const SCHEMA_V9: &str = include_str!("schema_v9.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -135,7 +137,7 @@ fn ddl_of(table: &str) -> String {
     ddl
 }
 
-/// Whether every step of `migrate` is already done: versions 1 to 8 recorded, the session row and
+/// Whether every step of `migrate` is already done: versions 1 to 9 recorded, the session row and
 /// the delivery ledger present. It only reads, so a current ledger is opened without the write
 /// lock (Issue 288).
 fn is_current(conn: &Connection) -> Result<bool> {
@@ -145,15 +147,15 @@ fn is_current(conn: &Connection) -> Result<bool> {
         }
     }
     let (versions, session): (i64, i64) = conn.query_row(
-        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 8),
+        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 9),
                 (SELECT COUNT(*) FROM org_sessions WHERE id = 1)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(versions == 8 && session == 1)
+    Ok(versions == 9 && session == 1)
 }
 
-/// Bring a database to v8: apply v3 to an empty one, upgrade an older one in place, then add v4 to v8.
+/// Bring a database to v9: apply v3 to an empty one, upgrade an older one in place, then add v4 to v9.
 /// Idempotent. Refuses to run inside a transaction, where it could not leave the caller's writes alone.
 pub fn migrate(conn: &mut Connection) -> Result<()> {
     if !conn.is_autocommit() {
@@ -205,12 +207,14 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         return Err(e.into());
     }
-    // v5 to v8, the same way.
+    // v5 to v9, the same way. v9 turns the foreign keys off around its transaction (it makes
+    // `ranges` again); they are turned on again here whether it ran, failed or was not needed.
     for (version, script) in [
         (5, SCHEMA_V5),
         (6, SCHEMA_V6),
         (7, SCHEMA_V7),
         (8, SCHEMA_V8),
+        (9, SCHEMA_V9),
     ] {
         let done: i64 = conn.query_row(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = ?1",
@@ -223,9 +227,11 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
             if !conn.is_autocommit() {
                 let _ = conn.execute_batch("ROLLBACK");
             }
+            let _ = conn.pragma_update(None, "foreign_keys", true);
             return Err(e.into());
         }
     }
+    conn.pragma_update(None, "foreign_keys", true)?;
     Ok(())
 }
 
@@ -254,4 +260,136 @@ pub(crate) fn query_rows(
         out.push(map);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A ledger complete at v8 (every step of v8's `migrate` done) is not current: the fast path
+    /// of Issue 288 does not skip it, and `migrate` brings it to v9, after which it is current.
+    #[test]
+    fn a_complete_v8_ledger_is_not_current_and_is_migrated_to_v9() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        conn.execute_batch(
+            "INSERT OR IGNORE INTO org_sessions (id, status, last_writer_at)
+             VALUES (1, 'IDLE', strftime('%Y-%m-%dT%H:%M:%fZ','now'));
+             INSERT OR IGNORE INTO schema_migrations (version, description) VALUES (2, 'v2'), (3, 'v3');",
+        )
+        .unwrap();
+        for script in [SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8] {
+            conn.execute_batch(script).unwrap();
+        }
+        let n = |c: &Connection, sql: &str| -> i64 { c.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 8"
+            ),
+            8,
+            "the ledger is complete at v8"
+        );
+        assert!(!is_current(&conn).unwrap());
+        migrate(&mut conn).unwrap();
+        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 9);
+        assert_eq!(
+            n(
+                &conn,
+                "SELECT count(*) FROM pragma_table_info('ranges') WHERE name = 'budget_fixes'"
+            ),
+            1
+        );
+        assert!(is_current(&conn).unwrap());
+    }
+
+    /// v9 makes `ranges` again: a range of a v8 database keeps its fields, its candidates and its
+    /// runs, takes the default `budget_fixes`, may end `budget_hours`, and the foreign keys hold
+    /// afterwards as before.
+    #[test]
+    fn v9_keeps_the_ranges_their_candidates_and_their_runs() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        for script in [SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8] {
+            conn.execute_batch(script).unwrap();
+        }
+        conn.execute_batch(
+            "INSERT INTO projects (id, slug, display_name) VALUES (1, 'p', 'p');
+             INSERT INTO ranges (id, project_id, issues_json, at_once, budget_tasks, brief_head,
+                                 proposed_by, status, approval_mode, approved_by)
+             VALUES (4, 1, '[7]', 2, 5, 'head', 'secretary', 'active', 'acceptance', 'person');
+             INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by,
+                                 replaces)
+             VALUES (5, 1, 1, 1, 'next', 'secretary', 4);
+             INSERT INTO range_candidates (range_id, read_id, position, issue, title, body, admitted)
+             VALUES (4, 1, 0, 7, 'Seven', 'b', 1);
+             INSERT INTO runs (task_id, project_id, pattern, title, range_id)
+             VALUES ('r4-7', 1, 'A', 'Seven', 4);",
+        )
+        .unwrap();
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 9);
+        assert_eq!(n("PRAGMA foreign_keys"), 1);
+        assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
+        let row: (String, i64, i64, String, String, Option<f64>, i64) = conn
+            .query_row(
+                "SELECT issues_json, at_once, budget_tasks, brief_head, approval_mode,
+                        budget_hours, budget_fixes FROM ranges WHERE id = 4",
+                [],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                },
+            )
+            .unwrap();
+        assert_eq!(
+            row,
+            (
+                "[7]".into(),
+                2,
+                5,
+                "head".into(),
+                "acceptance".into(),
+                None,
+                3
+            )
+        );
+        assert_eq!(n("SELECT replaces FROM ranges WHERE id = 5"), 4);
+        assert_eq!(
+            n("SELECT count(*) FROM range_candidates WHERE range_id = 4"),
+            1
+        );
+        assert_eq!(n("SELECT range_id FROM runs WHERE task_id = 'r4-7'"), 4);
+        // The next range takes the next id, and the children still name `ranges`.
+        conn.execute_batch(
+            "INSERT INTO ranges (project_id, at_once, budget_tasks, brief_head, proposed_by)
+             VALUES (1, 1, 1, 'h', 'secretary');
+             UPDATE ranges SET status = 'ended', ended_reason = 'budget_hours' WHERE id = 4;",
+        )
+        .unwrap();
+        assert_eq!(n("SELECT MAX(id) FROM ranges"), 6);
+        assert!(
+            conn.execute(
+                "INSERT INTO range_candidates (range_id, read_id, position, issue, title, body, admitted)
+                 VALUES (99, 1, 0, 1, 't', 'b', 1)",
+                [],
+            )
+            .is_err(),
+            "a candidate of no range is refused"
+        );
+        assert!(
+            conn.execute("UPDATE runs SET range_id = 99 WHERE task_id = 'r4-7'", [])
+                .is_err(),
+            "a run of no range is refused"
+        );
+    }
 }
