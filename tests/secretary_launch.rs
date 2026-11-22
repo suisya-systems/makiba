@@ -7,16 +7,18 @@
 //! (`MAKIBA_BASE=stub`, `MAKIBA_DOOR=none`), and reads what it recorded. No real `claude` and no
 //! real base is started.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread::JoinHandle;
@@ -85,6 +87,7 @@ struct Org {
     base: Shared,
     daemon: Option<Daemon>,
     _tmp: tempfile::TempDir,
+    _knowledge: makibad::Knowledge,
     _env: MutexGuard<'static, ()>,
 }
 
@@ -139,6 +142,7 @@ impl Org {
             &std::env::var_os("PATH").unwrap_or_default(),
         )))
         .unwrap();
+        let held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
         // SAFETY: the environment lock is held, and no daemon of this test runs yet.
         unsafe {
             std::env::set_var("PATH", &path);
@@ -147,7 +151,6 @@ impl Org {
             std::env::set_var("MAKIBA_DOCS_DIR", root.join("docs"));
             std::env::set_var("MAKIBA_WORKERS_DIR", root.join("workers"));
             std::env::set_var("MAKIBA_REPOS_DIR", root.join("repos"));
-            std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
             std::env::remove_var("MAKIBA_FAKE_AGENT");
             std::env::remove_var("MAKIBA_LAUNCH_AGENT");
             std::env::set_var("MAKIBA_SECRETARY", "1");
@@ -163,6 +166,7 @@ impl Org {
             base: Shared(Arc::new(Recording::default())),
             daemon: None,
             _tmp: tmp,
+            _knowledge: held_knowledge,
             _env: env,
         }
     }
@@ -173,7 +177,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let handle =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         self.daemon = Some((stop, handle));
     }
 
@@ -362,9 +366,9 @@ fn the_up_command_asks_for_the_secretary_once() {
     );
     script(&bin.join("hc"), "exit 0");
     let up = || -> Output {
-        Command::new(env!("CARGO_BIN_EXE_makiba"))
-            .arg("up")
+        makibad::up(&root)
             .env_clear()
+            .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(&root))
             .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
             .env("HOME", root.join("home"))
             .env("XDG_CONFIG_HOME", root.join("config"))

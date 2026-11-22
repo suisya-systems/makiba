@@ -7,8 +7,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, TerminalRef};
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use sha2::{Digest, Sha256};
@@ -128,7 +128,7 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
     let _ended = Ended(local.clone(), TerminalRef("w-t1".into()));
     let for_daemon = local.clone();
     let daemon_dir = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(for_daemon.clone())));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(for_daemon.clone())));
 
     let launched = wait(|| {
         (one::<String>(&dir, "SELECT stage FROM run_launch").as_deref() == Some("launched"))

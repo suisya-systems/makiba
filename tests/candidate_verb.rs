@@ -6,6 +6,9 @@
 //! the test writes to `state.db` is written before `makibad` starts; afterwards the test only
 //! reads it, so it never races `makibad`'s writes.
 
+mod common;
+
+use common::makibad;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -13,8 +16,6 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 
 const SECRETARY_KEY: &str = "5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5ec5";
 const WORKER_KEY: &str = "0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a0d1a";
@@ -158,7 +159,7 @@ fn the_secretary_records_a_decision_once_and_nobody_else_can() {
 
     let port = free_port();
     let _daemon = Daemon(
-        Command::new(MAKIBA)
+        makibad::daemon(root)
             .env("HOME", root.join("home"))
             .env("MAKIBA_STATE_DIR", root.join("state"))
             .env("XDG_STATE_HOME", root.join("xdg-state"))
@@ -171,7 +172,6 @@ fn the_secretary_records_a_decision_once_and_nobody_else_can() {
             .env("MAKIBA_BASE", "stub")
             .env("MAKIBA_STUB_SUBSCRIBE_DELAY_MS", "0")
             .env_remove("MAKIBA_PERSON_KEY")
-            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

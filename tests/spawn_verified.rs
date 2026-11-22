@@ -8,8 +8,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, TerminalRef};
-use makiba::daemon;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -80,7 +80,7 @@ fn org(task: &str, steps: &[&str], seed: impl FnOnce(&StateWriter)) -> Org {
     let local = Local::new();
     let ended = Ended(local.clone(), TerminalRef(format!("w-{task}")));
     let daemon_dir = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(local.clone())));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(local.clone())));
     Org {
         dir,
         _ended: ended,

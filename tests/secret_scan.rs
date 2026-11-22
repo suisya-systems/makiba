@@ -7,6 +7,9 @@
 //! The token-shaped test data is joined from two halves at run time, so that no file in the
 //! repository holds a line a scanner would flag.
 
+mod common;
+
+use common::makibad;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::Connection;
 use std::path::{Path, PathBuf};
@@ -14,6 +17,19 @@ use std::process::{Child, Command, Output, Stdio};
 use std::time::{Duration, Instant};
 
 const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
+
+/// The same command run from `program` (a copy of makiba): its arguments and environment kept.
+fn at(c: &mut Command, program: &Path) {
+    let mut moved = Command::new(program);
+    moved.args(c.get_args());
+    for (k, v) in c.get_envs() {
+        match v {
+            Some(v) => moved.env(k, v),
+            None => moved.env_remove(k),
+        };
+    }
+    *c = moved;
+}
 
 fn git_out(dir: &Path, args: &[&str]) -> Output {
     Command::new("git")
@@ -99,8 +115,8 @@ impl Org {
 
     fn start(&self, program: &Path) -> Daemon {
         Daemon(
-            Command::new(program)
-                .arg("daemon")
+            makibad::daemon(&self.root)
+                .with(|c| at(c, program))
                 .env("MAKIBA_STATE_DIR", self.root.join("state"))
                 .env("MAKIBA_DOOR", "none")
                 .env("MAKIBA_PORT", "0")

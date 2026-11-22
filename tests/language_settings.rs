@@ -6,11 +6,13 @@
 //! secretary as `makiba up` asks it to and two queued workers. The sentences are read from
 //! `roles/locale/` (this file holds English only).
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -82,6 +84,7 @@ struct Org {
     base: Shared,
     daemon: Option<Daemon>,
     _tmp: tempfile::TempDir,
+    _knowledge: makibad::Knowledge,
     _env: MutexGuard<'static, ()>,
 }
 
@@ -111,6 +114,7 @@ impl Org {
             &std::env::var_os("PATH").unwrap_or_default(),
         )))
         .unwrap();
+        let held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
         // SAFETY: the environment lock is held, and no daemon of this test runs yet.
         unsafe {
             std::env::set_var("PATH", &path);
@@ -119,7 +123,6 @@ impl Org {
             std::env::set_var("MAKIBA_DOCS_DIR", root.join("docs"));
             std::env::set_var("MAKIBA_WORKERS_DIR", root.join("workers"));
             std::env::set_var("MAKIBA_REPOS_DIR", root.join("repos"));
-            std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
             std::env::remove_var("MAKIBA_FAKE_AGENT");
             std::env::remove_var("MAKIBA_LAUNCH_AGENT");
             std::env::remove_var("MAKIBA_SECRETARY_REMOTE_CONTROL");
@@ -134,6 +137,7 @@ impl Org {
             base: Shared(Arc::new(Recording::default())),
             daemon: None,
             _tmp: tmp,
+            _knowledge: held_knowledge,
             _env: env,
         }
     }
@@ -183,7 +187,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let handle =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         self.daemon = Some((stop, handle));
     }
 

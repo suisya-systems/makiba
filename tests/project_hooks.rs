@@ -14,6 +14,9 @@
 //! read. The token-shaped test data is joined from parts at run time, so that no file in the
 //! repository holds a line a scanner would flag.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::daemon::gate;
@@ -27,7 +30,6 @@ use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 const WAIT: Duration = Duration::from_secs(30);
 
 fn git_out(dir: &Path, args: &[&str]) -> Output {
@@ -166,8 +168,7 @@ impl Org {
     fn start(&self) -> Daemon {
         let log = std::fs::File::create(self.root.join("makibad.log")).unwrap();
         Daemon(
-            Command::new(MAKIBA)
-                .arg("daemon")
+            makibad::daemon(&self.root)
                 .env("MAKIBA_STATE_DIR", self.state())
                 .env("MAKIBA_DOOR", "none")
                 .env("MAKIBA_PORT", "0")

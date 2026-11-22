@@ -8,8 +8,10 @@
 //! The test writes `state.db` only before `makibad` starts and through the door afterwards; it
 //! waits on the command row `makibad` finishes, read-only (Issue 181).
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::{ErrorKind, Role};
@@ -182,7 +184,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let (dir, flag) = (self.state.clone(), stop.clone());
         let d =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(Stub::new()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(Stub::new()), flag));
         self.daemon = Some((stop, d));
         // The first `Resync` handled: `base_resynced` is written last, after the view is rebuilt
         // (spec section 10), so the door's writes cannot race makibad's start writes (Issue 181).

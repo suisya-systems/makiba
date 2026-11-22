@@ -13,8 +13,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, State, TerminalRef};
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
@@ -141,7 +141,7 @@ fn org(launches: &[(&str, Vec<String>)]) -> Org {
     );
     let for_daemon = local.clone();
     let daemon_dir = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(for_daemon.clone())));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(for_daemon.clone())));
     Org {
         dir,
         work: root,
