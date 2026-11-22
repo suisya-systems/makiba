@@ -1,4 +1,4 @@
 # Test files named in incidents.md whose Issues are still open. Must be empty by M7-1.
-tests/pr_open_test_commit.rs
 tests/close_mask_leftovers.rs
 tests/close_accepted_limit.rs
+tests/ci_failure_reason.rs

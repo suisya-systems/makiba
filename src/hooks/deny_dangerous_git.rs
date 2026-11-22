@@ -155,17 +155,21 @@ pub fn subcommand_args(flat: &str, target: &str) -> Vec<String> {
     out
 }
 
-pub fn check(payload: &Value) -> Result<(), String> {
+/// The line this hook holds.
+const LINE: &str = "L-K3";
+
+pub fn check(payload: &Value) -> Result<(), super::Refusal> {
     let command = super::command(payload);
     if command.is_empty() {
         return Ok(());
     }
     let (segments, assigns) = shell::segments_and_assignments(&command);
-    if let Some(why) = shell::unreadable(&segments, &assigns) {
-        return Err(why);
+    if let Some((matched, why)) = shell::unreadable_at(&segments, &assigns) {
+        return Err(super::Refusal::new(LINE, matched, why));
     }
     for segment in segments.iter().filter(|s| !s.is_empty()) {
-        check_flat(&shell::flat_segment(segment, &assigns))?;
+        let flat = shell::flat_segment(segment, &assigns);
+        check_flat(&flat).map_err(|why| super::Refusal::new(LINE, flat.trim(), why))?;
     }
     Ok(())
 }

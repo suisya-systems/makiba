@@ -1111,6 +1111,11 @@ pub fn plain(text: &str, name: &str) -> String {
 ///
 /// Both lean to refusing.
 pub fn unreadable(segments: &[String], assigns: &[String]) -> Option<String> {
+    unreadable_at(segments, assigns).map(|(_, why)| why)
+}
+
+/// `unreadable`, with the text it could not read: `(matched, reason)`.
+pub fn unreadable_at(segments: &[String], assigns: &[String]) -> Option<(String, String)> {
     let takes_value = |t: &str| {
         matches!(
             t,
@@ -1137,8 +1142,11 @@ pub fn unreadable(segments: &[String], assigns: &[String]) -> Option<String> {
             if let Some(sub) = words.get(j)
                 && sub.contains(['"', '\'', '\\'])
             {
-                return Some(format!(
-                    "git's subcommand {sub} is quoted or escaped, so the hooks cannot read it; write it plainly"
+                return Some((
+                    format!("git {sub}"),
+                    format!(
+                        "git's subcommand {sub} is quoted or escaped, so the hooks cannot read it; write it plainly"
+                    ),
                 ));
             }
         }
@@ -1147,8 +1155,11 @@ pub fn unreadable(segments: &[String], assigns: &[String]) -> Option<String> {
     for a in assigns {
         let name = a.split('=').next().unwrap_or(a);
         if !seen.insert(name) {
-            return Some(format!(
-                "{name} is assigned more than once, so the hooks cannot tell its value where it is used; use one name per value"
+            return Some((
+                format!("{name}= twice"),
+                format!(
+                    "{name} is assigned more than once, so the hooks cannot tell its value where it is used; use one name per value"
+                ),
             ));
         }
     }
