@@ -379,7 +379,7 @@ impl Door {
         }
         // A decided candidate's file, or a placed ledger, is written outside the transaction: its
         // old bytes (or its absence) come back when its record does not stand.
-        let mut undo = None;
+        let mut undo = Vec::new();
         let r = match v {
             Verb::Candidate => candidate(&w, &actor, &args, &mut undo),
             Verb::Goal => goal(&w, &actor, &args, &mut undo),
@@ -395,14 +395,11 @@ impl Door {
             {
                 let _ = std::fs::remove_file(super::curator::knowledge_dir().join(file));
             }
-            match &undo {
-                Some((path, Some(old))) => {
-                    let _ = replace_file(path, old);
-                }
-                Some((path, None)) => {
-                    let _ = std::fs::remove_file(path);
-                }
-                None => {}
+            for (path, old) in undo.iter().rev() {
+                let _ = match old {
+                    Some(old) => replace_file(path, old),
+                    None => std::fs::remove_file(path),
+                };
             }
         };
         // A verb's writes stand only with their record: without it a retry would repeat them.
@@ -1635,7 +1632,7 @@ fn candidate(
     w: &StateWriter,
     actor: &str,
     args: &Value,
-    undo: &mut Option<(PathBuf, Option<Vec<u8>>)>,
+    undo: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
 ) -> Response {
     let pattern = str_arg(args, "pattern")?;
     let decision = str_arg(args, "decision")?;
@@ -1694,7 +1691,7 @@ fn candidate(
     .map_err(internal)?;
     replace_file(&path, new.as_bytes())
         .map_err(|e| internal(format!("cannot write {}: {e}", path.display())))?;
-    *undo = Some((path, Some(text.into_bytes())));
+    undo.push((path, Some(text.into_bytes())));
     Ok(payload)
 }
 
@@ -1707,7 +1704,7 @@ fn goal(
     w: &StateWriter,
     actor: &str,
     args: &Value,
-    undo: &mut Option<(PathBuf, Option<Vec<u8>>)>,
+    undo: &mut Vec<(PathBuf, Option<Vec<u8>>)>,
 ) -> Response {
     use crate::work_discovery::goals::{GoalStatus, load_goals, parse_ledger, split_slug};
     let action = str_arg(args, "action")?;
@@ -1797,24 +1794,39 @@ fn goal(
             let io =
                 |e: std::io::Error| internal(format!("cannot write {}: {e}", target.display()));
             std::fs::create_dir_all(target.parent().unwrap_or(&dir)).map_err(io)?;
+            // Each file's old bytes (or absence) are noted before it is written, so a failure at
+            // any step, or a record that does not stand, puts every file back.
+            let prev = target.with_file_name(format!("{name}.md.prev"));
+            let restore = |undo: &mut Vec<(PathBuf, Option<Vec<u8>>)>| {
+                for (path, old) in undo.drain(..).rev() {
+                    let _ = match old {
+                        Some(old) => replace_file(&path, &old),
+                        None => std::fs::remove_file(&path),
+                    };
+                }
+            };
             if let Some(old) = &old {
-                let prev = target.with_file_name(format!("{name}.md.prev"));
-                replace_file(&prev, old).map_err(io)?;
+                let was = std::fs::read(&prev).ok();
+                undo.push((prev.clone(), was));
+                if let Err(e) = replace_file(&prev, old) {
+                    restore(undo);
+                    return Err(io(e));
+                }
             }
-            replace_file(&target, text.as_bytes()).map_err(io)?;
+            undo.push((target.clone(), old.clone()));
+            if let Err(e) = replace_file(&target, text.as_bytes()) {
+                restore(undo);
+                return Err(io(e));
+            }
             let after = load_goals(&dir, &slug);
             if after.status != GoalStatus::Ok || after.clauses != parsed {
-                // An error is not unsaved by the door: put the old file back here.
-                let _ = match &old {
-                    Some(b) => replace_file(&target, b),
-                    None => std::fs::remove_file(&target),
-                };
+                // An error is not unsaved by the door: put the old files back here.
+                restore(undo);
                 return Err(internal(format!(
                     "the placed ledger does not read back ({}); it was not kept",
                     after.error.unwrap_or_default()
                 )));
             }
-            *undo = Some((target.clone(), old));
             Ok(
                 json!({"repo": slug, "status": "placed", "clauses": clauses(&after.clauses),
                       "previous": payload["previous_clauses"], "by": actor}),
