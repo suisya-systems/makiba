@@ -11,10 +11,10 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -146,7 +146,7 @@ fn org(task: &str) -> Org {
 impl Org {
     fn daemon(&self) -> JoinHandle<Result<(), String>> {
         let (dir, base) = (self.dir.clone(), self.base.clone());
-        std::thread::spawn(move || daemon::run(&dir, &|| Box::new(base.clone())))
+        std::thread::spawn(move || makibad::run(&dir, &|| Box::new(base.clone())))
     }
 
     fn one<T: rusqlite::types::FromSql>(&self, sql: &str) -> Option<T> {

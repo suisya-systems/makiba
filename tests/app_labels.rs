@@ -6,18 +6,20 @@
 //! (`MAKIBA_DOOR=none`). `makiba up` runs as tests/up.rs runs it: a stand-in `hc` and `claude` on
 //! PATH, the stand-in base for `makibad`, every folder a temporary one.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::daemon::launch::add_launch;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
 use sha2::{Digest, Sha256};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output};
+use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -105,6 +107,7 @@ fn a_secretary_a_worker_and_a_curator_launch_with_the_app_labels_in_one_space() 
     for f in ["work", "secretary", "curator", "share", "knowledge"] {
         std::fs::create_dir_all(root.join(f)).unwrap();
     }
+    let _held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
     // SAFETY: the only test of this binary that sets variables, before its daemon thread starts.
     unsafe {
         std::env::set_var("MAKIBA_DOOR", "none");
@@ -115,7 +118,6 @@ fn a_secretary_a_worker_and_a_curator_launch_with_the_app_labels_in_one_space() 
         );
         std::env::set_var("MAKIBA_VERIFY_TIMEOUT_MS", "600000");
         std::env::set_var("MAKIBA_SHARE_DIR", root.join("share"));
-        std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
         std::env::set_var("MAKIBA_PERSON_KEY", root.join("person.key"));
     }
 
@@ -160,7 +162,7 @@ fn a_secretary_a_worker_and_a_curator_launch_with_the_app_labels_in_one_space() 
     let stop = Arc::new(AtomicBool::new(false));
     let daemon = {
         let (dir, base, stop) = (dir.clone(), base.clone(), stop.clone());
-        std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), stop))
+        std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), stop))
     };
     let names = ["secretary", "w-t1", "curator"];
     let specs = wait(30, || {
@@ -221,10 +223,10 @@ fn up(root: &Path, session: &str) -> Output {
         ),
     );
     script(&bin.join("hc"), "exit 0");
-    Command::new(env!("CARGO_BIN_EXE_makiba"))
-        .arg("up")
+    makibad::up(root)
         .arg("--no-secretary")
         .env_clear()
+        .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(root))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", root.join("home"))
         .env("XDG_CONFIG_HOME", root.join("config"))

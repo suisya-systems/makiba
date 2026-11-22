@@ -5,6 +5,9 @@
 //! socket, and registers `acme/widget` from a bare repository under a scratch folder that
 //! `MAKIBA_GIT_URL` points at, so nothing reaches the network. The second runs no `makibad`.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::StateWriter;
@@ -141,7 +144,7 @@ fn status_says_when_no_project_is_registered_and_names_a_registered_one_with_its
         .local_addr()
         .unwrap()
         .port();
-    let mut c = Command::new(MAKIBA);
+    let mut c = makibad::daemon(&root);
     c.env("HOME", root.join("home"))
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("MAKIBA_STATE_DIR", &state)
@@ -171,8 +174,7 @@ fn status_says_when_no_project_is_registered_and_names_a_registered_one_with_its
         c.env_remove(v);
     }
     let _daemon = Daemon(
-        c.arg("daemon")
-            .stdin(Stdio::null())
+        c.stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()

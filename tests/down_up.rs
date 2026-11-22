@@ -9,9 +9,9 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{Base, LaunchSpec, Terminal};
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::json;
@@ -107,7 +107,7 @@ fn start(dir: &Path, local: &Local) -> Daemon {
     let stop = Arc::new(AtomicBool::new(false));
     let (dir, local, flag) = (dir.to_path_buf(), local.clone(), Arc::clone(&stop));
     let thread =
-        std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(local.clone()), flag));
+        std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(local.clone()), flag));
     Daemon { stop, thread }
 }
 

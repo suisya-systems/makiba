@@ -9,8 +9,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::Base;
-use makiba::daemon;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags, params};
 use serde_json::json;
@@ -38,6 +38,7 @@ struct Org {
     daemon: Option<Daemon>,
     closes: i64,
     _tmp: tempfile::TempDir,
+    _knowledge: makibad::Knowledge,
     _env: MutexGuard<'static, ()>,
 }
 
@@ -72,11 +73,11 @@ fn org(limit_ms: u64) -> Org {
     .unwrap();
     drop(StateWriter::open(&dir.join("state.db")).unwrap());
     let agent = json!([AGENT, "record", "steps:steps.json"]).to_string();
+    let held_knowledge = makibad::use_knowledge(&knowledge);
     // SAFETY: the lock above is held for the whole test; no daemon of an earlier test is running.
     unsafe {
         std::env::set_var("MAKIBA_FAKE_AGENT", agent);
         std::env::set_var("MAKIBA_LAUNCH_AGENT", "fake");
-        std::env::set_var("MAKIBA_KNOWLEDGE_DIR", &knowledge);
         std::env::set_var("MAKIBA_CURATOR_TIMEOUT_MS", limit_ms.to_string());
         std::env::set_var("MAKIBA_VERIFY_TIMEOUT_MS", "20000");
     }
@@ -86,6 +87,7 @@ fn org(limit_ms: u64) -> Org {
         daemon: None,
         closes: 0,
         _tmp: tmp,
+        _knowledge: held_knowledge,
         _env: env,
     }
 }
@@ -95,7 +97,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let (dir, base, flag) = (self.dir.clone(), self.base.clone(), Arc::clone(&stop));
         let daemon =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         self.daemon = Some((stop, daemon));
     }
 

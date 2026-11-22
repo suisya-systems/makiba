@@ -8,6 +8,7 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, LaunchSpec};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
@@ -179,10 +180,9 @@ impl Org {
             port: free_port(),
             daemon: Command::new("true").spawn().unwrap(),
         };
-        let mut c = Command::new(MAKIBA);
-        org.env(&mut c);
+        let mut c = makibad::daemon(&org.root);
+        c.with(|c| org.env(c));
         org.daemon = c
-            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

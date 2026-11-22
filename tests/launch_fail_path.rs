@@ -6,7 +6,7 @@
 mod common;
 
 use common::local::Local;
-use makiba::daemon;
+use common::makibad;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
@@ -61,7 +61,7 @@ fn org(kind: &str, stage: &str) -> (tempfile::TempDir, PathBuf) {
     drop(w);
     let local = Local::new();
     let daemon_dir = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(local.clone())));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(local.clone())));
     (tmp, dir)
 }
 

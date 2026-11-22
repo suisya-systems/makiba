@@ -5,8 +5,10 @@
 //! `tests/task_settings_shape.rs`; the host run of `scripts/probes/door-and-base-reach.sh` shows
 //! what a sandboxed Bash really gets.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use serde_json::Value;
 use std::path::Path;
@@ -75,7 +77,7 @@ fn the_settings_written_for_a_run_deny_a_write_of_mcp_json_in_its_worktree() {
             .unwrap();
     }
     let daemon_dir = dir.clone();
-    std::thread::spawn(move || daemon::run(&daemon_dir, &|| Box::new(Stub::new())));
+    std::thread::spawn(move || makibad::run(&daemon_dir, &|| Box::new(Stub::new())));
     let file = dir.join("settings/t1.json");
     let until = Instant::now() + Duration::from_secs(20);
     let v: Value = loop {

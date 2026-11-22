@@ -12,8 +12,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::Base;
-use makiba::daemon;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::StateWriter;
 use makiba::spec::Role;
@@ -116,7 +116,7 @@ fn a_dispatch_command_is_finished_by_its_verified_launch_and_failed_by_its_faile
     let stop = Arc::new(AtomicBool::new(false));
     let daemon = {
         let (dir, base, flag) = (dir.clone(), base.clone(), Arc::clone(&stop));
-        std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag))
+        std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag))
     };
     let ended = || {
         stop.store(true, Ordering::SeqCst);

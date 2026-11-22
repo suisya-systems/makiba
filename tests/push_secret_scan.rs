@@ -10,8 +10,10 @@
 //! The token-shaped test data is joined from parts at run time, so that no file in the repository
 //! holds a line a scanner would flag.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -197,7 +199,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let (dir, flag) = (self.state.clone(), stop.clone());
         let d =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(Stub::new()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(Stub::new()), flag));
         self.daemon = Some((stop, d));
         // The first `Resync` handled (`base_resynced` is written last), so the door's writes
         // cannot race makibad's start writes (Issue 181).

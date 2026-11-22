@@ -6,8 +6,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::Base;
-use makiba::daemon;
 use makiba::daemon::launch::RESUME_PROMPT;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use std::os::unix::fs::PermissionsExt;
@@ -96,7 +96,7 @@ fn a_resume_is_given_the_fixed_line_and_a_first_launch_its_brief() {
     let stop = Arc::new(AtomicBool::new(false));
     let thread = {
         let (dir, local, stop) = (dir.clone(), local.clone(), Arc::clone(&stop));
-        std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(local.clone()), stop))
+        std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(local.clone()), stop))
     };
     let (r, f) = (args(&resumed), args(&fresh));
     stop.store(true, Ordering::SeqCst);
