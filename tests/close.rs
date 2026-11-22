@@ -14,8 +14,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::{Base, LaunchSpec};
-use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::{ErrorKind, Role};
@@ -208,7 +208,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let (dir, base, flag) = (self.state.clone(), self.base.clone(), stop.clone());
         let d =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         self.daemon = Some((stop, d));
         // Subscribed: its start writes are done, so the door's writes cannot race them.
         let until = Instant::now() + WAIT;

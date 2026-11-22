@@ -16,8 +16,10 @@
 //! no test reaches the network. Each test has a project of its own, with a real clone (a code
 //! launch prepares its workplace from it) and a GitHub name for the reads.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
-use makiba::daemon;
 use makiba::daemon::door::{Door, Response, issue_key};
 use makiba::db::writer::StateWriter;
 use makiba::spec::Role;
@@ -186,7 +188,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let daemon = run.then(|| {
             let (dir, flag) = (dir.clone(), Arc::clone(&stop));
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(Stub::new()), flag))
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(Stub::new()), flag))
         });
         Org {
             _tmp: tmp,

@@ -3,6 +3,9 @@
 //! the refused list and a text that cannot be parsed are refused with a message naming what was
 //! found and why. Every version is built from the constants.
 
+mod common;
+
+use common::makibad;
 use makiba::agents::version::{LOWEST, NEWEST_CHECKED, REFUSED, SUPPORTED, check, check_with};
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -78,9 +81,9 @@ fn up(claude_prints: &str) -> (bool, String) {
         fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
     }
     let r = |p: &str| root.path().join(p);
-    let out = Command::new(env!("CARGO_BIN_EXE_makiba"))
-        .arg("up")
+    let out = makibad::up(root.path())
         .env_clear()
+        .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(root.path()))
         .env("PATH", format!("{}:/usr/bin:/bin", bin.display()))
         .env("HOME", r("home"))
         .env("XDG_CONFIG_HOME", r("config"))

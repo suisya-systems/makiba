@@ -6,11 +6,13 @@
 //! runs nothing and keeps every launch spec), launching the secretary as `makiba up` asks it to,
 //! with a stand-in `claude` on the path. No real `claude` and no real base is started.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use rusqlite::{Connection, OpenFlags};
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -80,6 +82,7 @@ struct Org {
     base: Shared,
     daemon: Option<Daemon>,
     _tmp: tempfile::TempDir,
+    _knowledge: makibad::Knowledge,
 }
 
 /// The daemon is stopped when the test ends, passed or failed.
@@ -163,6 +166,7 @@ impl Org {
         )))
         .unwrap();
         let share = root.join("share");
+        let held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
         // SAFETY: the environment lock is held by the caller, and no daemon of this test runs yet.
         unsafe {
             std::env::set_var("PATH", &path);
@@ -171,7 +175,6 @@ impl Org {
             std::env::set_var("MAKIBA_DOCS_DIR", root.join("docs"));
             std::env::set_var("MAKIBA_WORKERS_DIR", root.join("workers"));
             std::env::set_var("MAKIBA_REPOS_DIR", root.join("repos"));
-            std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
             std::env::set_var("MAKIBA_VERIFY_TIMEOUT_MS", "1000");
             std::env::remove_var("MAKIBA_FAKE_AGENT");
             std::env::remove_var("MAKIBA_LAUNCH_AGENT");
@@ -185,6 +188,7 @@ impl Org {
             base: Shared(Arc::new(Recording::default())),
             daemon: None,
             _tmp: tmp,
+            _knowledge: held_knowledge,
         }
     }
 
@@ -194,7 +198,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = Arc::clone(&stop);
         let handle =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         self.daemon = Some((stop, handle));
     }
 

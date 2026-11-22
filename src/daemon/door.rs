@@ -1683,7 +1683,7 @@ fn candidate(
     kebab("pattern", pattern)?;
     // The words of skills/curate.
     let status = match decision {
-        "approved" | "rejected" => decision.to_string(),
+        "approved" | "rejected" | "deferred" => decision.to_string(),
         d => match d.strip_prefix("into-") {
             Some(skill) => {
                 kebab("the skill of into-<skill>", skill)?;
@@ -1691,7 +1691,7 @@ fn candidate(
             }
             None => {
                 return Err(usage(format!(
-                    "decision is approved, rejected or into-<skill>, not {d:?}"
+                    "decision is approved, rejected, deferred or into-<skill>, not {d:?}"
                 )));
             }
         },
@@ -1912,7 +1912,9 @@ fn candidate_field(line: &str) -> Option<(&str, usize)> {
 }
 
 /// `text` with the `status`, `decided` and `reason` values of the one open entry of `pattern`
-/// replaced; every other byte as it was.
+/// replaced; every other byte as it was. An entry is open while its status is `pending` or
+/// `deferred` (held by the person, Issue 270); entries already decided stay beside it as history
+/// when the pattern returned. A held entry is not held again.
 fn decide_entry(
     text: &str,
     pattern: &str,
@@ -1938,11 +1940,48 @@ fn decide_entry(
         })
         .map(|(n, i)| (*i, starts.get(n + 1).copied().unwrap_or(lines.len())))
         .collect();
-    let (from, to) = match ours[..] {
+    if ours.is_empty() {
+        return Err(refuse(
+            ErrorKind::NotFound,
+            format!("no entry of pattern {pattern:?} in {CANDIDATES_FILE}"),
+            "",
+        ));
+    }
+    // Each entry's three lines (the line and the offset past its key), and its status as written.
+    let mut entries: Vec<(Vec<(usize, usize)>, String)> = Vec::new();
+    for (from, to) in &ours {
+        let mut at = Vec::new();
+        for key in ["status", "decided", "reason"] {
+            let Some(found) = (*from..*to).find_map(|i| {
+                candidate_field(&lines[i])
+                    .filter(|(k, _)| *k == key)
+                    .map(|(_, at)| (i, at))
+            }) else {
+                return Err(refuse(
+                    ErrorKind::Conflict,
+                    format!(
+                        "an entry of pattern {pattern:?} has no {key} line; nothing was written"
+                    ),
+                    "",
+                ));
+            };
+            at.push(found);
+        }
+        let was = value(&lines[at[0].0], at[0].1);
+        entries.push((at, was));
+    }
+    let open: Vec<&(Vec<(usize, usize)>, String)> = entries
+        .iter()
+        .filter(|(_, was)| was == "pending" || was == "deferred")
+        .collect();
+    let (at, was) = match open[..] {
         [] => {
             return Err(refuse(
-                ErrorKind::NotFound,
-                format!("no entry of pattern {pattern:?} in {CANDIDATES_FILE}"),
+                ErrorKind::Conflict,
+                format!(
+                    "the entry of pattern {pattern:?} is decided already: {}",
+                    entries.last().map_or("", |(_, was)| was)
+                ),
                 "",
             ));
         }
@@ -1951,38 +1990,25 @@ fn decide_entry(
             return Err(refuse(
                 ErrorKind::Conflict,
                 format!(
-                    "{} entries of pattern {pattern:?} in {CANDIDATES_FILE}; nothing was written",
-                    ours.len()
+                    "{} open entries of pattern {pattern:?} in {CANDIDATES_FILE}; nothing was written",
+                    open.len()
                 ),
                 "the curator must merge them into one",
             ));
         }
     };
-    let mut set = Vec::new();
-    for (key, new) in [("status", status), ("decided", decided), ("reason", reason)] {
-        let Some((i, at)) = (from..to).find_map(|i| {
-            candidate_field(&lines[i])
-                .filter(|(k, _)| *k == key)
-                .map(|(_, at)| (i, at))
-        }) else {
-            return Err(refuse(
-                ErrorKind::Conflict,
-                format!("the entry of pattern {pattern:?} has no {key} line; nothing was written"),
-                "",
-            ));
-        };
-        if key == "status" && value(&lines[i], at) != "pending" {
-            return Err(refuse(
-                ErrorKind::Conflict,
-                format!(
-                    "the entry of pattern {pattern:?} is decided already: {}",
-                    value(&lines[i], at)
-                ),
-                "",
-            ));
-        }
-        set.push((i, at, new));
+    if status == "deferred" && was == "deferred" {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("the entry of pattern {pattern:?} is deferred already"),
+            "decide it with approved, rejected or into-<skill>",
+        ));
     }
+    let set: Vec<(usize, usize, &str)> = at
+        .iter()
+        .zip([status, decided, reason])
+        .map(|((i, at), new)| (*i, *at, new))
+        .collect();
     for (i, at, new) in set {
         let line = &lines[i];
         let body = line.trim_end_matches(['\n', '\r']);
@@ -3731,7 +3757,7 @@ fn tool(v: Verb) -> Value {
             &["slug", "repo"],
         ),
         Verb::Candidate => (
-            "Record the person's decision on a pending skill candidate: makibad writes status (approved, rejected, or merged-into-<skill> for into-<skill>), decided (today) and reason into the entry of pattern in <knowledge>/skill-candidates.md, changing nothing else. reason is one line. An unknown pattern is not_found; an entry already decided is conflict.",
+            "Record the person's decision on a skill candidate: makibad writes status (approved, rejected, deferred, or merged-into-<skill> for into-<skill>), decided (today) and reason into the open entry of pattern (pending or deferred) in <knowledge>/skill-candidates.md, changing nothing else. deferred holds a pending entry; it is decided later with one of the other three. reason is one line. An unknown pattern is not_found; a pattern with no open entry, or a deferred entry deferred again, is conflict.",
             Map::from_iter([
                 ("pattern".into(), text.clone()),
                 ("decision".into(), text.clone()),

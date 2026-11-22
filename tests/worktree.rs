@@ -5,14 +5,15 @@
 //! `planned` while its `run_taken` event stays, which is what a restart after a cut-short pass
 //! looks like.
 
+mod common;
+
+use common::makibad;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::Connection;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
-
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 
 fn git(dir: &Path, args: &[&str]) -> String {
     let out = Command::new("git")
@@ -102,8 +103,7 @@ impl Org {
 
     fn start(&self) -> Daemon {
         Daemon(
-            Command::new(MAKIBA)
-                .arg("daemon")
+            makibad::daemon(&self.root)
                 .env("MAKIBA_STATE_DIR", self.root.join("state"))
                 // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
                 .env("MAKIBA_DOOR", "none")

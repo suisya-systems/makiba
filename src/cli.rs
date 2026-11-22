@@ -294,10 +294,10 @@ pub enum Command {
         topic: String,
         text: String,
     },
-    /// Record the person's decision on a pending skill candidate.
+    /// Record the person's decision on a skill candidate.
     Candidate {
         pattern: String,
-        /// approved, rejected or into-<skill>.
+        /// approved, rejected, deferred or into-<skill>.
         decision: String,
         #[arg(long)]
         reason: String,

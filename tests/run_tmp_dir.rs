@@ -11,11 +11,13 @@
 //! without a run. The door runs in this process too, on the same `state.db`, with the person's
 //! key.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::daemon::launch::add_launch;
 use makiba::db::writer::{RunUpsert, StateWriter};
@@ -112,6 +114,7 @@ struct Org {
     t3: Launched,
     secretary: Launched,
     curator: Launched,
+    _knowledge: makibad::Knowledge,
 }
 
 impl Org {
@@ -177,6 +180,7 @@ fn org() -> &'static Org {
         );
         git(&repo, &["push", "-q", "origin", "main"]);
         git(&repo, &["fetch", "-q", "origin"]);
+        let held_knowledge = makibad::use_knowledge(&root.join("knowledge"));
         // SAFETY: set once, by the first test to get here, before this process starts its
         // daemon thread; every other test waits on this initialisation.
         unsafe {
@@ -187,7 +191,6 @@ fn org() -> &'static Org {
             );
             std::env::set_var("MAKIBA_VERIFY_TIMEOUT_MS", "600000");
             std::env::set_var("MAKIBA_SHARE_DIR", root.join("share"));
-            std::env::set_var("MAKIBA_KNOWLEDGE_DIR", root.join("knowledge"));
             std::env::set_var("MAKIBA_PERSON_KEY", root.join("person.key"));
             std::env::set_var("MAKIBA_WORKERS_DIR", root.join("workers"));
             std::env::set_var("MAKIBA_DOCS_DIR", root.join("docs"));
@@ -250,7 +253,7 @@ fn org() -> &'static Org {
         {
             let (dir, base) = (state.clone(), base.clone());
             let stop = Arc::new(AtomicBool::new(false));
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), stop));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), stop));
         }
         let rows: [(&str, String, PathBuf); 5] = [
             ("w-t1", "spawn-t1".into(), state.join("settings/t1.json")),
@@ -312,6 +315,7 @@ fn org() -> &'static Org {
             t3,
             secretary,
             curator,
+            _knowledge: held_knowledge,
         }
     })
 }

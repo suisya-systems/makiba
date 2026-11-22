@@ -11,8 +11,8 @@
 mod common;
 
 use common::local::Local;
+use common::makibad;
 use makiba::base::Base;
-use makiba::daemon;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -132,7 +132,7 @@ impl Org {
         let stop = Arc::new(AtomicBool::new(false));
         let (dir, base, flag) = (self.dir.clone(), self.base.clone(), Arc::clone(&stop));
         let daemon =
-            std::thread::spawn(move || daemon::run_until(&dir, &|| Box::new(base.clone()), flag));
+            std::thread::spawn(move || makibad::run_until(&dir, &|| Box::new(base.clone()), flag));
         let held = self.dir.join("makibad.held");
         let until = Instant::now() + WAIT;
         while !held.exists() && !daemon.is_finished() && Instant::now() < until {

@@ -19,12 +19,12 @@
 
 mod common;
 
+use common::makibad;
 use makiba::base::version::PINNED;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseEvent, BaseInfo, Detail, EventStream, LaunchSpec, State,
     Status, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use rusqlite::{Connection, OpenFlags};
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -177,7 +177,7 @@ fn of(dir: &Path, kind: &str, spawn: Option<&str>, field: &str) -> Vec<Value> {
 fn boot(dir: &Path, list: Vec<Terminal>, n: usize) {
     let dir_for_daemon = dir.to_path_buf();
     let daemon = std::thread::spawn(move || {
-        daemon::run(&dir_for_daemon, &|| Box::new(Scripted(list.clone())))
+        makibad::run(&dir_for_daemon, &|| Box::new(Scripted(list.clone())))
     });
     wait(&format!("base_resynced number {n}"), || {
         (events(dir, "base_resynced").len() >= n).then_some(())

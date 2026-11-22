@@ -8,6 +8,9 @@
 //! starts; while it runs, this test only calls the agents' port and reads `state.db` read-only,
 //! waiting on the rows `makibad` wrote (Issue 181).
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::StateWriter;
@@ -21,8 +24,6 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 
 struct Org {
     root: PathBuf,
@@ -116,7 +117,7 @@ impl Org {
         assert!(r.is_ok(), "config set allowed_repo_owners: {r:?}");
         drop(door);
 
-        let mut c = Command::new(MAKIBA);
+        let mut c = makibad::daemon(&root);
         c.env("PATH", &path)
             .env("HOME", root.join("home"))
             .env("GIT_CONFIG_NOSYSTEM", "1")
@@ -148,7 +149,6 @@ impl Org {
             c.env_remove(v);
         }
         let daemon = c
-            .arg("daemon")
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())

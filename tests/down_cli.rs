@@ -2,21 +2,37 @@
 //! state, and refuses inside an agent. `makibad` runs on the in-process stand-in base without a
 //! socket (`MAKIBA_DOOR=none`), in a temporary state folder.
 
+mod common;
+
+use common::makibad;
 use std::path::Path;
 use std::process::{Child, Command, Output};
 use std::time::{Duration, Instant};
 
 fn makiba(state: &Path, args: &[&str]) -> Command {
     let mut c = Command::new(env!("CARGO_BIN_EXE_makiba"));
-    c.args(args)
-        .env_clear()
+    c.args(args);
+    env(&mut c, state);
+    c
+}
+
+/// `makibad` itself, with the knowledge folder of the helper.
+fn daemon(state: &Path) -> makibad::Makibad {
+    let mut c = makibad::daemon(state);
+    c.with(|c| env(c, state))
+        .env(makibad::KNOWLEDGE_ENV, makibad::knowledge(state));
+    c
+}
+
+/// Only what is set here: the person's environment is cleared.
+fn env(c: &mut Command, state: &Path) {
+    c.env_clear()
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", state)
         .env("MAKIBA_STATE_DIR", state)
         .env("MAKIBA_BASE", "stub")
         .env("MAKIBA_DOOR", "none")
         .env("MAKIBA_PORT", "0");
-    c
 }
 
 fn text(o: &Output) -> String {
@@ -41,7 +57,7 @@ impl Drop for Daemon {
 fn down_stops_makibad_and_suspends_the_runs() {
     let tmp = tempfile::tempdir().unwrap();
     let state = tmp.path();
-    let mut daemon = Daemon(makiba(state, &["daemon"]).spawn().unwrap());
+    let mut daemon = Daemon(daemon(state).spawn().unwrap());
     let subscribed = || {
         rusqlite::Connection::open(state.join("state.db"))
             .and_then(|c| {

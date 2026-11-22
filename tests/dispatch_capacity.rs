@@ -11,13 +11,14 @@
 //! `fail` and free its place); a prepared launch is `settings_ready`, so a taken run keeps
 //! counting as a launch that is not yet `verified` or `failed`.
 
+mod common;
+
+use common::makibad;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, params};
 use serde_json::Value;
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Stdio};
 use std::time::{Duration, Instant};
-
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 
 /// A `makibad` that is killed when the test ends, so a failed test leaves nothing running.
 struct Daemon(Child);
@@ -109,9 +110,8 @@ impl Org {
     }
 
     fn start(&self, capacity: Option<&str>) -> Daemon {
-        let mut c = Command::new(MAKIBA);
-        c.arg("daemon")
-            .env("MAKIBA_STATE_DIR", self.dir.path())
+        let mut c = makibad::daemon(self.dir.path());
+        c.env("MAKIBA_STATE_DIR", self.dir.path())
             // The door (M3-3) in the scratch folder too, on a port of the system's choosing.
             .env("MAKIBA_DOOR", "none")
             .env("MAKIBA_PORT", "0")

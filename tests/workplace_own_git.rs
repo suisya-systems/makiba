@@ -10,6 +10,9 @@
 //! process on the same `state.db`, as the secretary's tool call. The remote is a local bare
 //! repository: no network.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
@@ -21,7 +24,6 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
 const WAIT: Duration = Duration::from_secs(30);
 const TASK: &str = "own1";
 
@@ -120,8 +122,7 @@ impl Org {
 
     fn start(&self) -> Daemon {
         Daemon(
-            Command::new(MAKIBA)
-                .arg("daemon")
+            makibad::daemon(&self.root)
                 .env("MAKIBA_STATE_DIR", self.state())
                 .env("MAKIBA_DOOR", "none")
                 .env("MAKIBA_PORT", "0")

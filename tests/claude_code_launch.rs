@@ -4,11 +4,13 @@
 //! the worker's rules file, and settings that hold both the worker role's denies and the per-task
 //! denies. No real `claude` is started.
 
+mod common;
+
+use common::makibad;
 use makiba::base::stub::Stub;
 use makiba::base::{
     Base, BaseDenies, BaseError, BaseInfo, EventStream, LaunchSpec, Terminal, TerminalRef,
 };
-use makiba::daemon;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use serde_json::Value;
 use std::os::unix::fs::PermissionsExt;
@@ -154,7 +156,7 @@ fn a_claude_code_run_is_launched_with_the_role_rules_and_both_sets_of_denies() {
     let launched = Arc::new(Mutex::new(Vec::new()));
     let (for_daemon, daemon_dir) = (Arc::clone(&launched), dir.clone());
     std::thread::spawn(move || {
-        daemon::run(&daemon_dir, &|| {
+        makibad::run(&daemon_dir, &|| {
             Box::new(Recording {
                 stub: Stub::new(),
                 denies: denies.clone(),
