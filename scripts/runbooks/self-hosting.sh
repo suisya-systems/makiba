@@ -7,10 +7,13 @@
 #   bash scripts/runbooks/self-hosting.sh first-day   the four checks before the first range, in a scratch place
 #   bash scripts/runbooks/self-hosting.sh register    REAL: makiba registered in the organization, ledger placed
 #   bash scripts/runbooks/self-hosting.sh triage      REAL: one small task dispatched and closed, the scan read
+#   bash scripts/runbooks/self-hosting.sh switch      REAL: restart the organization on origin/main, with the secretary; starts the count
 #   bash scripts/runbooks/self-hosting.sh cleanup     removes the scratch places this script made; safe to run twice
 #
 # Each stage takes --dry-run (prints the commands, runs none, writes no file) and --yes (the real
-# stages ask once before they change anything). `register` also takes --replace-ledger.
+# stages ask once before they change anything). `register` also takes --replace-ledger;
+# `switch` also takes --handover <file> (the owner's private handover for the secretary) and
+# --issues 1,2,3 (the Issues of the first range; without it the secretary reads them from the handover).
 # Each stage writes a results file for the secretary, <repo>/.runbook-results/self-hosting-<stage>-<UTC>.txt
 # (RUNBOOK_RESULTS_DIR moves it). Nothing is deleted except what this script created.
 # Exit 0 done, 1 a check failed, 2 usage, 3 refused (a precondition is missing; the fix is printed).
@@ -36,19 +39,28 @@ BRIEF=""                   # the temporary brief of the triage task, removed at 
 SCRATCH_DRY=0           # 1 in a dry run of a scratch stage: paths are printed in their scratch form
 SCRATCH_RUN=""             # the scratch folder of this rehearsal, stopped and (when clean) removed at exit
 
-usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,19p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
-for a in "$@"; do
+SWITCH_HANDOVER=""
+SWITCH_ISSUES=""
+while [ $# -gt 0 ]; do
+  a=$1; shift
   case "$a" in
     --dry-run) DRY=1 ;;
     --yes) ASSUME_YES=1 ;;
     --replace-ledger) REPLACE_LEDGER=1 ;;
+    --handover) [ $# -gt 0 ] || { echo "--handover needs a file" >&2; exit 2; }; SWITCH_HANDOVER=$1; shift ;;
+    --handover=*) SWITCH_HANDOVER=${a#--handover=} ;;
+    --issues) [ $# -gt 0 ] || { echo "--issues needs a list like 169,270" >&2; exit 2; }; SWITCH_ISSUES=$1; shift ;;
+    --issues=*) SWITCH_ISSUES=${a#--issues=} ;;
     -h | --help) usage; exit 0 ;;
     -*) echo "unknown option $a" >&2; usage >&2; exit 2 ;;
     *) if [ -n "$STAGE" ]; then usage >&2; exit 2; fi; STAGE=$a ;;
   esac
 done
-case "$STAGE" in check | rehearse | first-day | register | triage | cleanup) ;; *) usage >&2; exit 2 ;; esac
+case "$STAGE" in check | rehearse | first-day | register | triage | switch | cleanup) ;; *) usage >&2; exit 2 ;; esac
+if [ -n "$SWITCH_HANDOVER$SWITCH_ISSUES" ] && [ "$STAGE" != switch ]; then echo "--handover and --issues belong to the switch stage" >&2; exit 2; fi
+if [ -n "$SWITCH_ISSUES" ] && ! printf '%s' "$SWITCH_ISSUES" | grep -Eq '^[0-9]+(,[0-9]+)*$'; then echo "--issues takes Issue numbers separated by commas, like 169,270" >&2; exit 2; fi
 STAGE_NAME=$STAGE
 
 open_results() {
@@ -744,6 +756,236 @@ stage_first_day() {
   FD_DONE=1
 }
 
+# ---- switch (Issue 51): the real organization restarted on origin/main, the count begun ----
+
+# The pieces of `status --json` the switch reads: one word, then one line per run in work, per run
+# that only waits (suspended or failed) and per pending entry, then the secretary's terminal state.
+sw_status() {
+  "$MK" status --json 2>/dev/null | python3 -I -c 'import json, sys
+v = json.load(sys.stdin)
+print("running" if v["makibad"]["running"] else "stopped")
+for r in v["runs"]:
+    kind = "wait" if r["status"] in ("suspended", "failed") else "work"
+    print("%s run %s (%s, %s)" % (kind, r["task_id"], r["kind"], r["status"]))
+for p in v["pending"]:
+    q = (p["question"] or "").splitlines()
+    print("work pending entry %s of %s: %s" % (p["id"], p["task_id"] or "-", q[0] if q else "-"))
+for t in v["terminals"]:
+    if t["role"] == "secretary":
+        print("secretary %s" % (t["state"] or "no state yet"))'
+}
+
+# sw_fail <what failed> <the one line that recovers>: the organization may be down; the next line is named.
+sw_fail() {
+  check switch FAIL "$1"
+  say "RECOVER: $2"
+  say "RESULT self-hosting switch: failed (the RECOVER line above is the next line to type)"
+  exit 1
+}
+
+# The merge approval mode (spec section 2): only the environment variable MAKIBA_MERGE_APPROVAL_MODE sets it
+# (`config set merge_approval_mode` is "not built yet" and `config get` always answers null), read by makibad
+# from its own environment, which makiba up passes on from the shell that runs it. Trimmed, any case; anything
+# that is not "acceptance" is read as human. The first range runs under human (the owner's decision of 2026-11-22),
+# so the switch accepts only unset or human here, and refuses everything else before anything is stopped.
+sw_mode_ok() {
+  local m; m=$(printf '%s' "${MAKIBA_MERGE_APPROVAL_MODE-human}" | tr 'A-Z' 'a-z' | tr -d '[:space:]')
+  [ "$m" = human ]
+}
+# The mode of a running makibad, from its own environment (/proc/<pid>/environ of the pid status shows): human,
+# acceptance, the word "unset", or "unreadable".
+sw_mode_of_makibad() {
+  local pid
+  pid=$("$MK" status 2>/dev/null | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p')
+  [ -n "$pid" ] && [ -r "/proc/$pid/environ" ] || { printf unreadable; return 0; }
+  tr '\0' '\n' < "/proc/$pid/environ" | sed -n 's/^MAKIBA_MERGE_APPROVAL_MODE=//p' | head -n 1 | grep . || printf unset
+}
+
+sw_preflight() {
+  say "== preconditions (switch)"
+  # No build here: the build of the new revision waits until makibad is stopped (a binary replaced under a running makibad leaves its hook and channel paths stale).
+  must "not inside an agent" "a CLAUDE* or HC_SESSION/HC_SOCKET/HC_SCOPE/HC_TERMINAL_* variable is set: this shell is inside an agent" "open a plain login shell on the host and run the line again" not_in_agent
+  for c in git cargo gh "${HC_BIN:-hc}" claude python3; do
+    must "$c on PATH" "$c is not on PATH" "install it, or put it on PATH" have "$c"
+  done
+  must "git 2.38 or newer" "git is older than 2.38 (git merge-tree --write-tree)" "install git 2.38 or newer" git_new_enough
+  must "stored login for github.com" "the GitHub CLI has no stored login for github.com" "run: gh auth login -h github.com" gh_login
+  if [ "$DRY" != 1 ]; then
+    for v in MAKIBA_BASE MAKIBA_LAUNCH_AGENT MAKIBA_FAKE_AGENT; do
+      if [ -n "${!v:-}" ]; then refuse "$v is set (a test seam)" "unset $v and run the line again"; fi
+    done
+    [ "${MAKIBA_DOOR:-}" != none ] || refuse "MAKIBA_DOOR=none is set (a test seam)" "unset MAKIBA_DOOR and run the line again"
+    [ -x "$MK" ] || refuse "$MK is not an executable" "name the installed binary with MK=<path>, or build once: cargo build"
+  fi
+}
+
+stage_switch() {
+  say "== switch: the real organization restarted on origin/main, with the secretary; the count of Issue 51 begins"
+  local state sec_dir hand start mode old new
+  state=$(dirname "$(db_path)"); sec_dir=$state/secretary; hand=$sec_dir/handover-owner.md; start=$state/self-hosting-start.txt
+  mode=human
+  sw_preflight
+  say "+ the merge approval mode of this shell: MAKIBA_MERGE_APPROVAL_MODE=${MAKIBA_MERGE_APPROVAL_MODE-<unset>} (makibad reads it from the shell that runs makiba up; the first range runs under human)"
+  if [ "$DRY" != 1 ] && ! sw_mode_ok; then
+    refuse "MAKIBA_MERGE_APPROVAL_MODE is '$MAKIBA_MERGE_APPROVAL_MODE' in this shell; the first range starts under the human mode (owner's decision of 2026-11-22), and makibad would read this value from the shell that runs makiba up" "unset MAKIBA_MERGE_APPROVAL_MODE   (then run this line again; only this variable sets the mode: config set merge_approval_mode is not built)"
+  fi
+
+  say "== what is read first (nothing is changed before you confirm)"
+  say "+ $MK status --json     (is makibad running; a run in work or a pending entry unanswered refuses)"
+  say "+ git -C $REPO fetch origin; git -C $REPO merge-base --is-ancestor HEAD origin/main   (the checkout must be on main, clean, and able to fast-forward)"
+  if [ -n "$SWITCH_HANDOVER" ]; then say "+ the handover $SWITCH_HANDOVER must exist, be non-empty and lie outside $REPO"; fi
+  if [ "$DRY" != 1 ]; then
+    local st work l; st=$(sw_status) || true
+    [ -n "$st" ] || refuse "makiba status --json gave no readable answer" "run: $MK status ; there is no organization state to read on this place"
+    work=$(printf '%s\n' "$st" | sed -n 's/^work //p')
+    if [ -n "$work" ]; then
+      say "in work in the real organization:"
+      printf '%s\n' "$work" | while IFS= read -r l; do say "  - $l"; done
+      refuse "the organization has work in it (a run in use or a pending entry unanswered); a restart would suspend or strand it" "let the secretary finish or close them (and answer the pending entries), then run this line again"
+    fi
+    printf '%s\n' "$st" | sed -n 's/^wait //p' | while IFS= read -r l; do say "  note: $l (not in use; makiba up brings a suspended run back on the new build)"; done
+    check organization INFO "makibad $(printf '%s\n' "$st" | head -n 1); no run in use, no pending entry unanswered"
+    [ "$(git -C "$REPO" rev-parse --abbrev-ref HEAD)" = main ] || refuse "$REPO is not on main" "git -C $REPO switch main"
+    [ -z "$(git -C "$REPO" status --porcelain --untracked-files=no)" ] || refuse "$REPO has uncommitted changes to tracked files" "save or discard them in that checkout, then run this line again"
+    git -C "$REPO" fetch origin >/dev/null 2>&1 || refuse "git fetch origin failed in $REPO" "check the network and the stored login (gh auth status), then run this line again"
+    git -C "$REPO" merge-base --is-ancestor HEAD origin/main || refuse "$REPO holds changes origin/main lacks: it cannot fast-forward" "move them to a branch yourself (git -C $REPO branch <name>), put main on origin/main, then run this line again; this script never resets or merges"
+    old=$(git -C "$REPO" rev-parse --short HEAD); new=$(git -C "$REPO" rev-parse --short origin/main)
+    check checkout INFO "$REPO: main $old, origin/main $new; a fast-forward is possible"
+    if [ -n "$SWITCH_HANDOVER" ]; then
+      [ -s "$SWITCH_HANDOVER" ] || refuse "the handover $SWITCH_HANDOVER does not exist or is empty" "name the file the previous secretary wrote: --handover <file>"
+      case "$(realpath "$SWITCH_HANDOVER")/" in "$(realpath "$REPO")"/*) refuse "the handover lies inside this repository ($REPO), which is public" "move it outside the checkout (for example your home folder) and name that path" ;; esac
+    fi
+  else
+    plan "refuse and list the runs in use and the pending entries; refuse unless $REPO is on main, clean, and origin/main is a fast-forward of it"
+  fi
+
+  lines_changed "makibad and the worker terminals are stopped (makiba down --secretary: the secretary's terminal too, so the new one starts on the new role files; the base is NOT stopped)
+the checkout $REPO moves to origin/main by a fast-forward and is built: the binary $MK is replaced
+makiba up starts makibad and a new secretary; merge approval mode for makibad: human (this shell holds no other value)
+$start is written once (the start of the count: time, revisions, the newest event id, the base version)
+${SWITCH_HANDOVER:+the handover is copied to $hand (mode 0600)}
+Kept as they are: the goal ledger already placed, the project registration, the clone, the keys, the base, every event and message."
+  confirm
+
+  # From here on every failure says the next line. The fast-forward below changes this script's own file, so
+  # the case branch that calls this function ends in `exit`: the shell never reads the file again.
+  say "== stop the organization"
+  run "$MK" down --secretary || true
+  if [ "$DRY" != 1 ]; then
+    if [ "$(sw_status | head -n 1)" = running ]; then sw_fail "makibad still runs after makiba down" "$MK status ; then run this stage again (nothing else was changed)"; fi
+    check down PASS "makibad is not running; the secretary's terminal is ended"
+  fi
+
+  say "== bring the checkout to origin/main and build"
+  run git -C "$REPO" merge --ff-only origin/main || sw_fail "the fast-forward failed" "$MK up   (the checkout and the old binary are as they were); read the error above, then run this stage again"
+  if [ -z "$MK_GIVEN" ]; then
+    run cargo build --manifest-path "$REPO/Cargo.toml" || sw_fail "cargo build failed at $(git -C "$REPO" rev-parse --short HEAD)" "$MK up   (the old binary is still in place and nothing was suspended; fix the build, then run this stage again)"
+  else
+    say "  $MK was named with MK=: it is used as it is, no build"
+  fi
+  if [ "$DRY" != 1 ]; then check build PASS "checkout $(git -C "$REPO" rev-parse --short HEAD), binary $MK ($(stat -c %y "$MK" | cut -c1-19))"; fi
+
+  say "== start the organization with the secretary"
+  local before=0
+  if [ "$DRY" != 1 ]; then before=$(sq "SELECT coalesce(max(id), 0) FROM run_launch WHERE role = 'secretary'"); fi
+  run "$MK" up || sw_fail "makiba up failed" "$MK up   (read its text above and makibad.log in $state; suspended runs stay suspended, nothing is lost)"
+  sec_ready() { [ -n "$(sq "SELECT 1 FROM run_launch WHERE role = 'secretary' AND id > $before AND stage IN ('verified', 'failed')")" ]; }
+  if [ "$DRY" = 1 ]; then
+    plan "wait for a secretary launch newer than id $before to be 'verified' (up to ${WAIT_SECRETARY:-600} s), and for its terminal to be listed by status"
+  else
+    wait_for "${WAIT_SECRETARY:-600}" "the secretary's launch to be verified" sec_ready || sw_fail "the secretary was not ready in ${WAIT_SECRETARY:-600} s" "$MK up   (asks again; to read what happened: $MK events --after $before --json)"
+    local stage reason
+    stage=$(sq "SELECT stage FROM run_launch WHERE role = 'secretary' AND id > $before ORDER BY id DESC LIMIT 1")
+    reason=$(sq "SELECT coalesce(failed_reason, '') FROM run_launch WHERE role = 'secretary' AND id > $before ORDER BY id DESC LIMIT 1")
+    [ "$stage" = verified ] || sw_fail "the secretary's launch failed: $reason" "$MK up   (asks for the secretary again; its screen is in the worker_spawn_failed event: $MK events --after 0 --json)"
+    sw_status | grep -q '^secretary ' || sw_fail "the launch is verified but status lists no secretary terminal" "$MK status ; then $MK up"
+    check secretary PASS "the secretary's launch is verified; its terminal: $(sw_status | sed -n 's/^secretary //p')"
+    mode=$(sw_mode_of_makibad)
+    case "$mode" in
+      human | unset) check merge-approval-mode PASS "makibad's own environment says: $mode (read as human)"; mode=human ;;
+      unreadable) check merge-approval-mode INFO "makibad's environment cannot be read here; this shell held no value but human, which makiba up passed on; makiba range approve prints the mode it sees"; mode=human ;;
+      *) sw_fail "makibad runs with MAKIBA_MERGE_APPROVAL_MODE=$mode, not human" "makiba down --secretary ; then unset MAKIBA_MERGE_APPROVAL_MODE ; then $MK up" ;;
+    esac
+  fi
+
+  say "== the read surface and the verbs of the new binary"
+  local v missing=""
+  for v in range review goal; do
+    say "+ $MK --help | grep '^  $v'"
+    if [ "$DRY" = 1 ]; then continue; fi
+    if "$MK" --help 2>&1 | grep -Eq "^  $v( |$)"; then check "verb-$v" PASS "present: $("$MK" "$v" --help 2>&1 | head -n 1)"
+    else check "verb-$v" FAIL "missing in $MK"; missing="$missing $v"; fi
+  done
+  say "+ $MK status"
+  if [ "$DRY" != 1 ]; then "$MK" status 2>&1 | sed 's/^/  | /' | tee -a "$RESULT"; fi
+  if [ -n "$missing" ]; then sw_fail "the new binary lacks the verb(s):$missing" "cargo build --manifest-path $REPO/Cargo.toml ; then $MK down --secretary ; then $MK up   (the binary $MK is not this checkout's build)"; fi
+
+  say "== the record that starts the count (Issue 51): $start"
+  if [ "$DRY" = 1 ]; then
+    plan "write it once: UTC time, origin/main and checkout revisions, the newest event id, the base version of the newest dispatcher_started; when it exists, print it and keep it"
+  elif [ -e "$start" ]; then
+    check count-start INFO "the count already began; $start is kept as it is:"
+    sed 's/^/  | /' "$start" | tee -a "$RESULT"
+  else
+    local evid bv
+    evid=$(sq "SELECT coalesce(max(id), 0) FROM events"); bv=$(sq "SELECT coalesce(json_extract(payload_json, '\$.base_version'), '') FROM events WHERE kind = 'dispatcher_started' ORDER BY id DESC LIMIT 1")
+    printf '%s\n' "Issue 51: the count of landed pull requests and of events met begins here." \
+      "started_at_utc: $(date -u +%Y-%m-%dT%H:%M:%SZ)" "origin_main: $(git -C "$REPO" rev-parse origin/main)" "checkout_head: $(git -C "$REPO" rev-parse HEAD)" \
+      "count_after_event_id: $evid" "base_version: $bv" "merge_approval_mode: $mode" > "$start"
+    check count-start PASS "written $start (count after event id $evid, base version ${bv:-none})"
+    sed 's/^/  | /' "$start" | tee -a "$RESULT"
+  fi
+
+  say "== the handover (operator-private: it must never enter this repository)"
+  if [ -z "$SWITCH_HANDOVER" ]; then
+    say "  no --handover given. Place it yourself with this one line (the file is yours, outside the repository):"
+    say "    mkdir -p -m 700 $sec_dir && install -m 600 <your handover file> $hand"
+  elif [ "$DRY" = 1 ]; then
+    plan "copy $SWITCH_HANDOVER to $hand (mode 0600); an older different one is kept beside it as handover-owner.md.before-<UTC>"
+  else
+    mkdir -p "$sec_dir"; chmod 700 "$sec_dir"
+    if [ -e "$hand" ] && ! cmp -s "$SWITCH_HANDOVER" "$hand"; then
+      cp "$hand" "$hand.before-$(date -u +%Y%m%dT%H%M%SZ)"
+    fi
+    install -m 600 "$SWITCH_HANDOVER" "$hand"
+    check handover PASS "placed $hand (mode 600, $(wc -c < "$hand") bytes); the original $SWITCH_HANDOVER is untouched"
+  fi
+
+  switch_next_steps "$hand" "$start" "$mode"
+}
+
+# What the person does next, printed whole so that nothing is copied by hand but one line at a time.
+switch_next_steps() { # switch_next_steps <handover path> <start file> <mode>
+  local hand=$1 start=$2 mode=$3 attach issues
+  if [ "$DRY" = 1 ]; then attach="HC_SESSION=<session> hc attach secretary"
+  else attach=$("$MK" status 2>/dev/null | sed -n 's/^secretary: .*attach with //p'); fi
+  [ -n "$attach" ] || attach="(the 'secretary:' line of makiba status prints the attach line)"
+  if [ -n "$SWITCH_ISSUES" ]; then issues="the Issues $SWITCH_ISSUES"; else issues="the Issues listed in section 1 of $hand"; fi
+  say "== NEXT 1: attach to the secretary (in your login shell), then type the two lines below, one at a time"
+  say "    $attach"
+  say "== NEXT 2: the first line to type to the secretary (it reads the handover and answers)"
+  say "    Read $hand first: it is the handover from the previous organization's secretary (my decisions and how I want to be spoken to). It is private: never copy it into a repository, an issue, a pull request, a document, a message to a worker or a note. Then call status and tell me in three lines where we stand."
+  say "== NEXT 3: the second line to type to the secretary (the first range; it proposes and shows what it admits; nothing is dispatched until you approve)"
+  say "    Propose the first range for makiba: $issues, 2 at once, 20 tasks in all, the brief head of our usual conventions. Show me what it admits and what it leaves out, with the reason."
+  say "== NEXT 4: the merge approval mode in force for makibad: $mode (the first range runs under human; the change to acceptance is the owner's, later)"
+  say "    Why human first (the owner's decision of 2026-11-22): on the first real code pull request, see that the agent host shows the landing gate's question to the person (only the human mode can show it; the stage 'first-day' proved the hook, not what Claude Code shows); and judge the secretary's recommendations from the stops on record. After ten recorded stops the owner decides, from how many answers matched the recommendation, whether to switch to acceptance."
+  say "    Where it is set: only the environment variable MAKIBA_MERGE_APPROVAL_MODE, read by makibad from its own environment (config set merge_approval_mode is not built; config get always answers null). 'makiba status' and 'makiba range approve' print the value of THEIR shell as 'Merge approval mode'; makibad records its own at approve. The switch to acceptance, when the owner decides it and nothing is in work, is this one line: makiba down --secretary && MAKIBA_MERGE_APPROVAL_MODE=acceptance makiba up   (a range approved under human does not widen: it needs its own approval again)."
+  say "== NEXT 5: when the secretary names the range id, approve it in your own shell (only your key can)"
+  say "    makiba range approve <id>"
+  say "    It prints the draft and makibad's newest read, then asks [y/N]. Check before you type y: 'Merge approval mode' is the one you meant; 'Takes' and the Issues are what you decided; 'At once: 2; tasks in all: 20'; each line '#<n> <title> - admitted' or 'left out: <why>' (read the order; an Issue at a trust boundary should say 'stop after the design' in the Brief head). 'has no complete read yet' means wait; 'stale' means makibad read it again after the preview: run the line again."
+  say "== NEXT 6: the count of Issue 51, read afterwards from your shell (the start is in $start)"
+  say "    sed -n 's/^count_after_event_id: //p' $start     (the id; call it N)"
+  say "    makiba events --after N --json     count the events of kind pr_merged (landed pull requests: twenty) and note when each of these appears: dispatcher_started with a base_version different from the start file (an update of the base), secretary_renewed (a renewal), worker_spawn_failed (a failed launch)"
+  say "    makiba status --json     ranges[].items[].place equal to landed shows the same landings per range"
+  say "    pr_merged is written only for the tasks of a range (spec 5.8): a pull request landed from a one-off dispatch is not in it; add it by hand, with its number, in docs/reports/self-hosting-week.md"
+}
+
+finish() { # the last two lines of the script, so that the switch can end without reading its own file again
+  if [ "$FAILS" -gt 0 ]; then say "RESULT self-hosting $STAGE: $FAILS failing check(s); results file ${RESULT:-none}"; exit 1; fi
+  say "RESULT self-hosting $STAGE: ok${RESULT:+; results file $RESULT}"
+  exit 0
+}
+
 stage_cleanup() {
   say "== cleanup: scratch places made by this script (the real organization is never touched)"
   local d found=0
@@ -812,6 +1054,10 @@ the organization is started with makiba up if it does not run (person key and ga
 its out/ folder under ${MAKIBA_DOCS_DIR:-$HOME/makiba-docs}, the run_closed and scan events, the notices to the secretary"
     confirm
     stage_triage 0
+    ;;
+  switch)
+    stage_switch
+    finish
     ;;
   cleanup)
     stage_cleanup
