@@ -52,22 +52,32 @@ pub fn check(payload: &Value) -> Result<(), Refusal> {
                 .find(|(_, s)| *s)
                 .map(|(n, _)| *n)
                 .unwrap_or("am");
-            return refuse(
+            return Err(Refusal::new(
+                LINE,
                 flat.trim(),
                 format!(
                     "git {which} --no-verify skips the repository's hooks (the secret scanner among them); run it without the flag"
                 ),
-            );
+            )
+            .at(" --no-verify"));
         }
         if subs[0]
             && (has(&flat, r"(^|[[:space:]])-n([[:space:]]|$)")
                 || has(&flat, r"(^|[[:space:]])-[a-zA-Z]*n[a-zA-Z]+([[:space:]]|$)")
                 || has(&flat, r"(^|[[:space:]])-[a-zA-Z]+n([[:space:]]|$)"))
         {
-            return refuse(
+            // The short option that holds the n, kept in view when the segment is cut.
+            let bundle = flat
+                .split_whitespace()
+                .find(|w| w.starts_with('-') && !w.starts_with("--") && w.contains('n'))
+                .map(|w| format!(" {w}"))
+                .unwrap_or_default();
+            return Err(Refusal::new(
+                LINE,
                 flat.trim(),
                 "git commit -n is --no-verify; it skips the repository's hooks. Run it without the flag",
-            );
+            )
+            .at(bundle));
         }
     }
     let mut whole = shell::plain_git(&shell::flatten_text(&command));

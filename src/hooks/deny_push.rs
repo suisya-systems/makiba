@@ -146,6 +146,15 @@ fn refuse(matched: impl Into<String>, reason: impl Into<String>) -> Result<(), R
     Err(Refusal::new(LINE, matched, reason))
 }
 
+/// A refusal whose matched text holds `key`, the words refused on, kept in view when it is cut.
+fn refuse_at(
+    matched: impl Into<String>,
+    key: &str,
+    reason: impl Into<String>,
+) -> Result<(), Refusal> {
+    Err(Refusal::new(LINE, matched, reason).at(key))
+}
+
 pub fn check(payload: &Value) -> Result<(), Refusal> {
     let command = super::command(payload);
     if command.is_empty() {
@@ -156,14 +165,18 @@ pub fn check(payload: &Value) -> Result<(), Refusal> {
         .split('\n')
         .find(|l| push.any_line(&shell::plain_git(l)))
     {
-        return refuse(line, PUSH_REASON);
+        return refuse_at(line, "push", PUSH_REASON);
     }
     let lines: Vec<String> = command.split('\n').map(String::from).collect();
     if let Some(body) = shell::unwrap(&lines)
         .into_iter()
         .find(|b| push.any_line(&shell::plain_git(b)))
     {
-        return refuse(body, format!("{PUSH_REASON} (seen inside eval or bash -c)"));
+        return refuse_at(
+            body,
+            "push",
+            format!("{PUSH_REASON} (seen inside eval or bash -c)"),
+        );
     }
     // makiba's addition: each segment as the shell reads its words (quotes and backslashes
     // dropped, known variables expanded), so `git "push"` and `G=push; git $G` are seen.
@@ -176,7 +189,7 @@ pub fn check(payload: &Value) -> Result<(), Refusal> {
     for segment in segments.iter().filter(|s| !s.is_empty()) {
         let words = shell::expand(segment, &assigns).replace(['"', '\'', '\\'], "");
         if push_cmd.any_line(&shell::plain_git(&words)) {
-            return refuse(segment.as_str(), PUSH_REASON);
+            return refuse_at(segment.as_str(), "push", PUSH_REASON);
         }
     }
     check_gh(&command)
@@ -223,8 +236,9 @@ fn check_gh(command: &str) -> Result<(), Refusal> {
         let flat = shell::flatten_text(&expanded);
         let joined = shell::flatten_text(&expanded.replace(['"', '\''], ""));
         if alias.any_line(&joined.replace('\\', "")) {
-            return refuse(
+            return refuse_at(
                 segment.as_str(),
+                "alias",
                 "a git alias that runs a shell or names push cannot be read; run the command by its own name",
             );
         }
@@ -239,8 +253,9 @@ fn check_gh(command: &str) -> Result<(), Refusal> {
             }
         }
         if !verdicts.is_empty() {
-            return refuse(
+            return refuse_at(
                 segment.as_str(),
+                "gh ",
                 format!(
                     "a gh call that writes to GitHub, or that cannot be read, is the secretary's (seen: {}). If no gh call was meant, the word gh in a text (a commit message, a heredoc) was read as one: put the text in a file and pass it by path",
                     verdicts.join(" ")

@@ -37,6 +37,8 @@ pub struct Refusal {
     pub line: &'static str,
     pub matched: String,
     pub reason: String,
+    /// The words inside `matched` that the hook refused on, kept in view when `matched` is cut.
+    pub key: Option<String>,
 }
 
 impl Refusal {
@@ -45,7 +47,14 @@ impl Refusal {
             line,
             matched: matched.into(),
             reason: reason.into(),
+            key: None,
         }
+    }
+
+    /// The refusal with `key`, the words inside the matched text that were refused on.
+    pub fn at(mut self, key: impl Into<String>) -> Self {
+        self.key = Some(key.into());
+        self
     }
 
     /// The line a refusal by hook `name` prints.
@@ -54,7 +63,7 @@ impl Refusal {
             "makiba: refused by hook {name} (line {} in docs/design/lines.md): {}. Matched: \"{}\"",
             self.line,
             self.reason.trim_end_matches('.'),
-            shown(&self.matched)
+            shown(&self.matched, self.key.as_deref())
         )
     }
 }
@@ -62,12 +71,40 @@ impl Refusal {
 /// The longest matched text a refusal shows, in characters.
 const SHOWN: usize = 200;
 
-/// `text` on one line (a newline shown as `\n`), cut at `SHOWN` characters.
-fn shown(text: &str) -> String {
+/// `text` on one line (a newline shown as `\n`). Text longer than `SHOWN` characters is cut in
+/// the middle, so that its start and its end are shown; when `key` is inside the cut part, the
+/// part around `key` is shown in place of the end.
+fn shown(text: &str, key: Option<&str>) -> String {
     let one = text.trim().replace('\n', "\\n");
-    match one.char_indices().nth(SHOWN) {
-        Some((at, _)) => format!("{}...", &one[..at]),
-        None => one,
+    let chars: Vec<char> = one.chars().collect();
+    if chars.len() <= SHOWN {
+        return one;
+    }
+    let take = |from: usize, to: usize| chars[from..to].iter().collect::<String>();
+    let half = SHOWN / 2;
+    let key_at = key
+        .map(|k| k.trim().replace('\n', "\\n"))
+        .filter(|k| !k.is_empty())
+        .and_then(|k| {
+            one.find(&k)
+                .map(|byte| (one[..byte].chars().count(), k.chars().count()))
+        });
+    match key_at {
+        // The key ends after the head and starts before the tail: show the part around it.
+        Some((at, len)) if at + len > half && at < chars.len() - half => {
+            let head = half.min(at);
+            let around = half.max(len);
+            let from = at.saturating_sub((around - len) / 2).max(head);
+            let to = (from + around).min(chars.len());
+            let gap = if from > head { "..." } else { "" };
+            let tail = if to < chars.len() { "..." } else { "" };
+            format!("{}{gap}{}{tail}", take(0, head), take(from, to))
+        }
+        _ => format!(
+            "{}...{}",
+            take(0, half),
+            take(chars.len() - half, chars.len())
+        ),
     }
 }
 
@@ -227,4 +264,26 @@ pub fn field(payload: &Value, pointer: &str) -> String {
 /// The Bash command of the payload, or empty.
 pub fn command(payload: &Value) -> String {
     field(payload, "/tool_input/command")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{SHOWN, shown};
+
+    #[test]
+    fn a_long_match_keeps_its_end_and_its_key_in_view() {
+        let short = "git push origin main";
+        assert_eq!(shown(short, None), short);
+        let tail = format!("echo {}; git push", "x".repeat(250));
+        assert!(shown(&tail, None).ends_with("; git push"));
+        let middle = format!("{} --no-verify {}", "a".repeat(250), "b".repeat(250));
+        let cut = shown(&middle, Some("--no-verify"));
+        assert!(cut.contains("--no-verify"), "{cut}");
+        assert!(cut.chars().count() <= SHOWN + 6, "{cut}");
+        let no_key = shown(&middle, None);
+        assert!(no_key.starts_with("aaa") && no_key.ends_with("bbb"));
+        // A key that starts inside the head is shown whole, not split by the cut.
+        let straddle = format!("{} --no-verify {}", "a".repeat(95), "b".repeat(300));
+        assert!(shown(&straddle, Some("--no-verify")).contains("--no-verify"));
+    }
 }

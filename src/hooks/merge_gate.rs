@@ -58,7 +58,7 @@ pub fn check(payload: &Value) -> Result<(), super::Refusal> {
         return Ok(());
     }
     let command = super::command(payload);
-    let refusal = |why: String| super::Refusal::new(LINE, command.trim(), why);
+    let refusal = |why: String| super::Refusal::new(LINE, command.trim(), why).at("gh pr merge");
     match parse(&command).map_err(refusal)? {
         None => Ok(()),
         Some((pr, repo, head)) => ask_gate(&repo, pr, &head).map_err(|(verdict, why)| {
