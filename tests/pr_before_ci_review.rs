@@ -3,8 +3,9 @@
 //! - `pr` with a head other than the pull request's own (an older commit the clone holds) is
 //!   refused: the head recorded is the head the pull request has at origin.
 //! - `update` with `--base` naming the branch itself, after the test commit was pushed alone, does
-//!   not hide the test commit: the check judges against the pull request's base, never against
-//!   what `update` merges in, so the fix is not sent before CI failed at the test commit.
+//!   not hide the test commit, and neither does a recorded pull request whose base is the branch:
+//!   push and update judge against the project's default branch, so the fix is not sent before CI
+//!   failed at the test commit.
 //!
 //! The worlds are built as in tests/pr_open_test_commit.rs: a local origin, the project's clone
 //! in the repositories folder, a `gh` stand-in (`MAKIBA_GH`) answering `pr view` from files, and
@@ -320,6 +321,19 @@ fn an_update_whose_base_is_the_branch_itself_does_not_hide_the_test_commit() {
         at_origin(),
         m,
         "the fix is not sent before CI failed at the test commit"
+    );
+
+    // A recorded pull request whose base is the branch itself does not steer the check either.
+    let dir = root.join("answers").join(task);
+    let v = json!({"number": 1, "url": format!("https://github.com/o/{task}/pull/1"),
+                   "baseRefName": branch, "headRefOid": m});
+    std::fs::write(dir.join("view.1"), v.to_string()).unwrap();
+    assert!(call("push", json!({"task": task})).is_ok());
+    assert_eq!(run.finished("push"), "failed");
+    assert_eq!(
+        at_origin(),
+        m,
+        "a pull request's base does not hide the test commit"
     );
     if let Some((stop, d)) = run.daemon.take() {
         stop.store(true, Ordering::SeqCst);

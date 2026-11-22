@@ -55,12 +55,11 @@ struct Job {
     before: Before,
 }
 
-/// Issue 307: the project's default branch, the task's newest watched pull request and the heads
-/// with a failed CI run on any of its pull requests (`door::failed_heads`, the gate's reader).
+/// Issue 307: the project's default branch and the heads with a failed CI run on any of the task's
+/// pull requests (`door::failed_heads`, the gate's reader).
 #[derive(Clone, Default)]
 struct Before {
     default_branch: String,
-    watched: Option<(String, i64)>,
     failed: BTreeSet<String>,
 }
 
@@ -80,29 +79,18 @@ impl Before {
         }
         Ok(Before {
             default_branch,
-            watched: prs.into_iter().next(),
             failed,
         })
     }
 }
 
-/// The base the check before CI judges against, fetched from origin first: the base of the task's
-/// newest watched pull request (read as the gate reads it), else the project's default branch, the
-/// run's starting point. Never `update`'s base, which is only what is merged in: a base naming the
-/// branch itself would hide the test commit. Its id; what cannot be read refuses.
+/// The base the check before CI judges against, fetched from origin first: the project's default
+/// branch, the run's starting point. Nothing the secretary passes or records steers it: neither
+/// `update`'s base, which is only what is merged in, nor a recorded pull request's base, either of
+/// which could name a branch that already holds the test commit and so hide it. Its id; what
+/// cannot be read refuses.
 fn judged_base(dir: &Path, j: &Job) -> std::result::Result<String, String> {
-    let b = match &j.before.watched {
-        Some((repo, pr)) => gate::pr_view(&super::gh::program(), repo, *pr)
-            .map(|(_, b, _)| b)
-            .map_err(|e| {
-                format!(
-                    "the base of {repo}#{pr} cannot be read ({}), so the branch cannot be checked \
-                     before CI (Issue 307); nothing was pushed, push again",
-                    e.0
-                )
-            })?,
-        None => j.before.default_branch.clone(),
-    };
+    let b = &j.before.default_branch;
     let r = format!("refs/remotes/origin/{b}");
     git(
         dir,

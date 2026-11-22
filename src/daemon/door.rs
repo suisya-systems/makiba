@@ -340,14 +340,21 @@ impl Door {
                     Ok((projects, failed_heads(w.conn(), &repo, pr)?))
                 })();
                 let (projects, failed) = read.map_err(internal)?;
+                let before = newest_watch(&w, &repo, pr).map_err(internal)?;
                 drop(w);
-                let found = pr_before_ci(&projects, &failed, &repo, pr, &head);
+                let mut found = pr_before_ci(&projects, &failed, &repo, pr, &head);
                 let w = self.writer();
                 // The same request may have been recorded while the lock was released.
                 if let Some(idem) = idem
                     && let Some(first) = replay(&w, &actor, idem).map_err(internal)?
                 {
                     return first;
+                }
+                // Another record of this pull request went in meanwhile: this one may be older.
+                if found.is_ok() && newest_watch(&w, &repo, pr).map_err(internal)? != before {
+                    found = Err(format!(
+                        "{repo}#{pr} was recorded again while this record was checked; nothing was recorded, record the newest head again"
+                    ));
                 }
                 if let Err(why) = found {
                     let r = Err(refuse(
@@ -2375,6 +2382,15 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         task,
         review,
     })
+}
+
+/// The id of the newest watch of `repo#pr`, if any.
+fn newest_watch(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<Option<i64>> {
+    w.conn().query_row(
+        "SELECT max(id) FROM pr_watches WHERE lower(repo) = lower(?1) AND pr = ?2",
+        params![repo, pr],
+        |r| r.get(0),
+    )
 }
 
 /// The heads of the failed `ci_completed` events among `ci` (one pull request's).
