@@ -1,6 +1,6 @@
 # The belt: work inside an approved range
 
-Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Nothing here is built; no name below is in `src/spec.rs` yet. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
+Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Step 1 is built (Issue 257): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
 
 Today the person is the clock: a run closes, `makibad` scans, the secretary proposes, the person picks. The conveyor skill lets the secretary keep going inside a scope, but the scope lives in the conversation, the count of slots is the secretary's own, and every stop holds a slot. On 2026-11-21 claude-org-ja ran this belt by hand over about a dozen makiba Issues; this note says what of that becomes a record or a verb here.
 
@@ -69,7 +69,7 @@ Why not a file (claude-org-ja keeps `.state/conveyor/scope-contract.md`):
 | `end <id>` | yes | yes | `ended`, reason `secretary` or `person`. |
 | `skip <id> <issue> --reason` | yes | yes | Takes one candidate out of the range before it is dispatched (`belt_skipped`). |
 
-There is no verb that changes an active range. Widening anything (more Issues, budget, `at_once`, `follow_ups` from `ask` to `inside`) is a new proposal, approved again; approving it ends the old one (`replaced`) in the same transaction, and the old range's runs move to the new one.
+There is no verb that changes an active range. Widening anything (more Issues, budget, `at_once`, `follow_ups` from `ask` to `inside`) is a new proposal, approved again; approving it ends the old one (`replaced`) in the same transaction. The old range's runs keep their range (where a run came from, and each range's budget, stay readable); the runs of the ranges a range replaced count against its `at_once` (as built in step 1, finding 3).
 
 What the range does not bound (review): a `dispatch` that names no range. That is today's path, the secretary acting on the person's word in the conversation, and it stays as trusted as today (Q8): a one-off task needs no range and no key. It is not silent: such a run counts against `max_concurrent_workers`, so it takes from the belt's room, and the read surface shows it as a run with no range.
 
@@ -77,12 +77,12 @@ What the range does not bound (review): a `dispatch` that names no range. That i
 
 | Transition | Cause | By |
 | --- | --- | --- |
-| `active` to `ended` | `budget_tasks` all taken and every task of the range closed; `budget_hours` past; `used_up` (a complete read finds no candidate, none left out only for an open dependency, and no task of the range is open); `scan_error` (the read reports the project unset or in error, never read as "no candidates"). | `makibad` |
+| `active` to `ended` | `budget_tasks` all taken, or `budget_hours` past, and every task of the range closed; `used_up` (a complete read finds no candidate, none left out only for an open dependency, and no task of the range is open); `scan_error` (the read reports the project unset or in error, never read as "no candidates"). | `makibad` |
 | `active` or `paused` to `ended` | `end`, or a replacing approval. | Secretary or person |
 | `active` to `paused` | `pause`; two launches of the range failed in a row (a verified launch resets the count); two refusals by the gate of different pull requests in a row (a merged one resets it). | Secretary, person, `makibad` |
 | `paused` to `active` | `resume`. | Person |
 
-Once `budget_tasks` are all taken or `budget_hours` is past, nothing new is dispatched; the range shows as ending until its last task closes. In every case runs already dispatched go on to their own end: the secretary still pushes, merges per the mode and closes them. Nothing is abandoned by an ending.
+Once `budget_tasks` are all taken or `budget_hours` is past, nothing new is dispatched; the range stays `active` and is read as ending (each candidate `not_in` is `budget`, none `no_slot`) until its last task closes, and only then is it `ended` with that reason. "Ending" is that stretch, never a status of its own. In every case runs already dispatched go on to their own end: the secretary still pushes, merges per the mode and closes them. Nothing is abandoned by an ending.
 
 ## 3. The loop
 
@@ -109,7 +109,7 @@ The triage pass cannot serve the clock as it is (review): it scans only after a 
 
 ### 3.4 State table
 
-"Next candidate" is the first row of `range_candidates` in triage order (goal clause, then the carried order) that the records still allow (no run of its own, a slot, budget) and that does not depend on a task waiting for the person (4.2).
+"Next candidate" is the first row of `range_candidates` in the read's order (the goal clause the Issue names, none last, then the Issue's number: step 1 does not carry the triage scan's other keys) that the records still allow (no run of its own, a slot, budget) and that does not depend on a task waiting for the person (4.2).
 
 | Event | `makibad` does | The secretary does |
 | --- | --- | --- |
@@ -160,7 +160,7 @@ Each stop of one task is a pending entry for the person with `stop_line` set, an
 | --- | --- | --- |
 | 1. A decision that is the person's | The secretary's `escalate` (judgment; the record makes it visible and frees the slot). Skill `pull-request` line 3 for a pull request. | Judgment only. |
 | 2. A change outside the range | A candidate outside the range: never dispatched by `makibad`, and refused when the secretary names the range (code). A dispatch naming no range: not bounded (2.3, Q8 decided so). A change beyond its brief inside a task: judgment (skill line 3). | Not yet: no range record. |
-| 3. An irreversible action | Skill line 4 (judgment). Code holds parts: `push` is never forced, `down` and the base are the person's, and a change with no declared test merges under `acceptance` only when it is Markdown or under `docs/`. Not held: a release tag, a change of settings or access made through `gh`. | Parts, by `push` and `gate`. |
+| 3. An irreversible action | Skill line 4 (judgment). Code holds parts: `push` is never forced, `down` and the base are the person's, and a change with no declared test merges under `acceptance` only when it is Markdown or under `docs/`. Not held: a release tag, a change of settings or access made through `gh`, a change to `Cargo.toml` or the lock file (which the gate does not compare with the test commit unless declared), and a script changed on disk outside the repository. | Parts, by `push` and `gate`. |
 | 4. The budget | `makibad` counts `budget_tasks`, `budget_hours` (whole range) and `budget_fixes` (one task) from records. | No. |
 | 5. A suspicion that a test was rewritten to pass | `gate`: the test commit is the first and unchanged, the declared paths and test setup at head are as at the test commit, the manifest digest is pinned. Not held: an edit to an existing test outside the declared paths (on 2026-11-21 every such pull request was landed by the owner by hand). Proposed for step 2: `gate` reports a change to an existing file under `tests/` not declared, and the belt makes it a stop. | Yes for declared tests. |
 | 6. A refusal by the gate | Every `gate` answer with `allow` false (review: `rejected`, and `no_manifest` refused under `acceptance`), including the refusals decided before the git checks (a head or CI mismatch), which then also write an `acceptance_gate` row so that a record exists. One stop per pull request and head. | The refusal, yes; the stop record, no. |
@@ -268,7 +268,8 @@ A screen shows every item of the range, not only the tasks on the belt (the owne
 | `in_work` | runs with the range's `range_id`, `queued`, `in_use`, `suspended` or `failed` | `stage`: `launching`, `at_work`, `design_only` (4.3), `launch_failed`. |
 | `waiting_person` | the run's open entry with `stop_line` (`belt_stopped`) | `why`: the line and the reason's first line; `since`: the stop. |
 | `review` | runs at `review` or `parked` with no open stop, with their pull request watch | `stage`: `no_pr`, `ci`, `to_land` (CI passed, merge under the mode), `waits_landing #<n>` (a parked design-ahead run, 4.3). |
-| `landed` | runs `completed` with the range's `range_id`, their `run_closed` event and their pull request record | `pr`, `pr_title`, `since` (the close): what landed, not a tick only. A run closed `completed` with no pull request shows `pr` empty. |
+| `landed` | runs `completed` with the range's `range_id` and a `pr_merged` event: their pull request recorded with `pr`, read merged by `makibad` | `pr`, `pr_title`, `since` (the close): what landed, not a tick only. |
+| `closed` | runs `completed` with no merge recorded (no pull request recorded, or not read merged yet) | `why`: `no merge recorded`. A close says the secretary closed it, not that it landed (finding 5). |
 | `skipped` | `belt_skipped` events of the range; runs `abandoned` | `why`: the recorded reason. |
 
 Order: by admission, so that the list does not jump between reads. Every item with a run is placed by the id of its `belt_dispatched` event, and a skipped one by its `belt_skipped` event; these never move. Items `not_in` follow, in the order of the newest read; only this tail may reorder when a read changes the triage order, and an item leaves it for its admission place when dispatched.
@@ -318,3 +319,23 @@ The first version refuses a second active range of a project in `approve`, and n
 | The stops (section 5) | A stop is put to `pending.context_json.to`, the range's `approved_by`. | The secretary puts the question to that person; the screen shows each person their own stops. |
 
 What must be true in step 1, so that several ranges are an extension and not a rewrite: every count, read, event and status field is keyed by the range id (no "the active range" in code or in the read surface; `ranges[]` is a list); `approved_by` and the person a stop is addressed to are fields, never the constant `person`; and the one-range rule lives in the move to `active` (`approve`, `resume`) only, not in a unique index.
+
+## 11. Step 1 as built (Issue 257)
+
+Built: the records (migration v8: `ranges`, `range_candidates`, `runs.range_id`), the verb `range` (`propose`, `approve`, `pause`, `resume`, `end`, `skip`), the read (spec section 5.8), the dispatch by `makibad` in the transaction of the done report, the close, the escalation or the read that freed or found a slot, the counts, the stop record and `ranges[]` on the read surface (spec section 12, table `Range field`). Not built: `budget_hours`, `budget_fixes`, `follow_ups: inside` (a follow-up is left out as `follow_up (ask)`), `design_ahead`, parking, the stops code writes itself, `dispatch` naming a range (a range's tasks are dispatched by `makibad`; a one-off dispatch names its Issue with `--issue`), and the `belt[]` and `pending[].stop_line` read fields.
+
+Departures from this note, decided with the owner's standing answer of 2026-11-22: runs are not moved on a replacement (2.3); the place `closed` (7.1); the read order is the goal clause then the number (3.4).
+
+The nine findings of the design review (Issue 248, 2026-11-22):
+
+| # | Finding | In step 1 |
+| --- | --- | --- |
+| 1 | Rework and suspended runs in the count | Built. `report start` from `review` puts a run back `in_use`; the range's count takes `queued`, `in_use`, `suspended` and `failed` (until closed, so a broken launch cannot spend the budget before the automatic pause of step 2), less runs waiting only for the person. |
+| 2 | A one-off dispatch and `runs.issue_refs` | Built. `dispatch --issue` fills `issue_refs`; a range leaves out and never dispatches an Issue an open run names. A one-off without `--issue` stays unseen (the delegate skill asks for it). |
+| 3 | Replacing a range, its budget | Built: runs keep their range; `at_once` counts the replaced chain; the budget counts the range's own dispatches. |
+| 4 | A failed read | Built. A failed or truncated read is recorded `complete` false and keeps the candidates, which are not dispatched from: a range dispatches only from a newest read that is complete and was started after its newest approval or resume. Only a complete read ends a range `used_up`. |
+| 5 | What proves a landing | Built. `pr_merged`, from the run's recorded pull request read merged; `landed` needs it, `closed` otherwise. |
+| 6 | A parked run and another open stop | Deferred to step 3, which parks. In step 1 nothing parks; a run with any escalated entry counts in neither count until every one is answered. |
+| 7 | What the gate holds | Section 5 now says what it does not hold (`Cargo.toml`, the lock file, a script on disk); the gate's check of edited tests is step 2. |
+| 8 | The resume brief | Built. A renewed secretary's brief names the ranges in force first, right after its fixed line, and says to read `status` before anything else. |
+| 9 | `budget_hours`, "ended" and "ending" | Worded in 2.4: "ending" is the stretch before the last task closes, never a status. `budget_hours` is not built in step 1. |

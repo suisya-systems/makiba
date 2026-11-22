@@ -46,6 +46,11 @@ pub fn main(as_json: bool) -> ExitCode {
     }
 }
 
+/// `read` of this organization's `state.db` (the person's `range approve` shows a range from it).
+pub fn read_here() -> Result<Value, String> {
+    read(&crate::daemon::state_dir().join("state.db"))
+}
+
 /// The same read as an object, with no age in it, so two reads of one heartbeat agree:
 /// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}, "merge_approval_mode"}`. The mode
 /// is read from this process's environment at each call, as the gate reads it (Issue 188): through
@@ -85,6 +90,7 @@ pub fn read(path: &Path) -> Result<Value, String> {
         "runs": runs(&conn).map_err(sql)?, "terminals": terminals(&conn).map_err(sql)?,
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?});
+    v["ranges"] = Value::Array(crate::daemon::belt::read_ranges(&conn).map_err(sql)?);
     v["next_work"] = next_work(&conn).map_err(sql)?;
     Mask::new(&conn).value(&mut v);
     Ok(v)

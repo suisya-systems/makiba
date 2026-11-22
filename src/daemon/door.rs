@@ -108,7 +108,11 @@ pub fn agent_of(db: &Path, token: &str) -> Option<String> {
     caller(&conn, token).ok().flatten().map(|(id, _)| id)
 }
 
-fn refuse(kind: ErrorKind, message: impl Into<String>, hint: impl Into<String>) -> DoorError {
+pub(super) fn refuse(
+    kind: ErrorKind,
+    message: impl Into<String>,
+    hint: impl Into<String>,
+) -> DoorError {
     DoorError {
         kind,
         message: message.into(),
@@ -116,7 +120,7 @@ fn refuse(kind: ErrorKind, message: impl Into<String>, hint: impl Into<String>) 
     }
 }
 
-fn internal(e: impl std::fmt::Display) -> DoorError {
+pub(super) fn internal(e: impl std::fmt::Display) -> DoorError {
     refuse(
         ErrorKind::Internal,
         e.to_string(),
@@ -124,7 +128,7 @@ fn internal(e: impl std::fmt::Display) -> DoorError {
     )
 }
 
-fn usage(message: impl Into<String>) -> DoorError {
+pub(super) fn usage(message: impl Into<String>) -> DoorError {
     refuse(ErrorKind::Usage, message, "")
 }
 
@@ -188,7 +192,7 @@ pub fn tools_of(role: Role) -> Vec<Verb> {
         .collect()
 }
 
-fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, DoorError> {
+pub(super) fn str_arg<'a>(args: &'a Value, name: &str) -> Result<&'a str, DoorError> {
     args.get(name)
         .and_then(Value::as_str)
         .ok_or_else(|| usage(format!("the argument {name} (text) is missing")))
@@ -589,7 +593,7 @@ fn run(
     v: Verb,
     args: &Value,
 ) -> Response {
-    match v {
+    let r = match v {
         Verb::Dispatch => dispatch(w, agent, actor, args),
         Verb::Status => status(w),
         Verb::Peek => peek(w, base, args),
@@ -626,9 +630,16 @@ fn run(
             super::project::accept(w, role, actor, slug, str_arg(args, "repo")?, hosts)
         }
         Verb::Update => update(w, args),
+        Verb::Range => super::belt::range(w, actor, role, args),
         Verb::Review => review_allowance(w, actor, args),
         other => Err(internal(format!("{} is not built yet", other.as_str()))),
+    }?;
+    // A done report, a close and an escalation free a slot: the belt fills it in the same
+    // transaction (belt.md 3.4, 4.1). Any other answer of these verbs fills nothing new.
+    if matches!(v, Verb::Report | Verb::Close | Verb::Pending) {
+        super::belt::fill(w, agent).map_err(internal)?;
     }
+    Ok(r)
 }
 
 /// `renew` (spec section 12, Issue 46): the handover is stored in the command's own row, which
@@ -752,7 +763,11 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
             if q.trim().is_empty() {
                 return Err(usage("the question is not empty"));
             }
-            let context = context_arg(args)?;
+            // Issue 255's context parts, and the belt's stop fields beside them (Issue 257).
+            let mut context = context_arg(args)?;
+            if let Value::Object(m) = &mut context {
+                m.extend(super::belt::stop_fields(args)?);
+            }
             if !run_exists(w, task)? {
                 return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
             }
@@ -802,6 +817,9 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
                 )
                 .map_err(internal)?;
             if changed == 1 {
+                if action == "escalate" {
+                    super::belt::stopped(w, "makibad", id).map_err(internal)?;
+                }
                 return Ok(json!({"id": id, "status": to}));
             }
             let now: Option<String> = c
@@ -1137,6 +1155,16 @@ fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response
             "a task id is used once; dispatch under another id",
         ));
     }
+    let issue = match args.get("issue") {
+        None | Some(Value::Null) => None,
+        Some(n) => Some(
+            n.as_i64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| usage("issue is an Issue number"))?,
+        ),
+    };
+    let refs = issue.map(|n| super::belt::issue_ref(project, n));
+    let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
     let spawn = random_key().map_err(internal)?[..32].to_string();
     let worktree = super::prepare::Places::from_env(Path::new(""))
         .workplace(kind, project, task)
@@ -1149,6 +1177,7 @@ fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response
             title: Some(title),
             status: Some("queued"),
             branch: opt("branch"),
+            issue_refs: (!refs.is_empty()).then_some(&refs[..]),
             ..Default::default()
         })?;
         w.conn().execute(
@@ -1324,6 +1353,15 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
         w.conn()
             .execute(
                 "UPDATE runs SET status = 'review' WHERE task_id = ?1 AND status IN ('queued','in_use','suspended')",
+                [task],
+            )
+            .map_err(internal)?;
+    }
+    // A worker that starts again from review (rework) is at work again, and counts again.
+    if state == "start" {
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'in_use' WHERE task_id = ?1 AND status = 'review'",
                 [task],
             )
             .map_err(internal)?;
@@ -3153,7 +3191,7 @@ fn tool(v: Verb) -> Value {
             &[],
         ),
         Verb::Dispatch => (
-            "Dispatch a task: a queued run and its first launch. kind is code or document; project is required for code. The brief is the task text itself.",
+            "Dispatch a task: a queued run and its first launch. kind is code or document; project is required for code. The brief is the task text itself. issue: the Issue number the task works on, so that a range does not dispatch it again.",
             Map::from_iter([
                 (
                     "kind".into(),
@@ -3165,6 +3203,7 @@ fn tool(v: Verb) -> Value {
                 ("project".into(), text.clone()),
                 ("model".into(), text.clone()),
                 ("branch".into(), text.clone()),
+                ("issue".into(), json!({"type": "integer"})),
             ]),
             &["kind", "task_id", "title", "brief"],
         ),
@@ -3182,7 +3221,7 @@ fn tool(v: Verb) -> Value {
             &["task_id"],
         ),
         Verb::Pending => (
-            "Keep the pending table of questions: add (task, question, and its context: background, if_yes, if_no, recommend, why), escalate or withdraw (id), list. An entry is escalated only with all five parts; recommend may say there is none, with the reason in why. add of the same open question fills in the parts given.",
+            "Keep the pending table of questions: add (task, question, and its context: background, if_yes, if_no, recommend, why), escalate or withdraw (id), list. An entry is escalated only with all five parts; recommend may say there is none, with the reason in why. add of the same open question fills in the parts given. For a range task's stop, add also stop_kind (design, scope, order, naming, other) and recommend_answer (yes, no or none), the recommendation as an answer.",
             Map::from_iter(
                 [
                     (
@@ -3192,6 +3231,14 @@ fn tool(v: Verb) -> Value {
                     ("id".into(), json!({"type": "integer"})),
                     ("task".into(), text.clone()),
                     ("question".into(), text.clone()),
+                    (
+                        "stop_kind".into(),
+                        json!({"type": "string", "enum": ["design", "scope", "order", "naming", "other"]}),
+                    ),
+                    (
+                        "recommend_answer".into(),
+                        json!({"type": "string", "enum": ["yes", "no", "none"]}),
+                    ),
                 ]
                 .into_iter()
                 .chain(CONTEXT_PARTS.map(|p| (p.into(), text.clone()))),
@@ -3238,6 +3285,30 @@ fn tool(v: Verb) -> Value {
                 ("reason".into(), text.clone()),
             ]),
             &["pattern", "decision", "reason"],
+        ),
+        Verb::Range => (
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone.",
+            Map::from_iter([
+                (
+                    "action".into(),
+                    json!({"type": "string", "enum": ["propose", "approve", "pause", "resume", "end", "skip"]}),
+                ),
+                ("id".into(), json!({"type": "integer"})),
+                ("project".into(), text.clone()),
+                (
+                    "issues".into(),
+                    json!({"type": "array", "items": {"type": "integer"}}),
+                ),
+                ("takes".into(), text.clone()),
+                ("at_once".into(), json!({"type": "integer"})),
+                ("budget_tasks".into(), json!({"type": "integer"})),
+                ("brief_head".into(), text.clone()),
+                ("replaces".into(), json!({"type": "integer"})),
+                ("issue".into(), json!({"type": "integer"})),
+                ("reason".into(), text.clone()),
+                ("read".into(), json!({"type": "integer"})),
+            ]),
+            &["action"],
         ),
         Verb::Review => (
             "A worker: have a second reader review your task, once with kind design (the design as note) before code, and with kind diff after your last commit, before report done. makibad runs the reader (another model's program when usable, else the same model in a fresh session) on your committed head and answers with verdict (passed or not-established), reader, round, allowed, findings (blocker, major, minor) and text. Rounds are capped: design 1, diff 3; over the cap it is refused with REVIEW_ROUND_DENIED. The secretary: set a task's diff allowance with task, allowed (a number or unlimited) and reason.",

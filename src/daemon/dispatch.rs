@@ -30,16 +30,19 @@ const TAKEN: &str = "EXISTS (SELECT 1 FROM events e WHERE e.kind = 'run_taken'
                       AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id)";
 
 /// The runs counted against `max_concurrent_workers`: `in_use`, or `queued` / `suspended` with a
-/// taken launch not yet `verified` or `failed`.
+/// taken launch not yet `verified` or `failed`; not a run that waits only for the person (an
+/// escalated pending entry, belt.md 4.1).
 pub fn busy(w: &StateWriter) -> Result<usize> {
     // A run counts once, however it is counted. Only a run still `queued` or `in_use` can be
     // waiting on a launch (ponytail: a launch left open on a run that ended is not counted).
     let n: i64 = w.conn().query_row(
         &format!(
-            "SELECT count(*) FROM runs r WHERE r.status = 'in_use'
+            "SELECT count(*) FROM runs r WHERE (r.status = 'in_use'
              OR (r.status IN ('queued', 'suspended')
              AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
-                         AND l.stage NOT IN ('verified', 'failed') AND {TAKEN}))"
+                         AND l.stage NOT IN ('verified', 'failed') AND {TAKEN})))
+             AND NOT {}",
+            super::belt::WAITING
         ),
         [],
         |r| r.get(0),
@@ -71,13 +74,15 @@ impl Dispatch {
         if busy(w)? >= self.capacity {
             return Ok(None);
         }
-        // The oldest queued run whose newest launch is `planned` and not taken yet.
+        // The oldest queued run whose newest launch is `planned` and not taken yet; a run that
+        // waits only for the person is not launched while it waits.
         let next: Option<(String, String)> = {
             let mut st = w.conn().prepare(&format!(
                 "SELECT r.task_id, l.spawn_id FROM runs r
                  JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
-                 WHERE r.status = 'queued' AND l.stage = 'planned' AND NOT {TAKEN}
-                 ORDER BY r.dispatched_at, r.id LIMIT 1"
+                 WHERE r.status = 'queued' AND l.stage = 'planned' AND NOT {TAKEN} AND NOT {}
+                 ORDER BY r.dispatched_at, r.id LIMIT 1",
+                super::belt::WAITING
             ))?;
             let mut rows = st.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?;
             rows.next().transpose()?
