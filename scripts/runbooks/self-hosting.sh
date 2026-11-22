@@ -4,6 +4,7 @@
 #
 #   bash scripts/runbooks/self-hosting.sh check       read-only: the preconditions, nothing is changed
 #   bash scripts/runbooks/self-hosting.sh rehearse    the whole run in a scratch place; no real place is written
+#   bash scripts/runbooks/self-hosting.sh first-day   the four checks before the first range, in a scratch place
 #   bash scripts/runbooks/self-hosting.sh register    REAL: makiba registered in the organization, ledger placed
 #   bash scripts/runbooks/self-hosting.sh triage      REAL: one small task dispatched and closed, the scan read
 #   bash scripts/runbooks/self-hosting.sh cleanup     removes the scratch places this script made; safe to run twice
@@ -34,7 +35,7 @@ ORIG_TMP=${TMPDIR:-/tmp}   # scratch_env moves TMPDIR; the scratch folders are n
 BRIEF=""                   # the temporary brief of the triage task, removed at exit
 SCRATCH_RUN=""             # the scratch folder of this rehearsal, stopped and (when clean) removed at exit
 
-usage() { sed -n '2,15p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,16p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 for a in "$@"; do
   case "$a" in
@@ -46,7 +47,7 @@ for a in "$@"; do
     *) if [ -n "$STAGE" ]; then usage >&2; exit 2; fi; STAGE=$a ;;
   esac
 done
-case "$STAGE" in check | rehearse | register | triage | cleanup) ;; *) usage >&2; exit 2 ;; esac
+case "$STAGE" in check | rehearse | first-day | register | triage | cleanup) ;; *) usage >&2; exit 2 ;; esac
 STAGE_NAME=$STAGE
 
 open_results() {
@@ -142,7 +143,10 @@ preflight() { # preflight <real|scratch>
   fi
   if [ -z "$MK_GIVEN" ]; then
     say "  building this commit (an older target/debug/makiba would be run otherwise)"
-    run cargo build --manifest-path "$REPO/Cargo.toml"
+    run cargo build --manifest-path "$REPO/Cargo.toml" || {
+      check binary FAIL "cargo build of $COMMIT failed (its output is above)"
+      refuse "cargo build failed" "fix the build, then run the line again"
+    }
   fi
   if [ "$DRY" != 1 ] && [ ! -x "$MK" ]; then refuse "$MK is not an executable" "build it: cargo build, or name another with MK=<path>"; fi
   if [ "$mode" = real ]; then
@@ -421,6 +425,282 @@ stage_rehearse() {
   stage_triage 1
 }
 
+# ---- first-day (Issue 51): the four checks before makiba's first range, in a scratch place ----
+
+FD_SUM=()    # one line per check, printed last
+FD_NEXT=()   # what to do next, one per FAIL
+FD_GAPS=()   # what no script shows (named steps) or what stays unproven
+FD_READER=""     # the reader the newest diff review of this stage used
+FD_VERDICT=""    # its verdict
+# The words a refused or unreachable host leaves in cargo's, git's or curl's own text.
+NET_ERR='resolve host|resolve hostname|[Ff]ailed to connect|onnection refused|CONNECT|[Pp]roxy|tunnel|spurious network error|failed to download|unable to update registry'
+
+# fd <name> <PASS|FAIL|INFO> <detail> [<what to do next, for a FAIL>]
+fd() {
+  check "$1" "$2" "$3"
+  local one=${3%%$'\n'*}
+  FD_SUM+=("$1: $2  ${one:0:220}")
+  if [ "$2" = FAIL ]; then FD_NEXT+=("$1: ${4:-read the lines above}"); fi
+  return 0
+}
+
+# The last lines of the results: one line per check, what to do for each FAIL, one verdict to relay as it is.
+fd_summary() {
+  if [ "$STAGE" != first-day ] || [ "$DRY" = 1 ] || [ "${#FD_SUM[@]}" -eq 0 ]; then return 0; fi
+  local l v
+  say "== summary (first-day, commit $COMMIT)"
+  for l in "${FD_SUM[@]}"; do say "SUMMARY $l"; done
+  for l in "${FD_NEXT[@]+"${FD_NEXT[@]}"}"; do say "NEXT $l"; done
+  for l in "${FD_GAPS[@]+"${FD_GAPS[@]}"}"; do say "NOT SHOWN $l"; done
+  if [ "$FAILS" -gt 0 ]; then v="NOT READY: $FAILS check(s) failed; the NEXT lines say what to do, then run the line again"
+  elif [ "${#FD_GAPS[@]}" -gt 0 ]; then v="READY on what a script can show; left for the person: the NOT SHOWN lines"
+  else v="READY: every check passed"; fi
+  say "VERDICT first-day: $v"
+}
+
+# The real organization's makibad, read only: its pid is in state.db (makiba status reads it without makibad).
+fd_real_binary() {
+  say "== check 1: the binary"
+  say "+ $MK status        (read only: which makibad the real organization runs; nothing is changed)"
+  if [ "$DRY" = 1 ]; then
+    plan "PASS: this checkout built as $COMMIT; INFO: the real makibad's pid, the program it runs (/proc/<pid>/exe) and when it started"
+    plan "print the two lines that restart the real organization on this build: $MK down, then $MK up"
+    return 0
+  fi
+  if [ -n "$MK_GIVEN" ]; then fd binary INFO "$MK was named with MK= and is used as it is; this checkout is $COMMIT"
+  else fd binary PASS "built $COMMIT: $MK ($(stat -c %y "$MK" | cut -c1-19))"; fi
+  local pid exe when
+  pid=$("$MK" status 2>/dev/null | sed -n 's/^makibad: pid \([0-9][0-9]*\)$/\1/p' || true)
+  exe=""; if [ -n "$pid" ]; then exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true); fi
+  if [ -n "$exe" ]; then
+    when=$(ps -o lstart= -p "$pid" 2>/dev/null || true)
+    fd real-binary INFO "the real makibad (pid $pid) runs $exe, started $when; a binary carries no commit (its version is 0.0.0), so what it was built from cannot be read; this checkout is $COMMIT, committed $(git -C "$REPO" log -1 --format=%cI)"
+  else
+    fd real-binary INFO "no real makibad could be read (makiba status shows no pid on the default places): nothing to compare, the real organization is not running on this build"
+  fi
+  say "  to restart the real organization on this build, type these two lines in a login shell, one after the other (the second brings back the runs the first suspended):"
+  say "    $MK down"
+  say "    $MK up"
+}
+
+# fd_brief <task> <full|doc>: the brief of one tiny code task. ASCII only.
+fd_brief() {
+  local t=$1 mode=$2
+  printf 'This is a check that a code worker of makiba works end to end. Keep it tiny. Work only inside your run repository (your current folder). Never push.\n'
+  if [ "$mode" = full ]; then
+    printf '1. Run: CARGO_HOME="$PWD/.cargo-home" cargo fetch 2>&1 | tail -n 12   (a CARGO_HOME of its own, so that cargo has no cache and must download from the network hosts; put it before every cargo command, each Bash call starts fresh).\n'
+    printf '2. Run: ls "$PWD/.cargo-home/registry/cache"/*/ | wc -l   (this number is DOWNLOADED).\n'
+    printf '3. Run: CARGO_HOME="$PWD/.cargo-home" cargo build 2>&1 | tail -n 15\n'
+  fi
+  printf 'Then append the single line "First-day check: a makiba code worker made this line." to README.md, and create tests/first_day_check.rs holding exactly one test: #[test] fn first_day_check() { assert_eq!(2 + 2, 4); } (write it over several lines).\n'
+  if [ "$mode" = full ]; then
+    printf 'Run: CARGO_HOME="$PWD/.cargo-home" cargo test --test first_day_check 2>&1 | tail -n 15\n'
+  fi
+  printf 'Then: git add README.md tests/first_day_check.rs (only these two; never .cargo-home or target) and git commit -m "docs: first-day check".\n'
+  printf 'Then call the tool review once, with kind "diff", and wait for its answer (it can take up to 20 minutes). Do not call it again.\n'
+  if [ "$mode" = full ]; then
+    printf 'Last, call the tool report with state "done", task "%s" and one sentence that starts with: BUILD=<ok|failed> DOWNLOADED=<the number> TEST=<ok|failed>, then what the review answered in a few words.\n' "$t"
+    printf 'If cargo fails with a network, host, connection or proxy error, do not retry: call the tool report with state "blocked", task "%s" and the first 8 lines of that error exactly as printed. The same if report done is refused.\n' "$t"
+  else
+    printf 'Last, call the tool report with state "done", task "%s" and one sentence that says what the review answered. Run no cargo command. If report done is refused, call report with state "blocked" and the refusal text.\n' "$t"
+  fi
+}
+
+# fd_dispatch <task> <brief file>: dispatches the task and waits for its done or blocked report, or a failed launch.
+# FD_OUTCOME: done, blocked, failed (the launch) or timeout; FD_BODY: the report's text or the launch's reason.
+fd_dispatch() {
+  local task=$1 f=$2 limit=${WAIT_CODE:-3000}
+  FD_OUTCOME=timeout; FD_BODY=""
+  say "+ $MK dispatch --kind code --project $SLUG --task-id $task --title 'First-day check' --brief-file $f"
+  "$MK" dispatch --kind code --project "$SLUG" --task-id "$task" --title "First-day check" --brief-file "$f" || { FD_OUTCOME=failed; FD_BODY="makiba dispatch exited non-zero (its text is above)"; return 0; }
+  settled() { [ -n "$(sq "SELECT 1 FROM messages WHERE kind IN ('report_done','report_blocked') AND run_id = (SELECT id FROM runs WHERE task_id = '$task') UNION ALL SELECT 1 FROM run_launch l JOIN runs r ON r.id = l.run_id WHERE r.task_id = '$task' AND l.stage = 'failed'")" ]; }
+  say "  this wait may take up to $((limit / 60)) minutes (a cold cargo fetch and build, the worker's turns and its diff review)"
+  wait_for "$limit" "the worker's done or blocked report for $task" settled || return 0
+  FD_BODY=$(sq "SELECT kind, body FROM messages WHERE kind IN ('report_done','report_blocked') AND run_id = (SELECT id FROM runs WHERE task_id = '$task') ORDER BY id DESC LIMIT 1")
+  case "$FD_BODY" in
+    report_done\|*) FD_OUTCOME=done ;;
+    report_blocked\|*) FD_OUTCOME=blocked ;;
+    *) FD_OUTCOME=failed; FD_BODY=$(sq "SELECT coalesce(l.failed_reason, '') FROM run_launch l JOIN runs r ON r.id = l.run_id WHERE r.task_id = '$task' AND l.stage = 'failed' ORDER BY l.id DESC LIMIT 1") ;;
+  esac
+  FD_BODY=${FD_BODY#*|}
+  return 0
+}
+
+# Host names a failure text names (after "host" or "://"), not the ones the project already lists.
+fd_hosts_in() {
+  printf '%s\n' "$1" | grep -E "$NET_ERR" | grep -oE '(://|[Hh]ost:? ?|connect to )[A-Za-z0-9.-]+\.[A-Za-z]{2,}' | sed -E 's#^(://|[Hh]ost:? ?|connect to )##' | sort -u | grep -vxF -f <(printf '%s\n' "${HOSTS//,/$'\n'}") || true
+}
+
+# Check 2, read from the worker's own messages and the run's events (no event names a refused host:
+# the refusal is Claude Code's, so it shows in the worker's words, which the brief asks it to quote).
+fd_check_build() {
+  local task=$1 hosts texts n
+  texts=$(sq "SELECT body FROM messages WHERE run_id = (SELECT id FROM runs WHERE task_id = '$task') UNION ALL SELECT payload_json FROM events WHERE run_id = (SELECT id FROM runs WHERE task_id = '$task')")
+  hosts=$(fd_hosts_in "$FD_BODY
+$texts" | tr '\n' ' ')
+  hosts=${hosts% }
+  if [ -n "$hosts" ]; then
+    fd code-worker-build FAIL "a worker's network host was refused: $hosts (not in the project's list: $HOSTS)" "add it, then run the line again: MAKIBA_RUNBOOK_HOSTS=$HOSTS,${hosts// /,} bash scripts/runbooks/self-hosting.sh first-day ; and for the real organization: $MK config set network_hosts --project $SLUG $HOSTS,${hosts// /,}"
+    return 0
+  fi
+  case "$FD_OUTCOME" in
+    timeout) fd code-worker-build FAIL "no done report in ${WAIT_CODE:-3000} s" "read its screen with $MK peek $task, then end it: $MK close $task --abandon" ;;
+    failed) fd code-worker-build FAIL "the launch failed: ${FD_BODY:-no reason recorded}" "docs/runbooks/self-hosting.md section 7 and the screen in worker_spawn_failed ($MK events); then run the line again" ;;
+    blocked) fd code-worker-build FAIL "the worker reported blocked: ${FD_BODY%%$'\n'*}" "read the whole report with $MK show <message id> (the results file keeps it), then run the line again" ;;
+    done)
+      n=$(printf '%s' "$FD_BODY" | grep -oE 'DOWNLOADED=[0-9]+' | head -n 1 | cut -d= -f2 || true)
+      if ! printf '%s' "$FD_BODY" | grep -q 'BUILD=ok' || ! printf '%s' "$FD_BODY" | grep -q 'TEST=ok'; then
+        fd code-worker-build FAIL "the done report does not say BUILD=ok and TEST=ok: ${FD_BODY%%$'\n'*}" "read its report and the build output it quotes; run the line again"
+      elif [ "${n:-0}" -gt 0 ]; then
+        fd code-worker-build PASS "done report with BUILD=ok TEST=ok after a cold download of $n crates (a CARGO_HOME of its own); no refused host in its messages or events"
+      else
+        fd code-worker-build INFO "built from a warm cache: the hosts are not proven (the report says DOWNLOADED=${n:-none}; ${FD_BODY%%$'\n'*})"
+        FD_GAPS+=("code-worker-build: the network hosts were not exercised (no crate was downloaded); run the line again, or watch the first real code worker's first cargo build")
+      fi ;;
+  esac
+}
+
+# Check 3, read from the answer the door stored (commands) and the round's event; the reason whole.
+fd_check_review() { # fd_check_review <task> <check name> <expected reader: any|fresh>
+  local task=$1 name=$2 want=$3 row verdict reader round reason fb st
+  row=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.verdict'), ''), coalesce(json_extract(result_json, '\$.result.reader'), ''), coalesce(json_extract(result_json, '\$.result.round'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' ORDER BY id DESC LIMIT 1")
+  FD_READER=""; FD_VERDICT=""
+  say "  codex_round events of $task:"
+  sq "SELECT id, kind, payload_json FROM events WHERE kind IN ('codex_round_started', 'codex_round_denied') AND json_extract(payload_json, '\$.task') = '$task' ORDER BY id" | sed 's/^/    | /' | tee -a "${RESULT:-/dev/null}" || true
+  if [ -z "$row" ]; then
+    st=$(sq "SELECT status || ' ' || coalesce(error_kind, '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' ORDER BY id DESC LIMIT 1")
+    fd "$name" FAIL "no answered diff review of $task (the worker's review command: ${st:-none was made})" "read the worker's report ($MK show) and its screen ($MK peek $task); the door's rows: the commands table, verb review"
+    return 0
+  fi
+  IFS='|' read -r verdict reader round <<EOF
+$row
+EOF
+  FD_READER=$reader; FD_VERDICT=$verdict
+  reason=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.reason'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' ORDER BY id DESC LIMIT 1")
+  fb=$(sq "SELECT coalesce(json_extract(result_json, '\$.result.fallback_reason'), '') FROM commands WHERE verb = 'review' AND actor = 'w-$task' AND status = 'done' ORDER BY id DESC LIMIT 1")
+  if [ "$verdict" = passed ]; then
+    if [ "$want" = fresh ] && [ "$reader" != fresh-session ]; then
+      fd "$name" FAIL "passed by $reader, not by the fresh session: hiding the other model's program did not take effect" "check MAKIBA_REVIEW_OTHER in makibad's environment (src/daemon/review.rs, Programs::from_env) and run the line again"
+    else
+      fd "$name" PASS "verdict passed, reader $reader, round $round${fb:+ (fallback_reason: $fb)}"
+    fi
+  else
+    say "  the review's reason, whole (Issue 280: it lists the commands the reader ran; this list tunes the recognizer):"
+    printf '%s\n' "$reason" | sed 's/^/    | /' | tee -a "${RESULT:-/dev/null}"
+    fd "$name" FAIL "verdict $verdict, reader $reader, round $round; the whole reason is in the results file above" "read the reason above: a reader that opened none of the change's files names the commands it ran there; fix the recognizer (docs/design/lines.md L-K10, src/daemon/review.rs) or the reader's setup, then run the line again"
+  fi
+}
+
+# Check 4: the hook's answer, from a stand-in door that answers as the gate does (a head with no passed review, mode human).
+fd_check_gate_ask() {
+  say "== check 4: the landing gate's question (the hook's answer; nothing is landed, no pull request exists)"
+  local sha=0123456789abcdef0123456789abcdef01234567 cmd payload out rc
+  cmd="gh pr merge 1 --repo $GH_REPO --squash --match-head-commit $sha"
+  payload=$(python3 -I -c 'import json, sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))' "$cmd")
+  say "+ the payload of the secretary's allowed landing command: $cmd"
+  if [ "$DRY" = 1 ]; then
+    plan "start a stand-in door in the scratch place that answers the gate's request with allow, warn and a reason with WARNING (a head with no diff review, mode human); run: $MK hook merge-gate with the payload and that door; read permissionDecision and WARNING"
+    plan "ask the scratch organization's real door once with the same command for a pull request that does not exist (expects a refusal that names the acceptance gate: shows the gate key and the door answer)"
+    plan "print the named step for the person"
+    return 0
+  fi
+  cat > "$RUN/standin-door.py" <<'EOF'
+import json, os, socket, sys
+path, key = sys.argv[1], sys.argv[2]
+s = socket.socket(socket.AF_UNIX)
+s.bind(path)
+s.listen(1)
+c, _ = s.accept()
+req = json.loads(c.makefile().readline())
+ok = req.get("key") == key and req.get("verb") == "gate"
+head = req.get("args", {}).get("head", "")[:12]
+reason = "no declared acceptance test; WARNING review of %s: none (no diff review was run): the person decides this landing" % head
+res = {"verdict": "no_manifest", "allow": True, "warn": True, "reason": reason, "mode": "human"}
+out = {"ok": True, "result": res} if ok else {"ok": False, "error": {"message": "stand-in: wrong key or verb"}}
+c.sendall((json.dumps(out) + "\n").encode())
+EOF
+  printf 'stand-in-gate-key\n' > "$RUN/standin-gate.key"
+  python3 -I "$RUN/standin-door.py" "$RUN/standin-door.sock" stand-in-gate-key &
+  local sp=$! i=0
+  while [ ! -S "$RUN/standin-door.sock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
+  rc=0
+  out=$(printf '%s' "$payload" | MAKIBA_DOOR="$RUN/standin-door.sock" MAKIBA_GATE_KEY="$RUN/standin-gate.key" "$MK" hook merge-gate 2>&1) || rc=$?
+  kill "$sp" 2>/dev/null || true
+  wait "$sp" 2>/dev/null || true
+  say "  the hook (stand-in door): exit $rc, output: $out"
+  if [ "$rc" -eq 0 ] && printf '%s' "$out" | python3 -I -c 'import json, sys; o = json.load(sys.stdin)["hookSpecificOutput"]; assert o["permissionDecision"] == "ask" and "WARNING" in o["permissionDecisionReason"]'; then
+    fd gate-ask PASS "the hook answered permissionDecision ask with a reason holding WARNING, for the allowed landing command under a stand-in door that answers as the gate does for a head with no review. This proves the hook's answer only: not the gate's decision on a real head, and not that Claude Code shows the question"
+  else
+    fd gate-ask FAIL "the hook did not answer ask with WARNING (exit $rc): $out" "src/hooks/merge_gate.rs ask_gate; run the line again and read the output above"
+  fi
+  rc=0
+  out=$(printf '%s' "$payload" | "$MK" hook merge-gate 2>&1) || rc=$?
+  say "  the hook (the scratch organization's real door, a pull request that does not exist): exit $rc, output: $out"
+  case "$out" in
+    *ACCEPTANCE_GATE*) fd gate-door INFO "the scratch door answered the hook with the gate key: ${out%%$'\n'*}" ;;
+    *) fd gate-door FAIL "the scratch door did not answer the gate request as a refusal of the gate (exit $rc): $out" "is makibad running, is MAKIBA_GATE_KEY read (spec section 3)? run the line again" ;;
+  esac
+  FD_GAPS+=("gate-ask: that Claude Code shows the question to the person is not shown by this script. Named step for the person: in the real secretary's session, when the first pull request of a code task is to be landed with a head that has no passed diff review, the secretary runs: gh pr merge <n> --repo $GH_REPO --squash --match-head-commit <full head sha> ; look for a question carrying WARNING review of <head>: none. If the command runs with no question, that is a failure of the hook's wiring: write it in the results")
+}
+
+stage_first_day() {
+  say "== first-day checks: what must hold on the real host before makiba's first range (Issue 51), in a scratch place"
+  say "The real organization is only read, once (makiba status). Nothing is pushed, landed or opened as a pull request; GitHub is read. Left behind on purpose, as by the rehearsal: trust entries in ~/.claude.json and transcript folders (runbook section 1)."
+  say "Waits (printed again when each starts): the clone of makiba up to $((${WAIT_CLONE:-1800} / 60)) min; each code worker's report up to $((${WAIT_CODE:-3000} / 60)) min (a cold cargo fetch and build is most of it; the diff review inside is bounded at 20 min). Expected total 25 to 60 minutes."
+  say "Cost: one real code worker and one diff review; a second worker and review only when the first review was read by the other model's program."
+  preflight scratch
+  fd_real_binary
+  scratch_env
+  if [ "$DRY" = 1 ]; then
+    plan "NOTE: the paths printed below are the real defaults; a real run points every one of them into the scratch place, with MAKIBA_MERGE_APPROVAL_MODE=human (the scratch organization only)"
+  else
+    export MAKIBA_MERGE_APPROVAL_MODE=human
+  fi
+  stage_register 1
+  say "== check 2 and 3: one real code worker, in the scratch organization"
+  local stamp A B f
+  stamp=$(date -u +%y%m%d%H%M); A=fda-$stamp; B=fdb-$stamp
+  if [ "$DRY" = 1 ]; then
+    say "+ $MK dispatch --kind code --project $SLUG --task-id $A --title 'First-day check' --brief-file <brief: cargo fetch with a CARGO_HOME of its own, cargo build, one README line, one trivial test, cargo test, commit, review kind diff, report>"
+    plan "wait for the worker's done or blocked report (up to $((${WAIT_CODE:-3000} / 60)) minutes); PASS only on BUILD=ok TEST=ok with DOWNLOADED above 0 and no refused host in its messages and events; a refused host is a FAIL that names it and the line that adds it"
+    plan "read the stored answer of the worker's review and the codex_round events: PASS when passed (with the reader), FAIL when not-established with the whole reason copied"
+    plan "when the reader was not the fresh session: $MK close $A --abandon; $MK down; MAKIBA_REVIEW_OTHER=<a path that does not exist> $MK up --no-secretary (this scratch organization only); dispatch $B (a README line and the trivial test, no cargo); expect passed by fresh-session"
+    fd_check_gate_ask
+    plan "print one line per check, a NEXT line for each FAIL, the NOT SHOWN lines and one VERDICT line"
+    return 0
+  fi
+  [ -n "$(sq "SELECT 1 FROM projects WHERE slug = '$SLUG'")" ] || refuse "project $SLUG is not registered in the scratch organization" "read the check lines above and makibad.log of the scratch state folder, then run the line again"
+  f=$RUN/brief-$A.md; fd_brief "$A" full > "$f"
+  fd_dispatch "$A" "$f"
+  say "  the worker's report: ${FD_OUTCOME}: $FD_BODY"
+  fd_check_build "$A"
+  if [ "$FD_OUTCOME" = done ]; then
+    fd_check_review "$A" review-diff any
+  else
+    fd review-diff FAIL "no review to read: the worker did not get to its done report ($FD_OUTCOME)" "see code-worker-build above"
+  fi
+  case "$FD_READER" in
+    "" | none) fd review-fresh-session INFO "not run: the first review gave no reader to compare with" ;;
+    fresh-session) fd review-fresh-session INFO "not run: the first review was already read by the fresh session" ;;
+    *)
+      say "== check 3, second reading: the other model's program ($FD_READER) hidden from the scratch makibad's lookup, a second worker"
+      say "+ $MK close $A --abandon   (the scratch run repository is never pushed)"
+      "$MK" close "$A" --abandon || true
+      say "+ $MK down"
+      "$MK" down
+      export MAKIBA_REVIEW_OTHER="$RUN/reader-hidden-for-this-check"   # a path that is not there: src/daemon/review.rs resolves a path as it is
+      say "+ MAKIBA_REVIEW_OTHER=$MAKIBA_REVIEW_OTHER $MK up --no-secretary   (the scratch organization only)"
+      "$MK" up --no-secretary
+      f=$RUN/brief-$B.md; fd_brief "$B" doc > "$f"
+      fd_dispatch "$B" "$f"
+      say "  the worker's report: ${FD_OUTCOME}: $FD_BODY"
+      if [ "$FD_OUTCOME" = done ]; then fd_check_review "$B" review-fresh-session fresh
+      else fd review-fresh-session FAIL "no review to read: the second worker did not get to its done report ($FD_OUTCOME): ${FD_BODY%%$'\n'*}" "$MK peek $B, then $MK close $B --abandon; run the line again" ; fi
+      ;;
+  esac
+  fd_check_gate_ask
+}
+
 stage_cleanup() {
   say "== cleanup: scratch places made by this script (the real organization is never touched)"
   local d found=0
@@ -451,6 +731,7 @@ on_exit() {
     else say "scratch place kept for inspection: $SCRATCH_RUN (the cleanup stage removes it)"; fi
   fi
   if [ "$FAILS" -gt 0 ] && [ "$rc" -eq 0 ]; then rc=1; fi
+  fd_summary   # first-day only: the last lines of the results file, after the teardown
   exit "$rc"
 }
 trap on_exit EXIT
@@ -470,6 +751,9 @@ case "$STAGE" in
     ;;
   rehearse)
     stage_rehearse
+    ;;
+  first-day)
+    stage_first_day
     ;;
   register)
     preflight real
