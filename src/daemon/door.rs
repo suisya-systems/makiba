@@ -2794,6 +2794,17 @@ impl Door {
                 }
             }
         }
+        // An allowance of a head refused before: its gate stop is withdrawn with this verdict.
+        if allow
+            && range.is_some()
+            && let Err(e) = super::belt::gate_allowed(&w, &repo, pr, &head)
+        {
+            let _ = w.rollback();
+            return fail(
+                &w,
+                Err(internal(format!("the stop could not be withdrawn: {e}"))),
+            );
+        }
         let mut answer = json!({"verdict": verdict, "allow": allow, "reason": reason,
                                 "mode": mode, "repo": repo, "pr": pr, "head": head});
         if let Some(rv) = review {
