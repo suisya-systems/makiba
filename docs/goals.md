@@ -6,6 +6,10 @@ without its judging step (Issue 173).
 
 - **Each operator writes the goals.** A ledger is a file on the operator's machine, not in any
   repository.
+- **The secretary writes it in a dialogue.** The skill `makiba:goal-setup` asks the person what they
+  aim at and what would show it unmet, checks the draft with this format's validator and places it
+  with the verb `goal` (`makiba goal show|check|place`, spec section 12), only on the person's word;
+  the file is not edited by hand. The previous ledger is kept beside it as `<repo>.md.prev`.
 - **A project with no ledger yields no candidates.** The scan reports it as unset, so write that
   project's ledger.
 - **A ledger that cannot be read yields no candidates either.** The scan reports it with the reason
