@@ -1,4 +1,4 @@
-//! Issue 307, the review's two holes in the check before CI:
+//! Issue 307, the reviews' holes in the check before CI:
 //!
 //! - `pr` with a head other than the pull request's own (an older commit the clone holds) is
 //!   refused: the head recorded is the head the pull request has at origin.
@@ -6,6 +6,8 @@
 //!   not hide the test commit, and neither does a recorded pull request whose base is the branch:
 //!   push and update judge against the project's default branch, so the fix is not sent before CI
 //!   failed at the test commit.
+//! - A valid `Acceptance-Test:` trailer does not cover a second such line outside the trailer
+//!   block: the commit is refused as stray, since the manifest would leave that test unprotected.
 //!
 //! The worlds are built as in tests/pr_open_test_commit.rs: a local origin, the project's clone
 //! in the repositories folder, a `gh` stand-in (`MAKIBA_GH`) answering `pr view` from files, and
@@ -341,4 +343,59 @@ fn an_update_whose_base_is_the_branch_itself_does_not_hide_the_test_commit() {
         stop.store(true, Ordering::SeqCst);
         let _ = d.join();
     }
+}
+
+/// The second diff review's hole: a message with a valid `Acceptance-Test:` trailer and a second
+/// `Acceptance-Test:` line outside the trailer block. git reads only the valid one, so the
+/// manifest would leave the other test unprotected: the check before CI refuses it as stray,
+/// naming the commit, even after a failed run at it. The valid trailer alone passes.
+#[test]
+fn a_valid_trailer_does_not_cover_a_second_line_outside_the_block() {
+    let tmp = tempfile::tempdir().unwrap();
+    let repo = tmp.path();
+    git(repo, &["init", "-q"]);
+    let base = commit_in(repo, "init", &[("README", "x\n")]);
+    let tests = [("tests/adds.rs", TEST_RS), ("tests/more.rs", TEST_RS)];
+    let both = commit_in(
+        repo,
+        "test: the failing tests\n\nAcceptance-Test: tests/more.rs\n\nThe body goes on.\n\nAcceptance-Test: tests/adds.rs\nCo-Authored-By: A <a@example.com>",
+        &tests,
+    );
+    let read = git(
+        repo,
+        &[
+            "log",
+            "-1",
+            "--format=%(trailers:key=Acceptance-Test,valueonly,separator=%x2c)",
+            &both,
+        ],
+    );
+    assert_eq!(
+        read, "tests/adds.rs",
+        "git reads both lines or neither; the case is wrong"
+    );
+    let failed_at = |sha: &str| sha == both;
+    let why = makiba::daemon::gate::before_ci(repo, &base, &both, &failed_at, "here")
+        .expect_err("a second Acceptance-Test line outside the trailer block was let through")
+        .0;
+    assert!(
+        why.contains(&both[..12]),
+        "the refusal does not name {both}: {why}"
+    );
+    assert!(
+        why.contains("trailer"),
+        "the refusal does not say why: {why}"
+    );
+
+    let tmp2 = tempfile::tempdir().unwrap();
+    let repo2 = tmp2.path();
+    git(repo2, &["init", "-q"]);
+    let base2 = commit_in(repo2, "init", &[("README", "x\n")]);
+    let valid = commit_in(repo2, DECLARES, &tests[..1]);
+    let r = makiba::daemon::gate::before_ci(repo2, &base2, &valid, &|_| false, "here");
+    assert!(
+        r.is_ok(),
+        "the valid trailer alone: {:?}",
+        r.err().map(|e| e.0)
+    );
 }

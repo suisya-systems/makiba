@@ -206,7 +206,9 @@ pub fn find_manifest(
 
 /// A commit of `base..head` with an `Acceptance-Test:` line that git does not read as a trailer of
 /// that key (a blank line inside the trailer block, as on pull request 308): its id. Such a
-/// branch would declare no test, and CI would print `ACCEPTANCE: none`.
+/// branch would declare no test, and CI would print `ACCEPTANCE: none`. A valid trailer does not
+/// cover a second such line outside the trailer block: git reads only the valid one, and the
+/// manifest would leave the other test unprotected, so more lines than values read name the commit.
 pub fn stray_trailer(repo: &Path, base: &str, head: &str) -> Result<Option<String>, Reject> {
     let format =
         format!("--format=%H%x00%(trailers:key={TRAILER},valueonly,separator=%x1f)%x00%B%x1e");
@@ -217,10 +219,15 @@ pub fn stray_trailer(repo: &Path, base: &str, head: &str) -> Result<Option<Strin
         let (Some(sha), Some(read), Some(body)) = (parts.next(), parts.next(), parts.next()) else {
             continue;
         };
-        let has_line = body
+        let lines = body
             .lines()
-            .any(|l| l.trim_start().to_lowercase().starts_with(&key));
-        if has_line && read.trim().is_empty() {
+            .filter(|l| l.trim_start().to_lowercase().starts_with(&key))
+            .count();
+        let values = read
+            .split('\u{1f}')
+            .filter(|v| !v.trim().is_empty())
+            .count();
+        if lines > values {
             return Ok(Some(sha.to_string()));
         }
     }
@@ -241,7 +248,7 @@ pub fn before_ci(
 ) -> Result<(), Reject> {
     if let Some(sha) = stray_trailer(repo, base, head)? {
         return reject(format!(
-            "commit {} has an {TRAILER} line that git does not read as a trailer (a blank line inside the trailer block, such as one before Co-Authored-By?), so the branch would declare no test: fix the message before it is pushed (git interpret-trailers --parse shows what git reads). Line L-K9: a merge needs CI on the exact head and the acceptance gate",
+            "commit {} has an {TRAILER} line that git does not read as a trailer (a blank line inside the trailer block, such as one before Co-Authored-By, or a line outside the block?), so the branch would not declare every test it names: fix the message before it is pushed (git interpret-trailers --parse shows what git reads). Line L-K9: a merge needs CI on the exact head and the acceptance gate",
             &sha[..sha.len().min(12)]
         ));
     }
