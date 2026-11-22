@@ -299,6 +299,15 @@ pub enum Command {
         #[arg(long)]
         reason: String,
     },
+    /// Show, check or place a project's goal ledger (docs/goals.md).
+    Goal {
+        #[arg(value_parser = ["show", "check", "place"])]
+        action: String,
+        /// OWNER/NAME of the project's GitHub repository.
+        repo: String,
+        /// The draft for check and place: a file, or - for standard input.
+        file: Option<String>,
+    },
     /// Register a project and have makibad clone or fetch its GitHub repository.
     Project {
         slug: String,
@@ -557,6 +566,25 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             "candidate",
             json!({"pattern": pattern, "decision": decision, "reason": reason}),
         ),
+        Command::Goal { action, repo, file } => {
+            let mut args = json!({"action": action, "repo": repo});
+            if let Some(f) = file {
+                args["text"] = if f == "-" {
+                    let mut t = String::new();
+                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut t)
+                        .map_err(|e| format!("cannot read standard input: {e}"))?;
+                    t
+                } else {
+                    read(Path::new(&f))?
+                }
+                .into();
+            } else if action != "show" {
+                return Err(format!(
+                    "{action} needs the draft: a file, or - for standard input"
+                ));
+            }
+            ("goal", args)
+        }
         Command::Config {
             action,
             key,

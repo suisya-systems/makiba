@@ -51,7 +51,11 @@ const CONFIG_KEYS: [&str; 6] = [
 pub type Response = Result<Value, DoorError>;
 
 pub fn sha256_hex(text: &str) -> String {
-    Sha256::digest(text.as_bytes())
+    hex_sha256(text.as_bytes())
+}
+
+fn hex_sha256(bytes: &[u8]) -> String {
+    Sha256::digest(bytes)
         .iter()
         .map(|b| format!("{b:02x}"))
         .collect()
@@ -373,11 +377,12 @@ impl Door {
         if let Err(e) = begin() {
             return Err(internal(e));
         }
-        // A decided candidate's file is replaced outside the transaction: its old bytes come back
-        // when its record does not stand.
+        // A decided candidate's file, or a placed ledger, is written outside the transaction: its
+        // old bytes (or its absence) come back when its record does not stand.
         let mut undo = None;
         let r = match v {
             Verb::Candidate => candidate(&w, &actor, &args, &mut undo),
+            Verb::Goal => goal(&w, &actor, &args, &mut undo),
             _ => run(&w, &*self.base, &self.agent, &actor, role, v, &args),
         };
         if r.is_err() && w.rollback().is_ok() {
@@ -390,8 +395,14 @@ impl Door {
             {
                 let _ = std::fs::remove_file(super::curator::knowledge_dir().join(file));
             }
-            if let Some((path, old)) = &undo {
-                let _ = replace_file(path, old);
+            match &undo {
+                Some((path, Some(old))) => {
+                    let _ = replace_file(path, old);
+                }
+                Some((path, None)) => {
+                    let _ = std::fs::remove_file(path);
+                }
+                None => {}
             }
         };
         // A verb's writes stand only with their record: without it a retry would repeat them.
@@ -1624,7 +1635,7 @@ fn candidate(
     w: &StateWriter,
     actor: &str,
     args: &Value,
-    undo: &mut Option<(PathBuf, Vec<u8>)>,
+    undo: &mut Option<(PathBuf, Option<Vec<u8>>)>,
 ) -> Response {
     let pattern = str_arg(args, "pattern")?;
     let decision = str_arg(args, "decision")?;
@@ -1683,8 +1694,134 @@ fn candidate(
     .map_err(internal)?;
     replace_file(&path, new.as_bytes())
         .map_err(|e| internal(format!("cannot write {}: {e}", path.display())))?;
-    *undo = Some((path, text.into_bytes()));
+    *undo = Some((path, Some(text.into_bytes())));
     Ok(payload)
+}
+
+/// `goal` (spec section 12, Issue 271): `show`, `check` and `place` a project's goal ledger
+/// (`docs/goals.md`). Only a draft the ledger's own parser accepts is written, and it is read back
+/// with the loader the scan uses; the old file is kept beside it as `<repo>.md.prev`. The file is
+/// written outside the transaction: `undo` gets its old bytes (none: it was absent) for the door
+/// to put back if the record fails.
+fn goal(
+    w: &StateWriter,
+    actor: &str,
+    args: &Value,
+    undo: &mut Option<(PathBuf, Option<Vec<u8>>)>,
+) -> Response {
+    use crate::work_discovery::goals::{GoalStatus, load_goals, parse_ledger, split_slug};
+    let action = str_arg(args, "action")?;
+    let repo = str_arg(args, "repo")?;
+    let Some((owner, name)) = split_slug(repo) else {
+        return Err(usage(format!("repo is OWNER/NAME, not {repo:?}")));
+    };
+    let slug = format!("{owner}/{name}");
+    let dir = crate::cli::goals_dir();
+    let clauses = |c: &[crate::work_discovery::goals::Clause]| -> Vec<Value> {
+        c.iter().map(|c| c.to_json()).collect()
+    };
+    let invalid = |e: String| usage(format!("the ledger is not valid: {e}"));
+    let before = load_goals(&dir, &slug);
+    let target = dir.join(&owner).join(format!("{name}.md"));
+    match action {
+        "show" => {
+            let text = before
+                .path
+                .as_ref()
+                .and_then(|p| std::fs::read_to_string(p).ok());
+            let placed: Option<(String, String)> = w
+                .conn()
+                .query_row(
+                    "SELECT actor, occurred_at FROM events WHERE kind = 'goal_ledger_placed'
+                     AND json_extract(payload_json, '$.repo') = ?1 ORDER BY id DESC LIMIT 1",
+                    [&slug],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(internal)?;
+            let status = match before.status {
+                GoalStatus::Ok => "ok",
+                GoalStatus::Unset => "unset",
+                GoalStatus::Error => "error",
+            };
+            Ok(
+                json!({"repo": slug, "status": status, "text": text, "clauses": clauses(&before.clauses),
+                      "error": before.error, "placed_by": placed.as_ref().map(|p| &p.0),
+                      "placed_at": placed.as_ref().map(|p| &p.1)}),
+            )
+        }
+        "check" | "place" => {
+            let text = str_arg(args, "text")?;
+            let parsed = parse_ledger(text).map_err(invalid)?;
+            if action == "check" {
+                return Ok(json!({"repo": slug, "status": "valid", "clauses": clauses(&parsed)}));
+            }
+            // A file under another case of the name, or in a folder of another case, is the
+            // loader's error: it is not replaced behind the person's back.
+            if before.path.as_deref().is_some_and(|p| p != target) {
+                return Err(refuse(
+                    ErrorKind::Conflict,
+                    format!(
+                        "the ledger of {slug} is at {:?}, not {}; nothing was written",
+                        before.path.unwrap_or_default(),
+                        target.display()
+                    ),
+                    "rename it by hand, the case of the name must be lower case",
+                ));
+            }
+            if before
+                .error
+                .as_deref()
+                .is_some_and(|e| e.starts_with("goals dir unreadable"))
+            {
+                return Err(internal(before.error.unwrap_or_default()));
+            }
+            let old = match std::fs::read(&target) {
+                Ok(b) => Some(b),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                Err(e) => return Err(internal(format!("cannot read {}: {e}", target.display()))),
+            };
+            let payload = json!({
+                "repo": slug, "clauses": parsed.len(), "bytes": text.len(),
+                "by": actor,
+                "previous_sha256": old.as_ref().map(|b| hex_sha256(b)),
+                "previous_clauses": (before.status == GoalStatus::Ok).then_some(before.clauses.len()),
+            });
+            w.append_event(&NewEvent {
+                kind: "goal_ledger_placed",
+                actor: Some(actor),
+                payload: Some(&payload),
+                ..Default::default()
+            })
+            .map_err(internal)?;
+            let io =
+                |e: std::io::Error| internal(format!("cannot write {}: {e}", target.display()));
+            std::fs::create_dir_all(target.parent().unwrap_or(&dir)).map_err(io)?;
+            if let Some(old) = &old {
+                let prev = target.with_file_name(format!("{name}.md.prev"));
+                replace_file(&prev, old).map_err(io)?;
+            }
+            replace_file(&target, text.as_bytes()).map_err(io)?;
+            let after = load_goals(&dir, &slug);
+            if after.status != GoalStatus::Ok || after.clauses != parsed {
+                // An error is not unsaved by the door: put the old file back here.
+                let _ = match &old {
+                    Some(b) => replace_file(&target, b),
+                    None => std::fs::remove_file(&target),
+                };
+                return Err(internal(format!(
+                    "the placed ledger does not read back ({}); it was not kept",
+                    after.error.unwrap_or_default()
+                )));
+            }
+            *undo = Some((target.clone(), old));
+            Ok(
+                json!({"repo": slug, "status": "placed", "clauses": clauses(&after.clauses),
+                      "previous": payload["previous_clauses"], "by": actor}),
+            )
+        }
+        a => Err(usage(format!("action is show, check or place, not {a:?}"))),
+    }
 }
 
 const CANDIDATES_FILE: &str = "skill-candidates.md";
@@ -3285,6 +3422,18 @@ fn tool(v: Verb) -> Value {
                 ("reason".into(), text.clone()),
             ]),
             &["pattern", "decision", "reason"],
+        ),
+        Verb::Goal => (
+            "Read, check or place a project's goal ledger (docs/goals.md). action show: the placed text, its clauses, who placed it and when, or unset, or the reason it cannot be read. action check: validate a draft in text with the ledger's own validator, writing nothing. action place: validate text, and only a valid one is written to the ledger folder (the previous ledger is kept beside it as <repo>.md.prev, one generation), then read back; an invalid draft is usage and nothing is written. repo is OWNER/NAME. Place only on the person's word.",
+            Map::from_iter([
+                (
+                    "action".into(),
+                    json!({"type": "string", "enum": ["show", "check", "place"]}),
+                ),
+                ("repo".into(), text.clone()),
+                ("text".into(), text.clone()),
+            ]),
+            &["action", "repo"],
         ),
         Verb::Range => (
             "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone.",

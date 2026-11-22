@@ -142,7 +142,7 @@ pub struct Goals {
     pub error: Option<String>,
 }
 
-fn split_slug(slug: &str) -> Option<(String, String)> {
+pub fn split_slug(slug: &str) -> Option<(String, String)> {
     let lower = slug.to_lowercase();
     let parts: Vec<&str> = lower.split('/').collect();
     let ok = |p: &&str| SLUG_PART.is_match(p) && *p != "." && *p != "..";
