@@ -615,16 +615,21 @@ struct Stop<'a> {
 /// run waits only for the person and counts in neither count), `belt_stopped`, and a notice to
 /// the secretary, who puts it to the person. Returns the entry's id, and whether it is new.
 fn stop(w: &StateWriter, s: &Stop) -> Result<(i64, bool)> {
-    let known: Option<i64> = w
+    // The newest entry of this subject stands, whatever its status, except one `makibad` itself
+    // withdrew because the pull request had moved to another head (`head_recorded`): a pull
+    // request that comes back to that head is stopped again, by a new entry.
+    let known: Option<(i64, bool)> = w
         .conn()
         .query_row(
-            "SELECT id FROM pending WHERE json_extract(context_json, '$.range_id') = ?1
-               AND json_extract(context_json, '$.key') = ?2 ORDER BY id LIMIT 1",
+            "SELECT id, status = 'withdrawn'
+                        AND coalesce(json_extract(context_json, '$.withdrawn_by') = 'makibad', 0)
+             FROM pending WHERE json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.key') = ?2 ORDER BY id DESC LIMIT 1",
             params![s.range, s.key],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some(id) = known {
+    if let Some((id, false)) = known {
         return Ok((id, false));
     }
     let to: Option<String> = w.conn().query_row(
@@ -917,7 +922,9 @@ pub(super) fn head_recorded(
         return Ok(());
     };
     w.conn().execute(
-        "UPDATE pending SET status = 'withdrawn' WHERE status = 'escalated'
+        "UPDATE pending SET status = 'withdrawn',
+           context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+         WHERE status = 'escalated'
            AND json_extract(context_json, '$.by') = 'makibad'
            AND json_extract(context_json, '$.stop_line') IN ('gate', 'tests')
            AND json_extract(context_json, '$.pr') = ?1
@@ -2724,6 +2731,43 @@ mod tests {
             refused(&w, "a", 7, &h1).is_some(),
             "the head it returned to"
         );
+    }
+
+    /// H1 refused (a stop), H2 recorded (the stop goes), H1 recorded again and refused again: a
+    /// new stop, escalated, so the refusal can be answered and the run waits for the person.
+    #[test]
+    fn a_stop_withdrawn_for_a_newer_head_is_written_again_when_the_head_comes_back() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
+        let record = |kind: &str, head: &str| {
+            super::super::prwatch::register(&w, kind, "a", "o/p", 7, head).unwrap();
+            head_recorded(&w, "a", "o/p", 7, head).unwrap();
+        };
+        // Fixes are not what this test is about.
+        w.conn()
+            .execute("UPDATE ranges SET budget_fixes = 99 WHERE id = ?1", [id])
+            .unwrap();
+        record("pr_opened", &h1);
+        let first = refused(&w, "a", 7, &h1).unwrap();
+        record("fix_pushed", &h2);
+        assert_eq!(escalated(&w), 0);
+        record("fix_pushed", &h1);
+        let again = refused(&w, "a", 7, &h1).unwrap();
+        assert_ne!(again, first, "a new entry, not the withdrawn one");
+        assert_eq!(escalated(&w), 1);
+        assert_eq!(range_count(&w, id).unwrap(), 0);
+        assert_eq!(refused(&w, "a", 7, &h1), Some(again), "one per head still");
+        // A stop the secretary withdrew is not written again.
+        w.conn()
+            .execute(
+                "UPDATE pending SET status = 'withdrawn' WHERE id = ?1",
+                [again],
+            )
+            .unwrap();
+        assert_eq!(refused(&w, "a", 7, &h1), Some(again));
+        assert_eq!(escalated(&w), 0);
     }
 
     /// Two refusals in a row of different pull requests pause the range that replaced the runs'
