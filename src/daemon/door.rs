@@ -2776,6 +2776,7 @@ impl Door {
                 repo: &repo,
                 pr,
                 head: &head,
+                allow,
                 refused: !allow && verdict != "tests_edited",
                 reason: &reason,
                 edited_tests: &edited,

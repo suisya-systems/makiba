@@ -795,6 +795,8 @@ pub(super) struct GateStop<'a> {
     pub repo: &'a str,
     pub pr: i64,
     pub head: &'a str,
+    /// The gate's answer: a refusal counts for the pause of two in a row.
+    pub allow: bool,
     /// The gate refused (line `gate`), or it reports only edited tests (line `tests`).
     pub refused: bool,
     pub reason: &'a str,
@@ -864,10 +866,13 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
         }
     };
     let (id, _) = stop(w, &made)?;
-    if let Some((acting, status)) = acting(w, range)?
+    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
+    if !s.allow
+        && let Some((acting, status)) = acting(w, range)?
         && status == "active"
     {
-        // The refusals of the range's pull requests since the last one read merged, newest first.
+        // The refusals of the range's pull requests since the last one read merged, and since the
+        // person last resumed the range (a resume starts the count again), newest first.
         let mut q = w.conn().prepare(&format!(
             "{CHAIN} SELECT e.kind, lower(json_extract(e.payload_json, '$.repo')) || '#'
                             || json_extract(e.payload_json, '$.pr')
@@ -875,6 +880,8 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
                     AND json_extract(e.payload_json, '$.allow') = 0))
+               AND e.id > coalesce((SELECT max(a.id) FROM events a WHERE a.kind = 'range_resumed'
+                     AND json_extract(a.payload_json, '$.range_id') = ?1), 0)
              ORDER BY e.id DESC LIMIT 100"
         ))?;
         let rows: Vec<(String, Option<String>)> = q
@@ -971,8 +978,8 @@ pub(super) fn head_recorded(
 }
 
 /// A launch of `task` failed and its run is `failed`, in that transaction (belt.md 2.4): two
-/// launches of a range failed in a row (a verified one between them resets the count) pause the
-/// range. The failed run holds no slot, so the pause is what keeps a broken launch from spending
+/// launches of a range failed in a row (a verified one between them, or the person's resume,
+/// resets the count) pause the range. The failed run holds no slot, so the pause is what keeps a broken launch from spending
 /// the budget.
 pub(super) fn launch_failed(w: &StateWriter, task: &str) -> Result<()> {
     let Some(range) = range_of(w, task)? else {
@@ -988,6 +995,8 @@ pub(super) fn launch_failed(w: &StateWriter, task: &str) -> Result<()> {
         "{CHAIN} SELECT e.kind FROM events e
          WHERE e.kind IN ('worker_spawn_failed', 'worker_spawn_verified') AND e.run_id IN
                (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
+               AND e.id > coalesce((SELECT max(a.id) FROM events a WHERE a.kind = 'range_resumed'
+                     AND json_extract(a.payload_json, '$.range_id') = ?1), 0)
          ORDER BY e.id DESC LIMIT 2"
     ))?;
     let last: Vec<String> = q
@@ -2669,6 +2678,7 @@ mod tests {
                 repo: "o/p",
                 pr,
                 head,
+                allow: false,
                 refused: true,
                 reason: "no passed CI",
                 edited_tests: &[],
@@ -2797,6 +2807,70 @@ mod tests {
         assert_eq!(status_of(&w, new), "active", "the merge reset the count");
         refused(&w, "c", 9, &h).unwrap();
         assert_eq!(status_of(&w, new), "paused");
+    }
+
+    /// The person's resume starts the counts again: after it, an answer that allows with edited
+    /// tests pauses nothing, one more refusal pauses nothing, and one more failed launch neither.
+    #[test]
+    fn a_resume_starts_the_counts_again_and_an_allowance_pauses_nothing() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        for t in ["a", "b", "c", "d"] {
+            run_of(&w, id, t);
+        }
+        let h = "1".repeat(40);
+        for (t, pr) in [("a", 7), ("b", 8), ("c", 9), ("d", 10)] {
+            watch(&w, t, pr, &h);
+        }
+        launch(&w, "a", true);
+        launch(&w, "b", true);
+        assert_eq!(status_of(&w, id), "paused");
+        let resume = |w: &StateWriter| {
+            range(
+                w,
+                "person",
+                Role::Person,
+                &json!({"action": "resume", "id": id}),
+            )
+            .unwrap();
+        };
+        resume(&w);
+        launch(&w, "c", true);
+        assert_eq!(status_of(&w, id), "active", "one failure since the resume");
+        refused(&w, "a", 7, &h).unwrap();
+        refused(&w, "b", 8, &h).unwrap();
+        assert_eq!(status_of(&w, id), "paused");
+        resume(&w);
+        // Allowed, with edited tests (human): a stop of line tests, and no pause.
+        let tests = ["tests/x.rs".to_string()];
+        event(
+            &w,
+            "acceptance_gate",
+            "merge-gate",
+            Some("c"),
+            json!({"repo": "o/p", "pr": 9, "head": h, "allow": true}),
+        )
+        .unwrap();
+        gate_stop(
+            &w,
+            &GateStop {
+                task: "c",
+                repo: "o/p",
+                pr: 9,
+                head: &h,
+                allow: true,
+                refused: false,
+                reason: "passed",
+                edited_tests: &tests,
+            },
+        )
+        .unwrap()
+        .expect("a stop of line tests");
+        assert_eq!(status_of(&w, id), "active", "an allowance pauses nothing");
+        refused(&w, "d", 10, &h).unwrap();
+        assert_eq!(status_of(&w, id), "active", "one refusal since the resume");
+        refused(&w, "c", 9, &h).unwrap();
+        assert_eq!(status_of(&w, id), "paused", "two since the resume");
     }
 
     /// A range budget is a stop only while it keeps a candidate out, and once.
