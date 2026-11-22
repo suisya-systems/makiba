@@ -463,6 +463,12 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
                 }
             }
             if let Some(h) = budget_hours {
+                // NaN and infinity have no JSON form: sent as null they would read as "no limit".
+                if !h.is_finite() || h <= 0.0 {
+                    return Err(format!(
+                        "--budget-hours is a number of hours above 0, not {h}"
+                    ));
+                }
                 args["budget_hours"] = h.into();
             }
             ("range", args)
@@ -834,5 +840,26 @@ mod tests {
         assert!(req(&["pr", "opened", "--repo", "o/n"]).is_err());
         assert!(req(&["pr", "bogus", "--repo", "o/n"]).is_err());
         assert!(req(&["pr", "opened", "--pr", "x"]).is_err());
+    }
+
+    /// `range propose` sends the budgets; hours that are no finite number above 0 are refused
+    /// here, since NaN and infinity would travel as null and read as "no limit".
+    #[test]
+    fn range_propose_sends_the_budgets_and_refuses_hours_that_are_no_number() {
+        let propose = |more: &[&str]| {
+            let mut a = vec!["range", "propose", "--project", "p", "--issues", "1,2"];
+            a.extend_from_slice(more);
+            req(&a)
+        };
+        let (verb, v) = propose(&["--budget-hours", "1.5", "--budget-fixes", "2"]).unwrap();
+        assert_eq!(verb, "range");
+        assert_eq!(v["budget_hours"], json!(1.5));
+        assert_eq!(v["budget_fixes"], json!(2));
+        let (_, v) = propose(&[]).unwrap();
+        assert!(v.get("budget_hours").is_none() && v.get("budget_fixes").is_none());
+        for bad in ["NaN", "inf", "-inf", "0", "-1"] {
+            let flag = format!("--budget-hours={bad}");
+            assert!(propose(&[&flag]).is_err(), "{bad}");
+        }
     }
 }
