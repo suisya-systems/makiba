@@ -137,6 +137,8 @@ struct Lexer<'a> {
     word: Option<Word>,
     /// The next word is a redirection's target, not an argument.
     target: bool,
+    /// That target is a here-string's text.
+    herestring: bool,
     /// Here-documents waiting for the end of the line: delimiter, strip tabs, quoted, command.
     pending: Vec<(String, bool, bool, usize)>,
     lost: bool,
@@ -151,6 +153,7 @@ impl<'a> Lexer<'a> {
             cur: Cmd::default(),
             word: None,
             target: false,
+            herestring: false,
             pending: Vec::new(),
             lost: false,
         }
@@ -172,6 +175,13 @@ impl<'a> Lexer<'a> {
         if let Some(w) = self.word.take() {
             if self.target {
                 self.target = false;
+                // A here-string (`<<< word`) is the command's input, as a here-document is.
+                if std::mem::take(&mut self.herestring) {
+                    self.cur.heredocs.push(Heredoc {
+                        quoted: true,
+                        body: w.text,
+                    });
+                }
             } else {
                 self.cur.words.push(w);
             }
@@ -182,6 +192,7 @@ impl<'a> Lexer<'a> {
         self.end_word();
         // A target never given (`> ;`) is the shell's error; it is not carried to the next command.
         self.target = false;
+        self.herestring = false;
         let mut cmd = std::mem::take(&mut self.cur);
         cmd.piped = piped;
         self.cmds.push(cmd);
@@ -307,6 +318,7 @@ impl<'a> Lexer<'a> {
         if self.at(i) == Some('<') && self.at(i + 1) == Some('<') {
             if self.at(i + 2) == Some('<') {
                 self.target = true;
+                self.herestring = true;
                 return i + 3;
             }
             i += 2;
@@ -540,14 +552,28 @@ impl<'a> Lexer<'a> {
                 j + 1
             }
             Some('{') => {
-                let end = (i + 2..self.c.len()).find(|&j| self.c[j] == '}');
-                let Some(end) = end else {
+                let Some(end) = self.brace_end(i + 2) else {
                     self.lost = true;
                     self.push('$');
                     return i + 1;
                 };
-                let name: String = self.c[i + 2..end].iter().collect();
-                self.variable(&name, &format!("${{{name}}}"), quoted);
+                let inner: String = self.c[i + 2..end].iter().collect();
+                let written = format!("${{{inner}}}");
+                if !inner.is_empty() && inner.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+                {
+                    self.variable(&inner, &written, quoted);
+                } else {
+                    // An expansion with an operator (`${v:-word}`): its value is not known, and
+                    // the substitutions in its word run.
+                    match substitutions(&inner) {
+                        Some(bodies) => self.cur.substs.extend(bodies),
+                        None => self.lost = true,
+                    }
+                    self.push_str(&written);
+                    if let Some(w) = self.word.as_mut() {
+                        w.built = true;
+                    }
+                }
                 end + 1
             }
             Some(c) if c.is_ascii_alphabetic() || c == '_' => {
@@ -568,6 +594,44 @@ impl<'a> Lexer<'a> {
                 i + 1
             }
         }
+    }
+
+    /// The position of the `}` that closes a `${` whose text starts at `i`: nested `${...}`,
+    /// quotes and substitutions are passed over.
+    fn brace_end(&self, mut i: usize) -> Option<usize> {
+        let mut depth = 0usize;
+        while let Some(c) = self.at(i) {
+            match c {
+                '\\' => i += 2,
+                '\'' => i = (i + 1..self.c.len()).find(|&j| self.c[j] == '\'')? + 1,
+                '"' => {
+                    let mut j = i + 1;
+                    while self.at(j)? != '"' {
+                        j += if self.at(j) == Some('\\') { 2 } else { 1 };
+                    }
+                    i = j + 1;
+                }
+                '$' if self.at(i + 1) == Some('(') => {
+                    let mut inner = Lexer::new(self.c, self.vars);
+                    let end = inner.run(i + 2, true);
+                    if inner.lost {
+                        return None;
+                    }
+                    i = end + 1;
+                }
+                '$' if self.at(i + 1) == Some('{') => {
+                    depth += 1;
+                    i += 2;
+                }
+                '}' if depth == 0 => return Some(i),
+                '}' => {
+                    depth -= 1;
+                    i += 1;
+                }
+                _ => i += 1,
+            }
+        }
+        None
     }
 
     /// The value of variable `name`, or the text as `written` when it is not known.
@@ -638,6 +702,18 @@ mod tests {
         let p = parse("x \"$(cat <<'EOF'\na ) b\nEOF\n)\" y", &Vars::new());
         assert!(!p.lost, "{p:?}");
         assert_eq!(p.cmds.last().unwrap().words.last().unwrap().text, "y");
+    }
+
+    #[test]
+    fn a_here_string_is_input_and_an_expansions_substitution_is_kept() {
+        let p = parse("bash <<< 'git commit -n' x", &Vars::new());
+        assert_eq!(p.cmds[0].heredocs[0].body, "git commit -n");
+        assert_eq!(p.cmds[0].words.len(), 2);
+        let p = parse("echo \"${v:-$(git status)}\" ${w}", &Vars::new());
+        assert!(!p.lost);
+        assert_eq!(p.cmds[0].substs, ["git status"]);
+        assert!(p.cmds[0].words[1].built);
+        assert!(!p.cmds[0].words[2].built);
     }
 
     #[test]

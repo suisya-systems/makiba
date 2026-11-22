@@ -13,10 +13,14 @@
 //! the flag. The command is read as the shell splits it (`words`): quotes keep a word whole,
 //! redirections are dropped, an option's value (`-m <message>`) is skipped, and git's word is
 //! looked for at any position, so a wrapper (`env`, `sudo`, `xargs`) needs no list. The bodies of
-//! command substitutions, of `eval`, `bash -c`, here-documents fed to a shell, and the values of
-//! git aliases defined in the command are read again as commands. A here-document fed to a text
-//! program is data, unless its output goes on to a shell; one fed to another program (`python`)
-//! is read as text, as before. What the reading cannot follow leans to refusing.
+//! command substitutions (also inside `${v:-...}`), of `eval`, `bash -c`, here-documents and
+//! here-strings fed to a shell, and the values of git aliases defined in the command are read
+//! again as commands. A here-document or here-string fed to a text program is data, unless a shell
+//! runs anywhere later in the command (a pipe, a group, a file written and then run) or the text
+//! is itself shell code's input; then it is read as commands, and where another program
+//! (`python`) runs later, or is fed it, it is read as text, as before. A word where git reads
+//! options that starts with a substitution or an expansion with an operator is refused, since its
+//! value is not known. What the reading cannot follow, or nests too deeply, leans to refusing.
 //!
 //! The variable and `-c` checks still read the text (`shell`).
 
@@ -169,7 +173,22 @@ fn ctx_of(program: Option<&str>) -> Ctx {
 
 /// Read `text` as shell commands whose output goes to `out`.
 fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
-    if depth > DEPTH {
+    // The reading nests a reader per substitution, so a deep nesting is refused before it.
+    let mut open = 0usize;
+    let mut deepest = 0usize;
+    let mut prev = ' ';
+    for c in text.chars() {
+        match c {
+            '(' | '{' if prev == '$' => {
+                open += 1;
+                deepest = deepest.max(open);
+            }
+            ')' | '}' => open = open.saturating_sub(1),
+            _ => {}
+        }
+        prev = c;
+    }
+    if depth > DEPTH || deepest > 4 * DEPTH {
         return refuse(
             text,
             "the command nests substitutions, shells or aliases too deeply to read; write it plainly",
@@ -203,6 +222,15 @@ fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
         .iter()
         .map(|c| command_program(&c.words))
         .collect();
+    // For each command, the contexts of the commands after it (counted once, from the end).
+    let mut later = vec![(false, false); progs.len() + 1];
+    for k in (0..progs.len()).rev() {
+        let c = ctx_of(progs[k].as_deref());
+        later[k] = (
+            later[k + 1].0 || c == Ctx::Shell,
+            later[k + 1].1 || c == Ctx::Other,
+        );
+    }
     for (k, cmd) in parsed.cmds.iter().enumerate() {
         let prog = progs[k].as_deref();
         let own = ctx_of(prog);
@@ -212,31 +240,41 @@ fn read(text: &str, out: Ctx, depth: usize) -> Result<(), Refusal> {
                 read(&body, Ctx::Shell, depth + 1)?;
             }
         }
-        // A substitution runs; its output becomes a word of this command.
+        // A substitution runs; its output becomes a word of this command, or, with no program
+        // (`$(...)` alone, or an assignment's value kept for later), may be run as a command.
+        let subst_out = if prog.is_none() { Ctx::Shell } else { own };
         for body in &cmd.substs {
-            read(body, own, depth + 1)?;
+            read(body, subst_out, depth + 1)?;
         }
-        // Where a here-document fed to a text program goes: through the pipe to the next
-        // command, or where this command's own output goes.
-        let onward = if cmd.piped {
-            ctx_of(progs.get(k + 1).and_then(|p| p.as_deref()))
+        // Where a here-document (or here-string) fed to a text program may end up: where this
+        // text's output goes, or any later command of it (through a pipe, a group, or a file
+        // written now and run after), so a shell or another program anywhere after it counts.
+        let (to_shell, to_other) = if own == Ctx::Data {
+            (
+                out == Ctx::Shell || later[k + 1].0,
+                out == Ctx::Other || later[k + 1].1,
+            )
         } else {
-            out
+            (own == Ctx::Shell, own == Ctx::Other)
         };
         for doc in &cmd.heredocs {
-            let goes = if own == Ctx::Data { onward } else { own };
-            match goes {
-                Ctx::Shell => read(&doc.body, Ctx::Shell, depth + 1)?,
-                Ctx::Other => legacy(&doc.body)?,
-                Ctx::Data if doc.quoted => {}
-                Ctx::Data => match words::substitutions(&doc.body) {
-                    Some(bodies) => {
-                        for b in bodies {
-                            read(&b, Ctx::Data, depth + 1)?;
-                        }
+            if to_shell {
+                read(&doc.body, Ctx::Shell, depth + 1)?;
+            }
+            if to_other {
+                legacy(&doc.body)?;
+            }
+            if doc.quoted {
+                continue;
+            }
+            // An unquoted body expands: its substitutions run.
+            match words::substitutions(&doc.body) {
+                Some(bodies) => {
+                    for b in bodies {
+                        read(&b, Ctx::Data, depth + 1)?;
                     }
-                    None => legacy(&doc.body)?,
-                },
+                }
+                None => legacy(&doc.body)?,
             }
         }
     }
@@ -404,11 +442,13 @@ fn options(
         if t == "--" {
             break;
         }
-        if w.built && (t.starts_with("$(") || t.starts_with('`')) {
+        // A word whose start is a substitution or an expansion with an operator (`${v:-...}`):
+        // its value, which may be an option, is not known.
+        if w.built && (t.starts_with('$') || t.starts_with('`')) {
             return refuse(
                 format!("{t} in git {sub}"),
                 format!(
-                    "a word of git {sub} made by a command substitution may be an option the hook cannot read; write the options plainly"
+                    "a word of git {sub} made by a substitution or an expansion may be an option the hook cannot read; write the options plainly"
                 ),
             );
         }
