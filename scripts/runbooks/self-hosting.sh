@@ -853,7 +853,7 @@ stage_switch() {
     check checkout INFO "$REPO: main $old, origin/main $new; a fast-forward is possible"
     case "$(realpath -m "$state")/" in "$(realpath "$REPO")"/*) refuse "the state folder $state lies inside this repository ($REPO), which is public: the handover and the start file would be placed in it" "unset MAKIBA_STATE_DIR or point it outside the checkout, then run this line again" ;; esac
     if [ -n "$SWITCH_HANDOVER" ]; then
-      [ -s "$SWITCH_HANDOVER" ] || refuse "the handover $SWITCH_HANDOVER does not exist or is empty" "name the file the previous secretary wrote: --handover <file>"
+      [ -f "$SWITCH_HANDOVER" ] && [ -r "$SWITCH_HANDOVER" ] && [ -s "$SWITCH_HANDOVER" ] || refuse "the handover $SWITCH_HANDOVER is not a readable, non-empty regular file" "name the file the previous secretary wrote: --handover <file>"
       case "$(realpath "$SWITCH_HANDOVER")/" in "$(realpath "$REPO")"/*) refuse "the handover lies inside this repository ($REPO), which is public" "move it outside the checkout (for example your home folder) and name that path" ;; esac
     fi
   else
