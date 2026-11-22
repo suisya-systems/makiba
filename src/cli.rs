@@ -348,6 +348,12 @@ pub enum Command {
         at_once: Option<i64>,
         #[arg(long)]
         budget_tasks: Option<i64>,
+        /// Wall-clock hours from approval after which nothing new goes in (none: no limit).
+        #[arg(long)]
+        budget_hours: Option<f64>,
+        /// Heads pushed to a task's pull request after the first before it is a stop (default 3).
+        #[arg(long)]
+        budget_fixes: Option<i64>,
         /// Read here; its content travels over the door.
         #[arg(long)]
         brief_head_file: Option<PathBuf>,
@@ -416,6 +422,8 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             takes,
             at_once,
             budget_tasks,
+            budget_hours,
+            budget_fixes,
             brief_head_file,
             replaces,
             reason,
@@ -447,11 +455,21 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             for (k, v) in [
                 ("at_once", at_once),
                 ("budget_tasks", budget_tasks),
+                ("budget_fixes", budget_fixes),
                 ("replaces", replaces),
             ] {
                 if let Some(v) = v {
                     args[k] = v.into();
                 }
+            }
+            if let Some(h) = budget_hours {
+                // NaN and infinity have no JSON form: sent as null they would read as "no limit".
+                if !h.is_finite() || h <= 0.0 {
+                    return Err(format!(
+                        "--budget-hours is a number of hours above 0, not {h}"
+                    ));
+                }
+                args["budget_hours"] = h.into();
             }
             ("range", args)
         }
@@ -659,6 +677,13 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
         range["at_once"], range["budget"]["tasks"]
     );
     println!(
+        "Hours from approval: {}; fixes of a task's pull request before it asks: {}",
+        range["budget"]["hours"]
+            .as_f64()
+            .map_or("no limit".to_string(), |h| h.to_string()),
+        range["budget"]["fixes"]
+    );
+    println!(
         "Merge approval mode (this shell's; makibad records its own): {}",
         status["merge_approval_mode"].as_str().unwrap_or("-")
     );
@@ -815,5 +840,26 @@ mod tests {
         assert!(req(&["pr", "opened", "--repo", "o/n"]).is_err());
         assert!(req(&["pr", "bogus", "--repo", "o/n"]).is_err());
         assert!(req(&["pr", "opened", "--pr", "x"]).is_err());
+    }
+
+    /// `range propose` sends the budgets; hours that are no finite number above 0 are refused
+    /// here, since NaN and infinity would travel as null and read as "no limit".
+    #[test]
+    fn range_propose_sends_the_budgets_and_refuses_hours_that_are_no_number() {
+        let propose = |more: &[&str]| {
+            let mut a = vec!["range", "propose", "--project", "p", "--issues", "1,2"];
+            a.extend_from_slice(more);
+            req(&a)
+        };
+        let (verb, v) = propose(&["--budget-hours", "1.5", "--budget-fixes", "2"]).unwrap();
+        assert_eq!(verb, "range");
+        assert_eq!(v["budget_hours"], json!(1.5));
+        assert_eq!(v["budget_fixes"], json!(2));
+        let (_, v) = propose(&[]).unwrap();
+        assert!(v.get("budget_hours").is_none() && v.get("budget_fixes").is_none());
+        for bad in ["NaN", "inf", "-inf", "0", "-1"] {
+            let flag = format!("--budget-hours={bad}");
+            assert!(propose(&[&flag]).is_err(), "{bad}");
+        }
     }
 }

@@ -22,7 +22,7 @@ This skill orders the other skills; it does none of their work. Questions are `m
 In the conversation, as often as the person likes:
 
 1. Agree with the person on the project, the Issues (a list, a condition, or both), how many at once, how many tasks in all, and the brief head every task starts from (conventions, verification depth, what to stop and ask on).
-2. Record the draft: mcp__makiba__range with `action` `propose`, `project`, `issues` and/or `takes` (`label:<l>`, `no-label:<l>`, `milestone:<m>`, `clause:<=G<n>`, joined by AND), `at_once`, `budget_tasks`, `brief_head`, and `replaces` (the previous draft, or the active range a wider one replaces). It dispatches nothing.
+2. Record the draft: mcp__makiba__range with `action` `propose`, `project`, `issues` and/or `takes` (`label:<l>`, `no-label:<l>`, `milestone:<m>`, `clause:<=G<n>`, joined by AND), `at_once`, `budget_tasks`, optionally `budget_hours` (hours from approval after which nothing new goes in) and `budget_fixes` (fixes of a task's pull request before it asks, 3 unless said), `brief_head`, and `replaces` (the previous draft, or the active range a wider one replaces). It dispatches nothing.
 3. Read what it admits now: mcp__makiba__status, its `ranges[]` entry: `candidates[]`, each admitted or left out with why. Show the person that list, not your own reading of the Issues.
 4. Put in the condition only what can be admitted with nobody looking. An Issue that needs a look first goes in the list, or is taken out with `action` `skip` (with `issue` and `reason`) before it is dispatched. A proposal whose Issues touch a trust boundary (git, the sandbox, keys, the push line) says in its brief head "stop after the design and ask".
 5. When the draft is right, ask the person to approve it with `makiba range approve <id>`, which shows them the same read and asks before it approves.
@@ -30,20 +30,21 @@ In the conversation, as often as the person likes:
 ## 2. While the range runs
 
 - `makibad` dispatches each task itself (`r<range>-<issue>`), with the brief head and the Issue's text. You do not dispatch a range's Issue; a one-off dispatch of another Issue names it with `issue` (`makiba:delegate`), so the range does not take it again.
-- A worker's question you cannot answer goes to the person through `makiba:escalation`, with `stop_kind` and `recommend_answer`. The escalation frees the task's slot and the next task goes in at once.
+- A worker's question you cannot answer goes to the person through `makiba:escalation`, with `stop_kind` and `recommend_answer` (`makibad` refuses the escalation without them). The escalation frees the task's slot and the next task goes in at once.
+- A stop `makibad` wrote itself reaches you as a notice naming its pending entry: the merge gate refused a task's pull request, a pull request edits tests it did not declare, a task used up its fixes, or the range reached a budget with Issues left. The entry is escalated already and its slot is filled. Put its question to the person with the pull request's link, and carry their answer with mcp__makiba__answer; the answer comes back to you, and what follows is yours (send the worker back, or leave the landing to the person).
+- `makibad` pauses the range itself after two failed launches in a row, or two refused pull requests in a row. Tell the person why (the notice says); only they resume it.
 - **Done** is `makiba:pull-request`: push, open the pull request, record it with mcp__makiba__pr (the landing is proved from that record). The range is the person's approval to push and open pull requests for its tasks.
 - A merged pull request is closed with `makiba:curate`, `makiba:retro` and mcp__makiba__close, in that order; the close makes `makibad` read the range again.
-- The range ends by itself when its budget is spent and its tasks are closed, or when nothing is left inside; it ends `scan_error` when its project cannot be read. Tell the person.
+- The range ends by itself when its budget (tasks or hours) is spent and its tasks are closed, or when nothing is left inside; it ends `scan_error` when its project cannot be read. Tell the person.
 - The person says pause or end: mcp__makiba__range with `action` `pause` or `end` and the `id`. Work already running goes on to its own end. Resuming is the person's.
 
 ## 3. The merge
 
-Read the approval mode with mcp__makiba__status before every merge you would make without the person's word: its `merge_approval_mode` is the setting as the merge gate reads it now, and the range's `approval_mode` is the one it was approved under.
+Read the approval mode with mcp__makiba__status before every merge you would make without the person's word: its `merge_approval_mode` is the setting now, and the range's `approval_mode` the one it was approved under.
 
-- Merge without asking only when both the range's `approval_mode` and the mode just read are `acceptance`. When status cannot be read, says `human`, or differs from the range, treat it as `human`. A change from `human` to `acceptance` while the range runs does not widen it: it needs the person's yes.
-- **`human`:** tell the person the pull request is green, with its link, and wait for their word for that pull request. The rest of the belt goes on.
-- **`acceptance`:** check the stop lines of `makiba:pull-request` (its "Merging" section, stop lines 1 to 7). Hitting none, merge with the one command that section names. Hitting one, stop on that pull request and tell the person which line, with its link; the rest of the belt goes on.
-- In both modes a refusal of the merge gate is stop line 7: never another way, never `--admin`.
+- The merge gate holds the pair: a range task's pull request lands without the person only when both are `acceptance`; for any other pair (`human` in either) your merge command stops at a question to the person. So read the pair to know what to say, not to decide: both `acceptance`, go on below; otherwise tell the person the pull request is green, with its link, and wait for their word. The rest of the belt goes on.
+- Both `acceptance`: check the stop lines of `makiba:pull-request` (its "Merging" section, stop lines 1 to 7). Hitting none, merge with the one command that section names. Hitting one, stop on that pull request and tell the person which line, with its link; the rest of the belt goes on.
+- A refusal of the merge gate is stop line 7, and `makibad` has written it as a stop already (section 2): never another way, never `--admin`.
 
 This read replaces, while a range is in force, the pull-request skill's "ask the person which mode is in force".
 
@@ -57,7 +58,7 @@ The range is in the records: a renewed secretary's brief names the ranges in for
 
 ## Not carried
 
-- A scope written in the conversation or a file, and your own count of slots: the range and `makibad`'s counts replace them.
+- A scope written in the conversation or a file, and your own count of slots, of a task's fixes or of failures in a row: the range and `makibad`'s counts replace them.
 - Dispatching the range's next candidate yourself: `makibad` does it when a slot frees.
 - Answering a stop with the recommendation on the person's behalf: not in this version; each stop records the recommendation and the answer so that the person can decide later.
 - The review round cap's relay: the door counts the rounds (`review`); a worker out of rounds reports it (stop line 5), and only you raise its allowance, with a reason.
