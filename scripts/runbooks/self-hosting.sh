@@ -504,7 +504,7 @@ fd_brief() {
     printf 'Run: CARGO_HOME="$PWD/.cargo-home" cargo test --test first_day_check 2>&1 | tail -n 15\n'
   fi
   printf 'Then: git add README.md tests/first_day_check.rs (only these two; never .cargo-home or target) and git commit -m "docs: first-day check".\n'
-  printf 'Then call the tool review once, with kind "diff", and wait for its answer (it can take up to 20 minutes). Do not call it again.\n'
+  printf 'Then call the tool review exactly once, with the single argument kind set to "diff" ({"kind":"diff"}) and nothing else: no task, no allowed, no reason (it is your own task, the door knows it, and an extra argument is refused). Wait for its answer (it can take up to 20 minutes). Do not call it again.\n'
   if [ "$mode" = full ]; then
     printf 'Last, call the tool report with state "done", task "%s" and one sentence that starts with: BUILD=<ok|failed> DOWNLOADED=<the number> TEST=<ok|failed>, then what the review answered in a few words.\n' "$t"
     printf 'If cargo fails with a network, host, connection or proxy error, do not retry: call the tool report with state "blocked", task "%s" and the first 8 lines of that error exactly as printed. The same if report done is refused.\n' "$t"
@@ -553,13 +553,14 @@ $texts" | tr '\n' ' ')
   case "$FD_OUTCOME" in
     timeout) fd code-worker-build FAIL "no done report in ${WAIT_CODE:-3000} s" "read its screen with $MK peek $task, then end it: $MK close $task --abandon" ;;
     failed) fd code-worker-build FAIL "the launch failed: ${FD_BODY:-no reason recorded}" "docs/runbooks/self-hosting.md section 7 and the screen in worker_spawn_failed ($MK events); then run the line again" ;;
-    blocked) fd code-worker-build FAIL "the worker reported blocked: ${FD_BODY%%$'\n'*}" "read the whole report with $MK show <message id> (the results file keeps it), then run the line again" ;;
-    done)
+    done | blocked)
+      # The build is judged alone: a worker that built and tested and then reported blocked for another reason
+      # (its review) still passes here; review-diff carries what it said.
       n=$(printf '%s' "$FD_BODY" | grep -oE 'DOWNLOADED=[0-9]+' | head -n 1 | cut -d= -f2 || true)
       if ! printf '%s' "$FD_BODY" | grep -q 'BUILD=ok' || ! printf '%s' "$FD_BODY" | grep -q 'TEST=ok'; then
-        fd code-worker-build FAIL "the done report does not say BUILD=ok and TEST=ok: ${FD_BODY%%$'\n'*}" "read its report and the build output it quotes; run the line again"
+        fd code-worker-build FAIL "the $FD_OUTCOME report does not say BUILD=ok and TEST=ok: ${FD_BODY%%$'\n'*}" "read its whole report ($MK show <message id>; the results file keeps it) and the build output it quotes; run the line again"
       elif [ "${n:-0}" -gt 0 ]; then
-        fd code-worker-build PASS "done report with BUILD=ok TEST=ok after a cold download of $n crates (a CARGO_HOME of its own); no refused host in its messages or events"
+        fd code-worker-build PASS "$FD_OUTCOME report with BUILD=ok TEST=ok after a cold download of $n crates (a CARGO_HOME of its own); no refused host in its messages or events"
       else
         fd code-worker-build INFO "built from a warm cache: the hosts are not proven (the report says DOWNLOADED=${n:-none}; ${FD_BODY%%$'\n'*})"
         FD_GAPS+=("code-worker-build: the network hosts were not exercised (no crate was downloaded); run the line again, or watch the first real code worker's first cargo build")
@@ -684,7 +685,13 @@ stage_first_day() {
   if [ "$FD_OUTCOME" = done ]; then
     fd_check_review "$A" review-diff any
   else
-    fd review-diff FAIL "no review to read: the worker did not get to its done report ($FD_OUTCOME)" "see code-worker-build above"
+    if [ "$FD_OUTCOME" = blocked ] && printf '%s' "$FD_BODY" | grep -qi 'classifier'; then
+      fd review-diff FAIL "a door tool call of the worker (review) was denied by the Claude Code auto mode classifier before it reached makibad; its words: ${FD_BODY%%$'\n'*}" "Issue 292 (a role's settings allow its own door tools); until it lands the review cannot run here: run the line again after it, or read $MK show <message id>"
+    elif [ "$FD_OUTCOME" = blocked ]; then
+      fd review-diff FAIL "the worker reported blocked and made no review; its words: ${FD_BODY%%$'\n'*}" "read its whole report ($MK show <message id>; the results file keeps it), then run the line again"
+    else
+      fd review-diff FAIL "no review to read: the worker did not get to its done report ($FD_OUTCOME)" "see code-worker-build above"
+    fi
   fi
   case "$FD_READER" in
     "" | none) fd review-fresh-session INFO "not run: the first review gave no reader to compare with" ;;
