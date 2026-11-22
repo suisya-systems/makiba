@@ -15,5 +15,6 @@ Each role also has a rules file, `rules.md`, carried from paddock's templates wi
 | `deny-workers-delete` | Bash | all | a recursive `rm` naming the folder of worktrees or of document folders |
 | `worker-boundary` | Edit, Write | worker, curator | a write outside the agent's folder, or to its own settings or `.mcp.json` |
 | `deny-foreground-subagent` | Agent, Task | all | a subagent in the foreground |
+| `premise-check` | UserPromptSubmit | secretary | nothing: it prints one reminder line when the person's message states a number, a setting or a behaviour (Issue 269) |
 
 Every hook refuses a payload it cannot read. What holds each line the organization keeps is in [docs/design/lines.md](../docs/design/lines.md). The binary carries these files. A worker's launch passes `$MAKIBA_SHARE_DIR/roles/worker/rules.md`, written there by `makibad`, as its rules, and its per-task settings file is this role's `settings.json` with the task's denies and write surface added (spec section 9, Issue 134).
