@@ -129,13 +129,18 @@ What it means for the gate:
   diff from each head's merge base with the base; `gate_review` in `src/daemon/door.rs`). A clean
   `update` that brings a base change near the pull request's own lines can fail `same_changes` (the
   diff's context differs), and the gate then calls the review stale and refuses. Under the queue the
-  gate never sees the queue's commit, so that check would be skipped. Two ways, for the owner (Q5):
-  accept that the review is judged at the pull request's head only, with the queue's CI as the check
-  on the combination (a relaxation of the Issue 344 contract, to be approved as such); or keep the
-  contract by having makibad, before the enqueue command is allowed, merge the head onto the current
-  `main` in the clone and apply `same_changes` there, accepting that entries ahead in the queue are
-  not seen. A queue that cannot merge cleanly removes the entry, so nothing with a conflict
-  resolution lands either way.
+  gate never sees the queue's commit, so that check would be skipped. The contract cannot be kept
+  whole with GitHub's queue: the commit that lands is built from entries ahead that change while the
+  pull request waits (a rebuild after a failure changes them again), and the check would have to run
+  on that commit before it lands, but `same_changes` needs makibad's review record, which a CI job on
+  `merge_group` cannot read, and makibad does not act between the queue's build and its merge. Both
+  ways open are relaxations of the Issue 344 contract, for the owner to approve as such (Q5):
+  (i) the review is judged at the pull request's head only, with the queue's CI as the check on the
+  combination; or (ii) narrower: before the enqueue command is allowed, makibad merges the head onto
+  the current `main` in the clone and applies `same_changes` there, so a review is stale when `main`
+  as it is changed the context of the pull request's own lines, while a change from an entry ahead in
+  the queue can still alter that context unseen. A queue that cannot merge cleanly removes the entry,
+  so nothing with a conflict resolution lands either way.
 - L-K9 would read: a merge needs CI on the exact head and the acceptance gate (at enqueue), and
   CI on the exact commit that lands (the queue's required checks).
 - The person's word under `human`: the question is asked at enqueue, for the pull request's head,
@@ -249,8 +254,9 @@ Why:
   the test-first proof is still judged at the pull request's head, and `acceptance` on
   `merge_group` runs the declared test targets on the landed commit (Q2), so the declared test is
   shown to run and pass on what lands, as today after an `update`. The review is the one part the
-  queue weakens: today's `same_changes` check on the merged head is either given up by the owner or
-  done by makibad against the current `main` before enqueue (Q5).
+  queue weakens: today's `same_changes` check on the merged head cannot be kept whole; either it is
+  given up, or makibad applies it against the current `main` before enqueue, which still misses the
+  entries ahead. Both are relaxations the owner approves as such (Q5); I recommend (ii).
 - It needs no `update` for being behind, so Issue 358's fix-budget stops for that reason end.
 - It is GitHub's own mechanism: no third-party app with write access, and branch protection stays
   the bound.
@@ -268,8 +274,9 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
 3. Merge gate and hook: confirm that the one allowed command enqueues with the expected head; if
    not, change the allowed form; say in the gate's answer that the command enqueues. Update L-K9's
    row and `skills/pull-request/SKILL.md` (the merge enqueues; "Main moved under a pushed branch"
-   needs `update` only for a conflict). Per Q5, either record the relaxed review contract in L-K9
-   and L-K10, or have the gate merge the head onto the current `main` and apply `same_changes`.
+   needs `update` only for a conflict). Per Q5, record the relaxed review contract in L-K9 and
+   L-K10, and for (ii) have the gate merge the head onto the current `main` and apply
+   `same_changes` before it allows the enqueue.
 4. PR watch: read the queue state in the same `gh pr view` call (with Issue 387's
    `mergeable,mergeStateStatus`), and tell the secretary when a pull request leaves the queue
    without landing; keep `merged_via` keyed on `headRefOid`. No second poller.
@@ -307,7 +314,7 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
   that merges, or must the person also see the queue's commit land?
 - Q4. Is the whole suite on the real base needed on every head, or only `tests/real_base_wire.rs`
   (with the whole suite after the merge)?
-- Q5. The review under the queue: accept that it is judged at the pull request's head only (a
-  relaxation of Issue 344's `same_changes` rule, with the queue's CI as the check on the
-  combination), or have makibad check `same_changes` against the current `main` before it allows
-  the enqueue (entries ahead in the queue still unseen)?
+- Q5. The review under the queue relaxes Issue 344's `same_changes` rule either way. Which
+  relaxation: (i) judged at the pull request's head only, with the queue's CI as the check on the
+  combination, or (ii) makibad also checks `same_changes` against the current `main` before it
+  allows the enqueue (entries ahead in the queue still unseen; recommended)?
