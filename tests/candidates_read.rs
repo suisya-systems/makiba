@@ -422,3 +422,35 @@ fn the_next_work_table_of_the_spec_is_what_is_printed() {
         "the Status field table has no row next_work"
     );
 }
+
+/// Issue 299: a body line `Depends on the belt's step 2.` names no Issue number, so the scan leaves
+/// the Issue out with the reason `dependency_unreadable` and the line; an Issue whose line names a
+/// closed Issue (`Depends on #70.`, #70 not open) is a candidate.
+#[test]
+fn a_dependency_written_in_words_is_left_out_of_the_next_work() {
+    let org = Org::scanned(
+        "words",
+        true,
+        &[
+            issue(71, "Step three", "Depends on the belt's step 2."),
+            issue(72, "Step four", "Depends on #70."),
+        ],
+    );
+    let v = org.next_work();
+    let left = entry(&v, "left_out", "issue", json!(71));
+    assert_eq!(left["kind"], json!("dependency_unreadable"), "{v}");
+    assert!(
+        left["reason"]
+            .as_str()
+            .is_some_and(|r| r.contains("Depends on the belt's step 2.")),
+        "{v}"
+    );
+    let issues: Vec<&Value> = v["candidates"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no candidates: {v}"))
+        .iter()
+        .map(|c| &c["issue"])
+        .collect();
+    assert!(issues.contains(&&json!(72)), "{v}");
+    assert!(!issues.contains(&&json!(71)), "{v}");
+}
