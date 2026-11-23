@@ -8,7 +8,9 @@
 //!     (the manifest commit M), and M is the PR's first own commit (its parent is in the base and
 //!     every other commit of `base..head` comes after it). Merging the base after M keeps this, and
 //!     a protected path M left alone that head holds as the base does counts as a change from the
-//!     base, not from the PR;
+//!     base, not from the PR. M may change only what `scripts/acceptance-check.sh` lets a test
+//!     commit change (its declared paths and test helpers: one rule, run from the built-in copy of
+//!     that script, Issue 361), and every path M changes is protected;
 //! (b) either the base names one check in `.github/acceptance-check`, `.github/workflows/` at head
 //!     equals the base, and every run of that check at head succeeded; or before the fix the test
 //!     failed: a failed `ci_completed` at M is recorded, the same CI job (app, check name, workflow)
@@ -269,6 +271,61 @@ pub fn before_ci(
     ))
 }
 
+/// The acceptance checker of makiba's own CI, built in: the one place of the rule of what a test
+/// commit may change (Issue 361). The gate runs its `--test-commit` mode, never restates it.
+const CHECKER: &str = include_str!("../../scripts/acceptance-check.sh");
+
+/// The paths the test commit `msha` may not change, by the rule of `scripts/acceptance-check.sh`
+/// (docs/acceptance-check.md, rule 2): every path it changes that is neither under a path it
+/// declares nor a test helper, sorted. The checker runs in `repo` with git hooks off.
+pub fn test_commit_refusals(repo: &Path, msha: &str) -> Result<Vec<String>, Reject> {
+    let (key, value) = HOOKS_OFF.split_once('=').unwrap_or((HOOKS_OFF, ""));
+    let out = Command::new("bash")
+        .args(["-c", CHECKER, "acceptance-check", "--test-commit", msha])
+        .current_dir(repo)
+        .env("GIT_CONFIG_COUNT", "1")
+        .env("GIT_CONFIG_KEY_0", key)
+        .env("GIT_CONFIG_VALUE_0", value)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| Reject(format!("cannot run bash for the acceptance checker: {e}")))?;
+    match out.status.code() {
+        Some(0) => Ok(Vec::new()),
+        Some(1) => {
+            let paths: BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
+                .lines()
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            Ok(paths.into_iter().collect())
+        }
+        _ => reject(format!(
+            "the acceptance checker could not judge the test commit {}: {}",
+            &msha[..msha.len().min(12)],
+            String::from_utf8_lossy(&out.stderr).trim()
+        )),
+    }
+}
+
+/// Every path the commit changes against its parent.
+fn changed_by(repo: &Path, sha: &str) -> Result<BTreeSet<String>, Reject> {
+    Ok(git(
+        repo,
+        &[
+            "diff",
+            "--no-renames",
+            "--name-only",
+            "-z",
+            &format!("{sha}^"),
+            sha,
+        ],
+    )?
+    .split('\0')
+    .filter(|p| !p.is_empty())
+    .map(String::from)
+    .collect())
+}
+
 /// Condition (a): the protected entries are those of the manifest commit.
 fn check_protected(
     repo: &Path,
@@ -293,9 +350,17 @@ fn check_protected(
             return reject(format!("manifest path {p:?} does not exist in {short}"));
         }
     }
+    let undeclared = test_commit_refusals(repo, msha)?;
+    if !undeclared.is_empty() {
+        return reject(format!(
+            "manifest commit {short} also changes undeclared paths {undeclared:?}: declare them with {TRAILER} or move them to a later commit"
+        ));
+    }
+    // What the test commit changed (its declared paths and test helpers) stays as it left them.
+    let touched = changed_by(repo, msha)?;
     let prot = |t: &Tree| -> Tree {
         t.iter()
-            .filter(|(p, _)| is_protected(p, manifest))
+            .filter(|(p, _)| is_protected(p, manifest) || touched.contains(*p))
             .map(|(p, e)| (p.clone(), e.clone()))
             .collect()
     };
@@ -306,20 +371,6 @@ fn check_protected(
         }
     }
     let parent = format!("{msha}^");
-    let touched = git(
-        repo,
-        &["diff", "--no-renames", "--name-only", "-z", &parent, msha],
-    )?;
-    let undeclared: BTreeSet<&str> = touched
-        .split('\0')
-        .filter(|p| !p.is_empty() && !is_protected(p, manifest))
-        .collect();
-    if !undeclared.is_empty() {
-        let list: Vec<&str> = undeclared.into_iter().collect();
-        return reject(format!(
-            "manifest commit {short} also changes undeclared paths {list:?}: declare them with {TRAILER} or move them to a later commit"
-        ));
-    }
     let ph = prot(&tree(repo, head)?);
     let (pp, pb) = (tree(repo, &parent)?, tree(repo, base)?);
     let keys: BTreeSet<&String> = pm.keys().chain(ph.keys()).collect();
@@ -606,7 +657,8 @@ fn is_test(path: &str) -> bool {
 /// The tests a pull request edited after its test commit (Issue 282, belt.md section 5 line 5):
 /// every file under a folder `tests` that exists at `P` and is changed or gone at `head`, where
 /// `P` is the parent of the test commit `msha`, or the merge base of `base` and `head` when no
-/// test is declared. Left out: the declared paths (condition (a) holds them), and a file `head`
+/// test is declared. Left out: the declared paths and every other path the test commit changed,
+/// such as a helper it extended (condition (a) holds them; Issue 361), and a file `head`
 /// holds exactly as `base` does (the base brought that change, as in `check_protected`). A new
 /// test is not an edited one. A moved test is reported at the path it left.
 pub fn edited_tests(
@@ -616,9 +668,12 @@ pub fn edited_tests(
     msha: Option<&str>,
     manifest: &[String],
 ) -> Result<Vec<String>, Reject> {
-    let before = match msha {
-        Some(m) => git(repo, &["rev-parse", &format!("{m}^")])?,
-        None => git(repo, &["merge-base", base, head])?,
+    let (before, by_test_commit) = match msha {
+        Some(m) => (
+            git(repo, &["rev-parse", &format!("{m}^")])?,
+            changed_by(repo, m)?,
+        ),
+        None => (git(repo, &["merge-base", base, head])?, BTreeSet::new()),
     };
     let (tp, th, tb) = (
         tree(repo, before.trim())?,
@@ -627,7 +682,9 @@ pub fn edited_tests(
     );
     Ok(tp
         .iter()
-        .filter(|(p, _)| is_test(p) && !manifest.iter().any(|m| under(p, m)))
+        .filter(|(p, _)| {
+            is_test(p) && !manifest.iter().any(|m| under(p, m)) && !by_test_commit.contains(*p)
+        })
         .filter(|(p, e)| th.get(*p) != Some(*e) && th.get(*p) != tb.get(*p))
         .map(|(p, _)| p.clone())
         .collect())

@@ -16,15 +16,48 @@
 #     paths, test helpers (files under tests/ that are not test targets), .github/ and this
 #     script unchanged (what a merge brings from its other parents does not count).
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
+#   bash scripts/acceptance-check.sh --test-commit SHA
+# prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
+# none, 1 some, 2 usage. The merge gate in makibad runs this mode, so both judge by one rule.
 set -u
-[ $# -eq 2 ] || { echo "usage: acceptance-check.sh BASE_SHA HEAD_SHA" >&2; exit 2; }
+declared() { git log -1 --format='%(trailers:key=Acceptance-Test,valueonly)' "$1" | sed '/^[[:space:]]*$/d'; }
+under() { # under <file> <path>: the file is the path or inside it
+  local p=${2%/}; [ "$1" = "$p" ] || case $1 in "$p"/*) true ;; *) false ;; esac
+}
+rs_name() { # rs_name <file>: the Cargo target name of tests/<name>.rs or tests/<name>/main.rs
+  local r=${1#tests/}
+  [ "$r" != "$1" ] || return 1
+  case $r in */*/*) return 1 ;; */main.rs) echo "${r%/main.rs}" ;; */*) return 1 ;; *.rs) echo "${r%.rs}" ;; *) return 1 ;; esac
+}
+is_py() { case $1 in tests/*) case ${1##*/} in test_*.py) true ;; *) false ;; esac ;; *) false ;; esac; }
+is_helper() { case $1 in tests/*) ! is_py "$1" && ! rs_name "$1" >/dev/null ;; *) false ;; esac; }
+is_declared() { local p; while IFS= read -r p; do under "$1" "$p" && return 0; done <<<"$paths"; return 1; }
+# The one rule of what a test commit may change (Issue 361): a path under a path the commit
+# declares, or a test helper. Prints every other path the commit changes, one per line. The merge
+# gate (src/daemon/gate.rs, test_commit_refusals) runs it through --test-commit.
+refused_in_test_commit() { # refused_in_test_commit <sha>
+  local paths f
+  paths=$(declared "$1")
+  while IFS= read -r f; do
+    [ -n "$f" ] || continue
+    is_declared "$f" || is_helper "$f" || printf '%s\n' "$f"
+  done < <(git diff --no-renames --name-only "$1^" "$1")
+}
+if [ "${1:-}" = --test-commit ]; then
+  [ $# -eq 2 ] || { echo "usage: acceptance-check.sh --test-commit SHA" >&2; exit 2; }
+  sha=$(git rev-parse --verify "$2^{commit}" 2>/dev/null) || { echo "acceptance-check: unknown commit $2" >&2; exit 2; }
+  git rev-parse --verify -q "$sha^" >/dev/null || { echo "acceptance-check: commit $2 has no parent" >&2; exit 2; }
+  refused=$(refused_in_test_commit "$sha" | LC_ALL=C sort -u)
+  [ -n "$refused" ] || exit 0
+  printf '%s\n' "$refused"; exit 1
+fi
+[ $# -eq 2 ] || { echo "usage: acceptance-check.sh BASE_SHA HEAD_SHA | --test-commit SHA" >&2; exit 2; }
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "acceptance-check: not in a git repository" >&2; exit 2; }
 head=$(git rev-parse --verify "$2^{commit}" 2>/dev/null) || { echo "acceptance-check: unknown head $2" >&2; exit 2; }
 mb=$(git merge-base "$1" "$head" 2>/dev/null) || { echo "acceptance-check: no merge base of $1 and $2" >&2; exit 2; }
 
 bad=0
 no() { echo "acceptance-check: $*"; bad=1; }
-declared() { git log -1 --format='%(trailers:key=Acceptance-Test,valueonly)' "$1" | sed '/^[[:space:]]*$/d'; }
 
 commits=$(git rev-list --reverse --first-parent "$head" --not "$1")
 first=$(printf '%s\n' "$commits" | head -1)
@@ -40,23 +73,10 @@ fi
 echo "acceptance-check: test commit $first declares: $(echo $paths)"
 [ "$(git rev-list --parents -n 1 "$first" | wc -w)" -eq 2 ] || no "test commit $first is a merge; no join commit may come before or at the test commit"
 
-under() { # under <file> <path>: the file is the path or inside it
-  local p=${2%/}; [ "$1" = "$p" ] || case $1 in "$p"/*) true ;; *) false ;; esac
-}
-rs_name() { # rs_name <file>: the Cargo target name of tests/<name>.rs or tests/<name>/main.rs
-  local r=${1#tests/}
-  [ "$r" != "$1" ] || return 1
-  case $r in */*/*) return 1 ;; */main.rs) echo "${r%/main.rs}" ;; */*) return 1 ;; *.rs) echo "${r%.rs}" ;; *) return 1 ;; esac
-}
-is_py() { case $1 in tests/*) case ${1##*/} in test_*.py) true ;; *) false ;; esac ;; *) false ;; esac; }
-is_helper() { case $1 in tests/*) ! is_py "$1" && ! rs_name "$1" >/dev/null ;; *) false ;; esac; }
-is_declared() { local p; while IFS= read -r p; do under "$1" "$p" && return 0; done <<<"$paths"; return 1; }
-
 # 1. the test commit changes only declared paths and test helpers
 while IFS= read -r f; do
-  [ -n "$f" ] || continue
-  is_declared "$f" || is_helper "$f" || no "test commit changes $f, which is neither declared nor a test helper"
-done < <(git diff --no-renames --name-only "$first^" "$first")
+  no "test commit changes $f, which is neither declared nor a test helper"
+done < <(refused_in_test_commit "$first")
 
 # 2. protected paths unchanged by the branch's own commits after the test commit. A merge (of
 # the base) counts only for files it leaves different from every parent: its own resolution.

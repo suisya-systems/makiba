@@ -1032,7 +1032,7 @@ fn repo_check_not_trusted_when_the_pr_rewrites_its_workflow() {
     expect(
         &js_gate(&c, &head),
         "rejected",
-        "no failed CI run recorded at the test commit",
+        "undeclared paths [\".github/workflows/ci.yml\"]",
     );
 }
 

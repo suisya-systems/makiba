@@ -13,7 +13,7 @@ bash scripts/acceptance-check.sh <base sha> <head sha>
 [`scripts/acceptance-check.sh`](../scripts/acceptance-check.sh) takes the branch's own commits: the head's first-parent line that the base cannot reach. The oldest of them is the test commit (its parent is in the base). If it carries `Acceptance-Test: <path>` trailers, the check fails unless all of these hold:
 
 1. The test commit is not a merge, and no other own commit declares. So no join commit comes before the test commit.
-2. The test commit changes only declared paths and test helpers.
+2. The test commit changes only declared paths and test helpers. This is the one rule of what a test commit may change; the merge gate judges by it too (below).
 3. At least one declared path is a test target; every declared target fails at the test commit and passes at head (below).
 4. The own commits after the test commit leave the declared paths, test helpers, `.github/` and the checker itself unchanged. New test targets may be added.
 
@@ -32,6 +32,12 @@ No trailer: the job passes and prints `ACCEPTANCE: none`. The last line of the l
 **Passes at head** only when Cargo exits 0 and the `test result: ok.` line reads P passed, 0 failed and 0 ignored, with P at least 1. An ignored test at head fails the check; so does a target that runs no test.
 
 **A Python test** (`tests/**/test_*.py`) runs as before: `python3 -m pytest <path>` from the tree root; exit 5 (no test collected) is not failing.
+
+## One rule for the checker and the merge gate
+
+Rule 2 is held in one place: the function `refused_in_test_commit` of `scripts/acceptance-check.sh`. `bash scripts/acceptance-check.sh --test-commit <sha>` prints the paths that commit changes and may not (neither under a path it declares nor a test helper), one per line, sorted; it exits 0 when there is none, 1 when there are some, 2 on a usage error or an unknown commit. It runs no test.
+
+The merge gate in makibad (`src/daemon/gate.rs`, condition (a)) runs that mode from the copy of the script built into makibad, in the project's clone with git hooks off, and refuses a manifest commit with any such path ("also changes undeclared paths"). So a helper added to `tests/common/` in the test commit passes both, and a code change, a `pyproject.toml` or a workflow in the test commit is refused by both (Issue 361: PR 353 passed the checker and was refused by the gate). Every path the test commit changed is then protected by the gate as well, and is not reported as a test edited after the test commit. The gate's copy is the one makibad was built with; CI takes the base's copy: they agree while makibad is built from the base it judges. Test: [`tests/acceptance_rule_shared.rs`](../tests/acceptance_rule_shared.rs).
 
 ## The landing gate
 
