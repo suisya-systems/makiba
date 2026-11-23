@@ -404,7 +404,9 @@ impl Door {
                     return r;
                 }
                 Ok(Some((to, text, q))) => {
-                    return self.typed(
+                    // `None`: the run was parked before the send was recorded (Issue 332), so
+                    // nothing was typed or stored; the verb's own path below stores it instead.
+                    if let Some(r) = self.typed(
                         &w,
                         &actor,
                         verb,
@@ -416,7 +418,9 @@ impl Door {
                             None => Ok(json!({"id": id})),
                             Some(q) => q.answered(w, &actor, id),
                         },
-                    );
+                    ) {
+                        return r;
+                    }
                 }
                 // An answer to a prompt types no text: the verb's own path.
                 Ok(None) => {}
@@ -475,7 +479,8 @@ impl Door {
     /// not finished, so a retry of the same `idem` after a crash answers that the outcome is not
     /// known instead of typing again. `send_typed` records the message before it types.
     /// `after` runs once the text was typed, with the message id, and gives the result (an
-    /// answer marks its entry answered there).
+    /// answer marks its entry answered there). `None` when the recipient's run was parked before
+    /// the message was recorded: nothing was typed or stored, and the command is not recorded.
     #[allow(clippy::too_many_arguments)]
     fn typed(
         &self,
@@ -487,14 +492,22 @@ impl Door {
         to: &str,
         text: &str,
         after: impl FnOnce(&StateWriter, i64) -> Response,
-    ) -> Response {
+    ) -> Option<Response> {
         let unknown: Response = Err(internal(
             "the outcome of an earlier typed send with this idem is not known; it is not sent again",
         ));
         let Some(id) = insert_command(w, actor, verb, args, idem, "accepted", &unknown) else {
-            return Err(internal("cannot record the request"));
+            return Some(Err(internal("cannot record the request")));
         };
-        let r = super::delivery::send_typed(w, &*self.base, actor, to, "message", text)
+        let r = super::delivery::send_typed(w, &*self.base, actor, to, "message", text);
+        if matches!(r, Err(super::delivery::TypedError::Parked)) {
+            if let Err(e) = w.conn().execute("DELETE FROM commands WHERE id = ?1", [id]) {
+                eprintln!("makibad: cannot remove command {id}: {e}");
+                return Some(Err(internal(e)));
+            }
+            return None;
+        }
+        let r = r
             .map_err(|e| match e {
                 super::delivery::TypedError::Usage(m) => usage(m),
                 super::delivery::TypedError::Conflict(m) => refuse(
@@ -503,6 +516,9 @@ impl Door {
                     "nothing was typed or stored; send again later or without typed",
                 ),
                 super::delivery::TypedError::Failed(m) => internal(m),
+                super::delivery::TypedError::Parked => {
+                    internal("the run was parked; handled above")
+                }
             })
             .and_then(|id| after(w, id));
         let done = match status_of(&r) {
@@ -527,7 +543,7 @@ impl Door {
         if let Err(e) = done {
             eprintln!("makibad: cannot finish command {id}: {e}");
         }
-        r
+        Some(r)
     }
 }
 
