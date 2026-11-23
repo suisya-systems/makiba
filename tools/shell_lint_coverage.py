@@ -45,13 +45,38 @@ def lint_globs(ci_text):
     sc = next((l for l in block if l.startswith(SHELLCHECK)), None)
     if loop is None or sc is None:
         raise ValueError("the shell step has no `for f in ...; do bash -n` loop or no shellcheck line")
-    return loop[len(LOOP):loop.index("; do")].split(), sc[len(SHELLCHECK):].split()
+    return _words(loop[len(LOOP):loop.index("; do")]), _words(sc[len(SHELLCHECK):])
+
+
+def _words(text):
+    """The path arguments of a command line: the words up to a comment or a shell operator,
+    without options. A word after `#`, `;`, `|`, `&`, `<` or `>` is not an argument."""
+    words = []
+    for w in text.split():
+        if w[0] in "#;|&<>":
+            break
+        if w[0] == "-":
+            continue
+        cut = min((w.index(c) for c in ";|&<>" if c in w), default=None)
+        if cut is not None:
+            if w[:cut]:
+                words.append(w[:cut])
+            break
+        words.append(w)
+    return words
+
+
+def _segment(name, pat):
+    # Bash's default globbing never matches a leading '.' with a wildcard: it must be written.
+    if name.startswith(".") and not pat.startswith("."):
+        return False
+    return fnmatchcase(name, pat)
 
 
 def _matches(glob, path):
     # A bash glob does not cross '/': match segment by segment.
     g, p = glob.split("/"), path.split("/")
-    return len(g) == len(p) and all(fnmatchcase(s, pat) for s, pat in zip(p, g))
+    return len(g) == len(p) and all(_segment(s, pat) for s, pat in zip(p, g))
 
 
 def uncovered(ci_text, files):
