@@ -149,6 +149,14 @@ pub fn daemon(root: &Path) -> Makibad {
     Makibad::new(root, "daemon")
 }
 
+/// `<exe> daemon` with `MAKIBA_KNOWLEDGE_DIR=<root>/knowledge`: `makibad` started from another
+/// file than the test's own binary, such as a copy in a temporary folder (Issue 340).
+pub fn daemon_from(exe: &Path, root: &Path) -> Makibad {
+    let mut c = Command::new(exe);
+    c.arg("daemon").env(KNOWLEDGE_ENV, knowledge(root));
+    Makibad(c)
+}
+
 /// `makiba up` (which starts `makiba daemon` with its environment) with
 /// `MAKIBA_KNOWLEDGE_DIR=<root>/knowledge`.
 pub fn up(root: &Path) -> Makibad {
