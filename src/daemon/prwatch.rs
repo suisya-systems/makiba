@@ -1177,7 +1177,7 @@ fn merge_sentence(seen: MergeSeen, repo: &str, pr: i64) -> String {
         }
         MergeSeen::NotFollowed => {
             return format!(
-                " makibad does not read this pull request's merge state (not followed): read it with gh pr view {pr} --repo {repo} --json mergeStateStatus before telling anyone it is ready."
+                " makibad does not read this pull request's merge state (not followed): read it with gh pr view {pr} --repo {repo} --json mergeStateStatus,headRefOid,state,isDraft before telling anyone it is ready."
             );
         }
     };
@@ -1209,7 +1209,8 @@ fn told_from_notice(body: &str) -> Option<String> {
 /// the run's newest recorded head, whose newest CI result is `passed`, of the pull request and
 /// generation still followed, is a change; one equal to the class last told is not. With none
 /// told by this process (a restart), the class is read back from the newest stored notice of that
-/// head, else recorded without a notice. The class now told, if it is to be remembered.
+/// head; when no notice names one (one written before Issue 387, or of a pull request not followed
+/// then), the first computed state is told. The class now told, if it is to be remembered.
 fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<Option<String>> {
     let class = merge_class(&r.status, r.draft);
     if class == "unknown" || r.head.is_empty() {
@@ -1276,9 +1277,8 @@ fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<
                 .optional()?
                 .and_then(|b| told_from_notice(&b)),
         };
-        match before {
-            Some(c) if c != class => {}
-            _ => return Ok(Some(class)),
+        if before.as_ref() == Some(&class) {
+            return Ok(Some(class));
         }
         super::verify::notify_secretary(
             w,
@@ -1945,6 +1945,55 @@ esac"#,
         assert_eq!(f.gen_reg, 0, "no registration event");
         let told = apply_merge(&w, &merge_read(&f, &head, "CLEAN"), None).unwrap();
         assert_eq!(told.as_deref(), Some("ready"));
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM messages WHERE body LIKE 'The merge state of o/r#5 at 1111111,%(CLEAN)%'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    /// A green head whose CI notice was written before Issue 387 (no merge state in it) has its
+    /// first computed merge state told after the upgrade, once.
+    #[test]
+    fn a_notice_from_before_the_merge_state_gets_the_first_computed_state_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "1".repeat(40);
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"}),
+        );
+        w.transaction(|w| {
+            super::super::verify::notify_secretary(
+                w,
+                Some("t"),
+                "CI passed for o/r#5 at 1111111: 0 of 1 checks failed.",
+            )
+        })
+        .unwrap();
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let told = apply_merge(&w, &merge_read(&f, &head, "CLEAN"), None).unwrap();
+        assert_eq!(told.as_deref(), Some("ready"));
+        let told = told.unwrap();
+        assert_eq!(
+            apply_merge(&w, &merge_read(&f, &head, "CLEAN"), Some(&told)).unwrap(),
+            Some(told)
+        );
         assert_eq!(
             count(
                 &w,

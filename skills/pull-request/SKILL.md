@@ -28,7 +28,7 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
   - **Blocked (`BLOCKED`):** find what blocks it (`gh pr view <n> --repo <owner>/<name> --json reviewDecision,statusCheckRollup`, branch protection or rules), then tell the person what is missing.
   - **A draft:** tell the person; it is not ready.
   - **Not known yet (`UNKNOWN`, `not read`):** do not call it ready; `makibad` sends a merge-state notice once it reads the state.
-  - **Not followed:** read the state with the command the notice names before calling it ready.
+  - **Not followed:** no merge-state notice will come. Read the state with the command the notice names; when it shows the head the CI notice was for, `state` `OPEN`, `isDraft` false and `mergeStateStatus` `CLEAN`, `HAS_HOOKS` or `UNSTABLE`, that read stands for a notice reading it mergeable now (quote it); otherwise act on its status as above.
 - **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push with mcp__makiba__push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
 
@@ -44,7 +44,7 @@ When a check failed for a cause outside the change (a flaky test) and you rerun 
 
 The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
 
-- **`human`** (also when you do not know): once the newest notice for the head reads it mergeable now, tell the person the pull request is green and can merge, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
+- **`human`** (also when you do not know): once the newest notice for the head reads it mergeable now (for a pull request not followed, your own read as above), tell the person the pull request is green and can merge, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
 - **`acceptance`:** merge a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
 
 Stop lines:
@@ -56,7 +56,7 @@ Stop lines:
 5. The worker ran out of its review rounds or its time, or reported a blocker, or the task's last diff review did not read the head you would merge.
 6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
 7. The merge gate refused.
-8. The newest notice for the head does not read it as mergeable now. Behind its base is not a stop to the person: update it first (above).
+8. The newest notice for the head does not read it as mergeable now (for a pull request not followed, your own read as above). Behind its base is not a stop to the person: update it first (above).
 
 The merge, in either mode, is this one command alone on one line, with the full 40-character head of the CI notice:
 
