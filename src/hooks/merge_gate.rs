@@ -760,8 +760,12 @@ fn gate_answer(repo: &str, pr: i64, head: &str) -> Result<Value, String> {
     let answer: Value =
         serde_json::from_str(&line).map_err(|e| format!("the door answered {line:?}: {e}"))?;
     if answer["ok"] != json!(true) {
+        // Issue 340: only the words of a refusal that already happened change.
+        let other = crate::daemon::exe::other_build_line(&answer)
+            .map(|l| format!(" ({l})"))
+            .unwrap_or_default();
         return Err(format!(
-            "the acceptance gate could not answer: {}",
+            "the acceptance gate could not answer: {}{other}",
             answer["error"]["message"].as_str().unwrap_or("no reason")
         ));
     }

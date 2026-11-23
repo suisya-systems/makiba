@@ -816,6 +816,10 @@ pub fn main(c: Command) -> ExitCode {
             if let Some(hint) = e["hint"].as_str().filter(|h| !h.is_empty()) {
                 eprintln!("{hint}");
             }
+            // Issue 340: a makibad of another build may not know what this makiba asks.
+            if let Some(other) = crate::daemon::exe::other_build_line(&answer) {
+                eprintln!("{other}");
+            }
             let code = ErrorKind::ALL
                 .iter()
                 .find(|k| k.as_str() == kind)
