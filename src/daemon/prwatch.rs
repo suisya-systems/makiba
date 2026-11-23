@@ -431,6 +431,9 @@ pub struct PrWatch {
     merges: HashMap<String, MergeRead>,
     /// The merge class last told to the secretary, by (repository lowercased, number, head).
     told: HashMap<(String, i64, String), String>,
+    /// When the loop received the passed CI result of a head, by the same key: a read that began
+    /// before it is not that head's state after its CI passed.
+    ci_seen: HashMap<(String, i64, String), Instant>,
 }
 
 impl PrWatch {
@@ -455,6 +458,7 @@ impl PrWatch {
             merge_rx,
             merges: HashMap::new(),
             told: HashMap::new(),
+            ci_seen: HashMap::new(),
         }
     }
 
@@ -475,11 +479,13 @@ impl PrWatch {
         }
         self.merges
             .retain(|task, r| follows.iter().any(|f| &f.task == task && *f == r.f));
-        self.told.retain(|(repo, pr, _), _| {
+        let still = |(repo, pr, _): &(String, i64, String)| {
             follows
                 .iter()
                 .any(|f| f.pr == *pr && f.repo.eq_ignore_ascii_case(repo))
-        });
+        };
+        self.told.retain(|k, _| still(k));
+        self.ci_seen.retain(|k, _| still(k));
         for (d, received) in std::mem::take(&mut self.queued) {
             let Some((sentence, class)) = self.merge_of(&d, received, &follows) else {
                 self.queued.push((d, received));
@@ -488,7 +494,9 @@ impl PrWatch {
             match apply_with(w, &d, Some(&sentence)) {
                 Ok(()) => {
                     if let Some(class) = class {
-                        self.told.insert(told_key(&d.repo, d.pr, &d.head), class);
+                        let key = told_key(&d.repo, d.pr, &d.head);
+                        self.ci_seen.insert(key.clone(), received);
+                        self.told.insert(key, class);
                     }
                     if self.pollers.get(&d.id).is_some_and(|p| p.stamp == d.stamp)
                         && let Some(mut p) = self.pollers.remove(&d.id)
@@ -504,6 +512,9 @@ impl PrWatch {
         }
         for r in newest_per_task(fresh) {
             let key = told_key(&r.f.repo, r.f.pr, &r.head);
+            if began_before_ci(&r, self.ci_seen.get(&key)) {
+                continue;
+            }
             match apply_merge(w, &r, self.told.get(&key)) {
                 Ok(Some(class)) => {
                     self.told.insert(key, class);
@@ -1137,6 +1148,12 @@ fn newest_per_task(reads: Vec<MergeRead>) -> Vec<MergeRead> {
     out
 }
 
+/// Whether `r` began before the loop received its head's passed CI result (`ci`): such a read
+/// may have been answered before the CI passed, so it is no change of a green head.
+fn began_before_ci(r: &MergeRead, ci: Option<&Instant>) -> bool {
+    ci.is_some_and(|t| r.started < *t)
+}
+
 fn told_key(repo: &str, pr: i64, head: &str) -> (String, i64, String) {
     (repo.to_lowercase(), pr, head.to_lowercase())
 }
@@ -1265,12 +1282,13 @@ fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<
                 .conn()
                 .query_row(
                     "SELECT body FROM messages WHERE recipient = ?1 AND kind = 'notice'
-                       AND (body LIKE ?2 OR body LIKE ?3)
+                       AND (lower(substr(body, 1, length(?2))) = lower(?2)
+                            OR lower(substr(body, 1, length(?3))) = lower(?3))
                      ORDER BY id DESC LIMIT 1",
                     params![
                         AGENT_SECRETARY,
-                        format!("CI passed for {repo}#{pr} at {short}:%"),
-                        format!("The merge state of {repo}#{pr} at {short},%")
+                        format!("CI passed for {repo}#{pr} at {short}:"),
+                        format!("The merge state of {repo}#{pr} at {short},")
                     ],
                     |q| q.get::<_, String>(0),
                 )
@@ -1873,6 +1891,82 @@ esac"#,
             draft: false,
             started: Instant::now(),
         }
+    }
+
+    /// A read that began before the head's passed CI result was received is not acted on; one
+    /// that began after it, or with no CI result received by this process, is.
+    #[test]
+    fn a_read_begun_before_the_ci_result_is_no_change() {
+        let f = Followed {
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            gen_reg: 1,
+            gen_close: 0,
+            closed: false,
+        };
+        let early = merge_read(&f, "h", "CLEAN");
+        std::thread::sleep(Duration::from_millis(5));
+        let ci = Instant::now();
+        std::thread::sleep(Duration::from_millis(5));
+        let late = merge_read(&f, "h", "CLEAN");
+        assert!(began_before_ci(&early, Some(&ci)));
+        assert!(!began_before_ci(&late, Some(&ci)));
+        assert!(!began_before_ci(&early, None));
+    }
+
+    /// The stored notice of another repository whose name differs only where this one has `_` is
+    /// not read back as this head's state.
+    #[test]
+    fn the_notice_read_back_is_of_this_repository_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "1".repeat(40);
+        register(&w, "pr_opened", "t", "o/a_b", 5, &head).unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/a_b", "pr": 5, "head_oid": head, "status": "passed"}),
+        );
+        w.transaction(|w| {
+            super::super::verify::notify_secretary(
+                w,
+                Some("t"),
+                &format!(
+                    "CI passed for o/a_b#5 at 1111111: 0 of 1 checks failed.{}",
+                    merge_sentence(MergeSeen::Read("UNKNOWN", false), "o/a_b", 5)
+                ),
+            )?;
+            super::super::verify::notify_secretary(
+                w,
+                None,
+                &format!(
+                    "CI passed for o/axb#5 at 1111111: 0 of 1 checks failed.{}",
+                    merge_sentence(MergeSeen::Read("CLEAN", false), "o/axb", 5)
+                ),
+            )
+        })
+        .unwrap();
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        apply_merge(&w, &merge_read(&f, &head, "CLEAN"), None).unwrap();
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM messages WHERE body LIKE 'The merge state of o/a_b#5 at 1111111,%(CLEAN)%'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
     }
 
     /// Reads queued in one pass: only the newest of each task is acted on (Issue 387).
