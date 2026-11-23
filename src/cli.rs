@@ -354,7 +354,8 @@ pub enum Command {
         /// Wall-clock hours from approval after which nothing new goes in (none: no limit).
         #[arg(long)]
         budget_hours: Option<f64>,
-        /// Heads pushed to a task's pull request after the first before it is a stop (default 3).
+        /// Fixes pushed to a task's pull request after its first head before it is a stop (default 3);
+        /// a clean merge of the base is no fix.
         #[arg(long)]
         budget_fixes: Option<i64>,
         /// Follow-ups found on the way: inside (the default of a proposal) or ask.
