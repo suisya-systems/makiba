@@ -280,10 +280,11 @@ pub fn unparsed_dependency_line(text: &str) -> Option<String> {
 }
 
 // A line that starts with a dependency keyword, after an optional quote, heading, list marker,
-// task box and any run of emphasis or code marks (Issue 299).
+// task box and any run of emphasis or code marks; the keyword ends at a word boundary or at a
+// closing mark (`_Depends on_`, where `_` is a word char) (Issue 299).
 re!(
     DEP_LINE_START,
-    r"(?i)^\s*(?:>\s*)*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?[*_~`]*\s*(?:blocked\s+by|depends\s+on|requires)\b"
+    r"(?i)^\s*(?:>\s*)*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?[*_~`]*\s*(?P<kw>blocked\s+by|depends\s+on|requires)(?:\b|[*_~`])"
 );
 re!(ANY_NUMBER_REF, r"#\d");
 
@@ -308,7 +309,7 @@ pub fn dependency_line_with_no_number(body: &str) -> Option<String> {
 pub fn dependency_line_unread(body: &str) -> Option<String> {
     let lines = splitlines(body);
     for (i, line) in lines.iter().enumerate() {
-        let Some(m) = DEP_LINE_START.find(line) else {
+        let Some(m) = DEP_LINE_START.captures(line).and_then(|c| c.name("kw")) else {
             continue;
         };
         if LEADING_RUN.is_match(&line[m.end()..]) {
@@ -457,6 +458,23 @@ mod tests {
                 "range: {body:?}"
             );
             assert!(dependency_line_unread(&body).is_some(), "triage: {body:?}");
+        }
+    }
+
+    /// Emphasis closed right after the keyword (`_` is a word char) is read through too.
+    #[test]
+    fn a_dependency_in_words_with_closed_emphasis_is_found() {
+        for body in [
+            "_Depends on_ the previous step.",
+            "__Blocked by__ the previous step.",
+            "**Requires** the previous step.",
+            "`Depends on` the previous step.",
+        ] {
+            assert!(
+                dependency_line_with_no_number(body).is_some(),
+                "range: {body:?}"
+            );
+            assert!(dependency_line_unread(body).is_some(), "triage: {body:?}");
         }
     }
 
