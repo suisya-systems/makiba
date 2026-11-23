@@ -362,6 +362,27 @@ Steps:
 
 Pass: the line of step 2 appears, and none from steps 3 and 4. If it fails: a missing line in step 2 means the run does not forward (check the run's configuration); a line in step 3 means the scan does not run first; a line in step 4 means `makibad`'s own git runs a project hook, which must never happen: file an Issue.
 
+### P15. Which server `hc server start` launches when another `herdr-core` exists
+
+Why: `hc` starts its server under the name `herdr-core`. After a pin move an older `herdr-core` was reported started in place of the newly installed `hc` (#382). `scripts/install-base.sh` now installs the base's own layout (`PREFIX/bin/herdr-core`, `PREFIX/bin/hc` a link to it) and exits 3 when `HC_BIN` or `PATH` finds another `herdr-core` or `hc` first. Agents may not run the base (line L-N2), and the binary's text does not show whether `hc` looks for `herdr-core` beside itself, on `PATH`, or only runs itself, so the tests of #382 show the layout and the check, not which server starts. The owner runs this probe; #382 stays open until it has a row in Results.
+
+Setup, in a scratch folder `S`, with nothing of makiba running and the person's own core left alone:
+
+1. An isolated place as `scripts/check-hello-wire.sh` makes one: its own `HC_SESSION` (for example `probe-p15`) and `XDG_CONFIG_HOME`, `XDG_STATE_HOME` and `XDG_RUNTIME_DIR` under `S`, `notes = false` in the config.
+2. The pinned release installed with `bash scripts/install-base.sh S/new` (exit 0 or 3 is expected; record which). `S/new/bin/hc --version` prints the pinned version.
+3. An older release of herdr-core (the previous pin), its `herdr-core` copied to `S/old/herdr-core`. `S/old/herdr-core --version` prints the older version.
+
+Cases, each from a stopped core (`server stop` with the same session at the end of each, through the same `hc` used to start it), reading the started core's version from its `hello` reply on its socket (`S/run/herdr-core/<session>.sock`), and its executable from `/proc/<pid>/exe` of the process listening there (Linux):
+
+- `layout`: `PATH=S/new/bin:<a PATH with no other hc or herdr-core>`, then `S/new/bin/hc server start`. Expected: the pinned version, executable `S/new/bin/herdr-core`.
+- `beside`: a separate folder `S/beside/bin` holding a copy of the pinned binary as `hc` (a plain file, not a link) and the older binary as `herdr-core`, the layout the script made before #382; `PATH` as in `layout` but with `S/beside/bin` in place of `S/new/bin`; `S/beside/bin/hc server start`. Records whether the sibling is preferred.
+- `on-path`: `PATH=S/old:S/new/bin:<as above>`, then `S/new/bin/hc server start` by its full path. Records whether `PATH` is searched.
+- `self`: a folder holding only a plain copy of the pinned binary as `hc`, no `herdr-core` anywhere on `PATH`; start it by its full path. Expected: the pinned version (CI's `real-base` job does this).
+
+Record, per case: the version `hello` answered, the executable path, and the exit code of `server start`.
+
+Pass: `layout` and `self` start the pinned version. `beside` and `on-path` are measurements, not pass or fail: their results say which of the script's checks protect a real install. If it fails (`layout` starts another version): the layout does not protect the install; reopen #382 with the case's record. If `on-path` starts the older version while `layout` passes, the exit-3 check of `PATH` is the guard: keep it; if neither `beside` nor `on-path` starts the older version, write which file the reported start came from before closing #382.
+
 ## 3. If a move to Orca is considered
 
 Not part of this plan's work. herdr-core is the base (plan.md section 3.1), and Orca's orchestration is not used whatever these checks say. They are kept for the day one of the reasons listed there applies, and they concern Orca only as a base: its terminals, its status, its notifications.
@@ -468,5 +489,6 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | P4 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | |
 | P5 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | |
 | P8 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | makiba's one subscription (`src/base/herdr/events.rs`) sends `events.subscribe` with empty params and drops `doc` notices |
+| P15 (Issue 382) | | | not used | not yet run | the owner runs it on the pinned release and the previous one; #382 stays open until this row is filled |
 
 Not covered by a row on 2.1.328: steps 10 to 13 of `door-and-base-reach` since #144 (the port checks, the unsandboxed run, the Read and Edit tools on the decoy key; on 2.1.330 the whole probe has a row after #144, the run of 2026-11-21 at 12:24Z, Refs #150), P3, P4, P5, P7, P8, P9, P10 as their own probes, paddock's carried probes, and the runbook of M4-5. See `docs/upgrading-claude-code.md`.
