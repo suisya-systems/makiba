@@ -23,7 +23,7 @@ A worker may end its done report with a note under the four headings `## Facts`,
 
 ## The curator
 
-`makibad` launches the curator when 5 or more raw notes wait (Issue 39); you do not start it. It does one cycle and reports to you once, with mcp__makiba__send, then ends. Its report says how many notes it read, which patterns are now candidates and which are close. Nothing in it goes to the person as the person's word.
+`makibad` launches the curator when 5 or more raw notes are new since the last cycle that reported to you (Issues 39 and 335): a note the curator left in `raw/` after a reported cycle does not count again, while a cycle that failed or was ended at its time limit leaves its notes counted. You do not start it. It does one cycle and reports to you once, with mcp__makiba__send, then ends. Its report says how many notes it read, which patterns are now candidates and which are close. Nothing in it goes to the person as the person's word.
 
 ## Candidates
 

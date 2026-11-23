@@ -369,6 +369,23 @@ impl Door {
             }
             _ => w,
         };
+        // Issue 317: the Issue a dispatch names is read from GitHub with the lock released.
+        let (w, issue) = match (v, dispatch_issue(&args)) {
+            (Verb::Dispatch, Some(n)) => {
+                let origin = dispatch_origin(&w, &args).map_err(internal)?;
+                drop(w);
+                let read = read_issue(&args, origin.as_deref(), n);
+                let w = self.writer();
+                // The same request may have been recorded while the lock was released.
+                if let Some(idem) = idem
+                    && let Some(first) = replay(&w, &actor, idem).map_err(internal)?
+                {
+                    return first;
+                }
+                (w, Some(read))
+            }
+            _ => (w, None),
+        };
         if v == Verb::Events {
             // A read that a client repeats: recorded, it would write a row and an event per
             // poll and show the client its own polls (spec section 3). Refusals are recorded above.
@@ -439,6 +456,7 @@ impl Door {
         let r = match v {
             Verb::Candidate => candidate(&w, &actor, &args, &mut undo),
             Verb::Goal => goal(&w, &actor, &args, &mut undo),
+            Verb::Dispatch => dispatch(&w, &self.agent, &actor, &args, issue.as_ref()),
             _ => run(&w, &*self.base, &self.agent, &actor, role, v, &args),
         };
         if r.is_err() && w.rollback().is_ok() {
@@ -670,7 +688,8 @@ fn run(
     args: &Value,
 ) -> Response {
     let r = match v {
-        Verb::Dispatch => dispatch(w, agent, actor, args),
+        // Its Issue is read before the transaction (Issue 317): `handle` calls `dispatch`.
+        Verb::Dispatch => Err(internal("dispatch is handled by the door's handle")),
         Verb::Status => status(w),
         Verb::Peek => peek(w, base, args),
         Verb::Pending => pending(w, args),
@@ -1232,9 +1251,112 @@ fn plain_name(what: &str, s: &str) -> Result<(), DoorError> {
 /// The project of a `document` dispatch given none (spec section 12 requires one for `code` only).
 const DOCUMENTS_PROJECT: &str = "documents";
 
+/// How long a dispatch waits for the Issue it names (Issue 317): under the 30 s `makiba dispatch`
+/// waits for the door's answer.
+const ISSUE_READ_TIMEOUT: Duration = Duration::from_secs(20);
+
+/// The Issue's text as the brief carries it, or why it could not be read (Issue 317).
+type IssueRead = Result<String, String>;
+
+/// The Issue a dispatch names, when it names a valid one.
+/// Only for a dispatch whose kind and project are valid: the project becomes a path in the read
+/// (`triage::repo_of`), so nothing is read for one that `dispatch` refuses.
+fn dispatch_issue(args: &Value) -> Option<i64> {
+    let kind = args.get("kind").and_then(Value::as_str);
+    if !matches!(kind, Some("code" | "document"))
+        || plain_name("project", dispatch_project(args)).is_err()
+    {
+        return None;
+    }
+    args.get("issue").and_then(Value::as_i64).filter(|n| *n > 0)
+}
+
+/// The GitHub URL of the dispatch's project, if it has one recorded.
+fn dispatch_origin(w: &StateWriter, args: &Value) -> rusqlite::Result<Option<String>> {
+    let slug = dispatch_project(args);
+    Ok(w.conn()
+        .query_row(
+            "SELECT origin_url FROM projects WHERE slug = ?1",
+            [slug],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .optional()?
+        .flatten())
+}
+
+fn dispatch_project(args: &Value) -> &str {
+    args.get("project")
+        .and_then(Value::as_str)
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DOCUMENTS_PROJECT)
+}
+
+/// Read Issue `n` of the dispatch's project with `gh issue view`, outside the door's lock: its
+/// title, body and comments, in the form a range's brief has (`belt::issue_text`).
+fn read_issue(args: &Value, origin: Option<&str>, n: i64) -> IssueRead {
+    // One deadline for the whole read: finding the repository, then `gh`.
+    let started = Instant::now();
+    let slug = dispatch_project(args);
+    let repos = super::prepare::Places::from_env(Path::new("")).repos;
+    let repo = super::triage::repo_of_within(slug, origin, &repos, ISSUE_READ_TIMEOUT).ok_or_else(
+        || format!("project {slug} has no GitHub repository, or its clone did not say in time"),
+    )?;
+    let left = ISSUE_READ_TIMEOUT.saturating_sub(started.elapsed());
+    if left.is_zero() {
+        return Err("gh timed out".into());
+    }
+    let program = super::gh::program();
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let text = super::gh::run_gh_for(
+        &program,
+        &[
+            "issue",
+            "view",
+            &n.to_string(),
+            "--repo",
+            &format!("github.com/{repo}"),
+            "--json",
+            "title,body,comments",
+        ],
+        &never,
+        left,
+    )
+    .map_err(|e| match e {
+        super::gh::GhError::Missing => format!("{program} not found"),
+        super::gh::GhError::Cancelled => "cancelled".into(),
+        super::gh::GhError::Failed(m) => m,
+    })?;
+    let v: Value =
+        serde_json::from_str(&text).map_err(|_| "gh issue view wrote no JSON".to_string())?;
+    let comments: Vec<Value> = v["comments"]
+        .as_array()
+        .map(|cs| {
+            cs.iter()
+                .map(|c| {
+                    json!({"author": c["author"]["login"].as_str().unwrap_or("-"),
+                           "at": c["createdAt"], "body": c["body"]})
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(super::belt::issue_text(
+        n,
+        v["title"].as_str().unwrap_or(""),
+        v["body"].as_str().unwrap_or(""),
+        &comments,
+    ))
+}
+
 /// `dispatch` (spec section 12): a `queued` run, its first `run_launch` row and `delegate_sent`.
-/// The caller's transaction holds them together with the command's record.
-fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response {
+/// The caller's transaction holds them together with the command's record. `issue` is the read of
+/// the Issue it names, made before the transaction (Issue 317): its text follows the brief.
+fn dispatch(
+    w: &StateWriter,
+    agent: &str,
+    actor: &str,
+    args: &Value,
+    issue_read: Option<&IssueRead>,
+) -> Response {
     let kind = str_arg(args, "kind")?;
     if !["code", "document"].contains(&kind) {
         return Err(usage(format!("kind is code or document, not {kind:?}")));
@@ -1279,6 +1401,24 @@ fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response
                 .ok_or_else(|| usage("issue is an Issue number"))?,
         ),
     };
+    // The brief the worker starts from, and what the answer says of the Issue's text.
+    let (brief, issue_text) = match (issue, issue_read) {
+        (Some(_), Some(Ok(text))) => (format!("{}{text}", brief.trim_end()), Some("read".into())),
+        (Some(n), read) => {
+            let why = match read {
+                Some(Err(why)) => why.as_str(),
+                _ => "it was not read",
+            };
+            (
+                format!(
+                    "{}\n\nIssue #{n}: makibad could not read its text at dispatch ({why}). Ask the secretary for it.\n",
+                    brief.trim_end()
+                ),
+                Some(format!("unreadable: {why}")),
+            )
+        }
+        (None, _) => (brief.to_string(), None),
+    };
     let refs = issue.map(|n| super::belt::issue_ref(project, n));
     let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
     let spawn = random_key().map_err(internal)?[..32].to_string();
@@ -1311,7 +1451,11 @@ fn dispatch(w: &StateWriter, agent: &str, actor: &str, args: &Value) -> Response
         Ok(())
     };
     store().map_err(internal)?;
-    Ok(json!({"task_id": task, "spawn_id": spawn, "status": "queued"}))
+    let mut answer = json!({"task_id": task, "spawn_id": spawn, "status": "queued"});
+    if let Some(t) = issue_text {
+        answer["issue_text"] = json!(t);
+    }
+    Ok(answer)
 }
 
 /// May `role` send to `to`, and is there such a recipient?
@@ -4058,7 +4202,30 @@ fn tool(v: Verb) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTEXT_PARTS, Verb, curator_at_work, json, save_note, tool};
+    use super::{CONTEXT_PARTS, Verb, curator_at_work, dispatch_issue, json, save_note, tool};
+
+    /// Issue 317: the project becomes a path in the read, so a dispatch that `dispatch` would
+    /// refuse for its project or kind reads nothing, neither git nor GitHub.
+    #[test]
+    fn only_a_dispatch_with_a_valid_project_and_kind_reads_its_issue() {
+        let a = |kind: &str, project: Option<&str>| {
+            let mut v = json!({"kind": kind, "issue": 7});
+            if let Some(p) = project {
+                v["project"] = json!(p);
+            }
+            dispatch_issue(&v)
+        };
+        assert_eq!(a("code", Some("p")), Some(7));
+        assert_eq!(a("document", None), Some(7));
+        for p in ["../x", "/abs", ".hidden", "-x", "a/b"] {
+            assert_eq!(a("code", Some(p)), None, "{p}");
+        }
+        assert_eq!(a("other", Some("p")), None);
+        assert_eq!(
+            dispatch_issue(&json!({"kind": "code", "project": "p", "issue": 0})),
+            None
+        );
+    }
 
     #[test]
     fn a_curator_key_not_revoked_means_the_curator_is_at_work() {
