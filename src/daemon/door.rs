@@ -1260,10 +1260,16 @@ type IssueRead = Result<String, String>;
 
 /// The Issue a dispatch names, when it names a valid one.
 /// Only for a dispatch whose kind and project are valid: the project becomes a path in the read
-/// (`triage::repo_of`), so nothing is read for one that `dispatch` refuses.
+/// (`triage::repo_of`), so nothing is read for one that `dispatch` refuses. A code dispatch has a
+/// project of its own: `documents` is a document's only (Issue 355).
 fn dispatch_issue(args: &Value) -> Option<i64> {
     let kind = args.get("kind").and_then(Value::as_str);
+    let named = args
+        .get("project")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.is_empty());
     if !matches!(kind, Some("code" | "document"))
+        || (kind == Some("code") && !named)
         || plain_name("project", dispatch_project(args)).is_err()
     {
         return None;
