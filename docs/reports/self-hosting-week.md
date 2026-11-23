@@ -23,16 +23,18 @@ The start time and N above are as the owner gave them; `grep -E '^(started_at_ut
 `makiba events` returns at most 1000 events per call, so the events after N are first gathered into one file, and every query below reads that file. The person runs this once, on the host, when the count is reached:
 
 ```sh
-after=49; : > "$TMPDIR/events-51.jsonl"
+E=$(mktemp "${TMPDIR:-/tmp}/events-51.XXXXXX") || echo "mktemp failed; nothing is written" >&2
+after=49
 while :; do
-  page=$(makiba events --after "$after" --limit 1000 --json)
-  n=$(printf '%s' "$page" | jq '.events | length')
-  [ "$n" -eq 0 ] && break
-  printf '%s' "$page" | jq -c '.events[]' >> "$TMPDIR/events-51.jsonl"
+  page=$(makiba events --after "$after" --limit 1000 --json) || { echo "makiba events failed; $E is incomplete" >&2; break; }
+  n=$(printf '%s' "$page" | jq '.events | length') || { echo "unreadable page; $E is incomplete" >&2; break; }
+  [ "$n" -eq 0 ] && { echo "done: $(wc -l < "$E") events in $E"; break; }
+  printf '%s' "$page" | jq -c '.events[]' >> "$E" || { echo "write failed; $E is incomplete" >&2; break; }
   after=$(printf '%s' "$page" | jq '.events[-1].id')
 done
-E="$TMPDIR/events-51.jsonl"
 ```
+
+Use the file only when the loop printed `done:`; any other line means it is incomplete and the loop is run again.
 
 Each event has `id`, `occurred_at`, `actor`, `kind`, `task_id` and `payload` (`docs/design/spec.md`, table `Event field`).
 
@@ -44,16 +46,16 @@ Each event has `id`, `occurred_at`, `actor`, `kind`, `task_id` and `payload` (`d
 | Failed launches | TODO(events) | `jq -c 'select(.kind=="worker_spawn_failed") \| {id, occurred_at, task_id, stage: .payload.stage, seen: .payload.seen}' "$E"` (count the lines; a launch without a run, such as the curator's, has `task_id` null) |
 | Undelivered messages at any point | TODO(events) | Not readable from `makiba events` or `makiba status`: delivery rows are not on the read surface (`docs/design/spec.md` section 12, "The read surface"). The closest records are `jq -c 'select(.kind=="observation_lost" or (.kind=="anomaly_raised" and .payload.rule=="secretary_still"))' "$E"`. The person decides the source of this count (makibad's log, or a read of the delivery rows added to the read surface) before it is filled; until then it stays open. |
 | Renewals of the secretary | TODO(events) | `jq -c 'select(.kind=="secretary_renewed") \| {id, occurred_at, actor, payload}' "$E"` (count the lines; at least event 202, section 4.2) |
-| Time `makibad` was down | about 3 h 07 min known (section 3); total TODO(events) | `jq -c 'select(.kind=="dispatcher_started" or .kind=="dispatcher_stopped") \| {id, occurred_at, kind, base_version: .payload.base_version}' "$E"`: each stop and the next start is a down time; a start with no clean stop before it (a crash) is measured from the last event before it, as in section 3 |
+| Time `makibad` was down | about 3 h 07 min known (section 3); total TODO(events) | `jq -c 'select(.kind=="dispatcher_started" or .kind=="dispatcher_stopped") \| {id, occurred_at, kind, base_version: .payload.base_version}' "$E"`: each stop and the next start is a down time. A start with no clean stop before it (a crash) has no recorded start of its down time: the last event before it gives only an upper bound, so its start is taken from other evidence (the person's word, a log) and the source is named, as in section 3 |
 | Pull requests landed through makiba | TODO(events): provisional 18 landed and 6 pending (section 5) | `jq -c 'select(.kind=="pr_merged") \| {id, pr: .payload.pr, merged_at: .payload.merged_at, task_id}' "$E"` |
 
 ## 3. Time `makibad` was down
 
 | From | To | Length | Cause |
 | --- | --- | --- | --- |
-| 2026-11-22 ~11:56 (20:56 JST) | 2026-11-23 15:03 (00:03 JST) | about 3 h 07 min | The whole WSL instance went down. `makibad` was restarted with the organization at 15:03 UTC. |
+| 2026-11-22 ~11:56 (2026-11-22 20:56 JST) | 2026-11-22 15:03 (2026-11-23 00:03 JST) | about 3 h 07 min | The whole WSL instance went down. `makibad` was restarted with the organization at 15:03 UTC. |
 
-The start time is the person's word: the ledger's last act before it is the dispatch of r2-288 at 11:48. The end is `makibad`'s new heartbeat and the relaunched terminals at 15:03. The workers resumed; no task was dispatched again.
+The start time is the person's word: the ledger's last act before it is the dispatch of r2-288 at 11:48, so the ledger alone bounds this down time at 3 h 15 min at most. The end is `makibad`'s new heartbeat and the relaunched terminals at 15:03. The workers resumed; no task was dispatched again.
 
 Other down times: TODO(events), from the `dispatcher_started` and `dispatcher_stopped` query of section 2 (the clean `makiba down` and `makiba up` of 2026-11-23 in section 7.2 is one of them).
 
