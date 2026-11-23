@@ -1437,12 +1437,11 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     } else {
         None
     };
-    // A design-only run waiting for a landing (Issue 284): its `blocked` is its design, its
-    // `done` waits for the landing.
-    let ahead = if role == Role::Worker {
-        super::ahead::report(w.conn(), task, state).map_err(internal)?
-    } else {
-        super::ahead::Report::Plain
+    // A design-only run waiting for a landing (Issue 284): its worker's `blocked` is its design;
+    // its `done`, whoever reports it, waits for the landing (else `close` could end it first).
+    let ahead = match super::ahead::report(w.conn(), task, state).map_err(internal)? {
+        super::ahead::Report::Design(..) if role != Role::Worker => super::ahead::Report::Plain,
+        other => other,
     };
     if let super::ahead::Report::Refused(why) = &ahead {
         return Err(refuse(
@@ -4085,6 +4084,53 @@ mod tests {
             .map(|e| e.unwrap().file_name().into_string().unwrap())
             .collect();
         assert!(names.iter().all(|n| !n.starts_with('.')), "{names:?}");
+    }
+
+    /// A design-only run's `report done` is refused while it waits, whoever reports it (Issue
+    /// 284): a curator's or the person's done would let `close` end it before its dependency
+    /// lands.
+    #[test]
+    fn a_design_only_runs_done_is_refused_for_every_role_while_it_waits() {
+        use crate::db::writer::{NewEvent, RunUpsert};
+        use crate::spec::{ErrorKind, Role};
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "r1-2",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.append_event(&NewEvent {
+            kind: "belt_dispatched",
+            actor: Some("makibad"),
+            payload: Some(&json!({"range_id": 1, "issue": 2, "task_id": "r1-2",
+                                  "design_only": true, "waits_for": [1],
+                                  "waits_tasks": ["r1-1"]})),
+            run_task_id: Some("r1-2"),
+            ..Default::default()
+        })
+        .unwrap();
+        let done = json!({"state": "done", "task": "r1-2", "text": "Done."});
+        for (actor, role) in [
+            ("curator", Role::Curator),
+            ("person", Role::Person),
+            ("w-r1-2", Role::Worker),
+        ] {
+            let e = super::report(&w, actor, role, &done)
+                .expect_err("a done report of a design-only run waiting for #1");
+            assert_eq!(e.kind, ErrorKind::Conflict, "{actor}: {e:?}");
+        }
+        let reports: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM messages WHERE kind = 'report_done'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reports, 0);
     }
 
     /// The `pending` tool offers the five context parts as optional text (Issue 255).

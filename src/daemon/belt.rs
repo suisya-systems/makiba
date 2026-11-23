@@ -2109,6 +2109,40 @@ struct Candidate {
     waits: Option<Vec<i64>>,
 }
 
+/// The Issues of the repository `repo` (`owner/name`) named on the body's lines that start with
+/// `prefix` (any case): each word `#<n>` or `<repo>#<n>` (any case), a trailing `.,;:)` aside.
+/// An Issue of another repository (`other/name#<n>`) is not one of them.
+fn local_refs_on_lines(body: &str, prefix: &str, repo: &str) -> Vec<i64> {
+    let repo = repo.to_ascii_lowercase();
+    body.lines()
+        .map(str::trim)
+        .filter(|l| l.to_lowercase().starts_with(prefix))
+        .flat_map(|l| {
+            l[prefix.len()..]
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter_map(|word| {
+                    let word = word.trim_end_matches(['.', ',', ';', ':', ')']);
+                    let (owner, n) = word.split_once('#')?;
+                    let local = owner.is_empty() || owner.to_ascii_lowercase() == repo;
+                    if !local || n.is_empty() || !n.chars().all(|c| c.is_ascii_digit()) {
+                        return None;
+                    }
+                    n.parse().ok()
+                })
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// A time as GitHub and `makibad` write it (`...:SS[.fff]Z`), with its fractions of a second
+/// made nine digits, so that two such times compare as times.
+fn as_time(at: &str) -> String {
+    let at = at.trim().trim_end_matches('Z');
+    let (whole, frac) = at.split_once('.').unwrap_or((at, ""));
+    let digits: String = frac.chars().filter(char::is_ascii_digit).take(9).collect();
+    format!("{whole}.{digits:0<9}")
+}
+
 /// The values of the body's lines that start with `prefix` (any case): what follows it, split
 /// at commas and spaces, lowercased.
 fn values_on_lines(body: &str, prefix: &str) -> Vec<String> {
@@ -2187,9 +2221,13 @@ fn admit(
     // A follow-up of `set`: created after the approval, with a line `Follow-up of #<n>` naming an
     // Issue of `set` or one the range dispatched (belt.md 2.1).
     let follow_of = |i: &Value, set: &BTreeSet<i64>| -> bool {
-        let after = approved_at.is_some_and(|at| i["createdAt"].as_str().is_some_and(|c| c > at));
+        let after = approved_at.is_some_and(|at| {
+            i["createdAt"]
+                .as_str()
+                .is_some_and(|c| as_time(c) > as_time(at))
+        });
         after
-            && refs_on_lines(i["body"].as_str().unwrap_or(""), "follow-up of")
+            && local_refs_on_lines(i["body"].as_str().unwrap_or(""), "follow-up of", &f.repo)
                 .iter()
                 .any(|f| set.contains(f) || dispatched_in(w, s.id, *f).unwrap_or(false))
     };
@@ -3245,6 +3283,51 @@ mod tests {
             "the same pull request reopened, then merged"
         );
         assert_eq!(read(&w), Vec::<i64>::new(), "merged: not read again");
+    }
+
+    /// A follow-up names an Issue of this repository: `Follow-up of other/repo#1` is not a
+    /// follow-up of #1, and a time with fewer fractions of a second is compared as a time.
+    #[test]
+    fn a_follow_up_of_another_repository_or_before_the_approval_is_not_taken() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head,
+                                     proposed_by, follow_ups)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 1, 9, 'h', 's', 'inside')",
+                [],
+            )
+            .unwrap();
+        let spec = Spec {
+            id: 1,
+            slug: "p".into(),
+            origin: None,
+            listed: vec![1],
+            takes: Takes::default(),
+            follow_inside: true,
+        };
+        let issue = |n: i64, body: &str, at: &str| {
+            json!({"number": n, "title": "t", "body": body, "labels": [], "comments": [],
+                   "createdAt": at})
+        };
+        let f = Fetched {
+            repo: "o/p".into(),
+            open: vec![
+                issue(1, "The first.", "2026-11-01T00:00:00Z"),
+                issue(2, "Follow-up of other/repo#1", "2026-11-23T00:00:00Z"),
+                issue(3, "Follow-up of o/p#1, seen in #1", "2026-11-23T00:00:00Z"),
+                issue(4, "Follow-up of #1", "2026-11-22T00:00:00Z"),
+                issue(5, "Follow-up of #1.", "2026-11-22T00:00:01Z"),
+            ],
+            prs: Vec::new(),
+            views: BTreeMap::new(),
+        };
+        let c = admit(&w, &spec, &f, Some("2026-11-22T00:00:00.500Z")).unwrap();
+        let has = |n: i64| c.iter().any(|c| c.issue == n);
+        assert!(!has(2), "another repository's #1");
+        assert!(has(3), "this repository named whole");
+        assert!(!has(4), "created half a second before the approval");
+        assert!(has(5));
     }
 
     /// A landing read on the thread for a pull request the task has replaced since is dropped:
