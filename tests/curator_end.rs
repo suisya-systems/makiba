@@ -227,8 +227,15 @@ fn a_curator_that_reported_is_ended_and_another_launches_at_the_next_close() {
     // Ended, not relaunched: nothing closed since.
     assert_eq!(org.count(LAUNCHES), 1);
 
-    // The notes are still at the threshold: the next close launches a curator again, without
-    // waiting for the time limit of the first.
+    // Five notes new since the reported cycle (Issue 335): the next close launches a curator
+    // again, without waiting for the time limit of the first.
+    for n in 0..5 {
+        std::fs::write(
+            org._knowledge.path().join(format!("raw/new-{n}.md")),
+            "a note",
+        )
+        .unwrap();
+    }
     org.close();
     org.until("a second curator launched", WAIT, |o| {
         o.count(LAUNCHES) == 2 && o.count(STARTED) == 2 && o.curators() == 1
