@@ -10,13 +10,13 @@ From `<state>/self-hosting-start.txt`, written once by the `switch` stage:
 
 | Field | Value |
 | --- | --- |
-| Start (UTC) | 2026-11-22T10:19Z |
+| Start (UTC) | 2026-11-22T08:47:27Z (the start file; the skeleton had 10:19Z, see below) |
 | `count_after_event_id` (N) | 49 |
-| `origin/main` and the checkout's commit at the start | TODO(events): the start file is not part of the export (section 1.2); `grep -E '^(origin_main\|checkout_head): ' <state>/self-hosting-start.txt` |
-| Base version at the start | TODO(events): the start file is not part of the export; `sed -n 's/^base_version: //p' <state>/self-hosting-start.txt`. The ledger agrees with 0.1.21: the `dispatcher_started` before the start (event 99, 10:13Z) and every `dispatcher_started` and `dispatcher_stopped` up to event 6864 show `base_version` 0.1.21 |
-| Merge approval mode in force | TODO(events): the start file is not part of the export; `sed -n 's/^merge_approval_mode: //p' <state>/self-hosting-start.txt`. At the export, `makiba status --json` showed `human` |
+| `origin/main` and the checkout's commit at the start | both ef12449 (pull request 294, the switch stage of the runbook and the start of the count) |
+| Base version at the start | 0.1.21. The ledger agrees: every `dispatcher_started` and `dispatcher_stopped` from event 98 up to event 6864 shows `base_version` 0.1.21 |
+| Merge approval mode in force | `human`. The status taken with the export (section 1.2) also shows `human` |
 
-The start time and N above are as the owner gave them; `grep -E '^(started_at_utc|count_after_event_id): ' <state>/self-hosting-start.txt` confirms them.
+The rows above were read from a copy of the start file the owner placed beside the export, with `grep -E '^(started_at_utc|count_after_event_id|origin_main|checkout_head|base_version|merge_approval_mode): ' <state>/self-hosting-start.txt`. N, the base version and the merge approval mode agree with the ledger and the status. The start time does not agree with what the skeleton had: the file says 08:47:27Z, and the first event after N, event 50, occurred at 08:47:28Z, which fits the file. The 10:19Z the skeleton had (as the owner gave it) is not in the file; this report uses the file's time.
 
 ### 1.1 Reading the ledger
 
@@ -45,7 +45,7 @@ The owner exported the ledger on 2026-11-23 at about 15:47Z (2026-11-24 00:47 JS
 - Events: after id 49 up to id 6925, 6876 events, no id missing, in id order (checked when the counts were made). The first, event 50, occurred at 2026-11-22T08:47Z; the last, event 6925, at 2026-11-23T15:47:19Z.
 - Status: `makibad` running, heartbeat at 2026-11-23T15:47:15Z.
 - The queries of section 2 were run over that file, read as one array instead of one event per line; the filters are the same.
-- Events 50 to 127 occurred before the start time (10:19Z). The count follows N, as section 11.5 of the runbook does. Of the counts below, only the stop and start of events 98 and 99 (section 3) fall in that stretch.
+- The count follows N, as section 11.5 of the runbook does. Event 50 occurred one second after the start file's time (section 1), so the event range and the start time agree.
 - Events after 6925, and what happened after the export, are not counted here.
 
 ## 2. Counts
@@ -65,7 +65,7 @@ From the `dispatcher_started` and `dispatcher_stopped` query of section 2: four 
 
 | From | To | Length | Cause | Events |
 | --- | --- | --- | --- | --- |
-| 2026-11-22 10:13:19 | 2026-11-22 10:13:24 | 5 s | A clean stop and start, before the start time (section 1.2) | 98, 99 |
+| 2026-11-22 10:13:19 | 2026-11-22 10:13:24 | 5 s | A clean stop and start | 98, 99 |
 | 2026-11-22 ~11:56 (2026-11-22 20:56 JST) | 2026-11-22 15:03:40 (2026-11-23 00:03 JST) | about 3 h 07 min | The whole WSL instance went down. `makibad` was restarted with the organization at 15:03. | 709 (no stop) |
 | 2026-11-23 03:01:32.557 | 2026-11-23 03:01:32.987 | under 1 s | The owner's `makiba down` and `makiba up` after the binary was replaced (section 7.2) | 3468, 3470 |
 | 2026-11-23 10:20:43 | 2026-11-23 10:20:54 | 10 s | A clean stop and start | 5330, 5331 |
@@ -154,6 +154,8 @@ Twenty are needed. A pull request landed by a repair from claude-org-ja is not o
 Final count: 34 landed (12 with `pr_merged`, 22 added by hand); 33 if 304 is left out. The twentieth landing was 348 at 2026-11-23T07:17Z, or 347 at 07:29Z without 304. Not landed at the export: 353 (above), 303 and 308 (closed, events 5339 and 5338; their work landed as 310 and 323), and 313, 315, 316, 377 and 378 (no merge on `origin/main`).
 
 Of the provisional list, every row marked landed is confirmed on `origin/main`; of the six pending, 347, 348, 349, 350 and 351 landed and 353 did not. Eleven landings were not on it: 359, 362 to 367, 370, 371, 373 and 376.
+
+Pull request 296 merged on `origin/main` at 2026-11-22T10:00Z, after the start file's time, but no event after N names it (no `pr_opened`, no `pr_merged`), so the rule above does not add it. It is the fix of Issue 295, which Issue 51 records as a repair that could only be made from claude-org-ja, and so it is not one of the twenty in any case. It has no section in 7, and no row of `docs/design/incidents.md` names Issue 295: TODO(person), whether it needs one.
 
 Three range tasks (r3-299, r3-317 and r3-335) landed with no `pr_merged` event, although `pr_merged` is written for the tasks of a range. Why is not established here.
 
