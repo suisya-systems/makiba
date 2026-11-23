@@ -4,9 +4,9 @@
 use super::{BaseError, BaseInfo};
 
 /// The pinned release: the one the design was read against and the probes were run on.
-pub const PINNED: &str = "0.1.21";
+pub const PINNED: &str = "0.1.22";
 /// The supported range, as written in messages. One patch release (docs/upgrading-the-base.md).
-pub const SUPPORTED: &str = ">=0.1.21,<0.1.22";
+pub const SUPPORTED: &str = ">=0.1.22,<0.1.23";
 
 /// Parse `major.minor.patch` and nothing else: a pre-release or build suffix is refused.
 fn parse(v: &str) -> Option<(u64, u64, u64)> {
