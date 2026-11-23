@@ -99,25 +99,30 @@ impl Verify {
     }
 
     /// One pass over the launches at `launched` and `dialog_passed`, at most once a second.
-    /// `keyed`: per spawn id, the last key of the dialog step that restarts its clock.
+    /// `keyed`: per spawn id, the last key of the dialog step that restarts its clock. `tick`:
+    /// when the loop's tick that calls this began. Every call, a pass or not, looks for a stall:
+    /// more than `STALL` since the last call, or since the tick began (a pass before this one in
+    /// the same tick was held, the first tick of the process included).
     pub fn pass(
         &mut self,
         w: &StateWriter,
         base: &dyn Base,
         keyed: &BTreeMap<String, String>,
+        tick: Instant,
     ) -> Result<()> {
         let began = Instant::now();
+        let held = began.saturating_duration_since(tick) > STALL
+            || self
+                .last
+                .is_some_and(|l| began.saturating_duration_since(l) > STALL);
+        if held {
+            self.restarted = Some(now_text(w)?);
+        }
+        self.last = Some(began);
         if began < self.next {
             return Ok(());
         }
         self.next = began + EVERY;
-        if self
-            .last
-            .is_some_and(|l| began.saturating_duration_since(l) > STALL)
-        {
-            self.restarted = Some(now_text(w)?);
-        }
-        self.last = Some(began);
         let rows: Vec<Row> = {
             let mut st = w.conn().prepare(
                 "SELECT l.id, r.id, r.task_id, l.spawn_id, l.stage, l.agent, l.worktree,
@@ -577,7 +582,7 @@ mod tests {
     fn passes(v: &mut Verify, w: &StateWriter, base: &dyn Base) {
         for _ in 0..2 {
             v.next = Instant::now();
-            v.pass(w, base, &BTreeMap::new()).unwrap();
+            v.pass(w, base, &BTreeMap::new(), Instant::now()).unwrap();
         }
     }
 
@@ -595,7 +600,8 @@ mod tests {
         let (_d, w) = org("dialog_passed", 0);
         let turn = record(&w, "terminal_turn", "s1", json!({"turn": 1}));
         let mut v = Verify::new(TIMEOUT);
-        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), Instant::now())
+            .unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "verified"
@@ -649,7 +655,7 @@ mod tests {
         })
         .unwrap();
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new(), Instant::now()).unwrap();
         assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
         assert_eq!(one::<String>(&w, "SELECT status FROM runs"), "failed");
         let p: String = one(
@@ -677,13 +683,15 @@ mod tests {
         let (_d, w) = org("dialog_passed", 10_000);
         record(&w, "terminal_status", "s1", json!({"state": "working"}));
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), Instant::now())
+            .unwrap();
         assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
         // Recorded within it, the same evidence verifies however late the pass.
         let (_d, w) = org("dialog_passed", 10_000);
         record(&w, "terminal_status", "s1", json!({"state": "working"}));
         let mut v = Verify::new(Duration::from_secs(60));
-        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), Instant::now())
+            .unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "verified"
@@ -756,7 +764,8 @@ mod tests {
         record(&w, "terminal_status", "s1", json!({"state": "working"}));
         let mut v = Verify::new(Duration::from_secs(5));
         v.last = Instant::now().checked_sub(STALL + Duration::from_secs(1));
-        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), Instant::now())
+            .unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "verified"
@@ -765,11 +774,31 @@ mod tests {
         let (_d, w) = org("launched", 10_000);
         let mut v = Verify::new(Duration::from_secs(5));
         v.last = Instant::now().checked_sub(STALL + Duration::from_secs(1));
-        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), Instant::now())
+            .unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "launched"
         );
+        // The first call of the process, in a tick held before it: a stall too.
+        let (_d, w) = org("launched", 10_000);
+        let mut v = Verify::new(Duration::from_secs(5));
+        let tick = Instant::now()
+            .checked_sub(STALL + Duration::from_secs(1))
+            .unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), tick).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "launched"
+        );
+        // A call that only looks (before the next pass is due) still sees a stall.
+        let (_d, w) = org("launched", 10_000);
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.next = Instant::now() + Duration::from_secs(60);
+        v.last = Instant::now().checked_sub(STALL + Duration::from_secs(1));
+        v.pass(&w, &Stub::new(), &BTreeMap::new(), Instant::now())
+            .unwrap();
+        assert!(v.restarted.is_some());
     }
 
     /// The stand-in whose list waits `.1` and whose read with no history is its whole screen.
@@ -843,6 +872,7 @@ mod tests {
             &w,
             &Held(stub, STALL + Duration::from_millis(200)),
             &BTreeMap::new(),
+            Instant::now(),
         )
         .unwrap();
         assert_eq!(
@@ -872,7 +902,7 @@ mod tests {
         let stub = Held(Stub::scripted(&DEV_CHANNEL), Duration::ZERO);
         terminal(&stub.0, "w-t1");
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new(), Instant::now()).unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "launched"
@@ -880,7 +910,7 @@ mod tests {
         assert!(v.graced.contains_key("s1"));
         // Within the grace: still not failed.
         v.next = Instant::now();
-        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new(), Instant::now()).unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "launched"
@@ -888,7 +918,7 @@ mod tests {
         // Past it: failed, the dialog named; no second grace.
         v.graced.insert("s1".into(), ago(&w, 6_000));
         v.next = Instant::now();
-        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new(), Instant::now()).unwrap();
         assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
         let (p, body) = failure(&w);
         assert_eq!(p["seen"], "dialog");
@@ -908,7 +938,7 @@ mod tests {
         let (_d, w) = org("launched", 10_000);
         let mut v = Verify::new(Duration::from_secs(5));
         let keyed = BTreeMap::from([("s1".to_string(), ago(&w, 1_000))]);
-        v.pass(&w, &Stub::new(), &keyed).unwrap();
+        v.pass(&w, &Stub::new(), &keyed, Instant::now()).unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "launched"
@@ -916,7 +946,7 @@ mod tests {
         // A key longer ago than the timeout does not hold it.
         let keyed = BTreeMap::from([("s1".to_string(), ago(&w, 6_000))]);
         v.next = Instant::now();
-        v.pass(&w, &Stub::new(), &keyed).unwrap();
+        v.pass(&w, &Stub::new(), &keyed, Instant::now()).unwrap();
         assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
     }
 
@@ -927,7 +957,7 @@ mod tests {
         let stub = Stub::new();
         terminal(&stub, "w-t1");
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new(), Instant::now()).unwrap();
         let (p, body) = failure(&w);
         assert_eq!(p["seen"], "not_working");
         assert!(
@@ -943,7 +973,7 @@ mod tests {
         terminal(&stub, "w-t1");
         terminal(&stub, "w-t1b");
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new(), Instant::now()).unwrap();
         let (p, body) = failure(&w);
         assert_eq!(p["seen"], "several");
         assert!(

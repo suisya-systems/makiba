@@ -364,6 +364,8 @@ fn serve_until(
             }
             Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
         }
+        // When this tick's work began: verification counts a tick held longer than its stall.
+        let tick = Instant::now();
         if subscribed && !started_recorded {
             match w.transaction(|w| {
                 w.conn()
@@ -429,7 +431,7 @@ fn serve_until(
                 if let Err(e) = dialogs.pass(&w, &*events_base) {
                     eprintln!("makibad: dialogs: {e}");
                 }
-                if let Err(e) = verify.pass(&w, &*events_base, dialogs.keyed()) {
+                if let Err(e) = verify.pass(&w, &*events_base, dialogs.keyed(), tick) {
                     eprintln!("makibad: verify: {e}");
                 }
                 if let Err(e) = prompts.pass(&w, &*events_base) {
