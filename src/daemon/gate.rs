@@ -293,11 +293,17 @@ pub fn test_commit_refusals(repo: &Path, msha: &str) -> Result<Vec<String>, Reje
     match out.status.code() {
         Some(0) => Ok(Vec::new()),
         Some(1) => {
+            // An empty line is kept: a name made only of newlines prints as one.
             let paths: BTreeSet<String> = String::from_utf8_lossy(&out.stdout)
                 .lines()
-                .filter(|l| !l.is_empty())
                 .map(String::from)
                 .collect();
+            if paths.is_empty() {
+                return reject(format!(
+                    "the acceptance checker refused the test commit {} but named no path",
+                    &msha[..msha.len().min(12)]
+                ));
+            }
             Ok(paths.into_iter().collect())
         }
         _ => reject(format!(

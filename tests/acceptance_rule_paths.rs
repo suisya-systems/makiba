@@ -242,3 +242,82 @@ fn a_test_commit_of_declared_paths_only_keeps_its_old_digest() {
         .collect();
     assert_eq!(v.manifest_digest, Some(want));
 }
+
+/// A base, then a test commit declaring `tests/answer.rs` that also adds `extra` (undeclared).
+fn repo_with(extra: &str) -> (tempfile::TempDir, PathBuf, String, String) {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path().join("repo");
+    std::fs::create_dir_all(&dir).unwrap();
+    git(&dir, &["init", "-q", "-b", "main"]);
+    let base = commit(&dir, "base", &[("src/lib.rs", "pub fn answer() {}\n")]);
+    git(&dir, &["checkout", "-q", "-b", "feature"]);
+    let m = commit(
+        &dir,
+        "test\n\nAcceptance-Test: tests/answer.rs\nCo-Authored-By: t <t@example.com>",
+        &[
+            ("tests/answer.rs", "#[test]\nfn a() {}\n"),
+            (extra, "code\n"),
+        ],
+    );
+    (tmp, dir, base, m)
+}
+
+#[test]
+fn an_undeclared_name_of_only_newlines_is_refused_by_both() {
+    let (_tmp, dir, base, m) = repo_with("\n");
+    commit(
+        &dir,
+        "fix",
+        &[("src/lib.rs", "pub fn answer() -> u8 { 2 }\n")],
+    );
+
+    let (code, out) = script(&dir, &["--test-commit", &m]);
+    assert_eq!(code, 1, "{out:?}");
+    assert_eq!(
+        gate::test_commit_refusals(&dir, &m),
+        Ok(vec![String::new()])
+    );
+    let why = gate_at(&dir, &base).expect_err("the gate refuses").0;
+    assert!(why.contains("undeclared paths"), "{why}");
+}
+
+#[test]
+fn a_test_commit_whose_changes_cannot_be_listed_is_refused_by_both() {
+    let (_tmp, dir, base, m) = repo_with("src/extra.rs");
+    let head = commit(
+        &dir,
+        "fix",
+        &[("src/lib.rs", "pub fn answer() -> u8 { 2 }\n")],
+    );
+    // The test commit's tree is gone: git diff fails at it.
+    let tree = git(&dir, &["rev-parse", &format!("{m}^{{tree}}")]);
+    std::fs::remove_file(dir.join(".git/objects").join(&tree[..2]).join(&tree[2..])).unwrap();
+
+    let (code, out) = script(&dir, &["--test-commit", &m]);
+    assert_eq!(code, 2, "{out}");
+    let (code, full) = script(&dir, &[&base, &head]);
+    assert_eq!(code, 1, "{full}");
+    assert!(
+        full.contains("cannot list the changes of the test commit"),
+        "{full}"
+    );
+    let why = gate::test_commit_refusals(&dir, &m)
+        .expect_err("the gate cannot judge")
+        .0;
+    assert!(why.contains("could not judge the test commit"), "{why}");
+}
+
+#[test]
+fn a_commit_after_the_test_commit_whose_changes_cannot_be_listed_fails_the_script() {
+    let (_tmp, dir, base, _m) = repo_with("tests/common/extra.rs");
+    let head = commit(&dir, "fix", &[("tests/common/extra.rs", "changed\n")]);
+    let tree = git(&dir, &["rev-parse", &format!("{head}^{{tree}}")]);
+    std::fs::remove_file(dir.join(".git/objects").join(&tree[..2]).join(&tree[2..])).unwrap();
+
+    let (code, full) = script(&dir, &[&base, &head]);
+    assert_eq!(code, 1, "{full}");
+    assert!(
+        full.contains("cannot list the changes of the commits after the test commit"),
+        "{full}"
+    );
+}

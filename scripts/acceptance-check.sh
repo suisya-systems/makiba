@@ -43,23 +43,30 @@ is_declared() { local p; while IFS= read -r p; do under "$1" "$p" && return 0; d
 # The one rule of what a test commit may change (Issue 361): a path under a path the commit
 # declares, or a test helper. Prints every other path the commit changes, one per line. The merge
 # gate (src/daemon/gate.rs, test_commit_refusals) runs it through --test-commit.
-refused_in_test_commit() { # refused_in_test_commit <sha>
-  local paths f
+refused_in_test_commit() { # refused_in_test_commit <sha>; fails when git cannot list the changes
+  local paths f list
   paths=$(declared "$1")
   # NUL-delimited: git would quote a name with non-ASCII bytes, a tab or a quote, and the quoted
-  # form would match no declared path and no helper.
+  # form would match no declared path and no helper. Listed into a file first, so that a failed
+  # git diff fails this function instead of reading as "nothing changed".
+  list=$(mktemp) || return 2
+  git diff --no-renames --name-only -z "$1^" "$1" >"$list" || { rm -f "$list"; return 2; }
   while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     is_declared "$f" || is_helper "$f" || printf '%s\n' "$f"
-  done < <(git diff --no-renames --name-only -z "$1^" "$1")
+  done <"$list"
+  rm -f "$list"
 }
+# The refused paths of <sha> in $refused, kept whole: the trailing "x" stops the command
+# substitution from dropping a name made only of newlines. Fails as refused_in_test_commit does.
+read_refused() { refused=$(refused_in_test_commit "$1" && printf x) || return 2; refused=${refused%x}; }
 if [ "${1:-}" = --test-commit ]; then
   [ $# -eq 2 ] || { echo "usage: acceptance-check.sh --test-commit SHA" >&2; exit 2; }
   sha=$(git rev-parse --verify "$2^{commit}" 2>/dev/null) || { echo "acceptance-check: unknown commit $2" >&2; exit 2; }
   git rev-parse --verify -q "$sha^" >/dev/null || { echo "acceptance-check: commit $2 has no parent" >&2; exit 2; }
-  refused=$(refused_in_test_commit "$sha" | LC_ALL=C sort -u)
+  read_refused "$sha" || { echo "acceptance-check: cannot list the changes of commit $2" >&2; exit 2; }
   [ -n "$refused" ] || exit 0
-  printf '%s\n' "$refused"; exit 1
+  printf '%s' "$refused" | LC_ALL=C sort -u; exit 1
 fi
 [ $# -eq 2 ] || { echo "usage: acceptance-check.sh BASE_SHA HEAD_SHA | --test-commit SHA" >&2; exit 2; }
 git rev-parse --git-dir >/dev/null 2>&1 || { echo "acceptance-check: not in a git repository" >&2; exit 2; }
@@ -84,38 +91,43 @@ echo "acceptance-check: test commit $first declares: $(echo $paths)"
 [ "$(git rev-list --parents -n 1 "$first" | wc -w)" -eq 2 ] || no "test commit $first is a merge; no join commit may come before or at the test commit"
 
 # 1. the test commit changes only declared paths and test helpers
-while IFS= read -r f; do
-  no "test commit changes $f, which is neither declared nor a test helper"
-done < <(refused_in_test_commit "$first")
+if read_refused "$first"; then
+  [ -z "$refused" ] || while IFS= read -r f; do
+    no "test commit changes $f, which is neither declared nor a test helper"
+  done < <(printf '%s' "$refused")
+else
+  no "cannot list the changes of the test commit $first"
+fi
 
 # 2. protected paths unchanged by the branch's own commits after the test commit. A merge (of
 # the base) counts only for files it leaves different from every parent: its own resolution.
 # Names are read unquoted (-z), as in refused_in_test_commit, so a non-ASCII helper is still seen.
-own_changes() {
-  local c ps p
+# A failed git diff fails the function (pipefail), so it is not read as "nothing changed".
+own_changes() (
+  set -o pipefail
   for c in $(printf '%s\n' "$commits" | tail -n +2); do
     ps=$(git rev-list --parents -n 1 "$c" | cut -d' ' -f2-)
     if [ "$(echo $ps | wc -w)" -eq 1 ]; then
-      git diff --no-renames --name-only -z "$c^" "$c" | tr '\0' '\n'
+      git diff --no-renames --name-only -z "$c^" "$c" | tr '\0' '\n' || exit 2
     else
-      local f
-      for p in $ps; do git diff --no-renames --name-only -z "$p" "$c" | tr '\0' '\n'; done | sort | uniq -c |
-        while read -r n f; do [ "$n" -lt "$(echo $ps | wc -w)" ] || printf '%s\n' "$f"; done
+      for p in $ps; do git diff --no-renames --name-only -z "$p" "$c" | tr '\0' '\n' || exit 2; done | sort | uniq -c |
+        while read -r n f; do [ "$n" -lt "$(echo $ps | wc -w)" ] || printf '%s\n' "$f"; done || exit 2
     fi
   done | sed '/^$/d' | sort -u
-}
+)
 # A merge may bring in only the base: a side branch's own commits are off the first-parent line.
 for c in $(printf '%s\n' "$commits" | tail -n +2); do
   for p in $(git rev-list --parents -n 1 "$c" | cut -d' ' -f3-); do
     git merge-base --is-ancestor "$p" "$1" || no "merge $c brings in $p, which is not in the base"
   done
 done
+changes=$(own_changes) || no "cannot list the changes of the commits after the test commit"
 while IFS= read -r f; do
   [ -n "$f" ] || continue
   if is_declared "$f" || is_helper "$f" || under "$f" .github || [ "$f" = scripts/acceptance-check.sh ]; then
     no "$f changed after the test commit (declared tests, test helpers, .github/ and this script are protected)"
   fi
-done < <(own_changes)
+done <<<"$changes"
 
 # 3. declared tests fail at the test commit and pass at head
 work=$(mktemp -d)
