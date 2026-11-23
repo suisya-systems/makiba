@@ -21,9 +21,20 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
 
 `makibad` sends you a notice when the checks of the watched head are decided, or when it cannot read them.
 
-- **Passed:** what happens next depends on the merge approval mode (below). Quote the notice (never a worker's own test run).
+- **Passed:** its last sentence says whether GitHub lets the pull request merge now; what happens next depends on that sentence and on the merge approval mode (below). Quote the notice (never a worker's own test run).
+  - **Mergeable now:** go on under the mode.
+  - **Behind its base (`BEHIND`):** it is not ready. Before telling the person anything, update it with the update-branch skill (mcp__makiba__update), record the new head, and wait for that head's CI notice; that notice, read mergeable now, is the ready signal.
+  - **Conflicts with its base (`DIRTY`):** send the worker the conflict (update-branch, step 5).
+  - **Blocked (`BLOCKED`):** find what blocks it (`gh pr view <n> --repo <owner>/<name> --json reviewDecision,statusCheckRollup`, branch protection or rules), then tell the person what is missing.
+  - **A draft:** tell the person; it is not ready.
+  - **Not known yet (`UNKNOWN`, `not read`):** do not call it ready; `makibad` sends a merge-state notice once it reads the state.
+  - **Not followed:** read the state with the command the notice names before calling it ready.
 - **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push with mcp__makiba__push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
+
+## A merge-state notice
+
+"The merge state of <repo>#<pr> at <head>, whose CI passed, changed: ..." comes when the merge state of a head whose CI passed changes, for example main moved under it and it is now behind its base. Act on its sentence as on the last sentence of a passed CI notice above. The newest of the two notices for a head is its merge state.
 
 ## A rerun of failed jobs
 
@@ -33,7 +44,7 @@ When a check failed for a cause outside the change (a flaky test) and you rerun 
 
 The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
 
-- **`human`** (also when you do not know): tell the person the pull request is green, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
+- **`human`** (also when you do not know): once the newest notice for the head reads it mergeable now, tell the person the pull request is green and can merge, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
 - **`acceptance`:** merge a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
 
 Stop lines:
@@ -45,6 +56,7 @@ Stop lines:
 5. The worker ran out of its review rounds or its time, or reported a blocker, or the task's last diff review did not read the head you would merge.
 6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
 7. The merge gate refused.
+8. The newest notice for the head does not read it as mergeable now. Behind its base is not a stop to the person: update it first (above).
 
 The merge, in either mode, is this one command alone on one line, with the full 40-character head of the CI notice:
 

@@ -45,7 +45,7 @@ In the conversation, as often as the person likes:
 Read the approval mode with mcp__makiba__status before every merge you would make without the person's word: its `merge_approval_mode` is the setting now, and the range's `approval_mode` the one it was approved under.
 
 - The merge gate holds the pair: a range task's pull request lands without the person only when both are `acceptance`; for any other pair (`human` in either) your merge command stops at a question to the person. So read the pair to know what to say, not to decide: both `acceptance`, go on below; otherwise tell the person the pull request is green, with its link, and wait for their word. The rest of the belt goes on.
-- Both `acceptance`: check the stop lines of `makiba:pull-request` (its "Merging" section, stop lines 1 to 7). Hitting none, merge with the one command that section names. Hitting one, stop on that pull request and tell the person which line, with its link; the rest of the belt goes on.
+- Both `acceptance`: check the stop lines of `makiba:pull-request` (its "Merging" section, stop lines 1 to 8). Hitting none, merge with the one command that section names. Hitting one, stop on that pull request and tell the person which line, with its link; the rest of the belt goes on.
 - A refusal of the merge gate is stop line 7, and `makibad` has written it as a stop already (section 2): never another way, never `--admin`.
 
 This read replaces, while a range is in force, the pull-request skill's "ask the person which mode is in force".

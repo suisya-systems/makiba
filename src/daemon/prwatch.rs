@@ -21,6 +21,13 @@
 //! (`pr_closed`) or the reopen (`pr_reopened`), the pull request's watches ended, and the
 //! secretary told of what happened outside makiba. One `gh` call cannot carry both reads: the
 //! state call has no workflow runs and no exact head, which the CI reading relies on.
+//!
+//! The merge state (Issue 387, in place of claude-org-ja's conflict announce): the same state read
+//! carries `mergeable`, `mergeStateStatus` and `isDraft`, and each open read is brought back to
+//! the loop. A passed CI result waits for a read of its head made after it, for at most three
+//! intervals, and its notice says whether GitHub lets the pull request merge now (behind its base,
+//! a conflict, blocked, a draft, or not known yet). A later change of the merge state of a head
+//! whose CI passed (main moved under it) is told once per change.
 
 use super::belt::{AWAITED, current_pr_sql, is_current_pr_sql, pr_closed_sql};
 use super::gh::{GhError, SLICE, run_gh};
@@ -408,14 +415,22 @@ pub struct PrWatch {
     pollers: HashMap<i64, Poller>,
     tx: Sender<Done>,
     rx: Receiver<Done>,
-    /// Results read from the pollers and not written yet: kept until their transaction commits.
-    queued: Vec<Done>,
+    /// Results read from the pollers and not written yet, with the time the loop received each:
+    /// kept until their transaction commits (a passed one also until its merge state is read).
+    queued: Vec<(Done, Instant)>,
     /// The state pollers, by task (Issue 388).
     states: HashMap<String, StatePoller>,
     state_tx: Sender<StateDone>,
     state_rx: Receiver<StateDone>,
     /// State results not written yet: kept until their transaction commits.
     state_queued: Vec<StateDone>,
+    /// The open reads of the state pollers (Issue 387).
+    merge_tx: Sender<MergeRead>,
+    merge_rx: Receiver<MergeRead>,
+    /// The newest valid open read, by task.
+    merges: HashMap<String, MergeRead>,
+    /// The merge class last told to the secretary, by (repository lowercased, number, head).
+    told: HashMap<(String, i64, String), String>,
 }
 
 impl PrWatch {
@@ -423,6 +438,7 @@ impl PrWatch {
     pub fn from_env() -> PrWatch {
         let (tx, rx) = channel();
         let (state_tx, state_rx) = channel();
+        let (merge_tx, merge_rx) = channel();
         PrWatch {
             gh: super::gh::program(),
             interval: millis_env("MAKIBA_PRWATCH_INTERVAL_MS", DEFAULT_INTERVAL),
@@ -435,18 +451,45 @@ impl PrWatch {
             state_tx,
             state_rx,
             state_queued: Vec::new(),
+            merge_tx,
+            merge_rx,
+            merges: HashMap::new(),
+            told: HashMap::new(),
         }
     }
 
     /// Write what the pollers found, end the watches of merged pull requests, then give every
     /// `watching` row a poller of its activation and every followed pull request a state poller.
     pub fn pass(&mut self, w: &StateWriter) -> Result<()> {
+        let now = Instant::now();
         while let Ok(d) = self.rx.try_recv() {
-            self.queued.push(d);
+            self.queued.push((d, now));
         }
-        for d in std::mem::take(&mut self.queued) {
-            match apply(w, &d) {
+        let follows = followed(w.conn(), None)?;
+        let mut fresh = Vec::new();
+        while let Ok(r) = self.merge_rx.try_recv() {
+            if follows.contains(&r.f) {
+                self.merges.insert(r.f.task.clone(), r.clone());
+                fresh.push(r);
+            }
+        }
+        self.merges
+            .retain(|task, r| follows.iter().any(|f| &f.task == task && *f == r.f));
+        self.told.retain(|(repo, pr, _), _| {
+            follows
+                .iter()
+                .any(|f| f.pr == *pr && f.repo.eq_ignore_ascii_case(repo))
+        });
+        for (d, received) in std::mem::take(&mut self.queued) {
+            let Some((sentence, class)) = self.merge_of(&d, received, &follows) else {
+                self.queued.push((d, received));
+                continue;
+            };
+            match apply_with(w, &d, Some(&sentence)) {
                 Ok(()) => {
+                    if let Some(class) = class {
+                        self.told.insert(told_key(&d.repo, d.pr, &d.head), class);
+                    }
                     if self.pollers.get(&d.id).is_some_and(|p| p.stamp == d.stamp)
                         && let Some(mut p) = self.pollers.remove(&d.id)
                     {
@@ -455,8 +498,21 @@ impl PrWatch {
                 }
                 Err(e) => {
                     eprintln!("makibad: pr watch {}: cannot record its result: {e}", d.id);
-                    self.queued.push(d);
+                    self.queued.push((d, received));
                 }
+            }
+        }
+        for r in fresh {
+            let key = told_key(&r.f.repo, r.f.pr, &r.head);
+            match apply_merge(w, &r, self.told.get(&key)) {
+                Ok(Some(class)) => {
+                    self.told.insert(key, class);
+                }
+                Ok(None) => {}
+                Err(e) => eprintln!(
+                    "makibad: pr watch {}#{}: cannot record its merge state: {e}",
+                    r.f.repo, r.f.pr
+                ),
             }
         }
         while let Ok(d) = self.state_rx.try_recv() {
@@ -533,6 +589,46 @@ impl PrWatch {
         self.state_pollers(w)
     }
 
+    /// The merge sentence of a result, once it can be written, and the class it tells (none for a
+    /// pull request not followed). `None`: a passed result still waits for a read of its head
+    /// made after it was received, for at most three intervals. Any other result has no sentence.
+    fn merge_of(
+        &self,
+        d: &Done,
+        received: Instant,
+        follows: &[Followed],
+    ) -> Option<(String, Option<String>)> {
+        if !matches!(&d.outcome, Outcome::Concluded(s, _) if s.status == "passed") {
+            return Some((String::new(), None));
+        }
+        let Some(f) = follows
+            .iter()
+            .find(|f| f.pr == d.pr && f.repo.eq_ignore_ascii_case(&d.repo))
+        else {
+            return Some((merge_sentence(MergeSeen::NotFollowed, &d.repo, d.pr), None));
+        };
+        let read = self
+            .merges
+            .get(&f.task)
+            .filter(|r| r.head.eq_ignore_ascii_case(&d.head) && r.started >= received && r.f == *f);
+        let known = read.filter(|r| merge_class(&r.status, r.draft) != "unknown");
+        let read = match known {
+            Some(r) => Some(r),
+            None if received.elapsed() >= self.interval * 3 => read,
+            None => return None,
+        };
+        Some(match read {
+            Some(r) => (
+                merge_sentence(MergeSeen::Read(&r.status, r.draft), &d.repo, d.pr),
+                Some(merge_class(&r.status, r.draft)),
+            ),
+            None => (
+                merge_sentence(MergeSeen::NotRead, &d.repo, d.pr),
+                Some("unknown".to_string()),
+            ),
+        })
+    }
+
     /// Every followed pull request has one state poller of its generation: one of a task no longer
     /// followed, of another key, or that has ended (its result sent, or crashed) is stopped, and
     /// the missing ones are started.
@@ -555,10 +651,10 @@ impl PrWatch {
             let handle = {
                 let (gh, tx, cancel) =
                     (self.gh.clone(), self.state_tx.clone(), Arc::clone(&cancel));
-                let (interval, f) = (self.interval, f.clone());
+                let (interval, f, merge_tx) = (self.interval, f.clone(), self.merge_tx.clone());
                 std::thread::spawn(move || {
                     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        poll_state(&gh, &f.repo, f.pr, f.closed, interval, &cancel)
+                        poll_state(&gh, &f, interval, &cancel, &merge_tx)
                     }));
                     if let Ok(Some(read)) = read {
                         let _ = tx.send(StateDone { f, read });
@@ -596,9 +692,16 @@ impl Drop for PrWatch {
     }
 }
 
-/// Write one result: the row, the event and the notice, together. Only the activation the poller
-/// was started for may conclude the row, so a late result of a superseded watch writes nothing.
+/// `apply_with` with no merge sentence.
+#[cfg(test)]
 fn apply(w: &StateWriter, d: &Done) -> Result<()> {
+    apply_with(w, d, None)
+}
+
+/// Write one result: the row, the event and the notice, together, with `merge` (Issue 387)
+/// appended to the notice of a passed result. Only the activation the poller was started for may
+/// conclude the row, so a late result of a superseded watch writes nothing.
+fn apply_with(w: &StateWriter, d: &Done, merge: Option<&str>) -> Result<()> {
     w.transaction(|w| {
         let (status, conclusion) = match &d.outcome {
             Outcome::Concluded(s, _) => ("completed", Some(s.status)),
@@ -629,8 +732,13 @@ fn apply(w: &StateWriter, d: &Done) -> Result<()> {
                        "fail_count": s.fail_count, "pending_count": s.pending_count,
                        "total_checks": s.total, "probe_attempts": attempts}),
                 format!(
-                    "CI {} for {}#{} at {short}: {} of {} checks failed.",
-                    s.status, d.repo, d.pr, s.fail_count, s.total
+                    "CI {} for {}#{} at {short}: {} of {} checks failed.{}",
+                    s.status,
+                    d.repo,
+                    d.pr,
+                    s.fail_count,
+                    s.total,
+                    merge.unwrap_or("")
                 ),
             ),
             Outcome::Failed(reason) => (
@@ -688,8 +796,9 @@ fn apply(w: &StateWriter, d: &Done) -> Result<()> {
 
 // ---- the pull request's state (Issue 388) --------------------------------------------------------
 
-/// The fields of the state read. Issue 387 adds `mergeable,mergeStateStatus` to this same call.
-const STATE_FIELDS: &str = "state,mergedAt,mergedBy,headRefOid,mergeCommit,title";
+/// The fields of the state read: the state (Issue 388) and the merge state (Issue 387).
+const STATE_FIELDS: &str =
+    "state,mergedAt,mergedBy,headRefOid,mergeCommit,title,mergeable,mergeStateStatus,isDraft";
 
 /// A pull request a run follows, and the generation it is followed at.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -774,18 +883,18 @@ impl StatePoller {
     }
 }
 
-/// Read the state of `repo#pr` each interval until it is merged, or read in the other state than
-/// the one it was followed in (`closed`). A failed read is read again, without bound; `None`:
-/// cancelled.
+/// Read the state of `f` each interval until it is merged, or read in the other state than the
+/// one it was followed in (`closed`). A failed read is read again, without bound; `None`:
+/// cancelled. Each read open of a pull request followed open is sent to `merges` (Issue 387).
 fn poll_state(
     gh: &str,
-    repo: &str,
-    pr: i64,
-    closed: bool,
+    f: &Followed,
     interval: Duration,
     cancel: &AtomicBool,
+    merges: &Sender<MergeRead>,
 ) -> Option<Value> {
-    let (number, place) = (pr.to_string(), format!("github.com/{repo}"));
+    let closed = f.closed;
+    let (number, place) = (f.pr.to_string(), format!("github.com/{}", f.repo));
     let args = [
         "pr",
         "view",
@@ -799,12 +908,22 @@ fn poll_state(
         if cancel.load(Ordering::SeqCst) {
             return None;
         }
+        let started = Instant::now();
         match run_gh(gh, &args, cancel) {
             Err(GhError::Cancelled) => return None,
             Err(_) => {}
             Ok(text) => {
                 if let Ok(v) = serde_json::from_str::<Value>(&text) {
                     let state = v["state"].as_str().unwrap_or("");
+                    if state == "OPEN" && !closed {
+                        let _ = merges.send(MergeRead {
+                            f: f.clone(),
+                            head: v["headRefOid"].as_str().unwrap_or("").to_string(),
+                            status: v["mergeStateStatus"].as_str().unwrap_or("").to_string(),
+                            draft: v["isDraft"].as_bool().unwrap_or(false),
+                            started,
+                        });
+                    }
                     if matches!(
                         (state, closed),
                         ("MERGED", _) | ("CLOSED", false) | ("OPEN", true)
@@ -990,6 +1109,170 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
             }
             _ => Ok(false),
         }
+    })
+}
+
+// ---- the merge state (Issue 387) ---------------------------------------------------------------
+
+/// An open read of a followed pull request: its head and merge state, and when the call began.
+#[derive(Debug, Clone)]
+struct MergeRead {
+    f: Followed,
+    head: String,
+    /// `mergeStateStatus`, empty when absent.
+    status: String,
+    /// `isDraft`.
+    draft: bool,
+    started: Instant,
+}
+
+fn told_key(repo: &str, pr: i64, head: &str) -> (String, i64, String) {
+    (repo.to_lowercase(), pr, head.to_lowercase())
+}
+
+/// The class of a merge state: `draft` (whatever the status), `ready`, `behind`, `conflict`,
+/// `blocked`, `unknown` (not computed yet) or `other:<status>`.
+fn merge_class(status: &str, draft: bool) -> String {
+    if draft {
+        return "draft".into();
+    }
+    match status {
+        "CLEAN" | "HAS_HOOKS" | "UNSTABLE" => "ready".into(),
+        "BEHIND" => "behind".into(),
+        "DIRTY" => "conflict".into(),
+        "BLOCKED" => "blocked".into(),
+        "UNKNOWN" | "" => "unknown".into(),
+        other => format!("other:{other}"),
+    }
+}
+
+/// What is known of a head's merge state when its notice is written.
+enum MergeSeen<'a> {
+    /// A read of that head: `mergeStateStatus` and `isDraft`.
+    Read(&'a str, bool),
+    /// Followed, but no read of that head came in time.
+    NotRead,
+    /// No state poller reads the pull request.
+    NotFollowed,
+}
+
+/// The sentence that says whether GitHub lets the pull request merge now. Its first parenthesised
+/// token is the state, which `told_from_notice` reads back.
+fn merge_sentence(seen: MergeSeen, repo: &str, pr: i64) -> String {
+    let (status, draft) = match seen {
+        MergeSeen::Read(s, d) => (s, d),
+        MergeSeen::NotRead => {
+            return " Whether it can merge is not known yet (not read); makibad tells you once it reads it.".into();
+        }
+        MergeSeen::NotFollowed => {
+            return format!(
+                " makibad does not read this pull request's merge state (not followed): read it with gh pr view {pr} --repo {repo} --json mergeStateStatus before telling anyone it is ready."
+            );
+        }
+    };
+    match merge_class(status, draft).as_str() {
+        "draft" => " It is a draft and cannot merge (DRAFT).".into(),
+        "ready" => format!(" GitHub reads it as mergeable now ({status})."),
+        "behind" => " It is behind its base and cannot merge until it is updated (BEHIND): update it with the update-branch skill and record the new head before telling anyone it is ready.".into(),
+        "conflict" => " It conflicts with its base and cannot merge (DIRTY): the base must be merged in and the conflict resolved.".into(),
+        "blocked" => " GitHub blocks its merge (BLOCKED): find what blocks it (reviews, required checks, rules) before telling anyone it is ready.".into(),
+        "unknown" => " Whether it can merge is not known yet (UNKNOWN); makibad tells you once GitHub has computed it.".into(),
+        _ => format!(" GitHub reads a merge state makiba does not know ({status}): find out whether it can merge before telling anyone it is ready."),
+    }
+}
+
+/// The class a stored notice told, from its first parenthesised token; `None` for a pull request
+/// not followed, or a notice with no token.
+fn told_from_notice(body: &str) -> Option<String> {
+    let open = body.find('(')?;
+    let close = open + body[open..].find(')')?;
+    Some(match &body[open + 1..close] {
+        "not followed" => return None,
+        "not read" => "unknown".into(),
+        "DRAFT" => "draft".into(),
+        token => merge_class(token, false),
+    })
+}
+
+/// A change of the merge state of a green head, told once (Issue 387). Only a computed state of
+/// the run's newest recorded head, whose newest CI result is `passed`, of the pull request and
+/// generation still followed, is a change; one equal to the class last told is not. With none
+/// told by this process (a restart), the class is read back from the newest stored notice of that
+/// head, else recorded without a notice. The class now told, if it is to be remembered.
+fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<Option<String>> {
+    let class = merge_class(&r.status, r.draft);
+    if class == "unknown" || r.head.is_empty() {
+        return Ok(None);
+    }
+    w.transaction(|w| {
+        if followed(w.conn(), Some(&r.f.task))?.first() != Some(&r.f) {
+            return Ok(None);
+        }
+        let (repo, pr, task) = (r.f.repo.as_str(), r.f.pr, r.f.task.as_str());
+        let newest: Option<String> = w
+            .conn()
+            .query_row(
+                "SELECT json_extract(e.payload_json, '$.head_oid') FROM events e
+                 JOIN runs u ON u.id = e.run_id
+                 WHERE u.task_id = ?1 AND e.kind IN ('pr_opened', 'fix_pushed')
+                 ORDER BY e.id DESC LIMIT 1",
+                [task],
+                |q| q.get(0),
+            )
+            .optional()?
+            .flatten();
+        if !newest.is_some_and(|h| h.eq_ignore_ascii_case(&r.head)) {
+            return Ok(None);
+        }
+        let ci: Option<String> = w
+            .conn()
+            .query_row(
+                "SELECT json_extract(payload_json, '$.status') FROM events
+                 WHERE kind = 'ci_completed'
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                   AND lower(json_extract(payload_json, '$.head_oid')) = lower(?3)
+                 ORDER BY id DESC LIMIT 1",
+                params![repo, pr, r.head],
+                |q| q.get(0),
+            )
+            .optional()?
+            .flatten();
+        if ci.as_deref() != Some("passed") {
+            return Ok(None);
+        }
+        let short = &r.head[..r.head.len().min(7)];
+        let before = match told {
+            Some(c) => Some(c.clone()),
+            None => w
+                .conn()
+                .query_row(
+                    "SELECT body FROM messages WHERE recipient = ?1 AND kind = 'notice'
+                       AND (body LIKE ?2 OR body LIKE ?3)
+                     ORDER BY id DESC LIMIT 1",
+                    params![
+                        AGENT_SECRETARY,
+                        format!("CI passed for {repo}#{pr} at {short}:%"),
+                        format!("The merge state of {repo}#{pr} at {short},%")
+                    ],
+                    |q| q.get::<_, String>(0),
+                )
+                .optional()?
+                .and_then(|b| told_from_notice(&b)),
+        };
+        match before {
+            Some(c) if c != class => {}
+            _ => return Ok(Some(class)),
+        }
+        super::verify::notify_secretary(
+            w,
+            Some(task),
+            &format!(
+                "The merge state of {repo}#{pr} at {short}, whose CI passed, changed:{}",
+                merge_sentence(MergeSeen::Read(&r.status, r.draft), repo, pr)
+            ),
+        )?;
+        Ok(Some(class))
     })
 }
 
