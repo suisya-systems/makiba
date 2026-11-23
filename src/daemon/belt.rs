@@ -1514,7 +1514,8 @@ pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
             && count(
                 w,
                 "SELECT count(*) FROM range_candidates WHERE range_id = ?1
-                   AND (left_out_why LIKE 'waits_for%' OR left_out_why LIKE 'unreadable%')",
+                   AND (left_out_why LIKE 'waits_for%' OR left_out_why LIKE 'unreadable%'
+                        OR left_out_why LIKE 'dependency_unreadable%')",
                 [id],
             )? == 0
         {
@@ -2370,6 +2371,16 @@ fn admit(
         if why.is_none() && followed.contains(&n) {
             why = kept_out(&body);
         }
+        if why.is_none()
+            && let Some(line) = crate::work_discovery::refs::dependency_line_with_no_number(&body)
+        {
+            // A dependency in words is not read as none (Issue 299): the line must name `#<n>`.
+            // The range's own records come first, so a skipped one does not hold the range open.
+            why = Some(match records_why(w, s, n)? {
+                Some(r) => r,
+                None => format!("dependency_unreadable ({line})"),
+            });
+        }
         let mut waits = None;
         if why.is_none() {
             let deps: Vec<i64> = refs_on_lines(&body, "depends on");
@@ -3193,6 +3204,55 @@ mod tests {
             &json!({"action": "approve", "id": second, "read": read}),
         );
         assert_eq!(r.unwrap()["status"], json!("active"));
+    }
+
+    /// A candidate whose dependency is written in words is left out as `dependency_unreadable`,
+    /// but once the range skipped it, it is `skipped`: the range is not held open by it.
+    #[test]
+    fn a_skipped_dependency_in_words_is_skipped_not_unreadable() {
+        let (_dir, w) = org();
+        let id = range(
+            &w,
+            "secretary",
+            Role::Secretary,
+            &json!({"action": "propose", "project": "p", "issues": [31, 32], "at_once": 1,
+                    "budget_tasks": 1, "brief_head": "h"}),
+        )
+        .unwrap()["id"]
+            .as_i64()
+            .unwrap();
+        let spec = Spec {
+            id,
+            slug: "p".into(),
+            origin: None,
+            listed: vec![31, 32],
+            takes: Takes::default(),
+            follow_inside: false,
+        };
+        let issue = |n: i64| {
+            json!({"number": n, "title": "t", "body": "Depends on the belt's step 2.",
+                   "labels": [], "comments": [], "createdAt": "2026-11-01T00:00:00Z"})
+        };
+        let f = Fetched {
+            repo: "o/p".into(),
+            open: vec![issue(31), issue(32)],
+            prs: Vec::new(),
+            views: BTreeMap::new(),
+        };
+        range(
+            &w,
+            "secretary",
+            Role::Secretary,
+            &json!({"action": "skip", "id": id, "issue": 31, "reason": "later"}),
+        )
+        .unwrap();
+        let c = admit(&w, &spec, &f, None).unwrap();
+        let why = |n: i64| c.iter().find(|c| c.issue == n).unwrap().why.clone();
+        assert_eq!(why(31).as_deref(), Some("skipped"));
+        assert_eq!(
+            why(32).as_deref(),
+            Some("dependency_unreadable (Depends on the belt's step 2.)")
+        );
     }
 
     /// A new Issue the condition matches is left out as a follow-up when its parent is in the

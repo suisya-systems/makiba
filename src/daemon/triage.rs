@@ -613,6 +613,18 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
             leave(&b["repo"], b["issue"].clone(), "blocked", reason);
         }
     }
+    for d in arr(&scan["excluded_dependency_unreadable"]) {
+        let reason = format!(
+            "a dependency line names no Issue number: \"{}\"; write it as Depends on #<n>, or remove it",
+            s(&d["line"])
+        );
+        leave(
+            &d["repo"],
+            d["issue"].clone(),
+            "dependency_unreadable",
+            reason,
+        );
+    }
     for slug in &o.norepo {
         left_out.push(
             json!({"project": slug, "repo": null, "issue": null, "kind": "no_repository",
