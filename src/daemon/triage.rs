@@ -20,7 +20,6 @@ use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -305,8 +304,13 @@ pub fn owner_repo_from_url(url: &str) -> Option<String> {
     (ok(owner) && ok(repo) && parts.next().is_none()).then(|| format!("{owner}/{repo}"))
 }
 
+/// How long `repo_of`'s git may take to read a clone's configuration (Issue 355): a local read,
+/// so far longer than it needs, and shorter than a `gh` call may take.
+const REPO_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The project's repository: its URL, else the `origin` of its clone as the clone's own
-/// configuration writes it (before any `insteadOf` rewrite), exactly one URL (Issue 211).
+/// configuration writes it (before any `insteadOf` rewrite), exactly one URL (Issue 211). The git
+/// call is ended at `REPO_LOOKUP_TIMEOUT`, and the answer is none then.
 pub(crate) fn repo_of(slug: &str, url: Option<&str>, repos_dir: &Path) -> Option<String> {
     repo_with_git("git", slug, url, repos_dir, None)
 }
@@ -331,36 +335,28 @@ fn repo_with_git(
     if let Some(r) = url.and_then(owner_repo_from_url) {
         return Some(r);
     }
-    let mut child = Command::new(git)
-        .arg("-C")
-        .arg(repos_dir.join(slug))
-        .args([
+    // Issue 355: the bounded runner, so that the deadline holds until the output is collected
+    // and a descendant that keeps the pipe open is ended with git. The slug is taken from the
+    // repositories folder, where git runs.
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let out = super::gh::run_bounded(
+        git,
+        &[
+            "-C",
+            slug,
             "config",
             "--local",
             "--null",
             "--get-all",
             "remote.origin.url",
-        ])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .ok()?;
-    if let Some(t) = timeout {
-        // The output is a few URLs: it fits the pipe, so waiting before reading cannot block.
-        let deadline = std::time::Instant::now() + t;
-        while child.try_wait().ok()?.is_none() {
-            if std::time::Instant::now() >= deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return None;
-            }
-            std::thread::sleep(super::gh::SLICE);
-        }
-    }
-    let out = child.wait_with_output().ok()?;
-    out.status.success().then_some(())?;
-    let urls = String::from_utf8_lossy(&out.stdout);
+        ],
+        Some(repos_dir),
+        &never,
+        timeout.unwrap_or(REPO_LOOKUP_TIMEOUT),
+        "git",
+    )
+    .ok()?;
+    let urls = String::from_utf8_lossy(&out);
     let [origin] = urls.strip_suffix('\0')?.split('\0').collect::<Vec<_>>()[..] else {
         return None;
     };
