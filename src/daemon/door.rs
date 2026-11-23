@@ -796,7 +796,8 @@ fn renew(w: &StateWriter, args: &Value) -> Response {
 /// `status` (spec section 12): what the person's local `makiba status --json` prints, read from
 /// the door's own database file. Read in `makibad`, its `merge_approval_mode` is the gate's.
 fn status(w: &StateWriter) -> Response {
-    crate::status_local::read(&db_file(w)?).map_err(internal)
+    crate::status_local::read_as(&db_file(w)?, crate::status_local::Reader::Makibad)
+        .map_err(internal)
 }
 
 /// `events` (Issue 168): the person's `makiba events --json`, read from the door's own file.
