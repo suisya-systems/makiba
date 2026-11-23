@@ -72,20 +72,25 @@ echo "install-base: herdr-core $version ($target) installed at $bin/herdr-core, 
 
 # What makiba and hc would run instead of the installed file. makiba runs $HC_BIN (a bare name is
 # looked up on PATH), else hc on PATH; hc starts its server under the name herdr-core.
+# `type -P` gives only files found on PATH (never a shell function), relative when the PATH entry
+# is; `-ef` compares a relative path from the current folder, as the lookup does.
 other=0
-if [ -n "${HC_BIN:-}" ]; then
+if [ "${HC_BIN+set}" = set ]; then
   case "$HC_BIN" in
+    '') named= ;;
     */*) named=$HC_BIN ;;
-    *) named=$(command -v "$HC_BIN" 2>/dev/null) || named=$HC_BIN ;;
+    *) named=$(type -P "$HC_BIN") || named=$HC_BIN ;;
   esac
-  if ! [ "$named" -ef "$bin/herdr-core" ]; then
+  if [ -z "$named" ]; then
+    echo "install-base: installed at $bin/herdr-core, but HC_BIN is set and empty; makiba up cannot run it: point HC_BIN at $bin/hc or unset it" >&2
+    other=1
+  elif ! [ "$named" -ef "$bin/herdr-core" ]; then
     echo "install-base: installed at $bin/herdr-core, but HC_BIN names $named; makiba up runs that one: point HC_BIN at $bin/hc or unset it" >&2
     other=1
   fi
 fi
 for name in herdr-core hc; do
-  found=$(command -v "$name" 2>/dev/null) || continue
-  case "$found" in /*) ;; *) continue ;; esac
+  found=$(type -P "$name") || continue
   if ! [ "$found" -ef "$bin/herdr-core" ]; then
     echo "install-base: installed at $bin/herdr-core, but PATH finds $name at $found first; hc may start that herdr-core instead: remove it or put $bin before it on PATH" >&2
     other=1
