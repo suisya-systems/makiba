@@ -28,7 +28,8 @@
 //! differs at head is reported (`edited_tests`); under `acceptance` such a pull request is refused,
 //! under `human` the person is asked. A test kept outside a folder `tests` is not seen.
 //!
-//! Pin: the first verdict that saw a manifest records a digest of the declared files; a later
+//! Pin: the first verdict that saw a manifest records a digest of the declared files and of the
+//! other paths the test commit changed (its test helpers); a later
 //! verdict for the same PR whose digest differs, or that finds no manifest, is rejected.
 
 use super::gh::{self, GhError};
@@ -434,16 +435,32 @@ fn repo_check(repo: &Path, base: &str) -> Result<Option<String>, Reject> {
     Ok(Some(names[0].to_string()))
 }
 
-/// sha256 of the declared paths and their (mode, blob) in the manifest commit.
+/// sha256 of the declared paths and their (mode, blob) in the manifest commit, and of the other
+/// paths it changed.
 fn manifest_digest(repo: &Path, msha: &str, manifest: &[String]) -> Result<String, Reject> {
-    let entries: Vec<Value> = tree(repo, msha)?
-        .into_iter()
+    let mtree = tree(repo, msha)?;
+    let entries: Vec<Value> = mtree
+        .iter()
         .filter(|(p, _)| manifest.iter().any(|m| under(p, m)))
         .map(|(p, (mode, obj))| json!([p, mode, obj]))
         .collect();
     let mut sorted = manifest.to_vec();
     sorted.sort();
-    let text = json!([sorted, entries]).to_string();
+    // The other paths the test commit changed (its test helpers, Issue 361) are pinned too, a
+    // deleted one as null; a test commit that changes only declared paths keeps its old digest.
+    let others: Vec<Value> = changed_by(repo, msha)?
+        .into_iter()
+        .filter(|p| !manifest.iter().any(|m| under(p, m)))
+        .map(|p| match mtree.get(&p) {
+            Some((mode, obj)) => json!([p, mode, obj]),
+            None => json!([p, null]),
+        })
+        .collect();
+    let text = if others.is_empty() {
+        json!([sorted, entries]).to_string()
+    } else {
+        json!([sorted, entries, others]).to_string()
+    };
     Ok(Sha256::digest(text.as_bytes())
         .iter()
         .map(|b| format!("{b:02x}"))

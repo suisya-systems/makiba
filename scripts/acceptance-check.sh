@@ -22,10 +22,12 @@
 set -u
 # The declared paths, each trimmed and with empty and "." segments dropped, as the merge gate reads
 # them (src/daemon/gate.rs, find_manifest): "./tests/a.rs" and "tests//a.rs" declare tests/a.rs.
+# A declaration that is nothing but such segments ("." or "./") stays declared, as ".", and fails
+# as no test target; it does not vanish into "nothing declared".
 declared() {
   git log -1 --format='%(trailers:key=Acceptance-Test,valueonly)' "$1" |
-    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's#//*#/#g' -e ':a' -e 's#\(^\|/\)\./#\1#' -e 'ta' \
-      -e 's#/\.$##' -e 's#^\.$##' -e '/^$/d'
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e '/^$/d' -e 's#//*#/#g' -e ':a' -e 's#\(^\|/\)\./#\1#' -e 'ta' \
+      -e 's#/\.$##' -e 's#^$#.#'
 }
 under() { # under <file> <path>: the file is the path or inside it
   local p=${2%/}; [ "$1" = "$p" ] || case $1 in "$p"/*) true ;; *) false ;; esac
