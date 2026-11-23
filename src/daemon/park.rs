@@ -8,7 +8,8 @@
 //! that showed it, spec section 7); its newest launch is `verified`; no message to its worker is
 //! still waiting for delivery, nor taken but not yet seen taken (Issue 332: a typed one until a
 //! turn of the launch later than the turn it was typed at is recorded, any other one until a
-//! terminal record of the launch written after it and that arrived after its delivery); and the newest `terminal_status` and
+//! terminal record of the launch written after it and that arrived after it reached the
+//! terminal); and the newest `terminal_status` and
 //! `terminal_turn` of that launch say `idle` or `done`, written at least `MAKIBA_PARK_AFTER_MS`
 //! ago. The base is read once more before anything is written: the terminal must still show
 //! `idle` or `done` and no later turn. The transaction that parks checks the records again, and a
@@ -65,8 +66,11 @@ const TURN: &str = "coalesce((SELECT max(json_extract(t.payload_json, '$.turn'))
 /// A message to its worker keeps it while it waits for delivery, and after it until the terminal
 /// is seen past it (Issue 332): for one typed at a turn of this launch, a recorded turn above
 /// that one; for any other, a terminal record of the launch written after the message and that
-/// arrived after its delivery (`occurred_at` is the arrival time the monitor keeps, so a record
-/// written late of something seen before the send does not count).
+/// arrived after it reached the terminal (`occurred_at` is the arrival time the monitor keeps, so
+/// a record written late of something seen before does not count). A typed text reached it when
+/// `Base::send` returned (`delivered_at`); a pushed one at its last push (`last_attempt_at`), as
+/// the turn that confirms a push is written before the delivery pass confirms it; one read from
+/// the box when it was read (`delivered_at`).
 fn parkable() -> String {
     format!(
         "r.status = 'in_use'
@@ -89,8 +93,12 @@ fn parkable() -> String {
                                           AND s.kind IN ('terminal_status', 'terminal_turn')
                                           AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
                                           AND s.id > d.source_event_id
-                                          AND s.occurred_at > coalesce(d.delivered_at,
-                                                d.last_attempt_at, d.created_at)))))
+                                          AND s.occurred_at > CASE
+                                              WHEN json_extract(m.payload_json, '$.typed')
+                                              THEN coalesce(d.delivered_at, d.last_attempt_at,
+                                                            d.created_at)
+                                              ELSE coalesce(d.last_attempt_at, d.delivered_at,
+                                                            d.created_at) END))))
          AND (SELECT json_extract(s.payload_json, '$.state') FROM events s
               WHERE s.run_id = r.id AND s.kind = 'terminal_status'
                 AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
@@ -658,6 +666,33 @@ mod tests {
         assert!(park(&w).is_empty());
         assert_eq!(status(&w), "in_use");
         let (_d, w) = typed_then_seen(10, 5);
+        assert_eq!(park(&w), ["t"]);
+    }
+
+    /// A message pushed by the channel 10 seconds ago is confirmed by the delivery pass only after
+    /// the monitor wrote its turn (`working` 8 seconds ago, `idle` 5): that turn releases the run,
+    /// although both records arrived before `delivered_at`.
+    #[test]
+    fn a_pushed_message_is_released_by_the_turn_after_its_push_even_when_confirmed_later() {
+        let (_d, w) = org(20_000);
+        entry(&w, "question", "escalated");
+        w.conn()
+            .execute_batch(
+                "INSERT INTO events (kind) VALUES ('message_sent');
+                 INSERT INTO event_deliveries (source_event_id, recipient, status, attempt,
+                                               first_attempt_at, last_attempt_at, delivered_at)
+                 VALUES ((SELECT max(id) FROM events), 'w-t', 'delivered', 1,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 seconds'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 seconds'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 seconds'));
+                 INSERT INTO events (kind, run_id, occurred_at, payload_json)
+                 VALUES ('terminal_status', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 seconds'),
+                         json_object('spawn_id', 's1', 'state', 'working'));
+                 INSERT INTO events (kind, run_id, occurred_at, payload_json)
+                 VALUES ('terminal_status', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-5 seconds'),
+                         json_object('spawn_id', 's1', 'state', 'idle'));",
+            )
+            .unwrap();
         assert_eq!(park(&w), ["t"]);
     }
 
