@@ -322,7 +322,7 @@ pub fn unpark(w: &StateWriter, task: &str, reason: &str, detail: Value) -> Resul
             [task],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )?;
-        let spawn = super::launch::add_relaunch(w, from, conversation.as_deref())?;
+        let spawn = super::launch::add_relaunch(w, from, conversation.as_deref(), "makibad")?;
         w.append_event(&NewEvent {
             kind: "run_unparked",
             actor: Some("makibad"),

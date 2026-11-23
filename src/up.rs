@@ -347,7 +347,7 @@ pub fn resume(w: &StateWriter) -> crate::db::Result<Vec<String>> {
             .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
         for (_, from, conversation) in &runs {
-            daemon::launch::add_relaunch(w, *from, conversation.as_deref())?;
+            daemon::launch::add_relaunch(w, *from, conversation.as_deref(), "person")?;
         }
         w.conn().execute(
             "UPDATE org_sessions SET status = 'ACTIVE',
