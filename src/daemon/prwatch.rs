@@ -505,11 +505,29 @@ pub fn register(
     pr: i64,
     head: &str,
 ) -> Result<Registered> {
+    register_with(w, kind, task, repo, pr, head, false)
+}
+
+/// As `register`; `base_merge` (Issue 358) marks a `fix_pushed` head whose only new commit is a
+/// clean merge of the base, which the fix budget of a range task does not count.
+pub fn register_with(
+    w: &StateWriter,
+    kind: &str,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    base_merge: bool,
+) -> Result<Registered> {
+    let mut payload = json!({"repo": repo, "pr": pr, "head_oid": head});
+    if base_merge {
+        payload["base_merge"] = json!(true);
+    }
     w.transaction(|w| {
         w.append_event(&NewEvent {
             kind,
             actor: Some("makibad"),
-            payload: Some(&json!({"repo": repo, "pr": pr, "head_oid": head})),
+            payload: Some(&payload),
             run_task_id: Some(task),
             ..Default::default()
         })?;

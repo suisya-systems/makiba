@@ -448,6 +448,34 @@ pub fn same_changes(repo: &Path, base: &str, a: &str, b: &str) -> bool {
     matches!((own(a), own(b)), (Some(x), Some(y)) if x == y)
 }
 
+/// `head`'s only new commit over `prev` is a clean merge of the base (Issue 358, the fix budget):
+/// `head` has two parents, `prev` and a commit of `base`, and its tree is the one git's own merge
+/// of those two writes with no conflict (what `update` pushes). A merge that resolved a conflict
+/// or carries any other edit is not; a failed git is not.
+pub fn clean_base_merge(repo: &Path, base: &str, prev: &str, head: &str) -> bool {
+    let Ok(line) = git(repo, &["rev-list", "--parents", "-n", "1", head]) else {
+        return false;
+    };
+    let ids: Vec<&str> = line.split_whitespace().collect();
+    let [_, a, b] = ids[..] else {
+        return false;
+    };
+    let other = match (a == prev, b == prev) {
+        (true, false) => b,
+        (false, true) => a,
+        _ => return false,
+    };
+    if !git_ok(repo, &["merge-base", "--is-ancestor", other, base]) {
+        return false;
+    }
+    let merged = git(repo, &["merge-tree", "--write-tree", prev, other]);
+    let tree = git(repo, &["rev-parse", &format!("{head}^{{tree}}")]);
+    match (merged, tree) {
+        (Ok(m), Ok(t)) => m.lines().next().map(str::trim) == Some(t.trim()),
+        _ => false,
+    }
+}
+
 // ---- GitHub --------------------------------------------------------------------------------------
 
 /// One JSON value per line of `gh api --paginate <path> --jq <jq>`.

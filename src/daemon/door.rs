@@ -327,6 +327,7 @@ impl Door {
             return self.review(w, &actor, &args, idem);
         }
         // Issue 307: the check before CI reads GitHub and git with the lock released, as the gate.
+        let mut base_merge = false;
         let w = match (v, gate_args(&args)) {
             (Verb::Pr, Ok((repo, pr, head))) => {
                 let read = (|| -> rusqlite::Result<_> {
@@ -341,8 +342,13 @@ impl Door {
                 })();
                 let (projects, failed) = read.map_err(internal)?;
                 let before = newest_watch(&w, &repo, pr).map_err(internal)?;
+                // Issue 358: the head recorded last, which a pushed merge of the base is judged against.
+                let prev = match args.get("state").and_then(Value::as_str) {
+                    Some("pushed") => newest_head(&w, &repo, pr).map_err(internal)?,
+                    _ => None,
+                };
                 drop(w);
-                let mut found = pr_before_ci(&projects, &failed, &repo, pr, &head);
+                let mut found = pr_before_ci(&projects, &failed, &repo, pr, &head, prev.as_deref());
                 let w = self.writer();
                 // The same request may have been recorded while the lock was released.
                 if let Some(idem) = idem
@@ -356,14 +362,17 @@ impl Door {
                         "{repo}#{pr} was recorded again while this record was checked; nothing was recorded, record the newest head again"
                     ));
                 }
-                if let Err(why) = found {
-                    let r = Err(refuse(
-                        ErrorKind::Conflict,
-                        why,
-                        "push the test commit alone with push and head, record it with pr, and record a later head once CI failed there",
-                    ));
-                    let _ = record(&w, &actor, verb, &args, idem, &r);
-                    return r;
+                match found {
+                    Err(why) => {
+                        let r = Err(refuse(
+                            ErrorKind::Conflict,
+                            why,
+                            "push the test commit alone with push and head, record it with pr, and record a later head once CI failed there",
+                        ));
+                        let _ = record(&w, &actor, verb, &args, idem, &r);
+                        return r;
+                    }
+                    Ok(merge) => base_merge = merge,
                 }
                 w
             }
@@ -439,7 +448,16 @@ impl Door {
         let r = match v {
             Verb::Candidate => candidate(&w, &actor, &args, &mut undo),
             Verb::Goal => goal(&w, &actor, &args, &mut undo),
-            _ => run(&w, &*self.base, &self.agent, &actor, role, v, &args),
+            _ => run(
+                &w,
+                &*self.base,
+                &self.agent,
+                &actor,
+                role,
+                v,
+                &args,
+                base_merge,
+            ),
         };
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin();
@@ -660,6 +678,9 @@ fn record(
     }
 }
 
+/// `base_merge`: what the door judged outside its lock for `pr pushed` (Issue 358), never an
+/// argument of the request.
+#[allow(clippy::too_many_arguments)]
 fn run(
     w: &StateWriter,
     base: &dyn Base,
@@ -668,6 +689,7 @@ fn run(
     role: Role,
     v: Verb,
     args: &Value,
+    base_merge: bool,
 ) -> Response {
     let r = match v {
         Verb::Dispatch => dispatch(w, agent, actor, args),
@@ -696,7 +718,7 @@ fn run(
             Ok(json!({"messages": messages, "more": b.more}))
         }
         Verb::Config => config(w, actor, args),
-        Verb::Pr => pr(w, args),
+        Verb::Pr => pr(w, args, base_merge),
         Verb::Note => note(w, actor, args),
         Verb::Push => push(w, args),
         Verb::Project => {
@@ -1646,8 +1668,9 @@ fn unsaved_work(w: &StateWriter, run: i64) -> Result<(), DoorError> {
 }
 
 /// `pr opened|pushed` (spec section 12): the event, the older watches of the PR `superseded`
-/// and the watch of the new head, as `prwatch::register` does in one transaction.
-fn pr(w: &StateWriter, args: &Value) -> Response {
+/// and the watch of the new head, as `prwatch::register` does in one transaction. `base_merge`:
+/// the door found the pushed head to be a clean merge of the base (Issue 358).
+fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
     let state = str_arg(args, "state")?;
     let kind = match state {
         "opened" => "pr_opened",
@@ -1681,9 +1704,12 @@ fn pr(w: &StateWriter, args: &Value) -> Response {
     if !run_exists(w, task)? {
         return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
     }
-    let r = super::prwatch::register(w, kind, task, repo, number, head).map_err(internal)?;
-    // The belt (Issue 282): the stops of an older head go, and a head that reaches the range's
-    // `budget_fixes` is a stop of the task. The push is recorded whatever the count.
+    let base_merge = base_merge && kind == "fix_pushed";
+    let r = super::prwatch::register_with(w, kind, task, repo, number, head, base_merge)
+        .map_err(internal)?;
+    // The belt (Issue 282): the stops of an older head go, and a fix that reaches the range's
+    // `budget_fixes` is a stop of the task; a clean merge of the base is no fix (Issue 358). The
+    // push is recorded whatever the count.
     super::belt::head_recorded(w, task, repo, number, head).map_err(internal)?;
     Ok(json!({"watch_id": r.watch_id, "status": r.status}))
 }
@@ -2521,6 +2547,22 @@ fn newest_watch(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<Option
     )
 }
 
+/// The head of the newest record of `repo#pr` (`pr_opened` or `fix_pushed`), if any.
+fn newest_head(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<Option<String>> {
+    w.conn()
+        .query_row(
+            "SELECT json_extract(payload_json, '$.head_oid') FROM events
+             WHERE kind IN ('pr_opened', 'fix_pushed')
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![repo, pr],
+            |r| r.get(0),
+        )
+        .optional()
+        .map(Option::flatten)
+}
+
 /// The heads of the failed `ci_completed` events among `ci` (one pull request's).
 fn failed_of(ci: &[(i64, Value)]) -> std::collections::BTreeSet<String> {
     ci.iter()
@@ -2563,21 +2605,23 @@ pub(super) fn failed_heads(
 /// or a project clone whose origin does not name it (the gate fetches only through such an
 /// origin). Otherwise the pull request is read and fetched as the gate does, and
 /// `gate::before_ci` judges the head against the failed runs recorded for this pull request; what
-/// cannot be read refuses.
+/// cannot be read refuses. Let through, the answer says whether `head` is a clean merge of the
+/// base onto `prev`, the head recorded last (Issue 358); unchecked, it is not.
 fn pr_before_ci(
     projects: &[(String, Option<String>)],
     failed: &std::collections::BTreeSet<String>,
     repo: &str,
     pr: i64,
     head: &str,
-) -> Result<(), String> {
+    prev: Option<&str>,
+) -> Result<bool, String> {
     use super::gate;
     let repos = super::prepare::Places::from_env(Path::new("")).repos;
     let Some(clone) = gate::clone_of(projects, &repos, &repo.to_lowercase()) else {
-        return Ok(());
+        return Ok(false);
     };
     if gate::origin_of(&clone, repo).is_err() {
-        return Ok(());
+        return Ok(false);
     }
     let why = |e: gate::Reject| {
         format!(
@@ -2600,7 +2644,8 @@ fn pr_before_ci(
         &|sha| failed.contains(sha),
         &format!("for {repo}#{pr}"),
     )
-    .map_err(|e| e.0)
+    .map_err(|e| e.0)?;
+    Ok(prev.is_some_and(|p| p != head && gate::clean_base_merge(&clone, &base, p, head)))
 }
 
 /// `(repo, pr, head)` of a `gate` request.
@@ -3999,7 +4044,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: heads pushed to a task's pull request after the first before it is a stop, default 3; follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
