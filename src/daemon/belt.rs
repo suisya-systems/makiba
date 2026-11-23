@@ -1301,14 +1301,29 @@ pub(super) fn named(issues: &[i64]) -> String {
 /// The brief of a range task: the range's head, then the Issue's title, body and comments, then,
 /// for a task dispatched for its design only, what it waits for and what to do (belt.md 4.3).
 fn brief(head: &str, n: &Next) -> String {
-    let mut b = format!(
-        "{}\n\nIssue #{}: {}\n\n{}\n",
-        head.trim_end(),
-        n.issue,
-        n.title,
-        n.body.trim_end()
-    );
     let comments: Vec<Value> = serde_json::from_str(&n.comments).unwrap_or_default();
+    let mut b = format!(
+        "{}{}",
+        head.trim_end(),
+        issue_text(n.issue, &n.title, &n.body, &comments)
+    );
+    if let Some((issues, _)) = &n.waits {
+        let (what, verb) = if issues.len() == 1 {
+            (named(issues), "has")
+        } else {
+            (named(issues), "have")
+        };
+        b.push_str(&format!(
+            "\nDesign only: {what} {verb} not landed. Write the design and have it read as the brief head says, then report blocked with the design, and stop: no code and no commit. When {what} {verb} landed you are woken on this conversation, told what landed, and you bring your branch up to the base and build.\n"
+        ));
+    }
+    b
+}
+
+/// An Issue as a brief carries it after its head, a range's or a dispatch's own (Issue 317): its
+/// title, body and comments, each comment `{author, at, body}`.
+pub(super) fn issue_text(issue: i64, title: &str, body: &str, comments: &[Value]) -> String {
+    let mut b = format!("\n\nIssue #{issue}: {title}\n\n{}\n", body.trim_end());
     if !comments.is_empty() {
         b.push_str("\nComments:\n");
         for c in comments {
@@ -1319,16 +1334,6 @@ fn brief(head: &str, n: &Next) -> String {
                 c["body"].as_str().unwrap_or_default().trim_end()
             ));
         }
-    }
-    if let Some((issues, _)) = &n.waits {
-        let (what, verb) = if issues.len() == 1 {
-            (named(issues), "has")
-        } else {
-            (named(issues), "have")
-        };
-        b.push_str(&format!(
-            "\nDesign only: {what} {verb} not landed. Write the design and have it read as the brief head says, then report blocked with the design, and stop: no code and no commit. When {what} {verb} landed you are woken on this conversation, told what landed, and you bring your branch up to the base and build.\n"
-        ));
     }
     b
 }
