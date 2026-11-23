@@ -1,6 +1,6 @@
 # Report: makiba's first week on makiba (Issue 51)
 
-This is the record that Issue 51 asks for. It began as a skeleton (pull request 359) and its counts are now filled from an export of the ledger (section 1.2). No number here was estimated. What the export cannot give stays a visible `TODO`, with its reason: `TODO(events)` where a record outside the export would give it, `TODO(person)` where only the person can say. The owner closes Issue 51 on this record once every `TODO` is filled or accepted as open.
+This is the record that Issue 51 asks for. It began as a skeleton (pull request 359) and its counts are now filled from an export of the ledger (section 1.2). No number here was estimated. What the export could not give was answered by the start file and by the owner; each such answer is named where it is used. The owner closes Issue 51 on this record.
 
 How the count is read is in `docs/runbooks/self-hosting.md` section 11.5. Times are UTC unless a time is marked JST (UTC+9).
 
@@ -56,9 +56,9 @@ The owner exported the ledger on 2026-11-23 at about 15:47Z (2026-11-24 00:47 JS
 | Failed launches | 1 (event 3068, the curator's, `task_id` null, stage `launched`; section 4.1) | `jq -c 'select(.kind=="worker_spawn_failed") \| {id, occurred_at, task_id, stage: .payload.stage, seen: .payload.seen}' "$E"` (count the lines; a launch without a run, such as the curator's, has `task_id` null) |
 | Undelivered messages at any point | 0 `observation_lost` events, the source the owner chose | `jq -c 'select(.kind=="observation_lost")' "$E"` (count the lines). Delivery rows are not on the read surface (`docs/design/spec.md` section 12, "The read surface"), so the owner decided that this count is read from `observation_lost`. What that event records is narrower: a record the monitor dropped because it could not be written within the retry window (`docs/design/spec.md` section 10). Zero of them does not show from the delivery rows that no message stayed undelivered; that would need the delivery rows on the read surface |
 | `secretary_still` anomalies (read by the owner as messages delivered but not acted on) | 10 anomalies | `jq -c 'select(.kind=="anomaly_raised" and .payload.rule=="secretary_still")' "$E"` (count the lines). The rule is raised when a worker anomaly is open while the secretary's status stays unchanged for 600 s, or a `pending` entry stays open for 600 s (`docs/design/spec.md` section 11). Each is one anomaly, not one message, and it says nothing of delivery; the owner counts them apart from the undelivered messages |
-| Renewals of the secretary | 1 (event 202; section 4.2) | `jq -c 'select(.kind=="secretary_renewed") \| {id, occurred_at, actor, payload}' "$E"` (count the lines; at least event 202, section 4.2) |
+| Renewals of the secretary | 1 (event 202; section 4.2) | `jq -c 'select(.kind=="secretary_renewed") \| {id, occurred_at, actor, payload}' "$E"` (count the lines; section 4.2) |
 | Time `makibad` was down | about 3 h 15 min in five down times: one crash of about 3 h 07 min (the person's word; the ledger bounds it at 3 h 10 min) and four clean stops of 7 min 35 s in all (section 3) | `jq -c 'select(.kind=="dispatcher_started" or .kind=="dispatcher_stopped") \| {id, occurred_at, kind, base_version: .payload.base_version}' "$E"`: each stop and the next start is a down time. A start with no clean stop before it (a crash) has no recorded start of its down time: the last event before it gives only an upper bound, so its start is taken from other evidence (the person's word, a log) and the source is named, as in section 3 |
-| Pull requests landed through makiba | 34: 12 with a `pr_merged` event and 22 added by hand (section 5); 33 if pull request 304 is left out | The list: `jq -c 'select(.kind=="pr_merged" and (.payload.repo \| ascii_downcase) == "suisya-systems/makiba") \| {id, repo: .payload.repo, pr: .payload.pr, merged_at: .payload.merged_at, task_id}' "$E"`. The count, each pull request once: `jq -r 'select(.kind=="pr_merged" and (.payload.repo \| ascii_downcase) == "suisya-systems/makiba") \| "\(.payload.repo)#\(.payload.pr)"' "$E" \| sort -u \| wc -l`, plus the hand-added landings of section 5 that have no `pr_merged` event. Only makiba's own repository counts: another registered project's landings are left out |
+| Pull requests landed through makiba | 34: 12 with a `pr_merged` event and 22 added by hand, merges by the person's hand included by the owner's decision (section 5); 33 without 373 | The list: `jq -c 'select(.kind=="pr_merged" and (.payload.repo \| ascii_downcase) == "suisya-systems/makiba") \| {id, repo: .payload.repo, pr: .payload.pr, merged_at: .payload.merged_at, task_id}' "$E"`. The count, each pull request once: `jq -r 'select(.kind=="pr_merged" and (.payload.repo \| ascii_downcase) == "suisya-systems/makiba") \| "\(.payload.repo)#\(.payload.pr)"' "$E" \| sort -u \| wc -l`, plus the hand-added landings of section 5 that have no `pr_merged` event. Only makiba's own repository counts: another registered project's landings are left out |
 
 ## 3. Time `makibad` was down
 
@@ -74,7 +74,7 @@ From the `dispatcher_started` and `dispatcher_stopped` query of section 2: four 
 
 The start time of the crash is the person's word. The ledger's last event before it is event 703 (a `terminal_status`) at 11:53:43, so the ledger alone bounds this down time at 3 h 10 min at most. The end is `makibad`'s new heartbeat and the relaunched terminals at 15:03. The workers resumed; no task was dispatched again.
 
-In all, about 3 h 15 min (at most 3 h 18 min by the ledger's bound). The causes of the stops at 10:13 and 10:20 are not in the ledger. Between the stop of event 6864 and the start of event 6869, two runs were taken at 15:42:14 (events 6865 and 6866) and again at 15:44:04 with the start; the down time is counted from the stop to the `dispatcher_started`, as the query says.
+In all, about 3 h 15 min (at most 3 h 18 min by the ledger's bound). The causes of the stops at 10:13 and 10:20 are not in the ledger. Between the stop of event 6864 and the start of event 6869, two runs were taken at 15:42:14 (events 6865 and 6866) and again at 15:44:04 with the start; the down time is counted from the stop to the `dispatcher_started`, as the query says. Events 6865 and 6866 have the actor `makibad` although they fall inside the stop; this is followed in Issue 385, and no cause is stated here.
 
 ## 4. The three events
 
@@ -83,7 +83,7 @@ An update of the base is a `dispatcher_started` after N whose `base_version` dif
 | Event | Met | When | On purpose? |
 | --- | --- | --- | --- |
 | Failed launch | yes | 2026-11-22T19:06:42Z, event 3068 | No, met by itself |
-| Renewal of the secretary | yes | 2026-11-22T10:46:40Z, event 202 | Not by the `renew` verb: it was `makibad`'s relaunch of a secretary whose terminal had exited (section 4.2). TODO(person): whether that exit was brought about on purpose is not in the ledger |
+| Renewal of the secretary | yes | 2026-11-22T10:46:40Z, event 202 | No, not an intended renewal: the person closed the secretary's terminal and `makibad` brought it back (events 195, 196, 202; section 4.2) |
 | Update of the base | yes | 2026-11-23T15:44:04Z, event 6869 | Yes, by the pin move to herdr-core 0.1.22 (pull request 373) and a restart by the owner |
 
 ### 4.1 Failed launch, met by itself
@@ -98,7 +98,7 @@ Event id: 3068, the only `worker_spawn_failed` after N, `task_id` null, stage `l
 
 Event 202, `secretary_renewed` (actor `makibad`), at 2026-11-22T10:46:40Z, the only one after N. Checked with `jq -c 'select(.id==202)' "$E"`.
 
-It was not asked for with `renew`. Just before it, event 195 records the secretary's terminal gone (reason `exited`, exit code 0) at 10:46:36Z, and event 196 raises `secretary_gone`. That rule is raised only while no `makiba renew` is under way (`docs/design/spec.md` section 11), and on it `makibad` relaunches the secretary by the path of `renew` with a row of its own; events 197 to 202 are that launch, its verification and the renewal. What made the secretary's terminal exit is not in the ledger: TODO(person), whether it was brought about on purpose.
+It was not asked for with `renew`. Just before it, event 195 records the secretary's terminal gone (reason `exited`, exit code 0) at 10:46:36Z, and event 196 raises `secretary_gone`. That rule is raised only while no `makiba renew` is under way (`docs/design/spec.md` section 11), and on it `makibad` relaunches the secretary by the path of `renew` with a row of its own; events 197 to 202 are that launch, its verification and the renewal. What made the terminal exit is not in the ledger; the owner says they most likely closed the secretary's terminal themselves. So this was not an intended renewal: the person closed the secretary's terminal and `makibad` brought it back (events 195, 196 and 202).
 
 ### 4.3 Update of the base
 
@@ -112,12 +112,14 @@ Met on 2026-11-23, brought about on purpose by a pin move (`docs/upgrading-the-b
 
 Twenty are needed. A pull request landed by a repair from claude-org-ja is not one of the twenty. `pr_merged` is written for the tasks of a range, and also for a one-off run that was parked or that a design-only run waits for (`landing_candidates` in `src/daemon/belt.rs`); any other one-off landing is not in it. The count is the pull requests of the `pr_merged` events, each pull request once, plus by hand only the landings that have no `pr_merged` event, each named with its pull request number here. A pull request is never counted twice.
 
-**Checked** against the `pr_merged` events of the export (query in section 2). There are 12 such events, one per pull request, all of makiba's repository. A pull request is added by hand when it has no `pr_merged` event, its `pr_opened` event after N names a makiba task, and its merge commit is on `origin/main` before the export. The merge times are those of the commits on `origin/main`. No pull request was landed by a repair from claude-org-ja (section 7).
+**Checked** against the `pr_merged` events of the export (query in section 2). There are 12 such events, one per pull request, all of makiba's repository. A pull request is added by hand when it has no `pr_merged` event, its `pr_opened` event after N names a makiba task, and its merge commit is on `origin/main` before the export. The merge times are those of the commits on `origin/main`. No counted pull request was landed by a repair from claude-org-ja (section 7; pull request 296, below, is not counted).
+
+The basis for counting a pull request merged by the person's hand, by the owner's decision: a pull request opened by a makiba task after N and merged by the person by hand (under merge approval mode `human`, or in the web UI), with its CI as the ledger records it, counts as landed through makiba. The ledger does not record who merged a pull request, and a `pr_merged` event does not show it either (pull request 304 has one and was merged in the web UI), so no row is told apart by that. Pull request 373 was merged at 15:41:27Z while `makibad` was stopped (section 3, events 6864 to 6869); it counts on the same basis.
 
 | Pull request | State | Note | `pr_merged` event |
 | --- | --- | --- | --- |
 | 301 | landed | | 546 |
-| 304 | landed | Merged by the owner in the web UI, not through makiba's landing; whether it counts is the owner's call | 1417 |
+| 304 | landed | Merged by the owner in the web UI; counts by the owner's decision (above) | 1417 |
 | 305 | landed | | 2730 |
 | 309 | landed | Its run's close needed a repair from claude-org-ja (section 7.1); the pull request itself landed through makiba and counts | 1619 |
 | 310 | landed | | none: added by hand (`pr_opened` 1065) |
@@ -135,7 +137,7 @@ Twenty are needed. A pull request landed by a repair from claude-org-ja is not o
 | 342 | landed | Its run was closed with `abandon` (section 7.3); the work landed | none: added by hand (`pr_opened` 3628) |
 | 346 | landed | | 4613 |
 | 347 | landed | Range task r3-299 | none: added by hand (`pr_opened` 4059) |
-| 348 | landed | Range task r3-317; the twentieth landing counting 304 (2026-11-23T07:17Z) | none: added by hand (`pr_opened` 4093) |
+| 348 | landed | Range task r3-317; the twentieth landing (2026-11-23T07:17Z) | none: added by hand (`pr_opened` 4093) |
 | 349 | landed | | none: added by hand (`pr_opened` 4152) |
 | 350 | landed | Range task r3-335 | none: added by hand (`pr_opened` 4181) |
 | 351 | landed | | 5075 |
@@ -149,16 +151,16 @@ Twenty are needed. A pull request landed by a repair from claude-org-ja is not o
 | 367 | landed | | 6416 |
 | 370 | landed | | 6531 |
 | 371 | landed | | none: added by hand (`pr_opened` 6088) |
-| 373 | landed | The pin move to herdr-core 0.1.22 (section 4.3) | none: added by hand (`pr_opened` 6487) |
+| 373 | landed | The pin move to herdr-core 0.1.22 (section 4.3); merged by hand while `makibad` was stopped, counts by the owner's decision (above) | none: added by hand (`pr_opened` 6487) |
 | 376 | landed | | none: added by hand (`pr_opened` 6704) |
 
-Final count: 34 landed (12 with `pr_merged`, 22 added by hand); 33 if 304 is left out. The twentieth landing was 348 at 2026-11-23T07:17Z, or 347 at 07:29Z without 304. Not landed at the export: 353 (above), 303 and 308 (closed, events 5339 and 5338; their work landed as 310 and 323), and 313, 315, 316, 377 and 378 (no merge on `origin/main`).
+Final count: 34 landed (12 with `pr_merged`, 22 added by hand), the hand-merged ones included on the owner's basis above; 33 without 373. The twentieth landing was 348 at 2026-11-23T07:17Z. Not landed at the export: 353 (above), 303 and 308 (closed, events 5339 and 5338; their work landed as 310 and 323), and 313, 315, 316, 377 and 378 (no merge on `origin/main`).
 
 Of the provisional list, every row marked landed is confirmed on `origin/main`; of the six pending, 347, 348, 349, 350 and 351 landed and 353 did not. Eleven landings were not on it: 359, 362 to 367, 370, 371, 373 and 376.
 
-Pull request 296 merged on `origin/main` at 2026-11-22T10:00Z, after the start file's time, but no event after N names it (no `pr_opened`, no `pr_merged`), so the rule above does not add it. It is the fix of Issue 295, which Issue 51 records as a repair that could only be made from claude-org-ja, and so it is not one of the twenty in any case. It has no section in 7, and no row of `docs/design/incidents.md` names Issue 295: TODO(person), whether it needs one.
+Pull request 296 merged on `origin/main` at 2026-11-22T10:00Z, after the start file's time, but no event after N names it (no `pr_opened`, no `pr_merged`), so the rule above does not add it. It is the fix of Issue 295, which Issue 51 records as a repair that could only be made from claude-org-ja, and so it is not one of the twenty in any case. Its incident row is [I-21](../design/incidents.md).
 
-Three range tasks (r3-299, r3-317 and r3-335) landed with no `pr_merged` event, although `pr_merged` is written for the tasks of a range. Why is not established here.
+Three range tasks (r3-299, r3-317 and r3-335) landed with no `pr_merged` event, although `pr_merged` is written for the tasks of a range. This is followed in Issue 385; no cause is stated here.
 
 ## 6. Who "the person" was
 
@@ -186,6 +188,10 @@ On 2026-11-23 park-race-332 (Issue 332, pull request 342, merged) was closed wit
 
 The secretary could not read a CI log of pull request 324, so it was read from claude-org-ja. claude-org-ja's reading of the cause was passed to the worker as a finding, then corrected to a hypothesis. Row I-17 names Issue 327 as its check; Issue 341 is the second check.
 
-### 7.5 Not a repair
+### 7.5 The secretary's GitHub login (row I-21, check Issue 295)
+
+On 2026-11-22, the first day of the count, the secretary's GitHub CLI found no login. The fix (Issue 295, pull request 296, merged at 10:00Z) could only be made from claude-org-ja. Pull request 296 is not one of the twenty (section 5).
+
+### 7.6 Not a repair
 
 The failed launch of section 4.1 (row I-18, Issue 333) needed no repair from claude-org-ja.
