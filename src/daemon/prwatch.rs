@@ -502,7 +502,7 @@ impl PrWatch {
                 }
             }
         }
-        for r in fresh {
+        for r in newest_per_task(fresh) {
             let key = told_key(&r.f.repo, r.f.pr, &r.head);
             match apply_merge(w, &r, self.told.get(&key)) {
                 Ok(Some(class)) => {
@@ -1126,6 +1126,17 @@ struct MergeRead {
     started: Instant,
 }
 
+/// The newest of `reads` for each task, in the order of those newest reads: an older read queued
+/// in the same pass is never told after the newer one the CI notice may already have used.
+fn newest_per_task(reads: Vec<MergeRead>) -> Vec<MergeRead> {
+    let mut out: Vec<MergeRead> = Vec::new();
+    for r in reads {
+        out.retain(|o| o.f.task != r.f.task);
+        out.push(r);
+    }
+    out
+}
+
 fn told_key(repo: &str, pr: i64, head: &str) -> (String, i64, String) {
     (repo.to_lowercase(), pr, head.to_lowercase())
 }
@@ -1209,13 +1220,18 @@ fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<
             return Ok(None);
         }
         let (repo, pr, task) = (r.f.repo.as_str(), r.f.pr, r.f.task.as_str());
+        // The head of the run's current pull request, as `current_pr_sql` finds its number: the
+        // newest registration, else the newest watch of the run (a watch with no registration).
         let newest: Option<String> = w
             .conn()
             .query_row(
-                "SELECT json_extract(e.payload_json, '$.head_oid') FROM events e
-                 JOIN runs u ON u.id = e.run_id
-                 WHERE u.task_id = ?1 AND e.kind IN ('pr_opened', 'fix_pushed')
-                 ORDER BY e.id DESC LIMIT 1",
+                "SELECT coalesce(
+                   (SELECT json_extract(e.payload_json, '$.head_oid') FROM events e
+                    WHERE e.run_id = u.id AND e.kind IN ('pr_opened', 'fix_pushed')
+                    ORDER BY e.id DESC LIMIT 1),
+                   (SELECT p.head_oid FROM pr_watches p WHERE p.run_id = u.id
+                    ORDER BY p.id DESC LIMIT 1))
+                 FROM runs u WHERE u.task_id = ?1",
                 [task],
                 |q| q.get(0),
             )
@@ -1847,6 +1863,97 @@ esac"#,
             closed: now.as_ref().is_some_and(|f| f.closed),
         };
         apply_state(w, &StateDone { f, read }).unwrap()
+    }
+
+    fn merge_read(f: &Followed, head: &str, status: &str) -> MergeRead {
+        MergeRead {
+            f: f.clone(),
+            head: head.into(),
+            status: status.into(),
+            draft: false,
+            started: Instant::now(),
+        }
+    }
+
+    /// Reads queued in one pass: only the newest of each task is acted on (Issue 387).
+    #[test]
+    fn only_the_newest_merge_read_of_a_task_is_acted_on() {
+        let f = |task: &str| Followed {
+            task: task.into(),
+            repo: "o/r".into(),
+            pr: 5,
+            gen_reg: 1,
+            gen_close: 0,
+            closed: false,
+        };
+        let reads = vec![
+            merge_read(&f("a"), "h", "CLEAN"),
+            merge_read(&f("b"), "h", "DIRTY"),
+            merge_read(&f("a"), "h", "BEHIND"),
+        ];
+        let kept: Vec<(String, String)> = newest_per_task(reads)
+            .into_iter()
+            .map(|r| (r.f.task, r.status))
+            .collect();
+        assert_eq!(
+            kept,
+            vec![("b".into(), "DIRTY".into()), ("a".into(), "BEHIND".into())]
+        );
+    }
+
+    /// A pull request known by its watch alone (no registration event) still has its merge state
+    /// change told, after a "not known yet" notice of its green head (Issue 387).
+    #[test]
+    fn a_watch_without_a_registration_has_its_merge_state_change_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "1".repeat(40);
+        w.conn()
+            .execute(
+                "INSERT INTO pr_watches (repo, pr, head_oid, run_id, status, conclusion)
+                 VALUES ('o/r', 5, ?1, (SELECT id FROM runs WHERE task_id = 't'),
+                         'completed', 'passed')",
+                [&head],
+            )
+            .unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"}),
+        );
+        w.transaction(|w| {
+            super::super::verify::notify_secretary(
+                w,
+                Some("t"),
+                &format!(
+                    "CI passed for o/r#5 at 1111111: 0 of 1 checks failed.{}",
+                    merge_sentence(MergeSeen::Read("UNKNOWN", false), "o/r", 5)
+                ),
+            )
+        })
+        .unwrap();
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        assert_eq!(f.gen_reg, 0, "no registration event");
+        let told = apply_merge(&w, &merge_read(&f, &head, "CLEAN"), None).unwrap();
+        assert_eq!(told.as_deref(), Some("ready"));
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM messages WHERE body LIKE 'The merge state of o/r#5 at 1111111,%(CLEAN)%'",
+                [],
+            )
+            .unwrap(),
+            1
+        );
     }
 
     /// A parked run outside every range is followed, and its pull request read merged writes
