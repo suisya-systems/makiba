@@ -34,6 +34,7 @@ pub mod run_repo;
 pub mod secretary;
 mod triage;
 pub use project::hosts_of;
+pub use push::sync_request;
 pub use triage::owner_repo_from_url;
 mod verify;
 
