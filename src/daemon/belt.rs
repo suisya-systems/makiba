@@ -13,7 +13,8 @@
 //!   while the range's runs that count are below `at_once`, `max_concurrent_workers` has room and
 //!   the budget allows. The task id `r<range id>-<issue>` is dispatched once whatever restarts.
 //! - A run that waits only for the person (an escalated pending entry) counts in neither count.
-//! - The proof of a landing: the run's registered pull request, read merged (`pr_merged`).
+//! - The proof of a landing: the run's registered pull request read merged (`pr_merged`), which
+//!   the PR watch records (`prwatch.rs`, Issue 388); the belt only checks the project's clone.
 //! - The read surface's `ranges[]` (spec section 12, table "Range field").
 //!
 //! Step 2 (Issue 282): the stops `makibad` writes itself, each a pending entry escalated at once
@@ -47,7 +48,7 @@ use std::time::{Duration, Instant};
 /// `$MAKIBA_RANGE_READ_INTERVAL_MS`: how often an active range is read again (default 10 min).
 pub const READ_INTERVAL_ENV: &str = "MAKIBA_RANGE_READ_INTERVAL_MS";
 const DEFAULT_INTERVAL_MS: i64 = 10 * 60 * 1000;
-/// A failed read is tried again after this; so is the landing check.
+/// A failed read is tried again after this; so is the clone check.
 const RETRY_MS: i64 = 60 * 1000;
 /// A read that lists this many open Issues or pull requests is not known to be whole.
 const ISSUE_LIMIT: usize = 500;
@@ -1233,7 +1234,7 @@ pub(super) fn is_current_pr_sql(alias: &str, repo: &str, pr: &str) -> String {
 
 /// The tasks open design-only runs wait for (Issue 284): their landings and closures are read
 /// whatever their status.
-const AWAITED: &str = "SELECT j.value FROM runs o
+pub(super) const AWAITED: &str = "SELECT j.value FROM runs o
     JOIN events e ON e.run_id = o.id AND e.kind = 'belt_dispatched'
          AND json_extract(e.payload_json, '$.design_only') = 1
     JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
@@ -1644,8 +1645,6 @@ type ReadResult = std::result::Result<Fetched, (String, bool)>;
 
 struct Outcome {
     range: Option<(Spec, ReadResult)>,
-    /// (task, repo, pr, the pull request as read, when the read succeeded)
-    landings: Vec<(String, String, i64, Option<Value>)>,
     /// A dependency's merge found in the project's clone after a fetch of its default branch.
     clones: Vec<InClone>,
 }
@@ -1662,7 +1661,7 @@ struct InClone {
     pr: Option<(String, i64)>,
 }
 
-/// `$MAKIBA_LANDING_RETRY_MS`: how often the landings are read again (default `RETRY_MS`).
+/// `$MAKIBA_LANDING_RETRY_MS`: how often the clone checks run again (default `RETRY_MS`).
 pub const LANDING_RETRY_ENV: &str = "MAKIBA_LANDING_RETRY_MS";
 
 /// A dependency of a design-only run waiting for its landing (belt.md 4.3) whose task closed
@@ -1726,16 +1725,10 @@ fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
     .collect::<std::result::Result<_, _>>()?)
 }
 
-/// One clone check on the read's thread: the merge commit (recorded, read by this job's landings,
-/// or, for a merge recorded without one, read again with `gh pr view`), then `in_clone`. The
-/// task, merge commit, branch and the branch's head when the merge is there.
-fn check_clone(
-    gh: &str,
-    repos_dir: &Path,
-    c: &CloneCheck,
-    merged: &BTreeMap<&str, &str>,
-    cancel: &AtomicBool,
-) -> Option<InClone> {
+/// One clone check on the read's thread: the merge commit (recorded, or, for a merge recorded
+/// without one, read again with `gh pr view`), then `in_clone`. The task, merge commit, branch
+/// and the branch's head when the merge is there.
+fn check_clone(gh: &str, repos_dir: &Path, c: &CloneCheck, cancel: &AtomicBool) -> Option<InClone> {
     let read_again = || -> Option<String> {
         let (repo, pr) = c.pr.as_ref()?;
         let v = gh_json(
@@ -1756,11 +1749,7 @@ fn check_clone(
             .then(|| v["mergeCommit"]["oid"].as_str().map(String::from))
             .flatten()
     };
-    let merge = c
-        .merge
-        .clone()
-        .or_else(|| merged.get(c.task.as_str()).map(|m| m.to_string()))
-        .or_else(read_again)?;
+    let merge = c.merge.clone().or_else(read_again)?;
     let head = in_clone(&repos_dir.join(&c.slug), &c.branch, &merge, cancel)?;
     Some(InClone {
         task: c.task.clone(),
@@ -1815,7 +1804,7 @@ impl Job {
     }
 }
 
-/// The belt's pass of `makibad`: the reads, the landing checks and the fill each tick.
+/// The belt's pass of `makibad`: the reads, the clone checks and the fill each tick.
 pub struct Belt {
     gh: String,
     repos_dir: PathBuf,
@@ -1886,18 +1875,27 @@ impl Belt {
             return Ok(());
         }
         let due = due(w, self.interval_ms)?;
-        let (landings, checks) = if self
+        let checks = if self
             .last_landing
             .is_none_or(|t| t.elapsed() >= self.landing_retry)
         {
-            (landing_candidates(w)?, clone_checks(w)?)
+            // Only a dependency whose merge is recorded (by the PR watch, Issue 388): the belt
+            // reads no pull request's state, and reads one again only for the commit of a merge
+            // recorded without it.
+            let mut checks = Vec::new();
+            for c in clone_checks(w)? {
+                if c.merge.is_some() || merge_recorded(w, &c.task)? {
+                    checks.push(c);
+                }
+            }
+            checks
         } else {
-            (Vec::new(), Vec::new())
+            Vec::new()
         };
-        if due.is_none() && landings.is_empty() && checks.is_empty() {
+        if due.is_none() && checks.is_empty() {
             return Ok(());
         }
-        if !landings.is_empty() || !checks.is_empty() {
+        if !checks.is_empty() {
             self.last_landing = Some(Instant::now());
         }
         let (through, activation) = due.as_ref().map_or((0, None), |(_, t, a)| (*t, *a));
@@ -1912,48 +1910,14 @@ impl Belt {
                     let f = read(&gh, &s, &repos_dir, &cancel);
                     (s, f)
                 });
-                let landings: Vec<(String, String, i64, Option<Value>)> = landings
-                    .into_iter()
-                    .map(|(task, repo, pr)| {
-                        let v = gh_json(
-                            &gh,
-                            &[
-                                "pr",
-                                "view",
-                                &pr.to_string(),
-                                "--repo",
-                                &format!("github.com/{repo}"),
-                                "--json",
-                                "state,mergedAt,title,mergeCommit",
-                            ],
-                            &cancel,
-                        )
-                        .ok();
-                        (task, repo, pr, v)
-                    })
-                    .collect();
                 // A dependency of a design-only run has landed for its worker only once its merge
                 // is in the project's clone, the worker's `origin` (belt.md 4.3).
-                let merged: BTreeMap<&str, &str> = landings
-                    .iter()
-                    .filter_map(|(task, _, _, v)| {
-                        let v = v.as_ref()?;
-                        (v["state"].as_str() == Some("MERGED"))
-                            .then_some(())
-                            .and(v["mergeCommit"]["oid"].as_str())
-                            .map(|m| (task.as_str(), m))
-                    })
-                    .collect();
                 let clones = checks
                     .iter()
-                    .filter_map(|c| check_clone(&gh, &repos_dir, c, &merged, &cancel))
+                    .filter_map(|c| check_clone(&gh, &repos_dir, c, &cancel))
                     .collect();
                 if !cancel.load(Ordering::SeqCst) {
-                    let _ = tx.send(Outcome {
-                        range,
-                        landings,
-                        clones,
-                    });
+                    let _ = tx.send(Outcome { range, clones });
                 }
             })
         };
@@ -2058,31 +2022,21 @@ fn due(w: &StateWriter, interval_ms: i64) -> Result<Option<(Spec, i64, Option<i6
     Ok(None)
 }
 
-/// The completed runs of a range with a registered pull request and no recorded merge.
-fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
-    // Also every task an open design-only run waits for, whatever its status but abandoned, so
-    // that its pull request closed unmerged is seen while it is still in review (Issue 284). A
-    // pull request read closed is read on until it merges: it may be reopened on GitHub.
-    // Its current pull request (`current_pr_sql`), with no merge of it recorded: a merge of
-    // another, even one of another repository with the same number, is not its landing.
-    let mut q = w.conn().prepare(&format!(
-        "SELECT r.task_id, {repo}, {pr} FROM runs r
-         WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked'
-                OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
-           AND {repo} IS NOT NULL AND {pr} IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
-                           AND {merged})
-         ORDER BY r.id",
-        repo = current_pr_sql("r", "repo"),
-        pr = current_pr_sql("r", "pr"),
-        merged = is_current_pr_sql(
-            "r",
-            "json_extract(e.payload_json, '$.repo')",
-            "json_extract(e.payload_json, '$.pr')"
+/// Whether the run of `task` has a `pr_merged` of its current pull request (`current_pr_sql`).
+fn merge_recorded(w: &StateWriter, task: &str) -> Result<bool> {
+    Ok(w.conn().query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM runs r JOIN events e ON e.run_id = r.id
+               WHERE r.task_id = ?1 AND e.kind = 'pr_merged' AND {})",
+            is_current_pr_sql(
+                "r",
+                "json_extract(e.payload_json, '$.repo')",
+                "json_extract(e.payload_json, '$.pr')"
+            )
         ),
-    ))?;
-    Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<std::result::Result<_, _>>()?)
+        [task],
+        |r| r.get(0),
+    )?)
 }
 
 fn gh_json(gh: &str, args: &[&str], cancel: &AtomicBool) -> std::result::Result<Value, String> {
@@ -2520,7 +2474,7 @@ fn dispatched_or_skipped(w: &StateWriter, id: i64, issue: i64, kind: &str) -> Re
 }
 
 /// The loop's side of a read: the candidates and `range_read` (or a failed `range_read`), the
-/// landings found, then the fill, in the caller's transaction.
+/// merges found in the clone, then the fill, in the caller's transaction.
 fn record(
     w: &StateWriter,
     through: i64,
@@ -2594,80 +2548,6 @@ fn record(
                     }
                 }
             }
-        }
-    }
-    for (task, repo, pr, read) in &o.landings {
-        let Some(v) = read else { continue };
-        // Read on the thread: a pull request the task has replaced since is no longer its own.
-        let current = count(
-            w,
-            &format!(
-                "SELECT count(*) FROM runs r WHERE r.task_id = ?1 AND {}",
-                is_current_pr_sql("r", "?2", "?3")
-            ),
-            params![task, repo, pr],
-        )?;
-        if current == 0 {
-            continue;
-        }
-        let known = count(
-            w,
-            "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE e.kind = 'pr_merged' AND r.task_id = ?1
-               AND lower(json_extract(e.payload_json, '$.repo')) = lower(?2)
-               AND json_extract(e.payload_json, '$.pr') = ?3",
-            params![task, repo, pr],
-        )?;
-        let closed = count(
-            w,
-            &format!(
-                "SELECT count(*) FROM runs r WHERE r.task_id = ?1 AND {}",
-                pr_closed_sql("r")
-            ),
-            [task],
-        )?;
-        // A pull request closed without its merge: it will not land as it is (belt.md 4.3). The
-        // tasks a design-only run waits for are read on, and one read open again is reopened.
-        let state = v["state"].as_str();
-        if known == 0 && closed == 0 && state == Some("CLOSED") {
-            event(
-                w,
-                "pr_closed",
-                "makibad",
-                Some(task),
-                json!({"repo": repo, "pr": pr, "title": v["title"], "task_id": task}),
-            )?;
-        }
-        if closed > 0 && state == Some("OPEN") {
-            event(
-                w,
-                "pr_reopened",
-                "makibad",
-                Some(task),
-                json!({"repo": repo, "pr": pr, "task_id": task}),
-            )?;
-        }
-        if known == 0 && v["state"].as_str() == Some("MERGED") {
-            event(
-                w,
-                "pr_merged",
-                "makibad",
-                Some(task),
-                json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
-                       "merge_commit": v["mergeCommit"]["oid"], "task_id": task}),
-            )?;
-            // A parked run whose pull request landed is brought back with that reason, and told
-            // (Issue 283).
-            super::park::wake_with_notice(
-                w,
-                task,
-                "landed",
-                json!({"repo": repo, "pr": pr}),
-                &format!(
-                    "Your pull request {repo}#{pr} landed (merged at {}).",
-                    v["mergedAt"].as_str().unwrap_or("an unknown time")
-                ),
-            )?;
         }
     }
     for InClone {
@@ -3105,63 +2985,8 @@ pub(super) fn in_force_line(w: &StateWriter) -> Result<Option<String>> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(in crate::daemon) mod tests {
     use super::*;
-
-    /// A parked run outside every range is in the landing poll, and its pull request read merged
-    /// writes `pr_merged`, wakes it with the reason `landed` and tells its worker (Issue 283).
-    #[test]
-    fn a_landing_wakes_a_parked_run_and_tells_its_worker() {
-        let dir = tempfile::tempdir().unwrap();
-        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
-        w.upsert_run(&crate::db::writer::RunUpsert {
-            task_id: "t",
-            project_slug: "p",
-            status: Some("in_use"),
-            ..Default::default()
-        })
-        .unwrap();
-        w.conn()
-            .execute_batch(
-                "UPDATE runs SET status = 'parked';
-                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage, conversation_id)
-                 VALUES (1, 's1', 'fake', 'b', '/w', 'verified', 'c1');
-                 INSERT INTO pending (run_id, kind, question, status) VALUES (1, 'question', 'q', 'escalated');
-                 INSERT INTO pr_watches (repo, pr, head_oid, run_id) VALUES ('o/r', 5, 'abc', 1);",
-            )
-            .unwrap();
-        assert_eq!(
-            landing_candidates(&w).unwrap(),
-            [("t".to_string(), "o/r".to_string(), 5)]
-        );
-        let o = Outcome {
-            range: None,
-            landings: vec![(
-                "t".into(),
-                "o/r".into(),
-                5,
-                Some(json!({"state": "MERGED", "title": "T",
-                            "mergedAt": "2026-11-23T00:00:00Z"})),
-            )],
-            clones: Vec::new(),
-        };
-        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
-        let n = |sql: &str| -> i64 { w.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT count(*) FROM events WHERE kind = 'pr_merged'"), 1);
-        assert_eq!(n("SELECT count(*) FROM runs WHERE status = 'suspended'"), 1);
-        assert_eq!(
-            n("SELECT count(*) FROM events WHERE kind = 'run_unparked'
-               AND json_extract(payload_json, '$.reason') = 'landed'"),
-            1
-        );
-        assert_eq!(
-            n(
-                "SELECT count(*) FROM messages WHERE recipient = 'w-t' AND body LIKE '%o/r#5 landed%'"
-            ),
-            1
-        );
-        assert!(landing_candidates(&w).unwrap().is_empty());
-    }
 
     #[test]
     fn the_condition_parses_its_four_words_and_refuses_others() {
@@ -3180,7 +3005,7 @@ mod tests {
         assert!(!Takes::default().matches(&issue(&["bug"])));
     }
 
-    fn org() -> (tempfile::TempDir, StateWriter) {
+    pub(in crate::daemon) fn org() -> (tempfile::TempDir, StateWriter) {
         let dir = tempfile::tempdir().unwrap();
         let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
         w.ensure_project("p", None, Some("https://github.com/o/p"))
@@ -3361,87 +3186,6 @@ mod tests {
         assert_eq!(why(6).as_deref(), Some("admitted"));
     }
 
-    /// The landing of a task a design-only run waits for is read whatever its status, so that a
-    /// pull request closed unmerged in review is seen; a closed one is not read again until the
-    /// task records another pull request.
-    #[test]
-    fn the_pull_request_of_an_awaited_task_is_read_in_review_until_closed() {
-        let (_dir, w) = org();
-        let id = active_range(&w, None);
-        run_of(&w, id, "r1-1");
-        run_of(&w, id, "r1-2");
-        event(
-            &w,
-            "belt_dispatched",
-            "makibad",
-            Some("r1-1"),
-            json!({"range_id": id, "issue": 1, "task_id": "r1-1", "design_only": false}),
-        )
-        .unwrap();
-        w.conn()
-            .execute(
-                "UPDATE runs SET status = 'review' WHERE task_id = 'r1-1'",
-                [],
-            )
-            .unwrap();
-        watch(&w, "r1-1", 11, &"a".repeat(40));
-        assert!(
-            landing_candidates(&w).unwrap().is_empty(),
-            "nothing waits for it"
-        );
-        event(
-            &w,
-            "belt_dispatched",
-            "makibad",
-            Some("r1-2"),
-            json!({"range_id": id, "issue": 2, "task_id": "r1-2", "design_only": true,
-                   "waits_for": [1], "waits_tasks": ["r1-1"]}),
-        )
-        .unwrap();
-        let read = |w: &StateWriter| -> Vec<i64> {
-            landing_candidates(w)
-                .unwrap()
-                .into_iter()
-                .map(|(_, _, pr)| pr)
-                .collect()
-        };
-        assert_eq!(read(&w), [11]);
-        let seen = |w: &StateWriter, state: &str| {
-            let o = Outcome {
-                range: None,
-                landings: vec![(
-                    "r1-1".into(),
-                    "o/p".into(),
-                    11,
-                    Some(
-                        json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
-                                "mergeCommit": {"oid": "m1"}}),
-                    ),
-                )],
-                clones: Vec::new(),
-            };
-            w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
-        };
-        let kinds = |w: &StateWriter, kind: &str| -> i64 {
-            count(w, "SELECT count(*) FROM events WHERE kind = ?1", [kind]).unwrap()
-        };
-        seen(&w, "CLOSED");
-        seen(&w, "CLOSED");
-        assert_eq!(kinds(&w, "pr_closed"), 1, "closed once");
-        assert!(ahead_of(w.conn(), id, 1).unwrap().is_none());
-        assert_eq!(read(&w), [11], "awaited: read on while closed");
-        seen(&w, "OPEN");
-        assert_eq!(kinds(&w, "pr_reopened"), 1);
-        assert_eq!(ahead_of(w.conn(), id, 1).unwrap().as_deref(), Some("r1-1"));
-        seen(&w, "MERGED");
-        assert_eq!(
-            kinds(&w, "pr_merged"),
-            1,
-            "the same pull request reopened, then merged"
-        );
-        assert_eq!(read(&w), Vec::<i64>::new(), "merged: not read again");
-    }
-
     /// A follow-up names an Issue of this repository: `Follow-up of other/repo#1` is not a
     /// follow-up of #1, and a time with fewer fractions of a second is compared as a time.
     #[test]
@@ -3485,151 +3229,6 @@ mod tests {
         assert!(has(3), "this repository named whole");
         assert!(!has(4), "created half a second before the approval");
         assert!(has(5));
-    }
-
-    /// A parked run whose pull request was read closed is still read: reopened and merged on
-    /// GitHub with nothing recorded again, its landing is seen and wakes it.
-    #[test]
-    fn a_parked_runs_pull_request_closed_then_reopened_and_merged_is_seen() {
-        let (_dir, w) = org();
-        let id = active_range(&w, None);
-        run_of(&w, id, "r1-1");
-        watch(&w, "r1-1", 11, &"a".repeat(40));
-        w.conn()
-            .execute_batch(
-                "UPDATE runs SET status = 'parked' WHERE task_id = 'r1-1';
-                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage,
-                                         conversation_id)
-                 VALUES ((SELECT id FROM runs WHERE task_id = 'r1-1'), 's1', 'fake', 'b', '/w',
-                         'verified', 'c1');",
-            )
-            .unwrap();
-        let seen = |w: &StateWriter, state: &str| {
-            let o = Outcome {
-                range: None,
-                landings: vec![(
-                    "r1-1".into(),
-                    "o/p".into(),
-                    11,
-                    Some(
-                        json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
-                                "mergeCommit": {"oid": "m1"}}),
-                    ),
-                )],
-                clones: Vec::new(),
-            };
-            w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
-        };
-        seen(&w, "CLOSED");
-        assert_eq!(
-            landing_candidates(&w).unwrap().len(),
-            1,
-            "a parked run is read on while its pull request is closed"
-        );
-        seen(&w, "MERGED");
-        assert_eq!(
-            count(
-                &w,
-                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
-                []
-            )
-            .unwrap(),
-            1
-        );
-        assert_eq!(
-            count(
-                &w,
-                "SELECT count(*) FROM runs WHERE task_id = 'r1-1' AND status = 'suspended'",
-                []
-            )
-            .unwrap(),
-            1,
-            "woken by its landing"
-        );
-    }
-
-    /// A completed range task whose pull request was read closed is still read: reopened and
-    /// merged on GitHub with nothing recorded again, its landing is recorded (`landed`, not
-    /// `closed`), as before closed pull requests were recorded.
-    #[test]
-    fn a_completed_tasks_pull_request_closed_then_reopened_and_merged_is_seen() {
-        let (_dir, w) = org();
-        let id = active_range(&w, None);
-        run_of(&w, id, "r1-1");
-        watch(&w, "r1-1", 11, &"a".repeat(40));
-        w.conn()
-            .execute(
-                "UPDATE runs SET status = 'completed' WHERE task_id = 'r1-1'",
-                [],
-            )
-            .unwrap();
-        let seen = |w: &StateWriter, state: &str| {
-            let o = Outcome {
-                range: None,
-                landings: vec![(
-                    "r1-1".into(),
-                    "o/p".into(),
-                    11,
-                    Some(
-                        json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
-                                "mergeCommit": {"oid": "m1"}}),
-                    ),
-                )],
-                clones: Vec::new(),
-            };
-            w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
-        };
-        seen(&w, "CLOSED");
-        assert_eq!(
-            landing_candidates(&w).unwrap().len(),
-            1,
-            "a completed task is read on while its pull request is closed"
-        );
-        seen(&w, "MERGED");
-        let merged = |w: &StateWriter| {
-            count(
-                w,
-                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
-                [],
-            )
-            .unwrap()
-        };
-        assert_eq!(merged(&w), 1);
-        assert!(
-            landing_candidates(&w).unwrap().is_empty(),
-            "merged: read no more"
-        );
-    }
-
-    /// A landing read on the thread for a pull request the task has replaced since is dropped:
-    /// it is no longer the task's own.
-    #[test]
-    fn a_landing_read_of_a_replaced_pull_request_is_dropped() {
-        let (_dir, w) = org();
-        let id = active_range(&w, None);
-        run_of(&w, id, "r1-1");
-        watch(&w, "r1-1", 11, &"a".repeat(40));
-        watch(&w, "r1-1", 12, &"b".repeat(40));
-        let o = Outcome {
-            range: None,
-            landings: vec![(
-                "r1-1".into(),
-                "o/p".into(),
-                11,
-                Some(json!({"state": "MERGED", "title": "T", "mergeCommit": {"oid": "m1"}})),
-            )],
-            clones: Vec::new(),
-        };
-        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
-        assert_eq!(
-            count(
-                &w,
-                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
-                []
-            )
-            .unwrap(),
-            0
-        );
     }
 
     /// A dependency's merge recorded before Issue 284 has no merge commit: the clone check reads
@@ -3688,13 +3287,7 @@ mod tests {
             pr: Some(("o/p".into(), 11)),
         };
         let never = AtomicBool::new(false);
-        let found = check_clone(
-            &gh.to_string_lossy(),
-            &root.join("repos"),
-            &check,
-            &BTreeMap::new(),
-            &never,
-        );
+        let found = check_clone(&gh.to_string_lossy(), &root.join("repos"), &check, &never);
         assert_eq!(
             found,
             Some(InClone {
@@ -3707,13 +3300,7 @@ mod tests {
         );
         let none = CloneCheck { pr: None, ..check };
         assert_eq!(
-            check_clone(
-                &gh.to_string_lossy(),
-                &root.join("repos"),
-                &none,
-                &BTreeMap::new(),
-                &never
-            ),
+            check_clone(&gh.to_string_lossy(), &root.join("repos"), &none, &never),
             None,
             "no pull request to read"
         );
@@ -3842,7 +3429,7 @@ mod tests {
     }
 
     /// A range of project `p`, made active as an approval would; its id.
-    fn active_range(w: &StateWriter, replaces: Option<i64>) -> i64 {
+    pub(in crate::daemon) fn active_range(w: &StateWriter, replaces: Option<i64>) -> i64 {
         let id = range(
             w,
             "secretary",
@@ -3867,7 +3454,7 @@ mod tests {
     }
 
     /// A run of `range`, at work.
-    fn run_of(w: &StateWriter, range: i64, task: &str) {
+    pub(in crate::daemon) fn run_of(w: &StateWriter, range: i64, task: &str) {
         w.upsert_run(&RunUpsert {
             task_id: task,
             project_slug: "p",
@@ -3963,7 +3550,7 @@ mod tests {
         assert_eq!(status_of(&w, new), "paused");
     }
 
-    fn watch(w: &StateWriter, task: &str, pr: i64, head: &str) {
+    pub(in crate::daemon) fn watch(w: &StateWriter, task: &str, pr: i64, head: &str) {
         w.conn()
             .execute(
                 "INSERT INTO pr_watches (repo, pr, head_oid, run_id)
@@ -4346,7 +3933,7 @@ mod tests {
     }
 
     /// A completed run `dep` and a design-only run `wait` waiting for it (Issue 345 tests).
-    fn waited_for(w: &StateWriter) {
+    pub(in crate::daemon) fn waited_for(w: &StateWriter) {
         let id = active_range(w, None);
         run_of(w, id, "dep");
         run_of(w, id, "wait");
@@ -4375,72 +3962,8 @@ mod tests {
             .unwrap();
     }
 
-    fn landing(w: &StateWriter, kind: &str, payload: Value) {
+    pub(in crate::daemon) fn landing(w: &StateWriter, kind: &str, payload: Value) {
         event(w, kind, "makibad", Some("dep"), payload).unwrap();
-    }
-
-    /// A, then B, then A again (A's watch row is left older than B's): A is the current pull
-    /// request of the landing read, of `ahead_of` and of the record of a landing, and a merge of
-    /// B is not the landing (Issue 345).
-    #[test]
-    fn a_pull_request_registered_again_is_current_for_every_reader() {
-        let (_dir, w) = org();
-        waited_for(&w);
-        let reg = |kind: &str, pr: i64, head: &str| {
-            super::super::prwatch::register(&w, kind, "dep", "o/p", pr, head).unwrap();
-        };
-        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
-        reg("pr_opened", 11, &h1);
-        reg("pr_opened", 12, &h2);
-        reg("fix_pushed", 11, &h1);
-        let candidates = |w: &StateWriter| landing_candidates(w).unwrap();
-        assert_eq!(candidates(&w), [("dep".into(), "o/p".into(), 11)]);
-        let range: i64 = w
-            .conn()
-            .query_row("SELECT range_id FROM runs WHERE task_id = 'dep'", [], |r| {
-                r.get(0)
-            })
-            .unwrap();
-        assert_eq!(
-            ahead_of(w.conn(), range, 1).unwrap().as_deref(),
-            Some("dep")
-        );
-        // A read of B merged, in flight while A was registered again: not recorded.
-        let read = |pr: i64, merge: &str| Outcome {
-            range: None,
-            landings: vec![(
-                "dep".into(),
-                "o/p".into(),
-                pr,
-                Some(
-                    json!({"state": "MERGED", "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
-                            "mergeCommit": {"oid": merge}}),
-                ),
-            )],
-            clones: Vec::new(),
-        };
-        w.transaction(|w| record(w, 0, None, &read(12, "m12"), "fake"))
-            .unwrap();
-        let merges = |w: &StateWriter| {
-            count(
-                w,
-                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
-                [],
-            )
-            .unwrap()
-        };
-        assert_eq!(merges(&w), 0, "B is not current");
-        // B's merge recorded before A came back is not A's landing either.
-        landing(
-            &w,
-            "pr_merged",
-            json!({"repo": "o/p", "pr": 12, "merge_commit": "m12", "task_id": "dep"}),
-        );
-        assert_eq!(candidates(&w), [("dep".into(), "o/p".into(), 11)]);
-        w.transaction(|w| record(w, 0, None, &read(11, "m11"), "fake"))
-            .unwrap();
-        assert_eq!(merges(&w), 2, "A's landing");
-        assert!(candidates(&w).is_empty());
     }
 
     /// The clone check is for the merge of the current pull request: not B's after A, B, A; a
@@ -4541,7 +4064,6 @@ mod tests {
         );
         let o = Outcome {
             range: None,
-            landings: Vec::new(),
             clones: vec![InClone {
                 task: "dep".into(),
                 merge: "m11".into(),

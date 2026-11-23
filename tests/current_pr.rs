@@ -8,13 +8,14 @@
 //! - A pull request replaced by one of another repository with the same number: the merge of the
 //!   old one is not the landing of the new one, which is read and recorded on its own.
 //!
-//! The belt's pass runs in this process on a state database of its own (makibad is not started).
-//! Each task is a `completed` run of an `ended` range, so the landing read takes it and nothing is
-//! read, filled or woken otherwise. `gh` is a stand-in script (`MAKIBA_GH`) that answers
-//! `gh pr view` from files in a folder per repository, logs every call and refuses anything else.
+//! The PR watch's pass runs in this process on a state database of its own (makibad is not
+//! started); since Issue 388 it reads a pull request's state, which the belt no longer does. Each
+//! task is a `completed` run of an `ended` range, so the PR watch follows its current pull request.
+//! `gh` is a stand-in script (`MAKIBA_GH`) that answers `gh pr view` from files in a folder per
+//! repository, answers the CI reads of any head with one check still running, logs every call and
+//! refuses anything else.
 
-use makiba::daemon::belt::Belt;
-use makiba::daemon::prwatch;
+use makiba::daemon::prwatch::{self, PrWatch};
 use makiba::db::writer::StateWriter;
 use serde_json::{Value, json};
 use std::os::unix::fs::PermissionsExt;
@@ -26,28 +27,39 @@ const WAIT: Duration = Duration::from_secs(20);
 
 const STAND_IN: &str = r#"#!/bin/sh
 # gh pr view <n> --repo github.com/<o>/<n> ...: the file pr-<n>.json of the repository's folder,
-# else a failure. Every call is logged whole, one line, in the repository's folder (calls).
+# else a failure. gh api --paginate repos/<o>/<n>/...: the CI reads of a head, one check still
+# running. Every call is logged whole, one line, in the repository's folder (calls).
 all="$*"
-what="$1 $2"; shift 2
-case "$what" in
-  "pr view") num=$1; shift ;;
-  *) echo "unexpected call: $what" >&2; exit 2 ;;
+case "$1 $2" in
+  "pr view")
+    num=$3; shift 3; repo=
+    while [ $# -gt 0 ]; do
+      case "$1" in
+        --repo) repo=$2; shift 2 ;;
+        --json) shift 2 ;;
+        *) echo "unexpected argument: $1" >&2; exit 2 ;;
+      esac
+    done
+    case "$repo" in github.com/*/*) ;; *) echo "unexpected repo: $repo" >&2; exit 2 ;; esac
+    r=${repo#github.com/} ;;
+  "api --paginate")
+    rest=${3#repos/}
+    owner=${rest%%/*}; rest=${rest#*/}
+    r="$owner/${rest%%/*}" ;;
+  *) echo "unexpected call: $all" >&2; exit 2 ;;
 esac
-repo=
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --repo) repo=$2; shift 2 ;;
-    --json) shift 2 ;;
-    *) echo "unexpected argument: $1" >&2; exit 2 ;;
-  esac
-done
-case "$repo" in github.com/*/*) ;; *) echo "unexpected repo: $repo" >&2; exit 2 ;; esac
-r=${repo#github.com/}
 dir="$FAKE_GH_DIR/${r%%/*}_${r#*/}"
 mkdir -p "$dir"
 echo "$all" >> "$dir/calls"
-f="$dir/pr-$num.json"
-if [ -e "$f" ]; then cat "$f"; else echo "not found" >&2; exit 1; fi
+case "$all" in
+  "pr view"*)
+    f="$dir/pr-$num.json"
+    if [ -e "$f" ]; then cat "$f"; else echo "not found" >&2; exit 1; fi ;;
+  *check-runs*) echo '{"name":"ci","status":"in_progress","conclusion":null}' ;;
+  */status*) ;;
+  *actions/runs*) echo in_progress ;;
+  *) echo "unexpected call: $all" >&2; exit 2 ;;
+esac
 "#;
 
 static HOME: OnceLock<tempfile::TempDir> = OnceLock::new();
@@ -70,6 +82,7 @@ fn init() -> PathBuf {
             std::env::set_var("MAKIBA_GH", &script);
             std::env::set_var("FAKE_GH_DIR", root.join("answers"));
             std::env::set_var("MAKIBA_LANDING_RETRY_MS", "0");
+            std::env::set_var("MAKIBA_PRWATCH_INTERVAL_MS", "50");
             std::env::set_var("MAKIBA_LAUNCH_AGENT", "fake");
         }
     });
@@ -103,17 +116,17 @@ fn calls(home: &Path, repo: &str) -> Vec<String> {
         .collect()
 }
 
-/// A state database with one project and an ended range, and a belt on it.
+/// A state database with one project and an ended range, and a PR watch on it.
 struct Org {
     _tmp: tempfile::TempDir,
     w: StateWriter,
-    belt: Belt,
+    watch: PrWatch,
     project: i64,
     range: i64,
 }
 
 impl Org {
-    fn new(home: &Path) -> Org {
+    fn new() -> Org {
         let tmp = tempfile::tempdir().unwrap();
         let w = StateWriter::open(&tmp.path().join("state.db")).unwrap();
         let project = w
@@ -129,11 +142,11 @@ impl Org {
             )
             .unwrap();
         let range = w.conn().last_insert_rowid();
-        let belt = Belt::from_env(home.join("repos"));
+        let watch = PrWatch::from_env();
         Org {
             _tmp: tmp,
             w,
-            belt,
+            watch,
             project,
             range,
         }
@@ -178,11 +191,11 @@ impl Org {
             .collect()
     }
 
-    /// Run the belt's pass until `ok` holds; panics after `WAIT`.
+    /// Run the PR watch's pass until `ok` holds; panics after `WAIT`.
     fn pass_until(&mut self, what: &str, mut ok: impl FnMut(&Org) -> bool) {
         let until = Instant::now() + WAIT;
         loop {
-            self.belt.pass(&self.w).unwrap();
+            self.watch.pass(&self.w).unwrap();
             if ok(self) {
                 return;
             }
@@ -191,11 +204,11 @@ impl Org {
         }
     }
 
-    /// Run the belt's pass for `d`.
+    /// Run the PR watch's pass for `d`.
     fn pass_for(&mut self, d: Duration) {
         let until = Instant::now() + d;
         while Instant::now() < until {
-            self.belt.pass(&self.w).unwrap();
+            self.watch.pass(&self.w).unwrap();
             std::thread::sleep(Duration::from_millis(20));
         }
     }
@@ -206,7 +219,7 @@ impl Org {
 #[test]
 fn a_pull_request_registered_again_is_current_and_the_landing_of_the_one_it_left_is_ignored() {
     let home = init();
-    let mut org = Org::new(&home);
+    let mut org = Org::new();
     org.completed_run("a");
     let (h1, h2) = ("1".repeat(40), "2".repeat(40));
     let (m11, m12) = ("b".repeat(40), "c".repeat(40));
@@ -240,7 +253,7 @@ fn a_pull_request_registered_again_is_current_and_the_landing_of_the_one_it_left
 #[test]
 fn a_merge_in_another_repository_with_the_same_number_is_not_the_landing() {
     let home = init();
-    let mut org = Org::new(&home);
+    let mut org = Org::new();
     org.completed_run("b");
     let (h1, h2) = ("3".repeat(40), "4".repeat(40));
     let (m_old, m_new) = ("d".repeat(40), "e".repeat(40));

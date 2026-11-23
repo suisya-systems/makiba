@@ -10,14 +10,24 @@
 //! The checks are read from `gh` (`$MAKIBA_GH`, the test seam) for the exact head: the check
 //! runs and the commit statuses of that commit, and its workflow runs. The reading and the
 //! conclusion are carried from claude-org-ja `tools/pr_watch.py`. Not carried: the push to the
-//! secretary and its transport switch (a notice goes through the ledger), the merge watch, the
-//! conflict announce and the old-`gh` fallback.
+//! secretary and its transport switch (a notice goes through the ledger), the conflict announce
+//! and the old-`gh` fallback.
+//!
+//! The pull request's state (Issue 388, in place of claude-org-ja's merge watch): each pull
+//! request a run follows (`followed`, rebuilt from the ledger) has one state poller, which reads
+//! `gh pr view` each interval and brings back a merge, or a close or a reopen it did not start
+//! with. The loop writes it (`apply_state`) only for the generation it was read for: the merge
+//! (`pr_merged`, with who merged it and whether the gate allowed that head), the close
+//! (`pr_closed`) or the reopen (`pr_reopened`), the pull request's watches ended, and the
+//! secretary told of what happened outside makiba. One `gh` call cannot carry both reads: the
+//! state call has no workflow runs and no exact head, which the CI reading relies on.
 
+use super::belt::{AWAITED, current_pr_sql, is_current_pr_sql, pr_closed_sql};
 use super::gh::{GhError, SLICE, run_gh};
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::AGENT_SECRETARY;
-use rusqlite::{OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -400,12 +410,19 @@ pub struct PrWatch {
     rx: Receiver<Done>,
     /// Results read from the pollers and not written yet: kept until their transaction commits.
     queued: Vec<Done>,
+    /// The state pollers, by task (Issue 388).
+    states: HashMap<String, StatePoller>,
+    state_tx: Sender<StateDone>,
+    state_rx: Receiver<StateDone>,
+    /// State results not written yet: kept until their transaction commits.
+    state_queued: Vec<StateDone>,
 }
 
 impl PrWatch {
     /// `$MAKIBA_GH` (default `gh`), `$MAKIBA_PRWATCH_INTERVAL_MS` and `$MAKIBA_PRWATCH_BUDGET_MS`.
     pub fn from_env() -> PrWatch {
         let (tx, rx) = channel();
+        let (state_tx, state_rx) = channel();
         PrWatch {
             gh: super::gh::program(),
             interval: millis_env("MAKIBA_PRWATCH_INTERVAL_MS", DEFAULT_INTERVAL),
@@ -414,10 +431,15 @@ impl PrWatch {
             tx,
             rx,
             queued: Vec::new(),
+            states: HashMap::new(),
+            state_tx,
+            state_rx,
+            state_queued: Vec::new(),
         }
     }
 
-    /// Write what the pollers found, then give every `watching` row a poller of its activation.
+    /// Write what the pollers found, end the watches of merged pull requests, then give every
+    /// `watching` row a poller of its activation and every followed pull request a state poller.
     pub fn pass(&mut self, w: &StateWriter) -> Result<()> {
         while let Ok(d) = self.rx.try_recv() {
             self.queued.push(d);
@@ -437,6 +459,19 @@ impl PrWatch {
                 }
             }
         }
+        while let Ok(d) = self.state_rx.try_recv() {
+            self.state_queued.push(d);
+        }
+        for d in std::mem::take(&mut self.state_queued) {
+            if let Err(e) = apply_state(w, &d) {
+                eprintln!(
+                    "makibad: pr watch {}#{}: cannot record its state: {e}",
+                    d.f.repo, d.f.pr
+                );
+                self.state_queued.push(d);
+            }
+        }
+        end_merged(w)?;
         let mut stmt = w.conn().prepare(
             "SELECT id, repo, pr, head_oid, started_at FROM pr_watches WHERE status = 'watching'",
         )?;
@@ -495,6 +530,50 @@ impl PrWatch {
                 },
             );
         }
+        self.state_pollers(w)
+    }
+
+    /// Every followed pull request has one state poller of its generation: one of a task no longer
+    /// followed, of another key, or that has ended (its result sent, or crashed) is stopped, and
+    /// the missing ones are started.
+    fn state_pollers(&mut self, w: &StateWriter) -> Result<()> {
+        let now = followed(w.conn(), None)?;
+        let tasks: Vec<String> = self.states.keys().cloned().collect();
+        for task in tasks {
+            let keep = self.states.get(&task).is_some_and(|p| {
+                !p.handle.as_ref().is_none_or(JoinHandle::is_finished) && now.contains(&p.key)
+            });
+            if !keep && let Some(mut p) = self.states.remove(&task) {
+                p.stop();
+            }
+        }
+        for f in now {
+            if self.states.contains_key(&f.task) {
+                continue;
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let handle = {
+                let (gh, tx, cancel) =
+                    (self.gh.clone(), self.state_tx.clone(), Arc::clone(&cancel));
+                let (interval, f) = (self.interval, f.clone());
+                std::thread::spawn(move || {
+                    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        poll_state(&gh, &f.repo, f.pr, f.closed, interval, &cancel)
+                    }));
+                    if let Ok(Some(read)) = read {
+                        let _ = tx.send(StateDone { f, read });
+                    }
+                })
+            };
+            self.states.insert(
+                f.task.clone(),
+                StatePoller {
+                    key: f,
+                    cancel,
+                    handle: Some(handle),
+                },
+            );
+        }
         Ok(())
     }
 }
@@ -505,7 +584,13 @@ impl Drop for PrWatch {
         for p in self.pollers.values() {
             p.cancel.store(true, Ordering::SeqCst);
         }
+        for p in self.states.values() {
+            p.cancel.store(true, Ordering::SeqCst);
+        }
         for p in self.pollers.values_mut() {
+            p.stop();
+        }
+        for p in self.states.values_mut() {
             p.stop();
         }
     }
@@ -598,6 +683,313 @@ fn apply(w: &StateWriter, d: &Done) -> Result<()> {
             params![event, AGENT_SECRETARY],
         )?;
         Ok(())
+    })
+}
+
+// ---- the pull request's state (Issue 388) --------------------------------------------------------
+
+/// The fields of the state read. Issue 387 adds `mergeable,mergeStateStatus` to this same call.
+const STATE_FIELDS: &str = "state,mergedAt,mergedBy,headRefOid,mergeCommit,title";
+
+/// A pull request a run follows, and the generation it is followed at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Followed {
+    pub task: String,
+    /// As the run's current registration spells it.
+    pub repo: String,
+    pub pr: i64,
+    /// The newest `pr_opened` or `fix_pushed` of the run (0: none).
+    pub gen_reg: i64,
+    /// The newest `pr_closed` or `pr_reopened` of the run (0: none).
+    pub gen_close: i64,
+    /// Read closed unmerged with nothing since (`pr_closed_sql`).
+    pub closed: bool,
+}
+
+/// The pull requests the runs follow (of `task` only, when given): each run's current pull
+/// request (`current_pr_sql`) with no `pr_merged` of it, while the run is open, a completed run of
+/// a range, a run an open design-only run waits for (`AWAITED`, not abandoned), or, unless its
+/// pull request was read closed, a run outside a range completed within a day.
+pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followed>> {
+    let mut q = c.prepare(&format!(
+        "SELECT r.task_id, {repo}, {pr},
+                coalesce((SELECT max(g.id) FROM events g WHERE g.run_id = r.id
+                          AND g.kind IN ('pr_opened', 'fix_pushed')), 0),
+                coalesce((SELECT max(g.id) FROM events g WHERE g.run_id = r.id
+                          AND g.kind IN ('pr_closed', 'pr_reopened')), 0),
+                {closed}
+         FROM runs r
+         WHERE (?1 IS NULL OR r.task_id = ?1)
+           AND {repo} IS NOT NULL AND {pr} IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
+                           AND {merged})
+           AND (r.status IN ('queued', 'in_use', 'review', 'suspended', 'parked')
+                OR (r.range_id IS NOT NULL AND r.status = 'completed')
+                OR (r.status != 'abandoned' AND r.task_id IN ({awaited}))
+                OR (NOT {closed} AND r.range_id IS NULL AND r.status = 'completed'
+                    AND r.completed_at IS NOT NULL
+                    AND julianday('now') - julianday(r.completed_at) <= 1.0))
+         ORDER BY r.id",
+        repo = current_pr_sql("r", "repo"),
+        pr = current_pr_sql("r", "pr"),
+        closed = pr_closed_sql("r"),
+        awaited = AWAITED,
+        merged = is_current_pr_sql(
+            "r",
+            "json_extract(e.payload_json, '$.repo')",
+            "json_extract(e.payload_json, '$.pr')"
+        ),
+    ))?;
+    Ok(q.query_map([task], |r| {
+        Ok(Followed {
+            task: r.get(0)?,
+            repo: r.get(1)?,
+            pr: r.get(2)?,
+            gen_reg: r.get(3)?,
+            gen_close: r.get(4)?,
+            closed: r.get(5)?,
+        })
+    })?
+    .collect::<std::result::Result<_, _>>()?)
+}
+
+/// A state read worth writing, for the pull request and generation it was read for.
+struct StateDone {
+    f: Followed,
+    read: Value,
+}
+
+struct StatePoller {
+    key: Followed,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl StatePoller {
+    fn stop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// Read the state of `repo#pr` each interval until it is merged, or read in the other state than
+/// the one it was followed in (`closed`). A failed read is read again, without bound; `None`:
+/// cancelled.
+fn poll_state(
+    gh: &str,
+    repo: &str,
+    pr: i64,
+    closed: bool,
+    interval: Duration,
+    cancel: &AtomicBool,
+) -> Option<Value> {
+    let (number, place) = (pr.to_string(), format!("github.com/{repo}"));
+    let args = [
+        "pr",
+        "view",
+        &number,
+        "--repo",
+        &place,
+        "--json",
+        STATE_FIELDS,
+    ];
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        match run_gh(gh, &args, cancel) {
+            Err(GhError::Cancelled) => return None,
+            Err(_) => {}
+            Ok(text) => {
+                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                    let state = v["state"].as_str().unwrap_or("");
+                    if matches!(
+                        (state, closed),
+                        ("MERGED", _) | ("CLOSED", false) | ("OPEN", true)
+                    ) {
+                        return Some(v);
+                    }
+                }
+            }
+        }
+        sleep_unless(cancel, interval);
+    }
+}
+
+/// End the `watching` row `id` (`failed`) with its `ci_watch_failed` and `reason`, no notice.
+fn end_row(w: &StateWriter, id: i64, reason: &str) -> Result<()> {
+    let (repo, pr, head, task): (String, i64, String, Option<String>) = w.conn().query_row(
+        "SELECT p.repo, p.pr, p.head_oid, r.task_id FROM pr_watches p
+         LEFT JOIN runs r ON r.id = p.run_id WHERE p.id = ?1",
+        [id],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+    )?;
+    let n = w.conn().execute(
+        "UPDATE pr_watches SET status = 'failed', conclusion = NULL,
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?1 AND status = 'watching'",
+        [id],
+    )?;
+    if n == 0 {
+        return Ok(());
+    }
+    w.append_event(&NewEvent {
+        kind: "ci_watch_failed",
+        actor: Some("makibad"),
+        payload: Some(&json!({"repo": repo, "pr": pr, "head_oid": head, "reason": reason})),
+        run_task_id: task.as_deref(),
+        ..Default::default()
+    })?;
+    Ok(())
+}
+
+/// End every `watching` row of `repo#pr` (the repository in any case) with `reason`.
+fn end_watches(w: &StateWriter, repo: &str, pr: i64, reason: &str) -> Result<()> {
+    let ids: Vec<i64> = {
+        let mut q = w.conn().prepare(
+            "SELECT id FROM pr_watches WHERE status = 'watching'
+               AND lower(repo) = lower(?1) AND pr = ?2 ORDER BY id",
+        )?;
+        q.query_map(params![repo, pr], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    for id in ids {
+        end_row(w, id, reason)?;
+    }
+    Ok(())
+}
+
+/// The durable end: a `watching` row of a pull request with a `pr_merged` (also one registered
+/// after the merge was recorded) ends with the reason `merged`.
+fn end_merged(w: &StateWriter) -> Result<()> {
+    let ids: Vec<i64> = {
+        let mut q = w.conn().prepare(
+            "SELECT p.id FROM pr_watches p WHERE p.status = 'watching'
+               AND EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged'
+                           AND lower(json_extract(e.payload_json, '$.repo')) = lower(p.repo)
+                           AND json_extract(e.payload_json, '$.pr') = p.pr)
+             ORDER BY p.id",
+        )?;
+        q.query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?
+    };
+    if ids.is_empty() {
+        return Ok(());
+    }
+    w.transaction(|w| {
+        for id in &ids {
+            end_row(w, *id, "merged")?;
+        }
+        Ok(())
+    })
+}
+
+/// Write one state read, in one transaction, only while its task still follows the same pull
+/// request at the same generation. Whether anything was written.
+fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
+    w.transaction(|w| {
+        let Some(f) = followed(w.conn(), Some(&d.f.task))?.into_iter().next() else {
+            return Ok(false);
+        };
+        if !(f.repo.eq_ignore_ascii_case(&d.f.repo)
+            && f.pr == d.f.pr
+            && f.gen_reg == d.f.gen_reg
+            && f.gen_close == d.f.gen_close)
+        {
+            return Ok(false);
+        }
+        let (task, repo, pr, v) = (f.task.as_str(), d.f.repo.as_str(), f.pr, &d.read);
+        let event = |kind: &str, payload: Value| -> Result<i64> {
+            w.append_event(&NewEvent {
+                kind,
+                actor: Some("makibad"),
+                payload: Some(&payload),
+                run_task_id: Some(task),
+                ..Default::default()
+            })
+        };
+        match v["state"].as_str() {
+            Some("MERGED") => {
+                let head = v["headRefOid"].as_str();
+                let gate: bool = w.conn().query_row(
+                    "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'acceptance_gate'
+                       AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                       AND json_extract(payload_json, '$.pr') = ?2
+                       AND json_extract(payload_json, '$.head') = ?3
+                       AND json_extract(payload_json, '$.allow') = 1)",
+                    params![repo, pr, head],
+                    |r| r.get(0),
+                )?;
+                let via = if gate { "gate" } else { "hand" };
+                event(
+                    "pr_merged",
+                    json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
+                           "merge_commit": v["mergeCommit"]["oid"], "task_id": task,
+                           "merged_by": v["mergedBy"]["login"], "head_oid": v["headRefOid"],
+                           "merged_via": via}),
+                )?;
+                end_watches(w, repo, pr, "merged")?;
+                let at = v["mergedAt"].as_str().unwrap_or("an unknown time");
+                // A parked run whose pull request landed is brought back with that reason, and
+                // told (Issue 283).
+                super::park::wake_with_notice(
+                    w,
+                    task,
+                    "landed",
+                    json!({"repo": repo, "pr": pr}),
+                    &format!("Your pull request {repo}#{pr} landed (merged at {at})."),
+                )?;
+                if !gate {
+                    let by = v["mergedBy"]["login"]
+                        .as_str()
+                        .unwrap_or("an unknown account");
+                    let merge = v["mergeCommit"]["oid"]
+                        .as_str()
+                        .map_or("unknown", |m| &m[..m.len().min(7)]);
+                    super::verify::notify_secretary(
+                        w,
+                        Some(task),
+                        &format!(
+                            "Pull request {repo}#{pr} of task {task} was merged by hand outside makiba's gate (by {by}, at {at}, merge commit {merge}): run the retro and close the task."
+                        ),
+                    )?;
+                }
+                Ok(true)
+            }
+            // A pull request closed without its merge: it will not land as it is (belt.md 4.3).
+            Some("CLOSED") if !f.closed => {
+                event(
+                    "pr_closed",
+                    json!({"repo": repo, "pr": pr, "title": v["title"], "task_id": task}),
+                )?;
+                end_watches(w, repo, pr, "closed")?;
+                super::verify::notify_secretary(
+                    w,
+                    Some(task),
+                    &format!(
+                        "Pull request {repo}#{pr} of task {task} was closed without a merge outside makiba; if it is reopened, record its head with makiba pr pushed to watch its CI again."
+                    ),
+                )?;
+                Ok(true)
+            }
+            Some("OPEN") if f.closed => {
+                event(
+                    "pr_reopened",
+                    json!({"repo": repo, "pr": pr, "task_id": task}),
+                )?;
+                super::verify::notify_secretary(
+                    w,
+                    Some(task),
+                    &format!(
+                        "Pull request {repo}#{pr} of task {task} was reopened outside makiba; record its head with makiba pr pushed to watch its CI again."
+                    ),
+                )?;
+                Ok(true)
+            }
+            _ => Ok(false),
+        }
     })
 }
 
@@ -1128,5 +1520,413 @@ esac"#,
             assert_eq!(status(old.watch_id), "completed");
             assert_eq!(status(new.watch_id), "watching");
         }
+    }
+
+    // ---- the pull request's state (Issue 388; moved from the belt's landing check) ------------
+
+    use super::super::belt::ahead_of;
+    use super::super::belt::tests::{active_range, landing, org, run_of, waited_for, watch};
+
+    fn event(w: &StateWriter, kind: &str, actor: &str, task: Option<&str>, payload: Value) {
+        w.append_event(&NewEvent {
+            kind,
+            actor: Some(actor),
+            payload: Some(&payload),
+            run_task_id: task,
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    fn count(w: &StateWriter, sql: &str, p: impl rusqlite::Params) -> Result<i64> {
+        Ok(w.conn().query_row(sql, p, |r| r.get(0))?)
+    }
+
+    /// The followed pull requests as (task, repo, pr).
+    fn candidates(w: &StateWriter) -> Vec<(String, String, i64)> {
+        followed(w.conn(), None)
+            .unwrap()
+            .into_iter()
+            .map(|f| (f.task, f.repo, f.pr))
+            .collect()
+    }
+
+    /// `read` of `repo#pr` for `task`, read at the task's current generation, written as the loop
+    /// writes a state poller's result.
+    fn seen_read(w: &StateWriter, task: &str, repo: &str, pr: i64, read: Value) -> bool {
+        let now = followed(w.conn(), Some(task)).unwrap().into_iter().next();
+        let f = Followed {
+            task: task.into(),
+            repo: repo.into(),
+            pr,
+            gen_reg: now.as_ref().map_or(0, |f| f.gen_reg),
+            gen_close: now.as_ref().map_or(0, |f| f.gen_close),
+            closed: now.as_ref().is_some_and(|f| f.closed),
+        };
+        apply_state(w, &StateDone { f, read }).unwrap()
+    }
+
+    /// A parked run outside every range is followed, and its pull request read merged writes
+    /// `pr_merged`, wakes it with the reason `landed` and tells its worker (Issue 283).
+    #[test]
+    fn a_landing_wakes_a_parked_run_and_tells_its_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute_batch(
+                "UPDATE runs SET status = 'parked';
+                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage, conversation_id)
+                 VALUES (1, 's1', 'fake', 'b', '/w', 'verified', 'c1');
+                 INSERT INTO pending (run_id, kind, question, status) VALUES (1, 'question', 'q', 'escalated');
+                 INSERT INTO pr_watches (repo, pr, head_oid, run_id) VALUES ('o/r', 5, 'abc', 1);",
+            )
+            .unwrap();
+        assert_eq!(candidates(&w), [("t".to_string(), "o/r".to_string(), 5)]);
+        seen_read(
+            &w,
+            "t",
+            "o/r",
+            5,
+            json!({"state": "MERGED", "title": "T", "mergedAt": "2026-11-23T00:00:00Z"}),
+        );
+        let n = |sql: &str| -> i64 { w.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT count(*) FROM events WHERE kind = 'pr_merged'"), 1);
+        assert_eq!(n("SELECT count(*) FROM runs WHERE status = 'suspended'"), 1);
+        assert_eq!(
+            n("SELECT count(*) FROM events WHERE kind = 'run_unparked'
+               AND json_extract(payload_json, '$.reason') = 'landed'"),
+            1
+        );
+        assert_eq!(
+            n(
+                "SELECT count(*) FROM messages WHERE recipient = 'w-t' AND body LIKE '%o/r#5 landed%'"
+            ),
+            1
+        );
+        assert!(candidates(&w).is_empty());
+    }
+
+    /// The pull request of a task a design-only run waits for is read whatever its status (here
+    /// `failed`, which nothing else follows), so that one closed unmerged is seen; a closed one is
+    /// read on, and read open again it is reopened.
+    #[test]
+    fn the_pull_request_of_an_awaited_task_is_read_whatever_its_status_until_closed() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        run_of(&w, id, "r1-2");
+        event(
+            &w,
+            "belt_dispatched",
+            "makibad",
+            Some("r1-1"),
+            json!({"range_id": id, "issue": 1, "task_id": "r1-1", "design_only": false}),
+        );
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'failed' WHERE task_id = 'r1-1'",
+                [],
+            )
+            .unwrap();
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        assert!(candidates(&w).is_empty(), "nothing waits for it");
+        event(
+            &w,
+            "belt_dispatched",
+            "makibad",
+            Some("r1-2"),
+            json!({"range_id": id, "issue": 2, "task_id": "r1-2", "design_only": true,
+                   "waits_for": [1], "waits_tasks": ["r1-1"]}),
+        );
+        let read = |w: &StateWriter| -> Vec<i64> {
+            candidates(w).into_iter().map(|(_, _, pr)| pr).collect()
+        };
+        assert_eq!(read(&w), [11]);
+        let seen = |w: &StateWriter, state: &str| {
+            seen_read(
+                w,
+                "r1-1",
+                "o/p",
+                11,
+                json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                        "mergeCommit": {"oid": "m1"}}),
+            );
+        };
+        let kinds = |w: &StateWriter, kind: &str| -> i64 {
+            count(w, "SELECT count(*) FROM events WHERE kind = ?1", [kind]).unwrap()
+        };
+        seen(&w, "CLOSED");
+        seen(&w, "CLOSED");
+        assert_eq!(kinds(&w, "pr_closed"), 1, "closed once");
+        assert!(ahead_of(w.conn(), id, 1).unwrap().is_none());
+        assert_eq!(read(&w), [11], "awaited: read on while closed");
+        // Back in review, so that `ahead_of` may take it once reopened.
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'review' WHERE task_id = 'r1-1'",
+                [],
+            )
+            .unwrap();
+        seen(&w, "OPEN");
+        assert_eq!(kinds(&w, "pr_reopened"), 1);
+        assert_eq!(ahead_of(w.conn(), id, 1).unwrap().as_deref(), Some("r1-1"));
+        seen(&w, "MERGED");
+        assert_eq!(
+            kinds(&w, "pr_merged"),
+            1,
+            "the same pull request reopened, then merged"
+        );
+        assert_eq!(read(&w), Vec::<i64>::new(), "merged: not read again");
+    }
+
+    /// A parked run whose pull request was read closed is still read: reopened and merged on
+    /// GitHub with nothing recorded again, its landing is seen and wakes it.
+    #[test]
+    fn a_parked_runs_pull_request_closed_then_reopened_and_merged_is_seen() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        w.conn()
+            .execute_batch(
+                "UPDATE runs SET status = 'parked' WHERE task_id = 'r1-1';
+                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage,
+                                         conversation_id)
+                 VALUES ((SELECT id FROM runs WHERE task_id = 'r1-1'), 's1', 'fake', 'b', '/w',
+                         'verified', 'c1');",
+            )
+            .unwrap();
+        let seen = |w: &StateWriter, state: &str| {
+            seen_read(
+                w,
+                "r1-1",
+                "o/p",
+                11,
+                json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                        "mergeCommit": {"oid": "m1"}}),
+            );
+        };
+        seen(&w, "CLOSED");
+        assert_eq!(
+            candidates(&w).len(),
+            1,
+            "a parked run is read on while its pull request is closed"
+        );
+        seen(&w, "MERGED");
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                []
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM runs WHERE task_id = 'r1-1' AND status = 'suspended'",
+                []
+            )
+            .unwrap(),
+            1,
+            "woken by its landing"
+        );
+    }
+
+    /// A completed range task whose pull request was read closed is still read: reopened and
+    /// merged on GitHub with nothing recorded again, its landing is recorded (`landed`, not
+    /// `closed`), as before closed pull requests were recorded.
+    #[test]
+    fn a_completed_tasks_pull_request_closed_then_reopened_and_merged_is_seen() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'completed' WHERE task_id = 'r1-1'",
+                [],
+            )
+            .unwrap();
+        let seen = |w: &StateWriter, state: &str| {
+            seen_read(
+                w,
+                "r1-1",
+                "o/p",
+                11,
+                json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                        "mergeCommit": {"oid": "m1"}}),
+            );
+        };
+        seen(&w, "CLOSED");
+        assert_eq!(
+            candidates(&w).len(),
+            1,
+            "a completed task is read on while its pull request is closed"
+        );
+        seen(&w, "MERGED");
+        let merged = |w: &StateWriter| {
+            count(
+                w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(merged(&w), 1);
+        assert!(candidates(&w).is_empty(), "merged: read no more");
+    }
+
+    /// A state read on the thread for a pull request the task has replaced since is dropped: it
+    /// is no longer the task's own.
+    #[test]
+    fn a_landing_read_of_a_replaced_pull_request_is_dropped() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        watch(&w, "r1-1", 12, &"b".repeat(40));
+        seen_read(
+            &w,
+            "r1-1",
+            "o/p",
+            11,
+            json!({"state": "MERGED", "title": "T", "mergeCommit": {"oid": "m1"}}),
+        );
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                []
+            )
+            .unwrap(),
+            0
+        );
+    }
+
+    /// A, then B, then A again (A's watch row is left older than B's): A is the current pull
+    /// request of the state read, of `ahead_of` and of the record of a landing, and a merge of B
+    /// is not the landing (Issue 345).
+    #[test]
+    fn a_pull_request_registered_again_is_current_for_every_reader() {
+        let (_dir, w) = org();
+        waited_for(&w);
+        let reg = |kind: &str, pr: i64, head: &str| {
+            register(&w, kind, "dep", "o/p", pr, head).unwrap();
+        };
+        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
+        reg("pr_opened", 11, &h1);
+        reg("pr_opened", 12, &h2);
+        reg("fix_pushed", 11, &h1);
+        assert_eq!(candidates(&w), [("dep".into(), "o/p".into(), 11)]);
+        let range: i64 = w
+            .conn()
+            .query_row("SELECT range_id FROM runs WHERE task_id = 'dep'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            ahead_of(w.conn(), range, 1).unwrap().as_deref(),
+            Some("dep")
+        );
+        // A read of B merged, in flight while A was registered again: not recorded.
+        let read = |w: &StateWriter, pr: i64, merge: &str| {
+            seen_read(
+                w,
+                "dep",
+                "o/p",
+                pr,
+                json!({"state": "MERGED", "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                        "mergeCommit": {"oid": merge}}),
+            );
+        };
+        read(&w, 12, "m12");
+        let merges = |w: &StateWriter| {
+            count(
+                w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(merges(&w), 0, "B is not current");
+        // B's merge recorded before A came back is not A's landing either.
+        landing(
+            &w,
+            "pr_merged",
+            json!({"repo": "o/p", "pr": 12, "merge_commit": "m12", "task_id": "dep"}),
+        );
+        assert_eq!(candidates(&w), [("dep".into(), "o/p".into(), 11)]);
+        read(&w, 11, "m11");
+        assert_eq!(merges(&w), 2, "A's landing");
+        assert!(candidates(&w).is_empty());
+    }
+
+    /// A state read whose generation is not the task's current one writes nothing: a merge read
+    /// before the task recorded a newer head of the same pull request is dropped, and the same
+    /// read at the current generation is written (Issue 388).
+    #[test]
+    fn a_state_read_of_a_stale_generation_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &"1".repeat(40)).unwrap();
+        let old = followed(w.conn(), Some("t")).unwrap().remove(0);
+        register(&w, "fix_pushed", "t", "o/r", 5, &"2".repeat(40)).unwrap();
+        let now = followed(w.conn(), Some("t")).unwrap().remove(0);
+        assert!(now.gen_reg > old.gen_reg);
+        let read = json!({"state": "MERGED", "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                          "mergedBy": {"login": "owner"}, "headRefOid": "2".repeat(40),
+                          "mergeCommit": {"oid": "m"}});
+        let merges = || -> i64 {
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                [],
+            )
+            .unwrap()
+        };
+        let stale = StateDone {
+            f: old,
+            read: read.clone(),
+        };
+        assert!(!apply_state(&w, &stale).unwrap(), "stale: nothing written");
+        assert_eq!(merges(), 0);
+        let mut closed_since = now.clone();
+        closed_since.gen_close += 1;
+        assert!(
+            !apply_state(
+                &w,
+                &StateDone {
+                    f: closed_since,
+                    read: read.clone()
+                }
+            )
+            .unwrap(),
+            "another close generation: nothing written"
+        );
+        assert!(apply_state(&w, &StateDone { f: now, read }).unwrap());
+        assert_eq!(merges(), 1);
+        let ended: i64 = count(
+            &w,
+            "SELECT count(*) FROM pr_watches WHERE status = 'failed'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(ended, 1, "the watching row of the current head ended");
     }
 }
