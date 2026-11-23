@@ -1016,8 +1016,9 @@ fn sentence(text: &str) -> String {
 /// A head recorded for a task's pull request (`pr opened` or `pushed`), in the verb's
 /// transaction. The open stops `makibad` wrote for an older head of that pull request are
 /// withdrawn: their subject is gone, and the run counts again. A `pushed` head that reaches
-/// `budget_fixes` (and each `budget_fixes` heads after it) is a stop of the task, line `budget`;
-/// the push itself is recorded as any other (belt.md 2.1).
+/// `budget_fixes` fixes (and each `budget_fixes` fixes after it) is a stop of the task, line
+/// `budget`; a head recorded as a clean merge of the base is no fix (Issue 358). The push itself
+/// is recorded as any other (belt.md 2.1).
 pub(super) fn head_recorded(
     w: &StateWriter,
     task: &str,
@@ -1044,10 +1045,26 @@ pub(super) fn head_recorded(
         [range],
         |r| r.get(0),
     )?;
+    // A head ever recorded as a clean merge of the base is no fix (Issue 358), also when it is
+    // recorded again (the head before it is then itself, and the new record is not marked).
+    let merges = "SELECT json_extract(m.payload_json, '$.head_oid') FROM events m
+         JOIN runs mr ON mr.id = m.run_id WHERE m.kind = 'fix_pushed' AND mr.task_id = ?1
+           AND coalesce(json_extract(m.payload_json, '$.base_merge'), 0) = 1";
+    let merge: bool = w.conn().query_row(
+        &format!("SELECT ?2 IN ({merges})"),
+        params![task, head],
+        |r| r.get(0),
+    )?;
+    if merge {
+        return Ok(());
+    }
     let fixes = count(
         w,
-        "SELECT count(DISTINCT json_extract(e.payload_json, '$.head_oid')) FROM events e
-         JOIN runs r ON r.id = e.run_id WHERE e.kind = 'fix_pushed' AND r.task_id = ?1",
+        &format!(
+            "SELECT count(DISTINCT json_extract(e.payload_json, '$.head_oid')) FROM events e
+             JOIN runs r ON r.id = e.run_id WHERE e.kind = 'fix_pushed' AND r.task_id = ?1
+               AND json_extract(e.payload_json, '$.head_oid') NOT IN ({merges})"
+        ),
         [task],
     )?;
     if fixes == 0 || fixes % budget != 0 {
@@ -1061,12 +1078,12 @@ pub(super) fn head_recorded(
             line: "budget",
             key: format!("fixes:{task}:{fixes}"),
             question: format!(
-                "Task {task} has pushed {fixes} head(s) to {repo}#{pr} after the first (budget_fixes {budget}). Should it go on?"
+                "Task {task} has {fixes} fix(es) on {repo}#{pr} after its first head (budget_fixes {budget}); merges of the base are not counted. Should it go on?"
             ),
             background: format!(
-                "The range allows {budget} fix(es) of a task's pull request before it asks; makibad counted the heads recorded with pr pushed."
+                "The range allows {budget} fix(es) of a task's pull request before it asks; makibad counted the heads recorded with pr pushed that change the pull request's own work, and not a head whose only new commit is a clean merge of the base."
             ),
-            if_yes: format!("The worker goes on; the next stop comes after {budget} more head(s)."),
+            if_yes: format!("The worker goes on; the next stop comes after {budget} more fix(es)."),
             if_no: "The secretary closes the task as abandoned, or you take the pull request over."
                 .into(),
             recommend: "None: it depends on what the last fixes were.",
