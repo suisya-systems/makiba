@@ -194,16 +194,36 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    let payload = |kind: &str| -> rusqlite::Result<Option<Value>> {
-        let p: Option<String> = c
-            .query_row(
-                "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
-                 WHERE r.task_id = ?1 AND e.kind = ?2 ORDER BY e.id LIMIT 1",
-                [task, kind],
-                |r| r.get(0),
-            )
-            .optional()?;
+    // The landing of its current pull request only (its newest watch's): a merge of an earlier
+    // one, replaced since, is not this task's landing.
+    let payload = |sql: &str, key: &str| -> rusqlite::Result<Option<Value>> {
+        let p: Option<String> = c.query_row(sql, [task, key], |r| r.get(0)).optional()?;
         Ok(p.and_then(|p| serde_json::from_str(&p).ok()))
+    };
+    let merged = payload(
+        "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
+         WHERE r.task_id = ?1 AND e.kind = 'pr_merged' AND ?2 = ''
+           AND json_extract(e.payload_json, '$.pr') =
+               (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = r.id ORDER BY pw.id DESC LIMIT 1)
+         ORDER BY e.id LIMIT 1",
+        "",
+    )?;
+    let in_clone = match merged.as_ref().and_then(|m| m["merge_commit"].as_str()) {
+        Some(merge) => payload(
+            "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
+             WHERE r.task_id = ?1 AND e.kind = 'landed_in_clone'
+               AND json_extract(e.payload_json, '$.merge_commit') = ?2
+             ORDER BY e.id LIMIT 1",
+            merge,
+        )?,
+        // A merge recorded before Issue 284 names no commit: the clone check read it again.
+        None if merged.is_some() => payload(
+            "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
+             WHERE r.task_id = ?1 AND e.kind = 'landed_in_clone' AND ?2 = ''
+             ORDER BY e.id DESC LIMIT 1",
+            "",
+        )?,
+        None => None,
     };
     let pr_closed: bool = c.query_row(
         &format!(
@@ -225,10 +245,24 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
         task: task.to_string(),
         run,
         pr_closed,
-        merged: payload("pr_merged")?,
-        in_clone: payload("landed_in_clone")?,
+        merged,
+        in_clone,
         released,
     })
+}
+
+/// Withdraw the questions `settle` wrote for the waiting run `task` that are still open: about
+/// the task of `issue`, or all of them.
+fn withdraw(w: &StateWriter, task: &str, issue: Option<i64>) -> Result<()> {
+    w.conn().execute(
+        "UPDATE pending SET status = 'withdrawn',
+           context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+         WHERE status IN ('open', 'escalated')
+           AND json_extract(context_json, '$.ahead_task') = ?1
+           AND (?2 IS NULL OR json_extract(context_json, '$.ahead_issue') = ?2)",
+        rusqlite::params![task, issue],
+    )?;
+    Ok(())
 }
 
 /// Settle every open wait the records decide, in the caller's transaction (see the module).
@@ -256,6 +290,11 @@ pub fn settle(w: &StateWriter) -> Result<()> {
             .zip(&wait.tasks)
             .map(|(i, t)| dep(w.conn(), &task, *i, t))
             .collect::<rusqlite::Result<_>>()?;
+        // A question about a task that has landed since (recovered, or its pull request reopened)
+        // has nothing left to decide: withdrawn, so the run does not wait on it.
+        for d in deps.iter().filter(|d| d.landed()) {
+            withdraw(w, &task, Some(d.issue))?;
+        }
         // Each task that will not land as things are is a question, once per run of it.
         for d in deps.iter().filter(|d| !d.released && !d.landed()) {
             let Some((how, what)) = d.stuck() else {
@@ -295,6 +334,8 @@ pub fn settle(w: &StateWriter) -> Result<()> {
         if deps.is_empty() || !deps.iter().all(|d| d.released || d.landed()) {
             continue;
         }
+        // Settled: no question of this wait is left before the run is woken.
+        withdraw(w, &task, None)?;
         let landed: Vec<&Dep> = deps.iter().filter(|d| !d.released).collect();
         let let_go: Vec<i64> = deps
             .iter()
@@ -833,5 +874,103 @@ mod tests {
             told.ends_with("You build without #3, as the person decided."),
             "{told}"
         );
+    }
+
+    fn lands(w: &StateWriter, pr: i64, merge: &str) {
+        ev(
+            w,
+            "pr_merged",
+            "r1-1",
+            json!({"repo": "o/p", "pr": pr, "merge_commit": merge, "task_id": "r1-1"}),
+        );
+        ev(
+            w,
+            "landed_in_clone",
+            "r1-1",
+            json!({"task_id": "r1-1", "merge_commit": merge, "base": "main", "base_head": "h9"}),
+        );
+    }
+
+    /// The landing of a pull request the task has replaced since is not its landing: the run
+    /// waits for the merge of the newest one.
+    #[test]
+    fn a_landing_of_a_replaced_pull_request_does_not_count() {
+        let (_d, w) = org();
+        report_design(&w);
+        set(&w, "r1-1", "completed");
+        lands(&w, 11, "m1");
+        w.conn()
+            .execute(
+                "INSERT INTO pr_watches (repo, pr, head_oid, run_id)
+                 VALUES ('o/p', 12, 'bbbb', (SELECT id FROM runs WHERE task_id = 'r1-1'))",
+                [],
+            )
+            .unwrap();
+        w.transaction(settle).unwrap();
+        assert!(
+            open_wait(w.conn(), "r1-2").unwrap().is_some(),
+            "#11 was replaced"
+        );
+        lands(&w, 12, "m2");
+        w.transaction(settle).unwrap();
+        assert!(open_wait(w.conn(), "r1-2").unwrap().is_none());
+    }
+
+    /// A task asked about (its launch failed) that recovers and lands before the person answers:
+    /// the question is withdrawn and the run is settled, with nothing left to wait on.
+    #[test]
+    fn a_question_about_a_task_that_landed_since_is_withdrawn() {
+        let (_d, w) = org();
+        report_design(&w);
+        set(&w, "r1-2", "parked");
+        set(&w, "r1-1", "failed");
+        w.transaction(settle).unwrap();
+        let open = |w: &StateWriter| {
+            n(
+                w,
+                "SELECT count(*) FROM pending WHERE status = 'escalated'
+                   AND json_extract(context_json, '$.ahead_task') = 'r1-2'",
+            )
+        };
+        assert_eq!(open(&w), 1);
+        set(&w, "r1-1", "completed");
+        lands(&w, 11, "m1");
+        w.transaction(settle).unwrap();
+        assert_eq!(open(&w), 0, "withdrawn");
+        assert_eq!(
+            n(
+                &w,
+                "SELECT count(*) FROM pending WHERE status = 'withdrawn'
+                   AND json_extract(context_json, '$.withdrawn_by') = 'makibad'"
+            ),
+            1
+        );
+        assert!(open_wait(w.conn(), "r1-2").unwrap().is_none());
+        assert_eq!(
+            status(&w, "r1-2"),
+            "suspended",
+            "woken, with nothing escalated"
+        );
+    }
+
+    /// A design-only run abandoned while it waited is listed as skipped, not as waiting.
+    #[test]
+    fn an_abandoned_design_only_run_is_not_listed_as_waiting() {
+        let (_d, w) = org();
+        report_design(&w);
+        let place = |w: &StateWriter| -> (Value, Value) {
+            let ranges = super::super::belt::read_ranges(w.conn()).unwrap();
+            let item = ranges[0]["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|i| i["issue"] == json!(2))
+                .cloned()
+                .unwrap();
+            (item["place"].clone(), item["stage"].clone())
+        };
+        assert_eq!(place(&w), (json!("review"), json!("waits_landing #1")));
+        set(&w, "r1-2", "abandoned");
+        assert_eq!(place(&w).0, json!("skipped"));
     }
 }

@@ -1619,9 +1619,7 @@ struct CloneCheck {
 
 fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
     let mut q = w.conn().prepare(
-        "SELECT DISTINCT d.task_id, p.slug, coalesce(p.default_branch, 'main'),
-                (SELECT json_extract(m.payload_json, '$.merge_commit') FROM events m
-                 WHERE m.run_id = d.id AND m.kind = 'pr_merged' ORDER BY m.id LIMIT 1),
+        "SELECT DISTINCT d.task_id, p.slug, coalesce(p.default_branch, 'main'), m.merge,
                 (SELECT pw.repo FROM pr_watches pw WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1),
                 (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1)
          FROM runs r
@@ -1630,11 +1628,19 @@ fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
          JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
          JOIN runs d ON d.task_id = j.value
          JOIN projects p ON p.id = d.project_id
+         -- The merge of its current pull request (its newest watch's), if read.
+         LEFT JOIN (SELECT run_id, json_extract(payload_json, '$.pr') AS pr,
+                           json_extract(payload_json, '$.merge_commit') AS merge, min(id)
+                    FROM events WHERE kind = 'pr_merged' GROUP BY run_id, pr) m
+              ON m.run_id = d.id AND m.pr = (SELECT pw.pr FROM pr_watches pw
+                                             WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1)
          WHERE r.status IN ('queued', 'in_use', 'suspended', 'parked')
            AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = r.id AND s.kind = 'ahead_settled')
            AND d.status = 'completed'
            AND NOT EXISTS (SELECT 1 FROM events x WHERE x.run_id = d.id
-                           AND x.kind = 'landed_in_clone')
+                           AND x.kind = 'landed_in_clone' AND m.run_id IS NOT NULL
+                           AND (m.merge IS NULL
+                                OR json_extract(x.payload_json, '$.merge_commit') = m.merge))
          ORDER BY d.id",
     )?;
     Ok(q.query_map([], |r| {
@@ -1986,7 +1992,8 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
          JOIN pr_watches p ON p.id = (SELECT max(id) FROM pr_watches WHERE run_id = r.id)
          WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked'
                 OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
-           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
+                           AND json_extract(e.payload_json, '$.pr') = p.pr)
            AND (NOT {} OR r.task_id IN ({AWAITED}))
          ORDER BY r.id",
         pr_closed_sql("r")
@@ -2460,11 +2467,23 @@ fn record(
     }
     for (task, repo, pr, read) in &o.landings {
         let Some(v) = read else { continue };
+        // Read on the thread: a pull request the task has replaced since is no longer its own.
+        let current = count(
+            w,
+            "SELECT count(*) FROM runs r WHERE r.task_id = ?1
+               AND (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = r.id
+                    ORDER BY pw.id DESC LIMIT 1) = ?2",
+            params![task, pr],
+        )?;
+        if current == 0 {
+            continue;
+        }
         let known = count(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE e.kind = 'pr_merged' AND r.task_id = ?1",
-            [task],
+             WHERE e.kind = 'pr_merged' AND r.task_id = ?1
+               AND json_extract(e.payload_json, '$.pr') = ?2",
+            params![task, pr],
         )?;
         let closed = count(
             w,
@@ -2522,8 +2541,9 @@ fn record(
         let known = count(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE e.kind = 'landed_in_clone' AND r.task_id = ?1",
-            [task],
+             WHERE e.kind = 'landed_in_clone' AND r.task_id = ?1
+               AND json_extract(e.payload_json, '$.merge_commit') = ?2",
+            params![task, merge],
         )?;
         if known == 0 {
             event(
@@ -2744,8 +2764,12 @@ fn items(
             .optional()?;
         // A design-only run (belt.md 4.3, 7.1): `design_only` at work, `waits_landing #<n>` in
         // review once its design is reported, until what it waits for has landed.
+        // Only a run still open waits: an abandoned or closed one is placed by its status.
         let landing: bool = c.query_row(
-            &format!("SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1 AND {LANDING_WAIT})"),
+            &format!(
+                "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1
+                   AND r.status IN ('queued', 'in_use', 'suspended', 'parked') AND {LANDING_WAIT})"
+            ),
             [run],
             |r| r.get(0),
         )?;
@@ -3221,6 +3245,37 @@ mod tests {
             "the same pull request reopened, then merged"
         );
         assert_eq!(read(&w), Vec::<i64>::new(), "merged: not read again");
+    }
+
+    /// A landing read on the thread for a pull request the task has replaced since is dropped:
+    /// it is no longer the task's own.
+    #[test]
+    fn a_landing_read_of_a_replaced_pull_request_is_dropped() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        watch(&w, "r1-1", 12, &"b".repeat(40));
+        let o = Outcome {
+            range: None,
+            landings: vec![(
+                "r1-1".into(),
+                "o/p".into(),
+                11,
+                Some(json!({"state": "MERGED", "title": "T", "mergeCommit": {"oid": "m1"}})),
+            )],
+            clones: Vec::new(),
+        };
+        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                []
+            )
+            .unwrap(),
+            0
+        );
     }
 
     /// A dependency's merge recorded before Issue 284 has no merge commit: the clone check reads
