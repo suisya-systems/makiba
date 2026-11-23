@@ -71,10 +71,10 @@ fn core(mode: Mode) -> Core {
 
 #[test]
 fn hello_returns_the_base_name_and_version() {
-    let c = core(Mode::Version("0.1.21"));
+    let c = core(Mode::Version("0.1.22"));
     let info = connect(&c.socket, TIMEOUT).hello().expect("hello");
     assert_eq!(info.name, "herdr-core");
-    assert_eq!(info.version, "0.1.21");
+    assert_eq!(info.version, "0.1.22");
     assert_eq!(c.requests.load(Ordering::SeqCst), 1);
 }
 
