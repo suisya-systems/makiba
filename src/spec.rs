@@ -64,6 +64,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "run_closed",
     "secretary_renewed",
     "curator_started",
+    "curator_counted",
     "run_taken",
     "raw_note_saved",
     "skill_candidate_decided",
