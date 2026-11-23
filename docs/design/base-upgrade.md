@@ -51,7 +51,8 @@ Every step before S3 changes nothing outside the verb's own staging files, and r
 - `MAKIBA_BASE=stub`, outside the verb's own tests;
 - the standard input is not a terminal (the question of S2 cannot be asked; there is no `--yes`);
 - the `hc` that `start` will run is not found, is a symbolic link, or its folder is not writable. A link is not followed and not rewritten; the message names the two choices of upgrading-the-base.md step 2 (install where the link points, or point the link at a new file);
-- the core or the file is newer than `PINNED`: "this makiba pins P, the base is Y; run the makiba that pins Y by its path". This is the PR 373 case (an older makiba on `PATH`).
+- the core or the file is newer than `PINNED`: "this makiba pins P, the base is Y; run the makiba that pins Y by its path". This is the PR 373 case (an older makiba on `PATH`);
+- the core's or the file's version cannot be compared: not plain `major.minor.patch` (a pre-release or build suffix, or an unreadable answer), as `parse` in `src/base/version.rs` refuses it. The message prints the version as read; nothing is changed.
 
 **S1. Download, verify, and place beside the destination.** The script installs into `<state>/base/staging-<pid>/bin/hc` (the state folder of `state_dir`, the verb's own process id), with its own SHA-256 check. The file is then copied into the folder of the destination `hc` under a name of this run (`.hc.makiba-new-<pid>`; under the lock of S0 the run first removes any `.hc.makiba-new-*` a crashed run left), and that copy's `--version` must print `PINNED`. The old `hc` is copied to `<state>/base/hc-<old version>`. Any failure (download, hash, version, a copy, a folder that is not writable or is full) removes what this step made and stops, with nothing else changed. Because the new file already sits in the destination folder, S4 is one `rename` within one folder and cannot fail for a cross-device reason after the irreversible step. The host is `releases.herdr.dev` (or `HERDR_RELEASES_URL`); the script needs `bash`, `curl` and `python3`, as today.
 
@@ -78,14 +79,15 @@ Then `End these terminals and replace hc? [y/N]`, its wording dropping what does
 
 **S5. Start and check.** `up::run` with the same `--no-secretary` choice the verb was given, which starts the core with the new `hc` (or finds it running), resumes the suspended runs and starts `makibad` from this binary (`current_exe`). Then `hello` must answer `PINNED`, and `up`'s own wait for `subscribed` must pass. The verb prints the old and new versions, the path of the old copy, and the newest `dispatcher_started` event id, which carries `base_version`.
 
-There is no automatic rollback. Going back is the person's act: put `<state>/base/hc-<old>` back and run the old makiba.
+There is no automatic rollback. Going back is the person's act, in this order, because after S5 the running core is the new release and the old makiba refuses it: with the new makiba, `makiba down --secretary --stop-base`; then put `<state>/base/hc-<old>` back over `hc`; then reinstall or rebuild the old makiba and run its `up` by its path. upgrading-the-base.md names these steps.
 
 ## 4. What changes in `makiba up`
 
 After `connect_session_for_start` and `hello`, an `UnsupportedVersion { found }` stops `up` at once, before `hc server start`, before the ledger is touched, with one of:
 
 - found older than `PINNED`: "the base runs F, this makiba pins P. To take P: `<current_exe> base upgrade` (it asks before ending the base's terminals)";
-- found newer: "the base runs F, this makiba pins P: this makiba is older than the base. Run the makiba that pins F by its path".
+- found newer: "the base runs F, this makiba pins P: this makiba is older than the base. Run the makiba that pins F by its path";
+- found not comparable (not plain `major.minor.patch`): "the base runs F, which this makiba cannot compare with P", naming neither verb.
 
 `<current_exe>` is the absolute path of the running binary, so the text names the right build even when `PATH` finds another (the PR 373 case). `up` still never stops a core.
 
@@ -121,10 +123,10 @@ The verb keeps no state of its own in memory beside the ledger, and adds no tabl
 
 ## 8. Build Issues proposed
 
-1. **`makiba up` refuses a core of another version at once and names what to run.** Section 4. Test: a stand-in core answering an older and a newer version; `up` exits `unavailable` within a second, the text holds `current_exe` and `base upgrade` (older) or "older than the base" (newer), `hc` was not run, and the ledger has no new suspension.
+1. **`makiba up` refuses a core of another version at once and names what to run.** Section 4. Test: a stand-in core answering an older and a newer version; `up` exits `unavailable` within a second, the text holds `current_exe` and `base upgrade` (older), "older than the base" (newer) or "cannot compare" (a pre-release version), `hc` was not run, and the ledger has no new suspension.
 2. **`install-base.sh` takes the version from `MAKIBA_BASE_PINNED`.** Test in `tests/base_version.rs`: with the variable set and no `src/base/version.rs` beside the script, it installs that version from a scratch manifest.
 3. **`Base::list_session`.** Section 3, S2. Test on the stand-in: it returns terminals of this organization, of another and with no tag; `list` still returns only this organization's.
-4. **`makiba base upgrade`.** Sections 3, 5, 6. Depends on 1, 2 and 3. Tests: each S0 refusal changes nothing (no download, no stop); `HC_BIN` naming the file is accepted and that file is the one replaced; a second run while the first waits at S2 is refused at S0 and the first run's staged file is untouched, both with the same `hc` and with another `HC_BIN` for the same session; a Claude Code or git below its lowest version refuses at S0 with `makibad` and every terminal still running; a wrong hash at S1 stops nothing and leaves no `.hc.makiba-new-*`; a worker or secretary of another organization refuses at S2 with nothing stopped, and after that organization's `makiba down --secretary` the verb passes S2; "n" at S2 stops nothing and removes staging; "y" ends the session's terminals, replaces `hc`, keeps the old copy, and `makiba status` shows `subscribed: yes` with the new version; a stopped core with an old file is upgraded without a call to the base before S5; an old core with a `PINNED` file is restarted and the file left as it was; a newer core or file is refused.
+4. **`makiba base upgrade`.** Sections 3, 5, 6. Depends on 1, 2 and 3. Tests: each S0 refusal changes nothing (no download, no stop); `HC_BIN` naming the file is accepted and that file is the one replaced; a second run while the first waits at S2 is refused at S0 and the first run's staged file is untouched, both with the same `hc` and with another `HC_BIN` for the same session; a Claude Code or git below its lowest version refuses at S0 with `makibad` and every terminal still running; a wrong hash at S1 stops nothing and leaves no `.hc.makiba-new-*`; a worker or secretary of another organization refuses at S2 with nothing stopped, and after that organization's `makiba down --secretary` the verb passes S2; "n" at S2 stops nothing and removes staging; "y" ends the session's terminals, replaces `hc`, keeps the old copy, and `makiba status` shows `subscribed: yes` with the new version; a stopped core with an old file is upgraded without a call to the base before S5; an old core with a `PINNED` file is restarted and the file left as it was; a newer core or file is refused; a core or file with a pre-release or malformed version is refused with nothing changed; the rollback steps of section 3 bring the old makiba back on the old core.
 5. **Docs: the owner's three steps.** `docs/upgrading-the-base.md`, after 4 lands.
 
 ## 9. With Issue 380: a range of two releases
