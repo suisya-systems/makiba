@@ -1298,8 +1298,9 @@ fn read_issue(args: &Value, origin: Option<&str>, n: i64) -> IssueRead {
     let started = Instant::now();
     let slug = dispatch_project(args);
     let repos = super::prepare::Places::from_env(Path::new("")).repos;
-    let repo = super::triage::repo_of(slug, origin, &repos)
-        .ok_or_else(|| format!("project {slug} has no GitHub repository"))?;
+    let repo = super::triage::repo_of_within(slug, origin, &repos, ISSUE_READ_TIMEOUT).ok_or_else(
+        || format!("project {slug} has no GitHub repository, or its clone did not say in time"),
+    )?;
     let left = ISSUE_READ_TIMEOUT.saturating_sub(started.elapsed());
     if left.is_zero() {
         return Err("gh timed out".into());
