@@ -2,6 +2,7 @@
 //! a heartbeat, a clean stop. It says it is subscribed only once the base's event stream has
 //! yielded its first `Resync`, and only then writes `dispatcher_started`.
 
+pub mod ahead;
 pub mod anomalies;
 pub mod belt;
 mod close;

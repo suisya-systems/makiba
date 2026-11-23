@@ -6,9 +6,15 @@
 //! `in_use`; it has an `escalated` entry of kind `question`; it has no entry `open` (the
 //! secretary's to answer) and no prompt entry `escalated` (a prompt's answer needs the terminal
 //! that showed it, spec section 7); its newest launch is `verified`; no message to its worker is
-//! still waiting for delivery; and the newest `terminal_status` and `terminal_turn` of that launch
-//! say `idle` or `done`, written at least `MAKIBA_PARK_AFTER_MS` ago. The base is read once more
-//! before anything is written: the terminal must still show `idle` or `done` and no later turn.
+//! still waiting for delivery, nor taken but not yet seen taken (Issue 332: a typed one until a
+//! turn of the launch later than the turn it was typed at is recorded, any other one until a
+//! terminal record of the launch written after it and that arrived after it reached the
+//! terminal); and the newest `terminal_status` and
+//! `terminal_turn` of that launch say `idle` or `done`, written at least `MAKIBA_PARK_AFTER_MS`
+//! ago. The base is read once more before anything is written: the terminal must still show
+//! `idle` or `done` and no later turn. The transaction that parks checks the records again, and a
+//! typed send checks the run in the transaction that records its message (`delivery::send_typed`),
+//! so a text is either typed to a run that is not parked after it or stored for a parked one.
 //!
 //! Parking is one transaction (the run `parked`, its worker's keys revoked, `run_parked`), then the
 //! run's terminals of this organization are ended; one that cannot be ended is ended on a later
@@ -49,27 +55,59 @@ const LAST_SEEN: &str = "(SELECT max(e.id) FROM events e WHERE e.run_id = r.id
     AND e.kind IN ('terminal_status', 'terminal_turn')
     AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id)";
 
+/// The newest turn recorded for the terminal of the launch `l`, 0 for none.
+const TURN: &str = "coalesce((SELECT max(json_extract(t.payload_json, '$.turn')) FROM events t
+    WHERE t.run_id = r.id AND t.kind = 'terminal_turn'
+      AND json_extract(t.payload_json, '$.spawn_id') = l.spawn_id), 0)";
+
 /// Whether the run `r` with its newest launch `l` may be parked now; `?1` is the wait in
 /// milliseconds. Read by the pass and again by the update that parks.
+///
+/// A message to its worker keeps it while it waits for delivery, and after it until the terminal
+/// is seen past it (Issue 332): for one typed at a turn of this launch, a recorded turn above
+/// that one; for any other, a terminal record of the launch written after the message and that
+/// arrived after it reached the terminal (`occurred_at` is the arrival time the monitor keeps, so
+/// a record written late of something seen before does not count). A typed text reached it when
+/// `Base::send` returned (`delivered_at`); a pushed one at its last push (`last_attempt_at`), as
+/// the turn that confirms a push is written before the delivery pass confirms it; one read from
+/// the box when it was read (`delivered_at`).
 fn parkable() -> String {
     format!(
         "r.status = 'in_use'
-         AND EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
-                     AND p.status = 'escalated' AND p.kind = 'question')
+         AND (EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
+                      AND p.status = 'escalated' AND p.kind = 'question')
+              OR {landing})
          AND NOT EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
                          AND (p.status = 'open' OR (p.status = 'escalated' AND p.kind = 'prompt')))
          AND l.stage = 'verified' AND l.conversation_id IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM events g WHERE g.run_id = r.id AND g.kind = 'terminal_gone'
                          AND json_extract(g.payload_json, '$.spawn_id') = l.spawn_id)
-         AND NOT EXISTS (SELECT 1 FROM event_deliveries d
-                         WHERE d.recipient = '{prefix}' || r.task_id AND d.status = 'pending')
+         AND NOT EXISTS (SELECT 1 FROM event_deliveries d JOIN events m ON m.id = d.source_event_id
+                         WHERE d.recipient = '{prefix}' || r.task_id
+                           AND (d.status = 'pending'
+                                OR (json_extract(m.payload_json, '$.turn') IS NOT NULL
+                                    AND json_extract(m.payload_json, '$.spawn_id') = l.spawn_id
+                                    AND {TURN} <= json_extract(m.payload_json, '$.turn'))
+                                OR (json_extract(m.payload_json, '$.turn') IS NULL
+                                    AND NOT EXISTS (SELECT 1 FROM events s
+                                        WHERE s.run_id = r.id
+                                          AND s.kind IN ('terminal_status', 'terminal_turn')
+                                          AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
+                                          AND s.id > d.source_event_id
+                                          AND s.occurred_at > CASE
+                                              WHEN json_extract(m.payload_json, '$.typed')
+                                              THEN coalesce(d.delivered_at, d.last_attempt_at,
+                                                            d.created_at)
+                                              ELSE coalesce(d.last_attempt_at, d.delivered_at,
+                                                            d.created_at) END))))
          AND (SELECT json_extract(s.payload_json, '$.state') FROM events s
               WHERE s.run_id = r.id AND s.kind = 'terminal_status'
                 AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
               ORDER BY s.id DESC LIMIT 1) IN ('idle', 'done')
          AND (julianday('now') - julianday((SELECT occurred_at FROM events WHERE id = {LAST_SEEN})))
              * 86400000.0 >= ?1",
-        prefix = crate::spec::WORKER_AGENT_PREFIX
+        prefix = crate::spec::WORKER_AGENT_PREFIX,
+        landing = super::belt::LANDING_WAIT
     )
 }
 
@@ -187,10 +225,7 @@ impl Park {
 
     fn candidates(&self, w: &StateWriter) -> Result<Vec<Candidate>> {
         let sql = format!(
-            "SELECT r.id, r.task_id, l.spawn_id,
-                    coalesce((SELECT max(json_extract(t.payload_json, '$.turn')) FROM events t
-                              WHERE t.run_id = r.id AND t.kind = 'terminal_turn'
-                                AND json_extract(t.payload_json, '$.spawn_id') = l.spawn_id), 0),
+            "SELECT r.id, r.task_id, l.spawn_id, {TURN},
                     (SELECT occurred_at FROM events WHERE id = {LAST_SEEN})
              FROM runs r JOIN {NEWEST} WHERE {} ORDER BY r.id",
             parkable()
@@ -237,12 +272,26 @@ impl Park {
                 )?
                 .query_map([c.run], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?;
+            // A run waiting for a landing (Issue 284): the Issues it waits for.
+            let landing: bool = w.conn().query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1 AND {})",
+                    super::belt::LANDING_WAIT
+                ),
+                [c.run],
+                |r| r.get(0),
+            )?;
+            let waits_for = if landing {
+                super::ahead::open_wait(w.conn(), &c.task)?.map(|wait| wait.issues)
+            } else {
+                None
+            };
             w.append_event(&NewEvent {
                 kind: "run_parked",
                 actor: Some("makibad"),
                 payload: Some(&json!({
                     "task_id": c.task, "spawn_id": c.spawn, "pending": pending,
-                    "idle_since": c.idle_since,
+                    "idle_since": c.idle_since, "waits_for": waits_for,
                 })),
                 run_task_id: Some(&c.task),
                 ..Default::default()
@@ -322,7 +371,8 @@ pub fn parked_worker(w: &StateWriter, agent: &str) -> Result<Option<String>> {
 
 /// Wake every parked run that no longer has an escalated question, in the caller's transaction:
 /// its last one was answered or withdrawn (by the secretary, the person or `makibad`), so nothing
-/// would bring it back otherwise. The reason is what became of its newest entry.
+/// would bring it back otherwise. The reason is what became of its newest entry. A run waiting
+/// for a landing (Issue 284) is left parked: its landing wakes it (`ahead::settle`).
 pub fn settle(w: &StateWriter) -> Result<()> {
     type Row = (
         String,
@@ -333,14 +383,16 @@ pub fn settle(w: &StateWriter) -> Result<()> {
     );
     let runs: Vec<Row> = w
         .conn()
-        .prepare(
+        .prepare(&format!(
             "SELECT r.task_id, p.status, p.id, p.question, p.answer FROM runs r
              LEFT JOIN pending p ON p.id = (SELECT max(id) FROM pending WHERE run_id = r.id)
              WHERE r.status = 'parked'
                AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id = r.id
                                AND q.status = 'escalated' AND q.kind = 'question')
+               AND NOT {}
              ORDER BY r.id",
-        )?
+            super::belt::LANDING_WAIT
+        ))?
         .query_map([], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
@@ -392,6 +444,9 @@ pub fn read_fields(c: &rusqlite::Connection, task: &str, status: &str) -> rusqli
                 "why": newest.lines().next().unwrap_or_default(),
             }),
         );
+    } else if let Some(landing) = super::ahead::waiting_field(c, task)? {
+        // A design-only run waiting for a landing (Issue 284).
+        out.insert("waiting".into(), landing);
     }
     if status != "parked" {
         let woken: Option<(String, String)> = c
@@ -590,6 +645,77 @@ mod tests {
             .unwrap();
         assert!(park(&w).is_empty());
         assert_eq!(status(&w), "in_use");
+    }
+
+    /// A message typed with no turn counter (`typed_at` seconds ago, delivered then), followed by
+    /// a terminal record of the launch that arrived `seen` seconds ago, written after the message.
+    fn typed_then_seen(typed_at: i64, seen: i64) -> (tempfile::TempDir, StateWriter) {
+        let (d, w) = org(20_000);
+        entry(&w, "question", "escalated");
+        let ago = |s: i64| format!("-{s} seconds");
+        w.conn()
+            .execute(
+                "INSERT INTO events (kind, payload_json) VALUES ('message_sent',
+                   json_object('typed', json('true'), 'spawn_id', 's1'))",
+                [],
+            )
+            .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO event_deliveries (source_event_id, recipient, status, delivered_at)
+                 VALUES ((SELECT max(id) FROM events), 'w-t', 'delivered',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1))",
+                [ago(typed_at)],
+            )
+            .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO events (kind, run_id, occurred_at, payload_json)
+                 VALUES ('terminal_status', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1),
+                         json_object('spawn_id', 's1', 'state', 'idle'))",
+                [ago(seen)],
+            )
+            .unwrap();
+        (d, w)
+    }
+
+    /// Issue 332, with no turn counter: an observation the monitor writes after a typed message
+    /// but that arrived before the text was typed does not let the run park; one that arrived
+    /// after it does.
+    #[test]
+    fn a_typed_message_without_a_turn_keeps_the_run_until_a_record_that_arrived_after_it() {
+        let (_d, w) = typed_then_seen(3, 5);
+        assert!(park(&w).is_empty());
+        assert_eq!(status(&w), "in_use");
+        let (_d, w) = typed_then_seen(10, 5);
+        assert_eq!(park(&w), ["t"]);
+    }
+
+    /// A message pushed by the channel 10 seconds ago is confirmed by the delivery pass only after
+    /// the monitor wrote its turn (`working` 8 seconds ago, `idle` 5): that turn releases the run,
+    /// although both records arrived before `delivered_at`.
+    #[test]
+    fn a_pushed_message_is_released_by_the_turn_after_its_push_even_when_confirmed_later() {
+        let (_d, w) = org(20_000);
+        entry(&w, "question", "escalated");
+        w.conn()
+            .execute_batch(
+                "INSERT INTO events (kind) VALUES ('message_sent');
+                 INSERT INTO event_deliveries (source_event_id, recipient, status, attempt,
+                                               first_attempt_at, last_attempt_at, delivered_at)
+                 VALUES ((SELECT max(id) FROM events), 'w-t', 'delivered', 1,
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 seconds'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-10 seconds'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-1 seconds'));
+                 INSERT INTO events (kind, run_id, occurred_at, payload_json)
+                 VALUES ('terminal_status', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-8 seconds'),
+                         json_object('spawn_id', 's1', 'state', 'working'));
+                 INSERT INTO events (kind, run_id, occurred_at, payload_json)
+                 VALUES ('terminal_status', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-5 seconds'),
+                         json_object('spawn_id', 's1', 'state', 'idle'));",
+            )
+            .unwrap();
+        assert_eq!(park(&w), ["t"]);
     }
 
     #[test]

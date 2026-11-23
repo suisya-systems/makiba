@@ -487,6 +487,8 @@ pub enum TypedError {
     /// The record or the send failed with an outcome that is not known. A message stored before
     /// the send stays `pending` and is never sent again by `makibad`.
     Failed(String),
+    /// The recipient's run is parked: it has no terminal. Nothing is stored and nothing is typed.
+    Parked,
 }
 
 /// `send` or `answer` with `typed` (spec sections 7 and 8): record the message as a typed one,
@@ -507,14 +509,22 @@ pub fn send_typed(
         )));
     }
     let failed = |e: &dyn std::fmt::Display| TypedError::Failed(e.to_string());
+    // A terminal the park pass ended is not found: its run was parked before it was ended, so a
+    // lookup that fails reads the run again and stores the message when it is parked (Issue 332).
+    let parked_or = |e: TypedError| match super::park::parked_worker(w, recipient) {
+        Ok(Some(_)) => TypedError::Parked,
+        Ok(None) => e,
+        Err(read) => failed(&read),
+    };
     let t = find_terminal(base, recipient)
-        .map_err(|e| failed(&e))?
-        .ok_or_else(|| TypedError::Conflict(format!("{recipient} has no single live terminal")))?;
-    let state = base
-        .get(&t.id)
-        .map_err(|e| failed(&e))?
-        .status
-        .map(|s| s.state);
+        .map_err(|e| parked_or(failed(&e)))?
+        .ok_or_else(|| {
+            parked_or(TypedError::Conflict(format!(
+                "{recipient} has no single live terminal"
+            )))
+        })?;
+    let t = base.get(&t.id).map_err(|e| parked_or(failed(&e)))?;
+    let state = t.status.as_ref().map(|s| s.state);
     let only_if_idle = match state {
         Some(State::Idle) => true,
         Some(State::Done) => false,
@@ -524,9 +534,20 @@ pub fn send_typed(
             )));
         }
     };
-    let payload = serde_json::json!({"typed": true});
-    let (id, event) = w
+    // The launch and the turn counter of the terminal typed into: the park pass keeps the run
+    // until a later turn of that launch is recorded, the proof that this text was taken.
+    let payload = serde_json::json!({
+        "typed": true,
+        "spawn_id": t.tags.get(crate::spec::TAG_SPAWN),
+        "turn": t.turn,
+    });
+    // Decided in the transaction that records the message (Issue 332): a run parked before it
+    // is not typed to, and a pass that parks after it finds this message and gives up.
+    let recorded = w
         .transaction(|w| {
+            if super::park::parked_worker(w, recipient)?.is_some() {
+                return Ok(None);
+            }
             let event = w.append_event(&NewEvent {
                 kind: "message_sent",
                 actor: Some(sender),
@@ -543,9 +564,12 @@ pub fn send_typed(
                  VALUES (?1, ?2, 'pending', 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 params![event, recipient],
             )?;
-            Ok((id, event))
+            Ok(Some((id, event)))
         })
         .map_err(|e| failed(&e))?;
+    let Some((id, event)) = recorded else {
+        return Err(TypedError::Parked);
+    };
     match base.send(&t.id, &wrap(id, sender, kind, body), only_if_idle) {
         Ok(()) => {
             w.confirm_push(event, recipient).map_err(|e| failed(&e))?;

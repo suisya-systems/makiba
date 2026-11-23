@@ -80,7 +80,7 @@ fn writer_migrates_a_pre_m2_database() {
         1
     );
     assert!(has_table(c, "event_deliveries"));
-    assert_eq!(count(c, "SELECT MAX(version) FROM schema_migrations"), 10);
+    assert_eq!(count(c, "SELECT MAX(version) FROM schema_migrations"), 11);
 }
 
 #[test]
@@ -163,7 +163,7 @@ fn failed_v4_migration_is_rolled_back_and_can_be_retried() {
     assert!(has_table(&conn, "agents"));
     assert_eq!(
         count(&conn, "SELECT MAX(version) FROM schema_migrations"),
-        10
+        11
     );
 }
 
