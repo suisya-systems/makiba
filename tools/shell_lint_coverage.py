@@ -14,8 +14,11 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = Path(".github") / "workflows" / "ci.yml"
 STEP = "- name: Shell scripts parse"
-# The loop must parse its own variable: `bash -n` on another operand checks none of the globs.
-LOOP_RE = re.compile(r'for (\w+) in (.*?); do bash -n ("?)\$(?:\1|\{\1\})\3(?:[ ;]|$)')
+# The loop must parse its own variable, quoted: `bash -n` on another operand checks none of the
+# globs, and an unquoted "$f" splits a name with a space so that bash -n parses another file.
+LOOP_RE = re.compile(r'for (\w+) in (.*?); do bash -n "\$(?:\1|\{\1\})"(?:[ ;]|$)')
+# The only option read: any other may take a value that is not a script (--rcfile tools/x.sh).
+SEVERITY_RE = re.compile(r"--severity=[^\s;|&<>#]+")
 SHELLCHECK = "shellcheck --severity=error "
 # Glob syntax where bash and fnmatch differ, or that bash expands before globbing: refused, not guessed.
 UNREAD = set("[]{}\\'\"$`~")
@@ -60,13 +63,16 @@ def lint_globs(ci_text):
 
 
 def _words(text):
-    """The path arguments of a command line: the words up to a comment or a shell operator,
-    without options. A word after `#`, `;`, `|`, `&`, `<` or `>` is not an argument."""
+    """The path arguments of a command line: the words up to a comment or a shell operator.
+    A word after `#`, `;`, `|`, `&`, `<` or `>` is not an argument. An option other than
+    --severity=<v> raises ValueError, since its value would be taken for a script."""
     words = []
     for w in text.split():
         if w[0] in "#;|&<>":
             break
         if w[0] == "-":
+            if not SEVERITY_RE.fullmatch(w):
+                raise ValueError(f"the shell step passes option {w!r}; only --severity=<v> is read")
             continue
         cut = min((w.index(c) for c in ";|&<>" if c in w), default=None)
         if cut is not None:

@@ -44,8 +44,13 @@ def test_operator_ends_the_arguments():
     assert cl.uncovered(SYN("scripts/*.sh", "scripts/*.sh;"), ["scripts/a.sh"]) == []
 
 
-def test_options_are_not_globs():
-    assert cl.uncovered(SYN("scripts/*.sh", "-x scripts/*.sh"), ["scripts/a.sh"]) == []
+def test_only_the_severity_option_is_read():
+    # An option's value is not a script: --rcfile tools/x.sh does not lint tools/x.sh.
+    for sc in ("--rcfile tools/x.sh scripts/*.sh tools/*.sh", "-x scripts/*.sh tools/*.sh",
+               "scripts/*.sh -e SC1000 tools/*.sh", "--severity scripts/*.sh tools/*.sh"):
+        with pytest.raises(ValueError):
+            cl.uncovered(SYN("scripts/*.sh tools/*.sh", sc), ["tools/x.sh"])
+    assert cl.uncovered(SYN("scripts/*.sh", "--severity=warning scripts/*.sh"), ["scripts/a.sh"]) == []
 
 
 def test_glob_syntax_bash_reads_differently_raises():
@@ -70,8 +75,10 @@ def loop_body(body):
 
 
 def test_loop_must_parse_its_own_variable():
-    for body in ("bash -n scripts/install-base.sh", 'bash -n "$g"', "bash -n $ff", "echo bash -n"):
+    # Unquoted $f splits "scripts/x.sh y.sh", so bash -n parses scripts/x.sh instead: refused.
+    for body in ("bash -n scripts/install-base.sh", 'bash -n "$g"', "bash -n $ff", "echo bash -n",
+                 "bash -n $f", "bash -n ${f}", 'bash -n "$ff"'):
         with pytest.raises(ValueError):
             cl.uncovered(loop_body(body), ["tools/x.sh"])
-    for body in ('bash -n "$f"', "bash -n $f", 'bash -n "${f}"'):
+    for body in ('bash -n "$f"', 'bash -n "${f}"'):
         assert cl.uncovered(loop_body(body), ["tools/x.sh"]) == [], body
