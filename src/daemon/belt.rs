@@ -2646,12 +2646,17 @@ fn record(
     } in &o.clones
     {
         let (repo, pr) = (pr.as_ref().map(|p| &p.0), pr.as_ref().map(|p| p.1));
+        // Once per merge commit and pull request: a record of the same commit written before
+        // Issue 345 names no pull request, and does not count for a merge recorded without its
+        // commit (`ahead::dep`, `clone_checks`), so this one is written.
         let known = count(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
              WHERE e.kind = 'landed_in_clone' AND r.task_id = ?1
-               AND json_extract(e.payload_json, '$.merge_commit') = ?2",
-            params![task, merge],
+               AND json_extract(e.payload_json, '$.merge_commit') = ?2
+               AND lower(json_extract(e.payload_json, '$.repo')) IS lower(?3)
+               AND json_extract(e.payload_json, '$.pr') IS ?4",
+            params![task, merge, repo, pr],
         )?;
         if known == 0 {
             event(
@@ -4426,5 +4431,62 @@ mod tests {
             checks(&w),
             [("dep".into(), Some("mn".into()), Some(("new/p".into(), 11)))]
         );
+    }
+
+    /// A merge recorded without its commit and a clone record written before Issue 345 (no `repo`
+    /// or `pr`): the clone check reads it again and its new record, of this pull request, is
+    /// written though one of the same commit exists, so the wait settles (diff review round 1).
+    #[test]
+    fn a_merge_without_its_commit_and_an_older_clone_record_settle_after_the_check() {
+        let (_dir, w) = org();
+        waited_for(&w);
+        super::super::prwatch::register(&w, "pr_opened", "dep", "o/p", 11, &"1".repeat(40))
+            .unwrap();
+        landing(
+            &w,
+            "pr_merged",
+            json!({"repo": "o/p", "pr": 11, "task_id": "dep"}),
+        );
+        landing(
+            &w,
+            "landed_in_clone",
+            json!({"task_id": "dep", "merge_commit": "m11", "base": "main", "base_head": "m11"}),
+        );
+        assert_eq!(
+            clone_checks(&w).unwrap().len(),
+            1,
+            "the older record is not of it"
+        );
+        let o = Outcome {
+            range: None,
+            landings: Vec::new(),
+            clones: vec![InClone {
+                task: "dep".into(),
+                merge: "m11".into(),
+                branch: "main".into(),
+                head: "m11".into(),
+                pr: Some(("o/p".into(), 11)),
+            }],
+        };
+        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        assert!(clone_checks(&w).unwrap().is_empty(), "its own record");
+        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'landed_in_clone'",
+                []
+            )
+            .unwrap(),
+            2,
+            "written once"
+        );
+        let settled = count(
+            &w,
+            "SELECT count(*) FROM events WHERE kind = 'ahead_settled'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(settled, 1, "the wait settles");
     }
 }
