@@ -24,18 +24,18 @@ fn info(version: &str) -> Result<BaseInfo, BaseError> {
 
 #[test]
 fn a_base_version_inside_the_range_is_accepted() {
-    assert!(base_version::check("0.1.21").is_ok());
-    assert_eq!(base_version::PINNED, "0.1.21");
+    assert!(base_version::check("0.1.22").is_ok());
+    assert_eq!(base_version::PINNED, "0.1.22");
 }
 
 #[test]
 fn a_base_version_outside_the_range_is_refused_naming_both() {
     for found in [
-        "0.1.20",
-        "0.1.22",
+        "0.1.21",
+        "0.1.23",
         "0.2.0",
-        "1.1.21",
-        "0.1.21-rc1",
+        "1.1.22",
+        "0.1.22-rc1",
         "0.1",
         "",
         "junk",
@@ -53,7 +53,7 @@ fn a_base_version_outside_the_range_is_refused_naming_both() {
                 }
                 .to_string();
                 assert!(
-                    text.contains(found) && text.contains(">=0.1.21,<0.1.22"),
+                    text.contains(found) && text.contains(">=0.1.22,<0.1.23"),
                     "{text}"
                 );
             }
@@ -70,8 +70,8 @@ fn a_refused_version_stops_before_any_other_call() {
         later_calls += 1; // stands for the first call after hello
         Ok::<(), BaseError>(())
     };
-    assert!(run("0.1.22").is_err());
-    assert!(run("0.1.21").is_ok());
+    assert!(run("0.1.23").is_err());
+    assert!(run("0.1.22").is_ok());
     assert_eq!(later_calls, 1);
 }
 

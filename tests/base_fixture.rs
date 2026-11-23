@@ -111,7 +111,7 @@ fn dropping_the_fixture_removes_the_place() {
 fn the_stand_in_refuses_an_unsupported_version_at_hello() {
     let ok = Stub::new().hello().unwrap();
     assert_eq!(ok.version, makiba::base::version::PINNED);
-    let err = Stub::new().with_version("0.1.22").hello().unwrap_err();
+    let err = Stub::new().with_version("0.1.23").hello().unwrap_err();
     assert!(
         matches!(err, BaseError::UnsupportedVersion { .. }),
         "{err:?}"
