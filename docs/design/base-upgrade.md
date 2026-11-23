@@ -73,7 +73,7 @@ Then `End these terminals and replace hc? [y/N]`, its wording dropping what does
 - core already stopped: no call to the base. The suspension is `up::run`'s own (it finds the core stopped and suspends, as after any stop of the base); `down::run` is not used, since it would call `list` and `stop` on a socket that does not answer.
 - core already `PINNED` (only the file is old): the core is not stopped; S5 finds it running.
 
-**S4. Replace `hc`.** One `rename` of `.hc.makiba-new` over `hc` in the same folder. A failure leaves the old `hc` in place and the core stopped; the message says the verb can be run again (it starts from S0 and finds the core stopped), or the old makiba (which pins the old release) can start it.
+**S4. Replace `hc`.** One `rename` of this run's `.hc.makiba-new-<pid>` over `hc` in the same folder. A failure leaves the old `hc` in place and the core stopped; the message says the verb can be run again (it starts from S0 and finds the core stopped), or the old makiba (which pins the old release) can start it.
 
 **S5. Start and check.** `up::run` with the same `--no-secretary` choice the verb was given, which starts the core with the new `hc` (or finds it running), resumes the suspended runs and starts `makibad` from this binary (`current_exe`). Then `hello` must answer `PINNED`, and `up`'s own wait for `subscribed` must pass. The verb prints the old and new versions, the path of the old copy, and the newest `dispatcher_started` event id, which carries `base_version`.
 
