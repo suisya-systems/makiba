@@ -279,6 +279,54 @@ pub fn unparsed_dependency_line(text: &str) -> Option<String> {
     None
 }
 
+// A line that starts with a dependency keyword, after an optional quote, heading, list marker or
+// emphasis (Issue 299).
+re!(
+    DEP_LINE_START,
+    r"(?i)^\s*(?:>\s*)*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?(?:\*\*|__|\*|_)?\s*(?:blocked\s+by|depends\s+on|requires)\b"
+);
+re!(ANY_NUMBER_REF, r"#\d");
+
+fn shown_line(line: &str) -> String {
+    line.trim().chars().take(120).collect()
+}
+
+/// The first line (at most 120 chars) of `body` that starts with a dependency keyword and holds
+/// no `#<digits>`: a dependency in words, which the range's read (a `#<n>` on a `Depends on`
+/// line) cannot read (Issue 299).
+pub fn dependency_line_with_no_number(body: &str) -> Option<String> {
+    splitlines(body)
+        .into_iter()
+        .find(|l| DEP_LINE_START.is_match(l) && !ANY_NUMBER_REF.is_match(l))
+        .map(shown_line)
+}
+
+/// The first line (at most 120 chars) of `body` that starts with a dependency keyword not followed
+/// on its line by a ref, while the next non-empty line does not open with one either (that case is
+/// `unparsed_dependency_line`'s warning): a dependency the triage grammar reads as none
+/// (Issue 299).
+pub fn dependency_line_unread(body: &str) -> Option<String> {
+    let lines = splitlines(body);
+    for (i, line) in lines.iter().enumerate() {
+        let Some(m) = DEP_LINE_START.find(line) else {
+            continue;
+        };
+        if LEADING_RUN.is_match(&line[m.end()..]) {
+            continue;
+        }
+        let next = lines[i + 1..]
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .copied()
+            .unwrap_or("");
+        if LEADING_RUN.is_match(next.trim_start()) {
+            continue;
+        }
+        return Some(shown_line(line));
+    }
+    None
+}
+
 /// A `blocked` / `on-hold` label makes the Issue blocked whatever its refs say.
 pub fn has_block_label(issue: &Value) -> bool {
     label_names(issue)

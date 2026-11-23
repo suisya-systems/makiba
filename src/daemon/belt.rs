@@ -1482,7 +1482,8 @@ pub fn fill(w: &StateWriter, agent: &str) -> Result<Vec<String>> {
             && count(
                 w,
                 "SELECT count(*) FROM range_candidates WHERE range_id = ?1
-                   AND (left_out_why LIKE 'waits_for%' OR left_out_why LIKE 'unreadable%')",
+                   AND (left_out_why LIKE 'waits_for%' OR left_out_why LIKE 'unreadable%'
+                        OR left_out_why LIKE 'dependency_unreadable%')",
                 [id],
             )? == 0
         {
@@ -2303,6 +2304,12 @@ fn admit(
         }
         if why.is_none() && followed.contains(&n) {
             why = kept_out(&body);
+        }
+        if why.is_none()
+            && let Some(line) = crate::work_discovery::refs::dependency_line_with_no_number(&body)
+        {
+            // A dependency in words is not read as none (Issue 299): the line must name `#<n>`.
+            why = Some(format!("dependency_unreadable ({line})"));
         }
         let mut waits = None;
         if why.is_none() {
