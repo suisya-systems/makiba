@@ -734,32 +734,43 @@ pub fn rerun(
 ) -> Result<std::result::Result<Registered, RerunRefused>> {
     w.transaction(|w| {
         let c = w.conn();
+        let recorded: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pr_watches
+               WHERE lower(repo) = lower(?1) AND pr = ?2 AND head_oid = ?3)",
+            params![repo, pr, head],
+            |r| r.get(0),
+        )?;
+        if !recorded {
+            return Ok(Err(RerunRefused::NotRecorded));
+        }
+        // The head recorded last, with the repository as that record spelled it: `register`
+        // keys the rows by that exact spelling, so another spelling's row is an older watch.
+        let current: Option<(Option<String>, Option<String>)> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.repo'), json_extract(payload_json, '$.head_oid')
+                 FROM events
+                 WHERE kind IN ('pr_opened', 'fix_pushed')
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![repo, pr],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (current_repo, current_head) = current.unwrap_or_default();
+        if current_head.as_deref() != Some(head) {
+            return Ok(Err(RerunRefused::NotCurrent(current_head.unwrap_or_default())));
+        }
         let existing: Option<(i64, String)> = c
             .query_row(
-                "SELECT id, status FROM pr_watches
-                 WHERE lower(repo) = lower(?1) AND pr = ?2 AND head_oid = ?3",
-                params![repo, pr, head],
+                "SELECT id, status FROM pr_watches WHERE repo = ?1 AND pr = ?2 AND head_oid = ?3",
+                params![current_repo.as_deref().unwrap_or(repo), pr, head],
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
         let Some((id, status)) = existing else {
             return Ok(Err(RerunRefused::NotRecorded));
         };
-        let current: Option<String> = c
-            .query_row(
-                "SELECT json_extract(payload_json, '$.head_oid') FROM events
-                 WHERE kind IN ('pr_opened', 'fix_pushed')
-                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
-                   AND json_extract(payload_json, '$.pr') = ?2
-                 ORDER BY id DESC LIMIT 1",
-                params![repo, pr],
-                |r| r.get(0),
-            )
-            .optional()?
-            .flatten();
-        if current.as_deref() != Some(head) {
-            return Ok(Err(RerunRefused::NotCurrent(current.unwrap_or_default())));
-        }
         if status == "watching" {
             return Ok(Ok(Registered {
                 watch_id: id,
@@ -1067,6 +1078,55 @@ esac"#,
                 ),
                 woken as i64
             );
+        }
+    }
+
+    /// A rerun takes up the watch of the head recorded last, as that record spelled the
+    /// repository: the rows are keyed by the exact spelling, so the same head recorded earlier
+    /// under another case is an older row and is left as it is (Issue 375).
+    #[test]
+    fn a_rerun_takes_up_the_row_of_the_spelling_recorded_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        let end = |id: i64| {
+            w.conn()
+                .execute(
+                    "UPDATE pr_watches SET status = 'completed', conclusion = 'failed' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+        };
+        let old = register(&w, "pr_opened", "t", "O/r", 5, "abc").unwrap();
+        end(old.watch_id);
+        let new = register(&w, "fix_pushed", "t", "o/r", 5, "abc").unwrap();
+        assert_ne!(old.watch_id, new.watch_id);
+        end(new.watch_id);
+        for asked in ["o/r", "O/R"] {
+            w.conn()
+                .execute(
+                    "UPDATE pr_watches SET status = 'completed' WHERE id = ?1",
+                    [new.watch_id],
+                )
+                .unwrap();
+            let r = rerun(&w, "t", asked, 5, "abc").unwrap().unwrap();
+            assert_eq!(r.watch_id, new.watch_id);
+            assert_eq!(r.status, "watching");
+            let status = |id: i64| -> String {
+                w.conn()
+                    .query_row("SELECT status FROM pr_watches WHERE id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap()
+            };
+            assert_eq!(status(old.watch_id), "completed");
+            assert_eq!(status(new.watch_id), "watching");
         }
     }
 }
