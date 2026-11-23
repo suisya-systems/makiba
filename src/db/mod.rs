@@ -4,8 +4,8 @@
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
 //! `schema_v5.sql` adds the launch identity to `agents`, `schema_v6.sql` the triggers that keep a
 //! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt, `schema_v9.sql` their budgets, `schema_v10.sql`
-//! the status `parked` of a run. `open` opens a database with the project's pragmas and `migrate`
-//! brings it to v10.
+//! the status `parked` of a run, `schema_v11.sql` a range's `follow_ups` and `design_ahead`. `open`
+//! opens a database with the project's pragmas and `migrate` brings it to v11.
 
 use std::fmt;
 use std::path::Path;
@@ -36,6 +36,9 @@ pub const SCHEMA_V9: &str = include_str!("schema_v9.sql");
 /// v10: `runs.status` `parked` (Issue 283). The script leaves its transaction open: `migrate`
 /// checks the foreign keys inside it before it commits.
 pub const SCHEMA_V10: &str = include_str!("schema_v10.sql");
+/// v11: `ranges.follow_ups`, `ranges.design_ahead` and `range_candidates.waits_json` (Issue 284).
+/// Columns are only added: every row is kept.
+pub const SCHEMA_V11: &str = include_str!("schema_v11.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -151,12 +154,12 @@ fn is_current(conn: &Connection) -> Result<bool> {
         }
     }
     let (versions, session): (i64, i64) = conn.query_row(
-        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 10),
+        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 11),
                 (SELECT COUNT(*) FROM org_sessions WHERE id = 1)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(versions == 10 && session == 1)
+    Ok(versions == 11 && session == 1)
 }
 
 /// Bring a database to v9: apply v3 to an empty one, upgrade an older one in place, then add v4 to v9.
@@ -283,6 +286,20 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
     }
     conn.pragma_update(None, "foreign_keys", true)?;
+    // v11 only adds columns (Issue 284), in a transaction of its own.
+    let done: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = 11",
+        [],
+        |r| r.get(0),
+    )?;
+    if done == 0
+        && let Err(e) = conn.execute_batch(SCHEMA_V11)
+    {
+        if !conn.is_autocommit() {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -343,7 +360,7 @@ mod tests {
         );
         assert!(!is_current(&conn).unwrap());
         migrate(&mut conn).unwrap();
-        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 10);
+        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 11);
         assert_eq!(
             n(
                 &conn,
@@ -381,7 +398,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
         let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 10);
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 11);
         assert_eq!(n("PRAGMA foreign_keys"), 1);
         assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
         let row: (String, i64, i64, String, String, Option<f64>, i64) = conn
@@ -483,7 +500,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         assert!(is_current(&conn).unwrap());
         let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 10);
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 11);
         assert_eq!(n("PRAGMA foreign_keys"), 1);
         assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
         assert_eq!(n("SELECT count(*) FROM run_launch WHERE run_id = 7"), 1);
@@ -536,5 +553,55 @@ mod tests {
         assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 9);
         assert_eq!(n("PRAGMA foreign_keys"), 1);
         assert!(conn.is_autocommit());
+    }
+
+    /// v11 only adds columns (Issue 284): a v10 database keeps its ranges and candidates, a range
+    /// approved before it stays `follow_ups` `ask` with `design_ahead` off, a candidate read before
+    /// it is a ready one, and the fast path takes v11 as current.
+    #[test]
+    fn v11_keeps_every_range_and_candidate_with_ask_and_no_design_ahead() {
+        let mut conn = open_in_memory().unwrap();
+        conn.execute_batch(SCHEMA).unwrap();
+        for script in [
+            SCHEMA_V4, SCHEMA_V5, SCHEMA_V6, SCHEMA_V7, SCHEMA_V8, SCHEMA_V9,
+        ] {
+            conn.execute_batch(script).unwrap();
+        }
+        conn.execute_batch(SCHEMA_V10).unwrap();
+        conn.execute_batch("COMMIT").unwrap();
+        conn.execute_batch(
+            "INSERT INTO projects (id, slug, display_name) VALUES (1, 'p', 'p');
+             INSERT INTO ranges (id, project_id, issues_json, at_once, budget_tasks, brief_head,
+                                 proposed_by, status)
+             VALUES (4, 1, '[7]', 2, 5, 'head', 'secretary', 'active');
+             INSERT INTO range_candidates (range_id, read_id, position, issue, title, body, admitted)
+             VALUES (4, 1, 0, 7, 'Seven', 'b', 1);",
+        )
+        .unwrap();
+        assert!(!is_current(&conn).unwrap());
+        migrate(&mut conn).unwrap();
+        migrate(&mut conn).unwrap();
+        assert!(is_current(&conn).unwrap());
+        let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 11);
+        assert_eq!(n("SELECT count(*) FROM ranges"), 1);
+        assert_eq!(n("SELECT count(*) FROM range_candidates"), 1);
+        let (follow, ahead, waits): (String, i64, Option<String>) = conn
+            .query_row(
+                "SELECT g.follow_ups, g.design_ahead, c.waits_json FROM ranges g
+                 JOIN range_candidates c ON c.range_id = g.id WHERE g.id = 4",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!((follow.as_str(), ahead, waits), ("ask", 0, None));
+        assert!(
+            conn.execute("UPDATE ranges SET follow_ups = 'maybe' WHERE id = 4", [])
+                .is_err()
+        );
+        assert!(
+            conn.execute("UPDATE ranges SET design_ahead = 2 WHERE id = 4", [])
+                .is_err()
+        );
     }
 }

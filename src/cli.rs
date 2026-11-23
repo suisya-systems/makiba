@@ -357,6 +357,12 @@ pub enum Command {
         /// Heads pushed to a task's pull request after the first before it is a stop (default 3).
         #[arg(long)]
         budget_fixes: Option<i64>,
+        /// Follow-ups found on the way: inside (the default of a proposal) or ask.
+        #[arg(long, value_parser = ["inside", "ask"])]
+        follow_ups: Option<String>,
+        /// A candidate waiting only for range tasks with a pull request goes in for its design.
+        #[arg(long)]
+        design_ahead: bool,
         /// Read here; its content travels over the door.
         #[arg(long)]
         brief_head_file: Option<PathBuf>,
@@ -427,12 +433,17 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             budget_tasks,
             budget_hours,
             budget_fixes,
+            follow_ups,
+            design_ahead,
             brief_head_file,
             replaces,
             reason,
             yes: _,
         } => {
             let mut args = json!({"action": action});
+            if design_ahead {
+                args["design_ahead"] = true.into();
+            }
             if let Some(id) = range_id {
                 args["id"] = id.into();
             }
@@ -450,7 +461,12 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             if let Some(f) = brief_head_file {
                 args["brief_head"] = read(&f)?.into();
             }
-            for (k, v) in [("project", project), ("takes", takes), ("reason", reason)] {
+            for (k, v) in [
+                ("project", project),
+                ("takes", takes),
+                ("reason", reason),
+                ("follow_ups", follow_ups),
+            ] {
                 if let Some(v) = v {
                     args[k] = v.into();
                 }
@@ -691,6 +707,23 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
         range["budget"]["fixes"]
     );
     println!(
+        "Follow-ups found on the way: {}",
+        match range["follow_ups"].as_str() {
+            Some("inside") =>
+                "inside (taken from the budget, unless they need a host or name a stop line)",
+            Some("ask") => "ask (each one is a new range)",
+            _ => "-",
+        }
+    );
+    println!(
+        "Design ahead: {}",
+        if range["design_ahead"] == json!(true) {
+            "yes (a candidate waiting for range tasks with a pull request goes in for its design only)"
+        } else {
+            "no"
+        }
+    );
+    println!(
         "Merge approval mode (this shell's; makibad records its own): {}",
         status["merge_approval_mode"].as_str().unwrap_or("-")
     );
@@ -700,7 +733,18 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
         text("read_at")
     );
     for c in range["candidates"].as_array().into_iter().flatten() {
-        let what = if c["admitted"] == json!(true) {
+        let waits: Vec<String> = c["design_only_waits"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|n| format!("#{n}"))
+            .collect();
+        let what = if c["admitted"] == json!(true) && !waits.is_empty() {
+            format!(
+                "admitted for its design only, waits for {}",
+                waits.join(", ")
+            )
+        } else if c["admitted"] == json!(true) {
             "admitted".to_string()
         } else {
             format!("left out: {}", c["left_out_why"].as_str().unwrap_or("-"))
@@ -864,6 +908,11 @@ mod tests {
         assert_eq!(v["budget_fixes"], json!(2));
         let (_, v) = propose(&[]).unwrap();
         assert!(v.get("budget_hours").is_none() && v.get("budget_fixes").is_none());
+        // Neither follow_ups nor design_ahead unless named: makibad's defaults hold (Issue 284).
+        assert!(v.get("follow_ups").is_none() && v.get("design_ahead").is_none());
+        let (_, v) = propose(&["--follow-ups", "ask", "--design-ahead"]).unwrap();
+        assert_eq!(v["follow_ups"], json!("ask"));
+        assert_eq!(v["design_ahead"], json!(true));
         for bad in ["NaN", "inf", "-inf", "0", "-1"] {
             let flag = format!("--budget-hours={bad}");
             assert!(propose(&[&flag]).is_err(), "{bad}");
