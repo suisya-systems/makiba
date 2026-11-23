@@ -153,7 +153,7 @@ Twenty are needed. A pull request landed by a repair from claude-org-ja is not o
 
 Final count: 34 landed (12 with `pr_merged`, 22 added by hand); 33 if 304 is left out. The twentieth landing was 348 at 2026-11-23T07:17Z, or 347 at 07:29Z without 304. Not landed at the export: 353 (above), 303 and 308 (closed, events 5339 and 5338; their work landed as 310 and 323), and 313, 315, 316, 377 and 378 (no merge on `origin/main`).
 
-Of the provisional list, every row marked landed is confirmed on `origin/main`; of the six pending, 347, 348, 349, 350 and 351 landed and 353 did not. Twelve landings were not on it: 359, 362 to 367, 370, 371, 373 and 376.
+Of the provisional list, every row marked landed is confirmed on `origin/main`; of the six pending, 347, 348, 349, 350 and 351 landed and 353 did not. Eleven landings were not on it: 359, 362 to 367, 370, 371, 373 and 376.
 
 Three range tasks (r3-299, r3-317 and r3-335) landed with no `pr_merged` event, although `pr_merged` is written for the tasks of a range. Why is not established here.
 
