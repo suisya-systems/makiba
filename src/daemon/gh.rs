@@ -3,6 +3,7 @@
 
 use std::io::Read;
 use std::os::unix::process::CommandExt;
+use std::path::Path;
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -39,18 +40,36 @@ pub(crate) fn run_gh_for(
     cancel: &AtomicBool,
     timeout: Duration,
 ) -> Result<String, GhError> {
+    let out = run_bounded(gh, args, None, cancel, timeout, "gh")?;
+    String::from_utf8(out).map_err(|_| GhError::Failed("gh wrote text that is not UTF-8".into()))
+}
+
+/// Run `program args` in `dir` (else the current folder) and give its stdout: `gh`, and the `git`
+/// that finds a project's repository (Issue 355). The child is ended, with what it started, at
+/// `timeout` and when `cancel` is set; `name` is what the errors call it.
+pub(crate) fn run_bounded(
+    program: &str,
+    args: &[&str],
+    dir: Option<&Path>,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    name: &str,
+) -> Result<Vec<u8>, GhError> {
     // A process group of its own, so that what the program started goes with it when it is ended.
-    let mut child = Command::new(gh)
+    let mut command = Command::new(program);
+    command
         .args(args)
         .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-        .map_err(|e| match e.kind() {
-            std::io::ErrorKind::NotFound => GhError::Missing,
-            _ => GhError::Failed(format!("cannot run {gh}: {e}")),
-        })?;
+        .stderr(Stdio::null());
+    if let Some(d) = dir {
+        command.current_dir(d);
+    }
+    let mut child = command.spawn().map_err(|e| match e.kind() {
+        std::io::ErrorKind::NotFound => GhError::Missing,
+        _ => GhError::Failed(format!("cannot run {program}: {e}")),
+    })?;
     let mut pipe = child.stdout.take().expect("stdout is piped");
     let reader = std::thread::spawn(move || {
         let mut out = Vec::new();
@@ -65,7 +84,7 @@ pub(crate) fn run_gh_for(
         if exited.is_none() {
             match child.try_wait() {
                 Ok(s) => exited = s,
-                Err(e) => return Err(GhError::Failed(format!("cannot wait for {gh}: {e}"))),
+                Err(e) => return Err(GhError::Failed(format!("cannot wait for {program}: {e}"))),
             }
         }
         if let Some(s) = exited
@@ -76,7 +95,7 @@ pub(crate) fn run_gh_for(
         let stop = if cancel.load(Ordering::SeqCst) {
             Some(GhError::Cancelled)
         } else if Instant::now() >= deadline {
-            Some(GhError::Failed("gh timed out".into()))
+            Some(GhError::Failed(format!("{name} timed out")))
         } else {
             None
         };
@@ -96,7 +115,31 @@ pub(crate) fn run_gh_for(
     };
     let out = reader.join().unwrap_or_default();
     if !status.success() {
-        return Err(GhError::Failed(format!("gh exited with {status}")));
+        return Err(GhError::Failed(format!("{name} exited with {status}")));
     }
-    String::from_utf8(out).map_err(|_| GhError::Failed("gh wrote text that is not UTF-8".into()))
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// Issue 355: the working folder given is the program's.
+    #[test]
+    fn a_bounded_program_runs_in_the_folder_given() {
+        let dir = tempfile::tempdir().unwrap();
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let out = super::run_bounded(
+            "pwd",
+            &["-P"],
+            Some(dir.path()),
+            &never,
+            std::time::Duration::from_secs(10),
+            "pwd",
+        )
+        .unwrap_or_else(|_| panic!("pwd did not run"));
+        let want = std::fs::canonicalize(dir.path()).unwrap();
+        assert_eq!(
+            String::from_utf8(out).unwrap().trim_end(),
+            want.to_str().unwrap()
+        );
+    }
 }
