@@ -685,6 +685,17 @@ impl Push {
     }
 }
 
+/// What the secretary asks of the worker after an `update`: the fast-forward of `branch`, ended by
+/// a one-line report, so the turn raises no `done_no_report` (Issue 386).
+pub fn sync_request(branch: &str) -> String {
+    format!(
+        "tell the worker to run git fetch origin and git merge --ff-only origin/{branch}, then \
+         report done in one line (\"fast-forwarded to <head>, nothing committed\"); if the \
+         worker has committed since, the fast-forward fails: it then runs git merge \
+         origin/{branch}, reports done again and you push again."
+    )
+}
+
 /// The command `done` with `branch_pushed`, or `failed`, and the notice to the secretary, together.
 fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
     w.transaction(|w| {
@@ -730,22 +741,21 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
                     ..Default::default()
                 })?;
                 format!(
-                    "The branch {b} of {} holds origin/{base} and is pushed to origin at {new} \
+                    "The branch {} of {} holds origin/{base} and is pushed to origin at {new} \
                      (was {old}). Record it with pr pushed and this head. The worker's tree is \
-                     not changed: tell the worker to run git fetch origin and git merge --ff-only \
-                     origin/{b}. If the worker has committed since, the fast-forward fails: it \
-                     then runs git merge origin/{b} and asks for a push again.",
+                     not changed: {}",
+                    j.branch,
                     j.task,
-                    b = j.branch
+                    sync_request(&j.branch)
                 )
             }
             Ok(Done::Current(head)) => format!(
-                "The branch {b} of {} already holds origin/{base}; nothing was merged. origin has \
+                "The branch {} of {} already holds origin/{base}; nothing was merged. origin has \
                  it at {head}; record it with pr pushed and this head if it is not recorded yet. \
-                 If the worker's tree is behind it, the worker runs git fetch origin and git merge \
-                 --ff-only origin/{b}.",
+                 If the worker's tree is behind it, {}",
+                j.branch,
                 j.task,
-                b = j.branch
+                sync_request(&j.branch)
             ),
             Err(why) => {
                 eprintln!("makibad: {} of {}: {why}", j.verb, j.task);

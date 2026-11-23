@@ -446,8 +446,14 @@ fn adopt(w: &StateWriter, row: &Row, t: &Terminal) -> Outcome {
 /// A new launch of the run of launch `from`, by `makiba up` or after a resume that was not
 /// verified (Issue 41): the same kind, agent, model, brief and workplace, a new spawn id, at
 /// `worktree_ready` (the workplace is used as it is), resuming `conversation` when given, and taken
-/// (`run_taken`). Returns its spawn id.
-pub fn add_relaunch(w: &StateWriter, from: i64, conversation: Option<&str>) -> Result<String> {
+/// (`run_taken`, written with `actor`: `person` for `makiba up`, which runs before `makibad` starts,
+/// Issue 385; `makibad` for its own passes). Returns its spawn id.
+pub fn add_relaunch(
+    w: &StateWriter,
+    from: i64,
+    conversation: Option<&str>,
+    actor: &str,
+) -> Result<String> {
     w.conn().execute(
         "INSERT INTO run_launch (run_id, spawn_id, kind, agent, model, brief, worktree,
                                  conversation_id, stage)
@@ -464,7 +470,7 @@ pub fn add_relaunch(w: &StateWriter, from: i64, conversation: Option<&str>) -> R
     )?;
     w.append_event(&NewEvent {
         kind: "run_taken",
-        actor: Some("makibad"),
+        actor: Some(actor),
         payload: Some(&json!({"task_id": task, "spawn_id": spawn})),
         run_task_id: Some(&task),
         ..Default::default()
