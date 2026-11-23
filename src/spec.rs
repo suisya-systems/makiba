@@ -61,6 +61,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "branch_updated",
     "ci_watch_started",
     "ci_watch_failed",
+    "ci_rerun",
     "run_closed",
     "secretary_renewed",
     "curator_started",
