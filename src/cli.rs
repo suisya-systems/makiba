@@ -243,9 +243,10 @@ pub enum Command {
         #[arg(long)]
         typed: bool,
     },
-    /// Record that a pull request was opened or a fix pushed, and watch its CI.
+    /// Record that a pull request was opened or a fix pushed, and watch its CI; `rerun` watches
+    /// the same head again after a rerun of its failed CI jobs.
     Pr {
-        #[arg(value_parser = ["opened", "pushed"])]
+        #[arg(value_parser = ["opened", "pushed", "rerun"])]
         state: String,
         #[arg(long)]
         repo: String,
