@@ -328,8 +328,10 @@ impl Door {
         }
         // Issue 307: the check before CI reads GitHub and git with the lock released, as the gate.
         let mut base_merge = false;
+        // A rerun records no new head (Issue 375): the head was checked when it was recorded.
+        let rerun = args.get("state").and_then(Value::as_str) == Some("rerun");
         let w = match (v, gate_args(&args)) {
-            (Verb::Pr, Ok((repo, pr, head))) => {
+            (Verb::Pr, Ok((repo, pr, head))) if !rerun => {
                 let read = (|| -> rusqlite::Result<_> {
                     let projects: Vec<(String, Option<String>)> = w
                         .conn()
@@ -1817,7 +1819,7 @@ fn unsaved_work(w: &StateWriter, run: i64) -> Result<(), DoorError> {
     Ok(())
 }
 
-/// `pr opened|pushed` (spec section 12): the event, the older watches of the PR `superseded`
+/// `pr opened|pushed|rerun` (spec section 12): the event, the older watches of the PR `superseded`
 /// and the watch of the new head, as `prwatch::register` does in one transaction. `base_merge`:
 /// the door found the pushed head to be a clean merge of the base (Issue 358).
 fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
@@ -1825,7 +1827,12 @@ fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
     let kind = match state {
         "opened" => "pr_opened",
         "pushed" => "fix_pushed",
-        _ => return Err(usage(format!("state is opened or pushed, not {state:?}"))),
+        "rerun" => "ci_rerun",
+        _ => {
+            return Err(usage(format!(
+                "state is opened, pushed or rerun, not {state:?}"
+            )));
+        }
     };
     let repo = str_arg(args, "repo")?;
     let repo_ok = repo.split_once('/').is_some_and(|(o, n)| {
@@ -1853,6 +1860,37 @@ fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
     let task = str_arg(args, "task")?;
     if !run_exists(w, task)? {
         return Err(refuse(ErrorKind::NotFound, format!("no task {task:?}"), ""));
+    }
+    if kind == "ci_rerun" {
+        // Issue 375: the same head watched again after a rerun of its failed jobs. No new head
+        // is recorded, so neither the check before CI nor the belt reads it.
+        use super::prwatch::RerunRefused;
+        let short = |h: &str| h[..h.len().min(12)].to_string();
+        return match super::prwatch::rerun(w, task, repo, number, head).map_err(internal)? {
+            Ok(r) => Ok(json!({"watch_id": r.watch_id, "status": r.status})),
+            Err(RerunRefused::NotRecorded) => Err(refuse(
+                ErrorKind::NotFound,
+                format!("{repo}#{number} was never recorded at {}", short(head)),
+                "record the head with pr opened or pushed; rerun watches a head already recorded",
+            )),
+            Err(RerunRefused::NotCurrent(current)) => Err(refuse(
+                ErrorKind::Conflict,
+                format!(
+                    "the head recorded last for {repo}#{number} is {}, not {}; a rerun is watched only on the pull request's current head",
+                    short(&current),
+                    short(head)
+                ),
+                "",
+            )),
+            Err(RerunRefused::Passed) => Err(refuse(
+                ErrorKind::Conflict,
+                format!(
+                    "CI already passed for {repo}#{number} at {}; there is nothing to rerun",
+                    short(head)
+                ),
+                "",
+            )),
+        };
     }
     let base_merge = base_merge && kind == "fix_pushed";
     let r = super::prwatch::register_with(w, kind, task, repo, number, head, base_merge)
@@ -4095,11 +4133,11 @@ fn tool(v: Verb) -> Value {
             &["id"],
         ),
         Verb::Pr => (
-            "Record that a pull request was opened or a fix pushed, and have makibad watch the CI of that head. A new head replaces the watch of the older one.",
+            "Record that a pull request was opened or a fix pushed, and have makibad watch the CI of that head. A new head replaces the watch of the older one. rerun: after `gh run rerun <run> --failed`, watch the same head again and get a notice of the rerun's result.",
             Map::from_iter([
                 (
                     "state".into(),
-                    json!({"type": "string", "enum": ["opened", "pushed"]}),
+                    json!({"type": "string", "enum": ["opened", "pushed", "rerun"]}),
                 ),
                 ("repo".into(), text.clone()),
                 ("pr".into(), json!({"type": "integer"})),

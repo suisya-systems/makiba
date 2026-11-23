@@ -159,6 +159,17 @@ fn observe(
 /// Whether a workflow run of `head` has not finished. Unreadable counts as finished: a hiccup
 /// can only fall back to the verdict of the checks, never hold the watch.
 fn unfinished_runs(gh: &str, repo: &str, head: &str, cancel: &AtomicBool) -> bool {
+    runs_going(gh, repo, head, cancel).unwrap_or(false)
+}
+
+/// Whether a workflow run of `head` has not finished, or why it cannot be read. A rerun's watch
+/// (Issue 375) takes an unreadable list as unreadable, never as finished.
+fn runs_going(
+    gh: &str,
+    repo: &str,
+    head: &str,
+    cancel: &AtomicBool,
+) -> std::result::Result<bool, GhError> {
     run_gh(
         gh,
         &[
@@ -170,7 +181,7 @@ fn unfinished_runs(gh: &str, repo: &str, head: &str, cancel: &AtomicBool) -> boo
         ],
         cancel,
     )
-    .is_ok_and(|text| text.lines().any(run_unfinished))
+    .map(|text| text.lines().any(run_unfinished))
 }
 
 // ---- one poller --------------------------------------------------------------------------------
@@ -210,6 +221,24 @@ fn sleep_unless(cancel: &AtomicBool, d: Duration) {
     let until = Instant::now() + d;
     while Instant::now() < until && !cancel.load(Ordering::SeqCst) {
         std::thread::sleep(SLICE.min(until - Instant::now()));
+    }
+}
+
+/// The poll of one activation: `poll_rerun` for a rerun of the head's failed jobs (Issue 375),
+/// `poll` for any other.
+fn poll_activation(
+    gh: &str,
+    repo: &str,
+    head: &str,
+    interval: Duration,
+    budget: Duration,
+    rerun: bool,
+    cancel: &AtomicBool,
+) -> Option<Outcome> {
+    if rerun {
+        poll_rerun(gh, repo, head, interval, budget, cancel)
+    } else {
+        poll(gh, repo, head, interval, budget, cancel)
     }
 }
 
@@ -269,6 +298,92 @@ fn poll(
             if since.elapsed() >= budget {
                 return Some(Outcome::Failed(reason));
             }
+        }
+        sleep_unless(cancel, interval);
+    }
+}
+
+/// The watch of a rerun (Issue 375). Right after `gh run rerun --failed` the checks may still
+/// read the old failed attempt while the workflow run is queued, so a verdict, failed or passed,
+/// is taken only from a reading with no pending check, a readable list of workflow runs none of
+/// which is going, and a second reading of the checks that is decided; and only once the rerun
+/// was seen going (a pending check or an unfinished run), or once the budget has passed since
+/// this poller started with decided readings only (the rerun ended before it was recorded, or
+/// never started: what is read is the head's result either way). What cannot be read, the runs
+/// included, is retried until the budget has passed since the first such reading, and then ends
+/// the watch without a result.
+fn poll_rerun(
+    gh: &str,
+    repo: &str,
+    head: &str,
+    interval: Duration,
+    budget: Duration,
+    cancel: &AtomicBool,
+) -> Option<Outcome> {
+    let started = Instant::now();
+    let (mut attempts, mut bad_since, mut seen_going) = (0u32, None::<Instant>, false);
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        attempts += 1;
+        let unreadable = |e: GhError| match e {
+            GhError::Missing => Err(Outcome::Failed("gh_missing".into())),
+            GhError::Cancelled => Ok(None),
+            GhError::Failed(m) => Ok(Some(format!("gh_unreadable: {m}"))),
+        };
+        // `Err`: the watch ends with that outcome; `Ok(None)` with `cancel` set: cancelled.
+        let step = (|| -> std::result::Result<Option<String>, Outcome> {
+            let s = match observe(gh, repo, head, cancel) {
+                Ok(entries) => summarize(&entries),
+                Err(e) => return unreadable(e),
+            };
+            if s.total == 0 {
+                return Ok(Some(
+                    "no_checks: the head has no check runs and no statuses".into(),
+                ));
+            }
+            if s.pending_count > 0 {
+                seen_going = true;
+                return Ok(None);
+            }
+            match runs_going(gh, repo, head, cancel) {
+                Ok(true) => {
+                    seen_going = true;
+                    return Ok(None);
+                }
+                Ok(false) => {}
+                Err(e) => return unreadable(e),
+            }
+            if !seen_going && started.elapsed() < budget {
+                return Ok(None);
+            }
+            match observe(gh, repo, head, cancel) {
+                Ok(again) => {
+                    let s = summarize(&again);
+                    if s.pending_count == 0 && s.total > 0 {
+                        return Err(Outcome::Concluded(s, attempts));
+                    }
+                    Ok(None)
+                }
+                Err(e) => unreadable(e),
+            }
+        })();
+        let bad = match step {
+            Err(outcome) => return Some(outcome),
+            Ok(bad) => bad,
+        };
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        match bad {
+            Some(reason) => {
+                let since = *bad_since.get_or_insert_with(Instant::now);
+                if since.elapsed() >= budget {
+                    return Some(Outcome::Failed(reason));
+                }
+            }
+            None => bad_since = None,
         }
         sleep_unless(cancel, interval);
     }
@@ -345,6 +460,7 @@ impl PrWatch {
             if self.pollers.contains_key(&id) {
                 continue;
             }
+            let rerun = is_rerun(w, id, &stamp)?;
             let cancel = Arc::new(AtomicBool::new(false));
             let handle = {
                 let (gh, tx, cancel) = (self.gh.clone(), self.tx.clone(), Arc::clone(&cancel));
@@ -353,7 +469,7 @@ impl PrWatch {
                 std::thread::spawn(move || {
                     let (id, stamp, repo, pr, head) = done;
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        poll(&gh, &repo, &head, interval, budget, &cancel)
+                        poll_activation(&gh, &repo, &head, interval, budget, rerun, &cancel)
                     }));
                     let outcome = match run {
                         Ok(Some(o)) => o,
@@ -436,7 +552,7 @@ fn apply(w: &StateWriter, d: &Done) -> Result<()> {
                 "ci_watch_failed",
                 json!({"repo": d.repo, "pr": d.pr, "head_oid": d.head, "reason": reason}),
                 format!(
-                    "The CI watch of {}#{} at {short} ended without a result: {reason}. Run `makiba pr pushed` again for this head to watch it again.",
+                    "The CI watch of {}#{} at {short} ended without a result: {reason}. Run `makiba pr pushed` again for this head to watch it again (`makiba pr rerun` when its failed jobs were rerun).",
                     d.repo, d.pr
                 ),
             ),
@@ -578,6 +694,142 @@ pub fn register_with(
             ..Default::default()
         })?;
         Ok(Registered { watch_id, status })
+    })
+}
+
+/// Whether the activation `stamp` of watch `id` is a rerun (Issue 375): `pr rerun` began it,
+/// which its `ci_rerun` event names. Read from the ledger, so it holds across a restart.
+fn is_rerun(w: &StateWriter, id: i64, stamp: &str) -> Result<bool> {
+    Ok(w.conn().query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'ci_rerun'
+           AND json_extract(payload_json, '$.watch_id') = ?1
+           AND json_extract(payload_json, '$.started_at') = ?2)",
+        params![id, stamp],
+        |r| r.get(0),
+    )?)
+}
+
+/// Why `pr rerun` watched nothing.
+#[derive(Debug, PartialEq, Eq)]
+pub enum RerunRefused {
+    /// No watch of the head was ever recorded for the pull request.
+    NotRecorded,
+    /// The head recorded last for the pull request is this other one.
+    NotCurrent(String),
+    /// The newest `ci_completed` of the head is passed.
+    Passed,
+}
+
+/// `pr rerun` (Issue 375): the head recorded last for the pull request, whose CI was decided
+/// (`completed`) or could not be read (`failed`), is watched again as a new activation, which
+/// `ci_rerun` (with the watch's id and its new `started_at`) marks as a rerun's; a `watching`
+/// row is left as it is. No new head is recorded: no `pr_opened` or `fix_pushed`, and no other
+/// watch is touched.
+pub fn rerun(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+) -> Result<std::result::Result<Registered, RerunRefused>> {
+    w.transaction(|w| {
+        let c = w.conn();
+        let recorded: bool = c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM pr_watches
+               WHERE lower(repo) = lower(?1) AND pr = ?2 AND head_oid = ?3)",
+            params![repo, pr, head],
+            |r| r.get(0),
+        )?;
+        if !recorded {
+            return Ok(Err(RerunRefused::NotRecorded));
+        }
+        // The head recorded last, with the repository as that record spelled it: `register`
+        // keys the rows by that exact spelling, so another spelling's row is an older watch.
+        let current: Option<(Option<String>, Option<String>)> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.repo'), json_extract(payload_json, '$.head_oid')
+                 FROM events
+                 WHERE kind IN ('pr_opened', 'fix_pushed')
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![repo, pr],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let (current_repo, current_head) = current.unwrap_or_default();
+        if current_head.as_deref() != Some(head) {
+            return Ok(Err(RerunRefused::NotCurrent(current_head.unwrap_or_default())));
+        }
+        let existing: Option<(i64, String)> = c
+            .query_row(
+                "SELECT id, status FROM pr_watches WHERE repo = ?1 AND pr = ?2 AND head_oid = ?3",
+                params![current_repo.as_deref().unwrap_or(repo), pr, head],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((id, status)) = existing else {
+            return Ok(Err(RerunRefused::NotRecorded));
+        };
+        if status == "watching" {
+            return Ok(Ok(Registered {
+                watch_id: id,
+                status,
+            }));
+        }
+        let newest: Option<String> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.status') FROM events
+                 WHERE kind = 'ci_completed'
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                   AND json_extract(payload_json, '$.head_oid') = ?3
+                 ORDER BY id DESC LIMIT 1",
+                params![repo, pr, head],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if newest.as_deref() == Some("passed") {
+            return Ok(Err(RerunRefused::Passed));
+        }
+        if status == "superseded" {
+            // The head recorded last always has its row taken up; kept for a row edited by hand.
+            return Ok(Err(RerunRefused::NotCurrent(head.to_string())));
+        }
+        let run_id: Option<i64> = c
+            .query_row("SELECT id FROM runs WHERE task_id = ?1", [task], |r| {
+                r.get(0)
+            })
+            .optional()?;
+        c.execute(
+            "UPDATE pr_watches SET status = 'watching', conclusion = NULL, finished_at = NULL,
+               run_id = ?2, started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1",
+            params![id, run_id],
+        )?;
+        let stamp: String = c.query_row(
+            "SELECT started_at FROM pr_watches WHERE id = ?1",
+            [id],
+            |r| r.get(0),
+        )?;
+        let watched = json!({"repo": repo, "pr": pr, "head_oid": head});
+        let mut payload = watched.clone();
+        payload["watch_id"] = json!(id);
+        payload["started_at"] = json!(stamp);
+        for (kind, payload) in [("ci_rerun", &payload), ("ci_watch_started", &watched)] {
+            w.append_event(&NewEvent {
+                kind,
+                actor: Some("makibad"),
+                payload: Some(payload),
+                run_task_id: Some(task),
+                ..Default::default()
+            })?;
+        }
+        Ok(Ok(Registered {
+            watch_id: id,
+            status: "watching".into(),
+        }))
     })
 }
 
@@ -826,6 +1078,55 @@ esac"#,
                 ),
                 woken as i64
             );
+        }
+    }
+
+    /// A rerun takes up the watch of the head recorded last, as that record spelled the
+    /// repository: the rows are keyed by the exact spelling, so the same head recorded earlier
+    /// under another case is an older row and is left as it is (Issue 375).
+    #[test]
+    fn a_rerun_takes_up_the_row_of_the_spelling_recorded_last() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        let end = |id: i64| {
+            w.conn()
+                .execute(
+                    "UPDATE pr_watches SET status = 'completed', conclusion = 'failed' WHERE id = ?1",
+                    [id],
+                )
+                .unwrap();
+        };
+        let old = register(&w, "pr_opened", "t", "O/r", 5, "abc").unwrap();
+        end(old.watch_id);
+        let new = register(&w, "fix_pushed", "t", "o/r", 5, "abc").unwrap();
+        assert_ne!(old.watch_id, new.watch_id);
+        end(new.watch_id);
+        for asked in ["o/r", "O/R"] {
+            w.conn()
+                .execute(
+                    "UPDATE pr_watches SET status = 'completed' WHERE id = ?1",
+                    [new.watch_id],
+                )
+                .unwrap();
+            let r = rerun(&w, "t", asked, 5, "abc").unwrap().unwrap();
+            assert_eq!(r.watch_id, new.watch_id);
+            assert_eq!(r.status, "watching");
+            let status = |id: i64| -> String {
+                w.conn()
+                    .query_row("SELECT status FROM pr_watches WHERE id = ?1", [id], |r| {
+                        r.get(0)
+                    })
+                    .unwrap()
+            };
+            assert_eq!(status(old.watch_id), "completed");
+            assert_eq!(status(new.watch_id), "watching");
         }
     }
 }
