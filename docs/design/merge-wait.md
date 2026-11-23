@@ -78,10 +78,11 @@ requirement is not needed: the queue tests the combination itself. Source:
 https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue
 and https://docs.github.com/en/actions/writing-workflows/choosing-when-your-workflow-runs/events-that-trigger-workflows#merge_group
 
-Plan [unverified]: available for public repositories owned by an organization, and for private
-repositories of organizations on GitHub Enterprise Cloud; not for repositories owned by a personal
-account. `suisya-systems/makiba` is organization-owned; whether it is public, and the organization's
-plan, are for the owner to confirm. Cost: the queue runs CI once per entry (plus reruns of the
+Plan: a merge queue is available in any public repository owned by an organization, per the
+owner's reading of https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue (the secretary's fetch of that page did not capture the sentence, so it is
+not confirmed by fetched text). `suisya-systems/makiba` meets it: the secretary checked that it is
+public, owned by an organization, on the free plan. Availability for private repositories (GitHub
+Enterprise Cloud) is [unverified] and does not matter here. Cost: the queue runs CI once per entry (plus reruns of the
 entries behind a failure); on a public repository Actions minutes on GitHub-hosted runners are free
 [unverified].
 
@@ -255,7 +256,7 @@ Why:
   the bound.
 - The person's word under `human` is asked once per pull request head, at enqueue.
 
-If the plan does not allow the queue (Q1), the fallback is D now (shorter runs, `strict` kept), not
+If the queue proves unusable after all (Q1 is answered yes, from the owner's reading), the fallback is D now (shorter runs, `strict` kept), not
 B: B lets untested trees land, and makiba has no rota to revert them.
 
 Build Issues the recommendation needs (proposed, to be filed by the secretary after approval):
@@ -276,8 +277,8 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
 
 ## 5. Claims to confirm (unverified)
 
-1. Merge queue availability on this repository's plan and visibility (organization-owned public, or
-   Enterprise Cloud private). Source: the managing-a-merge-queue page above.
+1. Merge queue availability: answered for this repository by the owner's reading of the
+   managing-a-merge-queue page (public, organization-owned); not confirmed by fetched text.
 2. The queue's commit is built on `gh-readonly-queue/<base>/pr-<n>-<sha>`, fires `merge_group`, and
    `main` is fast-forwarded to exactly that commit.
 3. A workflow needs `on: merge_group` to report checks for the queue; whether a `push` run on the
@@ -297,7 +298,8 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
 
 ## 6. Questions for the owner
 
-- Q1. Is `suisya-systems/makiba` public, and does its plan offer the merge queue?
+- Q1. Answered: the repository is public and organization-owned, which the owner reads the
+  merge queue page as enough.
 - Q2. For `acceptance` under the queue: run the declared test targets on the queue's commit
   (recommended), or accept the weaker guarantee (a `merge_group` step that only reports success, or
   a required-check set that differs between the pull request and the queue, if GitHub allows it)?
