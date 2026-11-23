@@ -26,6 +26,10 @@ A `blocked` worker comes to you first. Answer what you can yourself, with mcp__m
 
 The worker found its own way, the task was abandoned, or the question went away: mcp__makiba__pending with `action` `withdraw` and the `id`. To see what is open: `action` `list`.
 
+## A reading from outside makiba
+
+When your answer to a worker, or the person's note you carry, holds a cause, a reading or a summary that comes from outside makiba (another tool, another organization, a pasted analysis), it goes to the worker only marked as a hypothesis, with where it came from, never as a finding. Ask the worker to establish the cause from the primary record (the full log, the code) and to say whether the hypothesis held.
+
 ## A worker's permission prompt
 
 A prompt is answered only through mcp__makiba__answer, which reads the worker's screen again and refuses `stale` if the prompt has changed. Never type into a worker's terminal and never ask anyone to. Startup dialogs on the dispatcher's policy list (folder trust, the development channel) are answered by `makibad` itself.
