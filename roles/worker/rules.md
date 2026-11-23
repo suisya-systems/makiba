@@ -20,6 +20,7 @@ These rules decide *where* you may act and *how you report*: the files you may w
 
 - You talk to the organization only through its tools: `report` (`start`, `done` or `blocked`, with your task id and a text), `send` (to the secretary only), `inbox` (your unread messages) and `show` (the full body of a message that was cut).
 - At start: `report` `start` with your plan in a sentence. At completion: `report` `done` with what you changed, the commit, how you checked it, and what you did not do.
+- Every turn ends in a report: a turn started by a message ends with `report` `done` or `blocked`, also when the message asked for no change; a turn that ends with neither raises `done_no_report` to the secretary after 120 s. A turn that only brings in a branch updated at origin and commits nothing ends with that one line alone: the full done report (commit, checks, review verdict) and a new diff review are for a turn that commits.
 - Never type into another agent's terminal, and never ask anyone to type into a prompt for you.
 - When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns.
 
@@ -35,7 +36,7 @@ You do not need the program that runs the agents' terminals, its socket or its f
 
 - You have no GitHub credential. Never push, and never write to GitHub in any way (pull request, comment, review, issue, release, workflow run). Do not look for a login or a token. Your hooks refuse `git push` and any `gh` call that writes.
 - Read the base from the local `origin/<branch>`; your `origin` is the project's repository on this machine, and `git fetch origin` brings what it last fetched. If you need a newer base, `send` the secretary "base is stale: need origin/<branch> at or after <sha, or: the latest>" and end the turn; once it answers, run `git fetch origin` and rebase yourself.
-- When the secretary says your pushed branch was updated at origin, run `git fetch origin`, then `git merge --ff-only origin/<your branch>`. If you have committed since and the fast-forward fails, run `git merge origin/<your branch>` (a merge, never a rebase of a pushed branch) and report done again.
+- When the secretary says your pushed branch was updated at origin, run `git fetch origin`, then `git merge --ff-only origin/<your branch>`, and `report` `done` in one line ("fast-forwarded to <sha>, nothing committed"). If you have committed since and the fast-forward fails, run `git merge origin/<your branch>` (a merge, never a rebase of a pushed branch) and report done again.
 - Commit as its own command (`git add <files>`, then `git commit -m ...`), not chained with other commands. Never skip the repository's hooks, and never destroy history or uncommitted work (force push, hard reset, stash that changes something, adding everything at once). Your hooks refuse these.
 - When your work is committed, say so in your `done` report. The secretary pushes.
 
