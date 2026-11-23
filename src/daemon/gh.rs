@@ -29,6 +29,16 @@ pub(crate) enum GhError {
 
 /// Run `gh args`, give its stdout. The child is killed at the timeout and when `cancel` is set.
 pub(crate) fn run_gh(gh: &str, args: &[&str], cancel: &AtomicBool) -> Result<String, GhError> {
+    run_gh_for(gh, args, cancel, GH_TIMEOUT)
+}
+
+/// `run_gh` with the caller's timeout: a read someone waits for (Issue 317).
+pub(crate) fn run_gh_for(
+    gh: &str,
+    args: &[&str],
+    cancel: &AtomicBool,
+    timeout: Duration,
+) -> Result<String, GhError> {
     // A process group of its own, so that what the program started goes with it when it is ended.
     let mut child = Command::new(gh)
         .args(args)
@@ -47,7 +57,7 @@ pub(crate) fn run_gh(gh: &str, args: &[&str], cancel: &AtomicBool) -> Result<Str
         let _ = pipe.read_to_end(&mut out);
         out
     });
-    let deadline = Instant::now() + GH_TIMEOUT;
+    let deadline = Instant::now() + timeout;
     // The deadline and the cancel flag hold until the output is collected as well: a descendant
     // may keep the pipe open after the child has gone.
     let mut exited = None;

@@ -90,7 +90,7 @@ Once `budget_tasks` are all taken or `budget_hours` is past, nothing new is disp
 
 The rule the owner cares about: whoever holds the loop is outside the actor it restrains. The range restrains the secretary (what may go in without asking, how much). So the secretary must not be the one who decides that a candidate is inside, that a slot is free or that the budget allows one more. `makibad` holds the clock, the count and the dispatch; the secretary keeps the judgment (answering workers, the pull request, the merge under the mode, the close, the stop lines that are judgment).
 
-`makibad` dispatches the next task itself (decided, Q2): a run with the range's `brief_head`, then the Issue's title, body and comments from `range_candidates`. That also ends copying Issue text to workers by hand. The task id is `r<range id>-<issue>`, so a task is dispatched once whatever restarts. The secretary may still dispatch a range candidate with a brief of its own, naming the range; `makibad` refuses it when the Issue is outside the range or no slot or budget is left.
+`makibad` dispatches the next task itself (decided, Q2): a run with the range's `brief_head`, then the Issue's title, body and comments from `range_candidates`. That also ends copying Issue text to workers by hand; a dispatch that names `issue` gets the Issue's text the same way, read at dispatch (Issue 317, spec section 12). The task id is `r<range id>-<issue>`, so a task is dispatched once whatever restarts. The secretary may still dispatch a range candidate with a brief of its own, naming the range; `makibad` refuses it when the Issue is outside the range or no slot or budget is left.
 
 ### 3.2 The count
 
