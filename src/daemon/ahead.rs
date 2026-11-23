@@ -6,12 +6,13 @@
 //! - `report`: its worker's `report blocked` is its design (`design_reported`); `report done` is
 //!   refused while it waits. From the design report it waits for a landing (`belt::LANDING_WAIT`):
 //!   it counts in neither count and may be parked (`park.rs`).
-//! - `settle`, from the records each pass: every task it waits for closed `completed`, its pull
-//!   request read merged and the merge commit seen in the project's clone (`landed_in_clone`, the
-//!   workers' `origin`) is a landing, and the run is woken (or told) with what landed. A task it
-//!   waits for that was abandoned, or whose pull request was read closed unmerged, will not land:
-//!   the wait is settled and the person is asked whether to go on without it. A task that failed
-//!   is a question too, and the person's `no` (`answered`) releases the wait.
+//! - `settle`, from the records each pass, task by task of what it waits for: closed `completed`,
+//!   its pull request read merged and the merge commit seen in the project's clone
+//!   (`landed_in_clone`, the workers' `origin`) is a landing. One abandoned, whose newest pull
+//!   request was read closed unmerged, or whose launch failed, is a question to the person: go on
+//!   without it? Their `yes` (`answered`) lets that one task go (`ahead_released`); the others are
+//!   still waited for. When every task has landed or been let go, the wait is settled and the run
+//!   is woken (or told) with what landed.
 //!
 //! Each wait is settled once (`ahead_settled`): a task id is dispatched once.
 
@@ -143,12 +144,49 @@ struct Dep {
     task: String,
     /// Its run's id and status; `None` when the run is gone.
     run: Option<(i64, String)>,
+    /// Its newest pull request was read closed unmerged.
     pr_closed: bool,
     merged: Option<Value>,
     in_clone: Option<Value>,
+    /// The person let the waiting run go on without it.
+    released: bool,
 }
 
-fn dep(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Dep> {
+impl Dep {
+    fn landed(&self) -> bool {
+        self.run.as_ref().is_some_and(|(_, s)| s == "completed")
+            && self.merged.is_some()
+            && self.in_clone.is_some()
+    }
+
+    /// Why it will not land as things are, if so: a question to the person.
+    fn stuck(&self) -> Option<(&'static str, String)> {
+        match &self.run {
+            None => Some((
+                "dropped",
+                format!("#{}'s task {} is gone", self.issue, self.task),
+            )),
+            Some((_, s)) if s == "abandoned" => Some((
+                "dropped",
+                format!("#{}'s task {} was abandoned", self.issue, self.task),
+            )),
+            Some((_, s)) if s == "failed" => Some((
+                "failed",
+                format!("the launch of #{}'s task {} failed", self.issue, self.task),
+            )),
+            Some(_) if self.pr_closed => Some((
+                "dropped",
+                format!(
+                    "the pull request of #{}'s task {} was closed unmerged",
+                    self.issue, self.task
+                ),
+            )),
+            Some(_) => None,
+        }
+    }
+}
+
+fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Result<Dep> {
     let run: Option<(i64, String)> = c
         .query_row(
             "SELECT id, status FROM runs WHERE task_id = ?1",
@@ -167,13 +205,29 @@ fn dep(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Dep> {
             .optional()?;
         Ok(p.and_then(|p| serde_json::from_str(&p).ok()))
     };
+    let pr_closed: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ?1 AND {})",
+            super::belt::pr_closed_sql("r")
+        ),
+        [task],
+        |r| r.get(0),
+    )?;
+    let released: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
+                        WHERE r.task_id = ?1 AND e.kind = 'ahead_released'
+                          AND json_extract(e.payload_json, '$.issue') = ?2)",
+        rusqlite::params![waiting, issue],
+        |r| r.get(0),
+    )?;
     Ok(Dep {
         issue,
         task: task.to_string(),
         run,
-        pr_closed: payload("pr_closed")?.is_some(),
+        pr_closed,
         merged: payload("pr_merged")?,
         in_clone: payload("landed_in_clone")?,
+        released,
     })
 }
 
@@ -200,53 +254,13 @@ pub fn settle(w: &StateWriter) -> Result<()> {
             .issues
             .iter()
             .zip(&wait.tasks)
-            .map(|(i, t)| dep(w.conn(), *i, t))
+            .map(|(i, t)| dep(w.conn(), &task, *i, t))
             .collect::<rusqlite::Result<_>>()?;
-        let dropped: Vec<&Dep> = deps
-            .iter()
-            .filter(|d| d.pr_closed || d.run.as_ref().is_none_or(|(_, s)| s == "abandoned"))
-            .collect();
-        if !dropped.is_empty() {
-            let what = named(&dropped.iter().map(|d| d.issue).collect::<Vec<_>>());
-            event(
-                w,
-                "ahead_settled",
-                &task,
-                json!({"task_id": task, "outcome": "dependency_dropped",
-                       "issues": wait.issues,
-                       "dropped": dropped.iter().map(|d| d.issue).collect::<Vec<_>>()}),
-            )?;
-            stop(
-                w,
-                &Stop {
-                    range,
-                    task: Some(&task),
-                    line: "decision",
-                    key: format!("ahead:{task}"),
-                    question: format!(
-                        "{what}, which {task} waited for, will not land (its task abandoned or its pull request closed unmerged). Should {task} go on without it?"
-                    ),
-                    background: format!(
-                        "{task} was dispatched for its design only, because {what} had not landed; it has its design and waits."
-                    ),
-                    if_yes: format!(
-                        "The secretary tells {task} to build without {what}, as its design allows."
-                    ),
-                    if_no: format!(
-                        "{task} is closed as abandoned; its design stays in its report."
-                    ),
-                    recommend: "None: it depends on what the dropped work was.",
-                    why: "Only you decide what the range builds without.",
-                    recommend_answer: "none",
-                    more: json!({"kind": "order"}),
-                },
-            )?;
-            continue;
-        }
-        for d in deps
-            .iter()
-            .filter(|d| d.run.as_ref().is_some_and(|(_, s)| s == "failed"))
-        {
+        // Each task that will not land as things are is a question, once per run of it.
+        for d in deps.iter().filter(|d| !d.released && !d.landed()) {
+            let Some((how, what)) = d.stuck() else {
+                continue;
+            };
             let run = d.run.as_ref().map_or(0, |(id, _)| *id);
             stop(
                 w,
@@ -254,36 +268,51 @@ pub fn settle(w: &StateWriter) -> Result<()> {
                     range,
                     task: Some(&task),
                     line: "decision",
-                    key: format!("ahead-failed:{task}:{run}"),
+                    key: format!("ahead-{how}:{task}:{}:{run}", d.issue),
                     question: format!(
-                        "#{}'s task {} failed, and {task} waits for it to land. Keep waiting (yes) or go on without it (no)?",
-                        d.issue, d.task
+                        "{what}, and {task} waits for #{} to land. Should {task} go on without #{}?",
+                        d.issue, d.issue
                     ),
                     background: format!(
-                        "{task} was dispatched for its design only and waits for #{} to land; the launch of {} failed.",
-                        d.issue, d.task
+                        "{task} was dispatched for its design only, because #{} had not landed; it has its design and waits.",
+                        d.issue
                     ),
                     if_yes: format!(
-                        "{task} keeps waiting; when {} is launched again and lands, {task} is woken to build.",
-                        d.task
+                        "{task} no longer waits for #{}; once what else it waits for has landed it is woken to build.",
+                        d.issue
                     ),
-                    if_no: format!("{task} is woken and builds without #{}.", d.issue),
-                    recommend: "None: it depends on whether the failed task is launched again.",
+                    if_no: format!(
+                        "{task} keeps waiting for #{}: until {} lands, or the secretary closes {task}.",
+                        d.issue, d.task
+                    ),
+                    recommend: "None: it depends on what the work left out was.",
                     why: "Only you decide what the range builds without.",
                     recommend_answer: "none",
-                    more: json!({"kind": "order"}),
+                    more: json!({"kind": "order", "ahead_task": task, "ahead_issue": d.issue}),
                 },
             )?;
         }
-        let landed = deps.iter().all(|d| {
-            d.run.as_ref().is_some_and(|(_, s)| s == "completed")
-                && d.merged.is_some()
-                && d.in_clone.is_some()
-        });
-        if deps.is_empty() || !landed {
+        if deps.is_empty() || !deps.iter().all(|d| d.released || d.landed()) {
             continue;
         }
-        let prs: Vec<Value> = deps
+        let landed: Vec<&Dep> = deps.iter().filter(|d| !d.released).collect();
+        let let_go: Vec<i64> = deps
+            .iter()
+            .filter(|d| d.released)
+            .map(|d| d.issue)
+            .collect();
+        if landed.is_empty() {
+            // Every task let go: the run is woken as answered (`park::settle`).
+            event(
+                w,
+                "ahead_settled",
+                &task,
+                json!({"task_id": task, "outcome": "released", "issues": wait.issues,
+                       "released": let_go}),
+            )?;
+            continue;
+        }
+        let prs: Vec<Value> = landed
             .iter()
             .map(|d| {
                 let m = d.merged.clone().unwrap_or_default();
@@ -308,17 +337,27 @@ pub fn settle(w: &StateWriter) -> Result<()> {
                 )
             })
             .collect();
+        let without = if let_go.is_empty() {
+            String::new()
+        } else {
+            format!(
+                " You build without {}, as the person decided.",
+                named(&let_go)
+            )
+        };
         let body = format!(
-            "{}. origin/{base} is now {head}. Your design-only wait is over: run git fetch origin, bring your branch up to origin/{base}, and build: code, tests, the reviews, then report done.",
+            "{}. origin/{base} is now {head}. Your design-only wait is over: run git fetch origin, bring your branch up to origin/{base}, and build: code, tests, the reviews, then report done.{without}",
             each.join("; ")
         );
-        let detail = json!({"issues": wait.issues, "prs": prs, "base": base, "base_head": head});
+        let issues: Vec<i64> = landed.iter().map(|d| d.issue).collect();
+        let detail = json!({"issues": issues, "prs": prs, "base": base, "base_head": head,
+                            "released": let_go});
         event(
             w,
             "ahead_settled",
             &task,
-            json!({"task_id": task, "outcome": "landed", "issues": wait.issues, "prs": prs,
-                   "base": base, "base_head": head}),
+            json!({"task_id": task, "outcome": "landed", "issues": issues, "prs": prs,
+                   "base": base, "base_head": head, "released": let_go}),
         )?;
         if status == "parked" {
             super::park::wake_with_notice(w, &task, "landed", detail, &body)?;
@@ -329,36 +368,33 @@ pub fn settle(w: &StateWriter) -> Result<()> {
     Ok(())
 }
 
-/// The person answered the entry `pending` with `answer`: a `no` to a failed dependency's
-/// question (`ahead-failed:`) releases the wait, so the run is woken to build without it.
+/// The person answered the entry `pending` with `answer`: a `yes` to the question about a task
+/// that will not land lets the waiting run go on without it (`ahead_released`); the wait is then
+/// settled if nothing else is waited for.
 pub fn answered(w: &StateWriter, pending: i64, answer: &str) -> Result<()> {
-    let key: Option<String> = w
+    let row: Option<(Option<String>, Option<i64>)> = w
         .conn()
         .query_row(
-            "SELECT json_extract(context_json, '$.key') FROM pending WHERE id = ?1",
+            "SELECT json_extract(context_json, '$.ahead_task'),
+                    json_extract(context_json, '$.ahead_issue')
+             FROM pending WHERE id = ?1",
             [pending],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?
-        .flatten();
-    let Some(task) = key
-        .as_deref()
-        .and_then(|k| k.strip_prefix("ahead-failed:"))
-        .and_then(|k| k.rsplit_once(':'))
-        .map(|(task, _)| task.to_string())
-    else {
+        .optional()?;
+    let Some((Some(task), Some(issue))) = row else {
         return Ok(());
     };
-    if answer != "no" || open_wait(w.conn(), &task)?.is_none() {
+    if answer != "yes" || open_wait(w.conn(), &task)?.is_none() {
         return Ok(());
     }
     event(
         w,
-        "ahead_settled",
+        "ahead_released",
         &task,
-        json!({"task_id": task, "outcome": "released", "pending_id": pending}),
+        json!({"task_id": task, "issue": issue, "pending_id": pending}),
     )?;
-    Ok(())
+    settle(w)
 }
 
 #[cfg(test)]
@@ -627,56 +663,126 @@ mod tests {
         ));
     }
 
-    /// A dependency abandoned will not land: the wait is settled and the person is asked. A
-    /// dependency failed is asked about once, and the person's `no` releases the wait.
+    /// A dependency abandoned, closed unmerged or whose launch failed is a question to the person,
+    /// once per run of it; `no` keeps the run waiting, `yes` lets that one task go and, with
+    /// nothing else waited for, settles the wait.
     #[test]
-    fn a_dropped_dependency_is_a_question_and_a_failed_one_is_released_by_no() {
-        let (_d, w) = org();
-        report_design(&w);
-        set(&w, "r1-1", "abandoned");
-        w.transaction(settle).unwrap();
-        assert_eq!(
-            n(
-                &w,
-                "SELECT count(*) FROM events WHERE kind = 'ahead_settled'
-                   AND json_extract(payload_json, '$.outcome') = 'dependency_dropped'"
-            ),
-            1
-        );
-        assert_eq!(
-            n(
+    fn a_task_that_will_not_land_is_a_question_and_yes_lets_it_go() {
+        for how in ["abandoned", "failed", "closed"] {
+            let (_d, w) = org();
+            report_design(&w);
+            if how == "closed" {
+                set(&w, "r1-1", "review");
+                ev(
+                    &w,
+                    "pr_closed",
+                    "r1-1",
+                    json!({"repo": "o/p", "pr": 11, "task_id": "r1-1"}),
+                );
+            } else {
+                set(&w, "r1-1", how);
+            }
+            w.transaction(settle).unwrap();
+            w.transaction(settle).unwrap();
+            let asked = n(
                 &w,
                 "SELECT count(*) FROM pending WHERE status = 'escalated'
                    AND json_extract(context_json, '$.stop_line') = 'decision'
-                   AND json_extract(context_json, '$.key') = 'ahead:r1-2'"
-            ),
-            1
-        );
+                   AND json_extract(context_json, '$.ahead_task') = 'r1-2'
+                   AND json_extract(context_json, '$.ahead_issue') = 1",
+            );
+            assert_eq!(asked, 1, "{how}: asked once");
+            let id = n(&w, "SELECT max(id) FROM pending");
+            answered(&w, id, "no").unwrap();
+            assert!(
+                open_wait(w.conn(), "r1-2").unwrap().is_some(),
+                "{how}: no waits"
+            );
+            answered(&w, id, "yes").unwrap();
+            assert!(
+                open_wait(w.conn(), "r1-2").unwrap().is_none(),
+                "{how}: yes lets it go"
+            );
+            assert_eq!(
+                n(
+                    &w,
+                    "SELECT count(*) FROM events WHERE kind = 'ahead_settled'
+                       AND json_extract(payload_json, '$.outcome') = 'released'"
+                ),
+                1,
+                "{how}"
+            );
+        }
+    }
 
+    /// With two tasks waited for, letting one go keeps the run waiting for the other: it may not
+    /// report done, and it is woken only when the other has landed, told it builds without the
+    /// first.
+    #[test]
+    fn letting_one_of_two_go_keeps_the_wait_for_the_other() {
         let (_d, w) = org();
+        w.upsert_run(&RunUpsert {
+            task_id: "r1-3",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute(
+                "UPDATE events SET payload_json = json_set(payload_json,
+                   '$.waits_for', json('[1, 3]'), '$.waits_tasks', json('[\"r1-1\", \"r1-3\"]'))
+                 WHERE kind = 'belt_dispatched'
+                   AND json_extract(payload_json, '$.task_id') = 'r1-2'",
+                [],
+            )
+            .unwrap();
         report_design(&w);
-        set(&w, "r1-1", "failed");
+        set(&w, "r1-2", "parked");
+        set(&w, "r1-3", "abandoned");
         w.transaction(settle).unwrap();
-        w.transaction(settle).unwrap();
-        let id: i64 = n(
+        let id = n(
             &w,
-            "SELECT id FROM pending WHERE json_extract(context_json, '$.key') LIKE 'ahead-failed:r1-2:%'",
+            "SELECT id FROM pending WHERE json_extract(context_json, '$.ahead_issue') = 3",
         );
-        assert!(open_wait(w.conn(), "r1-2").unwrap().is_some());
         answered(&w, id, "yes").unwrap();
-        assert!(open_wait(w.conn(), "r1-2").unwrap().is_some(), "yes waits");
-        answered(&w, id, "no").unwrap();
         assert!(
-            open_wait(w.conn(), "r1-2").unwrap().is_none(),
-            "no releases"
+            open_wait(w.conn(), "r1-2").unwrap().is_some(),
+            "#1 still waited for"
         );
-        assert_eq!(
-            n(
-                &w,
-                "SELECT count(*) FROM events WHERE kind = 'ahead_settled'
-                   AND json_extract(payload_json, '$.outcome') = 'released'"
-            ),
-            1
+        assert!(matches!(
+            report(w.conn(), "r1-2", "done").unwrap(),
+            Report::Refused(_)
+        ));
+        set(&w, "r1-1", "completed");
+        ev(
+            &w,
+            "pr_merged",
+            "r1-1",
+            json!({"repo": "o/p", "pr": 11, "merge_commit": "m1", "task_id": "r1-1"}),
+        );
+        ev(
+            &w,
+            "landed_in_clone",
+            "r1-1",
+            json!({"task_id": "r1-1", "merge_commit": "m1", "base": "main", "base_head": "h9"}),
+        );
+        w.transaction(settle).unwrap();
+        assert!(open_wait(w.conn(), "r1-2").unwrap().is_none());
+        assert_eq!(status(&w, "r1-2"), "suspended");
+        let told: String = w
+            .conn()
+            .query_row(
+                "SELECT body FROM messages WHERE recipient = 'w-r1-2' AND kind = 'notice'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(told.starts_with("#1 landed:"), "{told}");
+        assert!(
+            told.ends_with("You build without #3, as the person decided."),
+            "{told}"
         );
     }
 }

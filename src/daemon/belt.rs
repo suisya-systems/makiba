@@ -1177,6 +1177,26 @@ fn open_runs(w: &StateWriter, id: i64) -> Result<i64> {
     )
 }
 
+/// Whether the run `alias` has its newest pull request (its newest watch's) read closed unmerged
+/// (`pr_closed`, Issue 284). A pull request opened again after it is not.
+pub(super) fn pr_closed_sql(alias: &str) -> String {
+    format!(
+        "EXISTS (SELECT 1 FROM events pc WHERE pc.run_id = {alias}.id AND pc.kind = 'pr_closed'
+           AND json_extract(pc.payload_json, '$.pr') =
+               (SELECT pw.pr FROM pr_watches pw WHERE pw.id =
+                  (SELECT max(px.id) FROM pr_watches px WHERE px.run_id = {alias}.id)))"
+    )
+}
+
+/// The tasks open design-only runs wait for (Issue 284): their landings and closures are read
+/// whatever their status.
+const AWAITED: &str = "SELECT j.value FROM runs o
+    JOIN events e ON e.run_id = o.id AND e.kind = 'belt_dispatched'
+         AND json_extract(e.payload_json, '$.design_only') = 1
+    JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
+    WHERE o.status IN ('queued', 'in_use', 'suspended', 'parked')
+      AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = o.id AND s.kind = 'ahead_settled')";
+
 /// The task of the range `id` (or its chain) that a design-only candidate may wait for, for the
 /// Issue `issue` (belt.md 4.3): the run dispatched for it, not abandoned or failed, with a pull
 /// request recorded, no pull request read closed unmerged, and not waiting for the person (4.2: a
@@ -1192,10 +1212,11 @@ pub(super) fn ahead_of(c: &Connection, id: i64, issue: i64) -> rusqlite::Result<
                      AND json_extract(e.payload_json, '$.issue') = ?2)
                AND r.status NOT IN ('abandoned', 'failed')
                AND EXISTS (SELECT 1 FROM pr_watches p WHERE p.run_id = r.id)
-               AND NOT EXISTS (SELECT 1 FROM events x WHERE x.run_id = r.id AND x.kind = 'pr_closed')
+               AND NOT {closed}
                AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id = r.id
                                AND q.status = 'escalated')
-             ORDER BY r.id LIMIT 1"
+             ORDER BY r.id LIMIT 1",
+            closed = pr_closed_sql("r")
         ),
         params![id, issue],
         |r| r.get(0),
@@ -1907,14 +1928,18 @@ fn due(w: &StateWriter, interval_ms: i64) -> Result<Option<(Spec, i64, Option<i6
 
 /// The completed runs of a range with a registered pull request and no recorded merge.
 fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
-    let mut q = w.conn().prepare(
+    // Also every task an open design-only run waits for, whatever its status but abandoned, so
+    // that its pull request closed unmerged is seen while it is still in review (Issue 284).
+    let mut q = w.conn().prepare(&format!(
         "SELECT r.task_id, p.repo, p.pr FROM runs r
          JOIN pr_watches p ON p.id = (SELECT max(id) FROM pr_watches WHERE run_id = r.id)
-         WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked')
-           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind IN ('pr_merged', 'pr_closed')
-                           AND e.run_id = r.id)
+         WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked'
+                OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id)
+           AND NOT {}
          ORDER BY r.id",
-    )?;
+        pr_closed_sql("r")
+    ))?;
     Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<std::result::Result<_, _>>()?)
 }
@@ -2110,20 +2135,40 @@ fn admit(
                 .iter()
                 .any(|f| set.contains(f) || dispatched_in(w, s.id, *f).unwrap_or(false))
     };
-    // With `inside`, the follow-ups of the range's Issues are its Issues too, and theirs in turn.
+    // With `inside`, a follow-up the range takes only as one stays out (asked for) when it needs a
+    // host the project does not list, or names the stop line it would hit.
+    let hosts = super::project::hosts_of(w.conn(), &s.slug)?;
+    let kept_out = |body: &str| -> Option<String> {
+        if let Some(h) = values_on_lines(body, "needs host:")
+            .into_iter()
+            .find(|h| !host_listed(&hosts, h))
+        {
+            return Some(format!("follow_up (ask: needs host {h})"));
+        }
+        values_on_lines(body, "stop line:")
+            .first()
+            .map(|line| format!("follow_up (ask: stop line {line})"))
+    };
+    // With `inside`, the follow-ups of the range's Issues are its Issues too, and theirs in turn;
+    // one kept out is listed, and its own follow-ups are not taken through it.
     let mut followed = BTreeSet::new();
+    let mut seeds = numbers.clone();
     let mut more_to_find = inside;
     while more_to_find {
-        let more: Vec<i64> = open
+        let more: Vec<(i64, &Value)> = open
             .iter()
-            .filter(|(n, i)| !numbers.contains(n) && follow_of(i, &numbers))
-            .map(|(n, _)| *n)
+            .filter(|(n, i)| !numbers.contains(n) && follow_of(i, &seeds))
+            .map(|(n, i)| (*n, *i))
             .collect();
         more_to_find = !more.is_empty();
-        followed.extend(more.iter().copied());
-        numbers.extend(more);
+        for (n, i) in more {
+            numbers.insert(n);
+            followed.insert(n);
+            if kept_out(i["body"].as_str().unwrap_or("")).is_none() {
+                seeds.insert(n);
+            }
+        }
     }
-    let hosts = super::project::hosts_of(w.conn(), &s.slug)?;
     // The range's Issues in this read: with `ask`, a follow-up of any of them is asked for.
     let members = numbers.clone();
     for n in numbers {
@@ -2162,16 +2207,7 @@ fn admit(
             why = Some("follow_up (ask)".into());
         }
         if why.is_none() && followed.contains(&n) {
-            // With `inside`, a follow-up the range takes only as one stays out when it needs a
-            // host the project does not list, or names the stop line it would hit.
-            if let Some(h) = values_on_lines(&body, "needs host:")
-                .into_iter()
-                .find(|h| !host_listed(&hosts, h))
-            {
-                why = Some(format!("follow_up (ask: needs host {h})"));
-            } else if let Some(line) = values_on_lines(&body, "stop line:").first() {
-                why = Some(format!("follow_up (ask: stop line {line})"));
-            }
+            why = kept_out(&body);
         }
         let mut waits = None;
         if why.is_none() {
@@ -2376,12 +2412,19 @@ fn record(
         let known = count(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE e.kind IN ('pr_merged', 'pr_closed') AND r.task_id = ?1",
+             WHERE e.kind = 'pr_merged' AND r.task_id = ?1",
             [task],
         )?;
+        let closed = count(
+            w,
+            "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
+             WHERE e.kind = 'pr_closed' AND r.task_id = ?1
+               AND json_extract(e.payload_json, '$.pr') = ?2",
+            params![task, pr],
+        )?;
         // A pull request closed without its merge: it will not land (belt.md 4.3, a dependency
-        // dropped), and it is not read again.
-        if known == 0 && v["state"].as_str() == Some("CLOSED") {
+        // dropped), and it is not read again unless the task records another.
+        if known == 0 && closed == 0 && v["state"].as_str() == Some("CLOSED") {
             event(
                 w,
                 "pr_closed",
@@ -2978,6 +3021,126 @@ mod tests {
         let why = |n: i64| c.iter().find(|c| c.issue == n).unwrap().why.clone();
         assert_eq!(why(5), None);
         assert_eq!(why(6).as_deref(), Some("follow_up (ask)"));
+    }
+
+    /// With `inside`, a follow-up kept out (a host not listed, a stop line) is listed as asked
+    /// for, and a follow-up of it alone is not taken through it; one of a kept follow-up is.
+    #[test]
+    fn a_follow_up_kept_out_does_not_take_its_own_follow_ups_in() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head,
+                                     proposed_by, follow_ups)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 1, 9, 'h', 's', 'inside')",
+                [],
+            )
+            .unwrap();
+        let spec = Spec {
+            id: 1,
+            slug: "p".into(),
+            origin: None,
+            listed: vec![1],
+            takes: Takes::default(),
+            follow_inside: true,
+        };
+        let issue = |n: i64, body: &str| {
+            json!({"number": n, "title": "t", "body": body, "labels": [], "comments": [],
+                   "createdAt": "2026-11-23T00:00:00Z"})
+        };
+        let f = Fetched {
+            repo: "o/p".into(),
+            open: vec![
+                issue(1, "The first."),
+                issue(2, "Follow-up of #1\nNeeds host: example.org"),
+                issue(3, "Follow-up of #2"),
+                issue(4, "Follow-up of #1"),
+                issue(5, "Follow-up of #4\nStop line: irreversible"),
+                issue(6, "Follow-up of #4"),
+            ],
+            prs: Vec::new(),
+            views: BTreeMap::new(),
+        };
+        let c = admit(&w, &spec, &f, Some("2026-11-22T00:00:00Z")).unwrap();
+        let why = |n: i64| {
+            c.iter()
+                .find(|c| c.issue == n)
+                .map(|c| c.why.clone().unwrap_or_else(|| "admitted".into()))
+        };
+        assert_eq!(
+            why(2).as_deref(),
+            Some("follow_up (ask: needs host example.org)")
+        );
+        assert_eq!(why(3), None, "taken only through a follow-up kept out");
+        assert_eq!(why(4).as_deref(), Some("admitted"));
+        assert_eq!(
+            why(5).as_deref(),
+            Some("follow_up (ask: stop line irreversible)")
+        );
+        assert_eq!(why(6).as_deref(), Some("admitted"));
+    }
+
+    /// The landing of a task a design-only run waits for is read whatever its status, so that a
+    /// pull request closed unmerged in review is seen; a closed one is not read again until the
+    /// task records another pull request.
+    #[test]
+    fn the_pull_request_of_an_awaited_task_is_read_in_review_until_closed() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        run_of(&w, id, "r1-2");
+        event(
+            &w,
+            "belt_dispatched",
+            "makibad",
+            Some("r1-1"),
+            json!({"range_id": id, "issue": 1, "task_id": "r1-1", "design_only": false}),
+        )
+        .unwrap();
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'review' WHERE task_id = 'r1-1'",
+                [],
+            )
+            .unwrap();
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        assert!(
+            landing_candidates(&w).unwrap().is_empty(),
+            "nothing waits for it"
+        );
+        event(
+            &w,
+            "belt_dispatched",
+            "makibad",
+            Some("r1-2"),
+            json!({"range_id": id, "issue": 2, "task_id": "r1-2", "design_only": true,
+                   "waits_for": [1], "waits_tasks": ["r1-1"]}),
+        )
+        .unwrap();
+        let read = |w: &StateWriter| -> Vec<i64> {
+            landing_candidates(w)
+                .unwrap()
+                .into_iter()
+                .map(|(_, _, pr)| pr)
+                .collect()
+        };
+        assert_eq!(read(&w), [11]);
+        let o = Outcome {
+            range: None,
+            landings: vec![(
+                "r1-1".into(),
+                "o/p".into(),
+                11,
+                Some(json!({"state": "CLOSED", "title": "T"})),
+            )],
+            clones: Vec::new(),
+        };
+        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        assert_eq!(read(&w), Vec::<i64>::new(), "closed: not read again");
+        assert!(ahead_of(w.conn(), id, 1).unwrap().is_none());
+        watch(&w, "r1-1", 12, &"b".repeat(40));
+        assert_eq!(read(&w), [12], "another pull request is read");
+        assert_eq!(ahead_of(w.conn(), id, 1).unwrap().as_deref(), Some("r1-1"));
     }
 
     /// A merge is seen in the project's clone only once its default branch, fetched from its
