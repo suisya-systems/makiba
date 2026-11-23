@@ -1986,7 +1986,8 @@ fn due(w: &StateWriter, interval_ms: i64) -> Result<Option<(Spec, i64, Option<i6
 /// The completed runs of a range with a registered pull request and no recorded merge.
 fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
     // Also every task an open design-only run waits for, whatever its status but abandoned, so
-    // that its pull request closed unmerged is seen while it is still in review (Issue 284).
+    // that its pull request closed unmerged is seen while it is still in review (Issue 284). A
+    // pull request read closed is read on until it merges: it may be reopened on GitHub.
     let mut q = w.conn().prepare(&format!(
         "SELECT r.task_id, p.repo, p.pr FROM runs r
          JOIN pr_watches p ON p.id = (SELECT max(id) FROM pr_watches WHERE run_id = r.id)
@@ -1994,9 +1995,7 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
                 OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
                            AND json_extract(e.payload_json, '$.pr') = p.pr)
-           AND (NOT {} OR r.status = 'parked' OR r.task_id IN ({AWAITED}))
-         ORDER BY r.id",
-        pr_closed_sql("r")
+         ORDER BY r.id"
     ))?;
     Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<std::result::Result<_, _>>()?)
@@ -3388,6 +3387,59 @@ mod tests {
             .unwrap(),
             1,
             "woken by its landing"
+        );
+    }
+
+    /// A completed range task whose pull request was read closed is still read: reopened and
+    /// merged on GitHub with nothing recorded again, its landing is recorded (`landed`, not
+    /// `closed`), as before closed pull requests were recorded.
+    #[test]
+    fn a_completed_tasks_pull_request_closed_then_reopened_and_merged_is_seen() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'completed' WHERE task_id = 'r1-1'",
+                [],
+            )
+            .unwrap();
+        let seen = |w: &StateWriter, state: &str| {
+            let o = Outcome {
+                range: None,
+                landings: vec![(
+                    "r1-1".into(),
+                    "o/p".into(),
+                    11,
+                    Some(
+                        json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                                "mergeCommit": {"oid": "m1"}}),
+                    ),
+                )],
+                clones: Vec::new(),
+            };
+            w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        };
+        seen(&w, "CLOSED");
+        assert_eq!(
+            landing_candidates(&w).unwrap().len(),
+            1,
+            "a completed task is read on while its pull request is closed"
+        );
+        seen(&w, "MERGED");
+        let merged = |w: &StateWriter| {
+            count(
+                w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(merged(&w), 1);
+        assert!(
+            landing_candidates(&w).unwrap().is_empty(),
+            "merged: read no more"
         );
     }
 
