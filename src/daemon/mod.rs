@@ -423,12 +423,14 @@ fn serve_until(
                 if let Err(e) = secretary.pass(&w, &*events_base) {
                     eprintln!("makibad: secretary: {e}");
                 }
-                // Before the dialogs: a launch they move on is looked at on a later tick.
-                if let Err(e) = verify.pass(&w, &*events_base) {
-                    eprintln!("makibad: verify: {e}");
-                }
+                // The dialogs before verification (Issue 333): after a stall of this loop a known
+                // dialog on the screen is answered before its launch's time is looked at, and a
+                // launch they move on is looked at on the same tick.
                 if let Err(e) = dialogs.pass(&w, &*events_base) {
                     eprintln!("makibad: dialogs: {e}");
+                }
+                if let Err(e) = verify.pass(&w, &*events_base, dialogs.keyed()) {
+                    eprintln!("makibad: verify: {e}");
                 }
                 if let Err(e) = prompts.pass(&w, &*events_base) {
                     eprintln!("makibad: prompts: {e}");

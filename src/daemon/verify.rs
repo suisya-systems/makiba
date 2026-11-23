@@ -10,15 +10,26 @@
 //! event without one, whoever writes it.
 //!
 //! A failure, here or in the dialogs (M3-5), is one transaction: `worker_spawn_failed`, stage
-//! `failed`, the run `failed`, and a notice to the secretary. The terminal is left for inspection.
+//! `failed`, the run `failed`, and a notice to the secretary saying what was seen (Issue 333).
+//! A worker's terminal is left for inspection; the curator's and the secretary's are ended by
+//! their own passes.
+//!
+//! The time makibad's loop was held is not charged to a launch (Issue 333). A launch's clock
+//! starts at the latest of its `worker_spawned`, the end of the last stall of the loop (a gap
+//! between two passes longer than `STALL`, or a pass that itself took that long), a key the dialog
+//! step pressed into it (the first `KEYS_RESTART`), and its one grace: a launch at `launched`
+//! whose screen shows a dialog of the policy list when the timeout is reached is given one more
+//! timeout, for the dialog step to answer it. The time makibad was down still counts.
 
+use super::dialogs::Decision;
 use crate::agents;
-use crate::base::Base;
+use crate::base::{Base, State, Status, Terminal};
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::{AGENT_SECRETARY, ErrorKind, TAG_SPAWN};
 use rusqlite::params;
 use serde_json::json;
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -28,6 +39,12 @@ pub const TIMEOUT: Duration = Duration::from_secs(180);
 pub const TIMEOUT_ENV: &str = "MAKIBA_VERIFY_TIMEOUT_MS";
 /// How often a pass runs at most.
 const EVERY: Duration = Duration::from_secs(1);
+/// A gap between two passes (or one pass) longer than this is a stall of makibad's loop: the
+/// clocks of the launches under way start again (Issue 333).
+pub const STALL: Duration = Duration::from_secs(3);
+/// How many keys of the dialog step restart a launch's clock at most: a dialog that keeps coming
+/// back cannot keep a launch from failing.
+pub const KEYS_RESTART: u32 = 8;
 
 /// The timeout: the seam when it holds a number, otherwise `TIMEOUT`.
 pub fn timeout_from_env() -> Duration {
@@ -47,16 +64,27 @@ struct Row {
     stage: String,
     agent: String,
     worktree: String,
-    /// The first working status or turn recorded with the launch's spawn id within the timeout
-    /// (one recorded later does not count, even if a pass sees it before the launch is failed).
-    evidence: Option<i64>,
-    /// Milliseconds since the launch.
-    waited: i64,
+    /// Its `worker_spawned` (else its row's `created_at`), as the database writes times.
+    launched: String,
+}
+
+/// The database's clock, in the form it writes times.
+pub(super) fn now_text(w: &StateWriter) -> Result<String> {
+    Ok(w.conn()
+        .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now')", [], |r| {
+            r.get(0)
+        })?)
 }
 
 pub struct Verify {
     timeout: Duration,
     next: Instant,
+    /// When the last pass began.
+    last: Option<Instant>,
+    /// The end of the last stall of the loop seen by this process, as the database writes times.
+    restarted: Option<String>,
+    /// Per spawn id: when its one grace began (a known dialog on the screen at the timeout).
+    graced: BTreeMap<String, String>,
 }
 
 impl Verify {
@@ -64,34 +92,44 @@ impl Verify {
         Verify {
             timeout,
             next: Instant::now(),
+            last: None,
+            restarted: None,
+            graced: BTreeMap::new(),
         }
     }
 
     /// One pass over the launches at `launched` and `dialog_passed`, at most once a second.
-    pub fn pass(&mut self, w: &StateWriter, base: &dyn Base) -> Result<()> {
-        if Instant::now() < self.next {
+    /// `keyed`: per spawn id, the last key of the dialog step that restarts its clock.
+    pub fn pass(
+        &mut self,
+        w: &StateWriter,
+        base: &dyn Base,
+        keyed: &BTreeMap<String, String>,
+    ) -> Result<()> {
+        let began = Instant::now();
+        if began < self.next {
             return Ok(());
         }
-        self.next = Instant::now() + EVERY;
+        self.next = began + EVERY;
+        if self
+            .last
+            .is_some_and(|l| began.saturating_duration_since(l) > STALL)
+        {
+            self.restarted = Some(now_text(w)?);
+        }
+        self.last = Some(began);
         let rows: Vec<Row> = {
             let mut st = w.conn().prepare(
-                "SELECT id, run_id, task_id, spawn_id, stage, agent, worktree,
-                   (SELECT min(e.id) FROM events e
-                    WHERE json_extract(e.payload_json, '$.spawn_id') = spawn_id
-                      AND (e.kind = 'terminal_turn' OR (e.kind = 'terminal_status'
-                           AND json_extract(e.payload_json, '$.state') = 'working'))
-                      AND julianday(e.occurred_at) <= julianday(launched) + ?1 / 86400000.0),
-                   CAST((julianday('now') - julianday(launched)) * 86400000 AS INTEGER)
-                 FROM (SELECT l.id, r.id AS run_id, r.task_id, l.spawn_id, l.stage, l.agent,
-                         l.worktree, COALESCE(
-                           (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
-                            AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id),
-                           l.created_at) AS launched
-                       FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
-                       WHERE l.stage IN ('launched', 'dialog_passed'))
-                 ORDER BY id",
+                "SELECT l.id, r.id, r.task_id, l.spawn_id, l.stage, l.agent, l.worktree,
+                   COALESCE(
+                     (SELECT max(e.occurred_at) FROM events e WHERE e.kind = 'worker_spawned'
+                      AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id),
+                     l.created_at)
+                 FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
+                 WHERE l.stage IN ('launched', 'dialog_passed')
+                 ORDER BY l.id",
             )?;
-            st.query_map([self.timeout.as_millis() as i64], |r| {
+            st.query_map([], |r| {
                 Ok(Row {
                     id: r.get(0)?,
                     run_id: r.get(1)?,
@@ -100,14 +138,17 @@ impl Verify {
                     stage: r.get(4)?,
                     agent: r.get(5)?,
                     worktree: r.get(6)?,
-                    evidence: r.get(7)?,
-                    waited: r.get(8)?,
+                    launched: r.get(7)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
         };
+        self.graced
+            .retain(|spawn, _| rows.iter().any(|r| &r.spawn == spawn));
+        let timeout = self.timeout.as_millis() as i64;
         for row in rows {
-            match row.evidence {
+            let (evidence, waited) = self.clock(w, &row, keyed.get(&row.spawn))?;
+            match evidence {
                 Some(event) if row.stage == "dialog_passed" => {
                     let applied = verified(w, &row, event)?;
                     if !applied {
@@ -118,34 +159,197 @@ impl Verify {
                 // Seen working in time, still at `launched` (a restart came after the timeout):
                 // the dialog step moves it on (Issue M3-7).
                 Some(_) => {}
-                _ if row.waited >= self.timeout.as_millis() as i64 => {
+                None if waited >= timeout => {
+                    let sight = Sight::of(base, &row.spawn, Some(&row.agent));
+                    // This pass was held itself (a list or read that blocked): a stall, and
+                    // nothing is failed on what was read before it.
+                    if began.elapsed() > STALL {
+                        self.restarted = Some(now_text(w)?);
+                        self.last = Some(Instant::now());
+                        return Ok(());
+                    }
+                    // A dialog of the policy list on the screen: the dialog step, which runs
+                    // before this pass in every tick, gets one more timeout to answer it.
+                    if row.stage == "launched"
+                        && sight.dialog.is_some()
+                        && !self.graced.contains_key(&row.spawn)
+                    {
+                        self.graced.insert(row.spawn.clone(), now_text(w)?);
+                        continue;
+                    }
                     let why = format!(
                         "no working status or turn of its terminal within {} ms of the launch",
                         self.timeout.as_millis()
                     );
-                    let screen = screen_of(base, &row.spawn);
                     let task = row.task.as_deref();
-                    if !fail(w, row.id, task, &row.spawn, &row.stage, &why, &screen)? {
+                    if !fail(w, row.id, task, &row.spawn, &row.stage, &why, &sight)? {
                         let _ = super::resume::end_terminals(base, &row.spawn);
                     }
                 }
-                _ => {}
+                None => {}
             }
         }
         Ok(())
     }
+
+    /// For `row`: the first working status or turn recorded with its spawn id within the timeout
+    /// of its clock's start (one recorded later does not count, even if a pass sees it before the
+    /// launch is failed), and the milliseconds since that start.
+    fn clock(
+        &self,
+        w: &StateWriter,
+        row: &Row,
+        keyed: Option<&String>,
+    ) -> Result<(Option<i64>, i64)> {
+        Ok(w.conn().query_row(
+            "SELECT (SELECT min(e.id) FROM events e
+                     WHERE json_extract(e.payload_json, '$.spawn_id') = ?1
+                       AND (e.kind = 'terminal_turn' OR (e.kind = 'terminal_status'
+                            AND json_extract(e.payload_json, '$.state') = 'working'))
+                       AND julianday(e.occurred_at) <= s.start + ?2 / 86400000.0),
+                    CAST((julianday('now') - s.start) * 86400000 AS INTEGER)
+             FROM (SELECT max(julianday(?3), COALESCE(julianday(?4), 0),
+                              COALESCE(julianday(?5), 0), COALESCE(julianday(?6), 0)) AS start) s",
+            params![
+                row.spawn,
+                self.timeout.as_millis() as i64,
+                row.launched,
+                self.restarted,
+                self.graced.get(&row.spawn),
+                keyed,
+            ],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?)
+    }
 }
 
-/// The screen of the terminal carrying `spawn`, for the record; empty when it cannot be read.
-fn screen_of(base: &dyn Base, spawn: &str) -> Vec<String> {
-    base.list()
-        .ok()
-        .and_then(|ts| {
-            ts.into_iter()
-                .find(|t| t.tags.get(TAG_SPAWN).map(String::as_str) == Some(spawn))
-        })
-        .and_then(|t| base.read(&t.id, 0).ok())
-        .unwrap_or_default()
+/// What a pass saw of a launch's terminals when it failed it (Issue 333), for the record and the
+/// notice.
+#[derive(Debug, Clone, Default)]
+pub(super) struct Sight {
+    /// The base could not list: nothing is known of the terminals.
+    unlisted: bool,
+    /// Name and address of every terminal carrying the launch's spawn id.
+    terminals: Vec<(String, String)>,
+    /// The first terminal's status.
+    status: Option<Status>,
+    /// The dialog of the policy list the first terminal's screen shows, as the dialog step reads
+    /// it (one it would press a key for).
+    dialog: Option<&'static str>,
+    screen: Vec<String>,
+}
+
+impl Sight {
+    /// No terminal of the launch (it failed before one was launched, or none carries it).
+    pub(super) fn none() -> Sight {
+        Sight::default()
+    }
+
+    /// The terminals carrying `spawn` as the base lists them, the first one's screen read and
+    /// asked against `agent`'s policy list.
+    pub(super) fn of(base: &dyn Base, spawn: &str, agent: Option<&str>) -> Sight {
+        let Ok(list) = base.list() else {
+            return Sight {
+                unlisted: true,
+                ..Sight::default()
+            };
+        };
+        let ours: Vec<&Terminal> = list
+            .iter()
+            .filter(|t| t.tags.get(TAG_SPAWN).map(String::as_str) == Some(spawn))
+            .collect();
+        let screen = ours
+            .first()
+            .and_then(|t| base.read(&t.id, 0).ok())
+            .unwrap_or_default();
+        Sight::with_screen(&ours, screen, agent)
+    }
+
+    /// `terminals` carrying the launch, the first one showing `screen`.
+    pub(super) fn with_screen(
+        terminals: &[&Terminal],
+        screen: Vec<String>,
+        agent: Option<&str>,
+    ) -> Sight {
+        let policies = agent
+            .and_then(agents::by_name)
+            .map(|a| a.startup_dialogs().to_vec())
+            .unwrap_or_default();
+        let dialog = match super::dialogs::decide(&policies, &screen) {
+            Decision::Key { dialog, .. } if !terminals.is_empty() => Some(dialog),
+            _ => None,
+        };
+        Sight {
+            unlisted: false,
+            terminals: terminals
+                .iter()
+                .map(|t| (t.name.clone(), t.id.0.clone()))
+                .collect(),
+            status: terminals.first().and_then(|t| t.status.clone()),
+            dialog,
+            screen,
+        }
+    }
+
+    /// The kind of what was seen, as the record names it.
+    fn kind(&self) -> &'static str {
+        match self.terminals.len() {
+            _ if self.unlisted => "unlisted",
+            0 => "no_terminal",
+            1 => match (&self.dialog, &self.status) {
+                (Some(_), _) => "dialog",
+                (None, None) => "no_status",
+                (None, Some(s)) if s.state == State::Working => "working_late",
+                (None, Some(_)) => "not_working",
+            },
+            _ => "several",
+        }
+    }
+
+    /// What was seen, in words.
+    fn said(&self) -> String {
+        match self.kind() {
+            "unlisted" => "nothing, the base could not list its terminals".into(),
+            "no_terminal" => "no terminal of the launch".into(),
+            "several" => format!("{} terminals carry the launch", self.terminals.len()),
+            "dialog" => format!(
+                "the known dialog {} still shown",
+                self.dialog.unwrap_or_default()
+            ),
+            "no_status" => "never any status".into(),
+            "working_late" => "a working status recorded after the timeout".into(),
+            _ => format!(
+                "a status but not working: {}",
+                self.status
+                    .as_ref()
+                    .map(|s| format!("{:?}", s.state).to_lowercase())
+                    .unwrap_or_default()
+            ),
+        }
+    }
+
+    /// The terminals, as the notice names them: empty when there is none.
+    fn named(&self) -> String {
+        let each: Vec<String> = self
+            .terminals
+            .iter()
+            .map(|(name, address)| format!("{name} at {address}"))
+            .collect();
+        match each.len() {
+            0 => String::new(),
+            1 => format!(" Its terminal: {}.", each[0]),
+            _ => format!(" Its terminals: {}.", each.join(", ")),
+        }
+    }
+}
+
+/// What ends the terminal of a failed launch of `role`, as the notice says it.
+fn fate(role: &str) -> &'static str {
+    match role {
+        "curator" => " It is ended at once, its key revoked.",
+        "secretary" => " It is ended when the secretary is launched again.",
+        _ => " It is left for inspection until the run is closed.",
+    }
 }
 
 /// `worker_spawn_verified`, stage `verified` and the run `in_use` (when there is one), together;
@@ -187,9 +391,10 @@ fn verified(w: &StateWriter, row: &Row, event: i64) -> Result<bool> {
     })
 }
 
-/// A launch that cannot be verified, at `stage`: `worker_spawn_failed` with `screen`, stage
-/// `failed`, the run `failed` (when there is one), and a notice to the secretary if the gate sends
-/// it, together. The terminal is left. `task` is `None` for a launch without a run (Issue 166).
+/// A launch that cannot be verified, at `stage`: `worker_spawn_failed` with what was seen
+/// (`sight`: the screen, its kind, the terminals), stage `failed`, the run `failed` (when there is
+/// one), and a notice to the secretary if the gate sends it, together. No terminal is ended here.
+/// `task` is `None` for a launch without a run (Issue 166).
 ///
 /// A resume of a `suspended` run (Issue 41: a launch with a conversation id before it is
 /// verified) does not fail its run: its keys are revoked and a fresh launch is added with the
@@ -203,19 +408,24 @@ pub(super) fn fail(
     spawn: &str,
     stage: &str,
     why: &str,
-    screen: &[String],
+    sight: &Sight,
 ) -> Result<bool> {
     super::crash::hold("failed");
     w.transaction(|w| {
-        let resumed = w.conn().query_row(
+        let (resumed, name, role) = w.conn().query_row(
             "SELECT l.conversation_id IS NOT NULL AND l.stage != 'verified'
                     AND COALESCE(r.status = 'suspended', 0),
-                    COALESCE(r.task_id, l.role)
+                    COALESCE(r.task_id, l.role), l.role
              FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id WHERE l.id = ?1",
             [id],
-            |r| Ok((r.get::<_, bool>(0)?, r.get::<_, String>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, bool>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
         )?;
-        let (resumed, name) = resumed;
         let n = w.conn().execute(
             "UPDATE run_launch SET stage = 'failed', failed_reason = ?2 WHERE id = ?1 AND stage = ?3",
             params![id, why, stage],
@@ -230,7 +440,12 @@ pub(super) fn fail(
                 "spawn_id": spawn,
                 "stage": stage,
                 "reason": why,
-                "screen": screen.join("\n"),
+                "screen": sight.screen.join("\n"),
+                "seen": sight.kind(),
+                "dialog": sight.dialog,
+                "terminals": sight.terminals.iter()
+                    .map(|(name, address)| json!({"name": name, "address": address}))
+                    .collect::<Vec<_>>(),
             })),
             run_task_id: task,
             ..Default::default()
@@ -255,8 +470,15 @@ pub(super) fn fail(
         if !super::notify_gate::decide("worker_spawn_failed").send {
             return Ok(true);
         }
+        let fate = if sight.terminals.is_empty() {
+            ""
+        } else {
+            fate(&role)
+        };
         let body = format!(
-            "Launch of {name} failed at stage {stage}: {why}. Its terminal is left for inspection."
+            "Launch of {name} failed at stage {stage}: {why}. Seen: {}.{}{fate}",
+            sight.said(),
+            sight.named()
         );
         notify_secretary(w, task, &body)?;
         Ok(true)
@@ -355,7 +577,7 @@ mod tests {
     fn passes(v: &mut Verify, w: &StateWriter, base: &dyn Base) {
         for _ in 0..2 {
             v.next = Instant::now();
-            v.pass(w, base).unwrap();
+            v.pass(w, base, &BTreeMap::new()).unwrap();
         }
     }
 
@@ -373,7 +595,7 @@ mod tests {
         let (_d, w) = org("dialog_passed", 0);
         let turn = record(&w, "terminal_turn", "s1", json!({"turn": 1}));
         let mut v = Verify::new(TIMEOUT);
-        v.pass(&w, &Stub::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "verified"
@@ -427,7 +649,7 @@ mod tests {
         })
         .unwrap();
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &stub).unwrap();
+        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
         assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
         assert_eq!(one::<String>(&w, "SELECT status FROM runs"), "failed");
         let p: String = one(
@@ -455,13 +677,13 @@ mod tests {
         let (_d, w) = org("dialog_passed", 10_000);
         record(&w, "terminal_status", "s1", json!({"state": "working"}));
         let mut v = Verify::new(Duration::from_secs(5));
-        v.pass(&w, &Stub::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
         assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
         // Recorded within it, the same evidence verifies however late the pass.
         let (_d, w) = org("dialog_passed", 10_000);
         record(&w, "terminal_status", "s1", json!({"state": "working"}));
         let mut v = Verify::new(Duration::from_secs(60));
-        v.pass(&w, &Stub::new()).unwrap();
+        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
         assert_eq!(
             one::<String>(&w, "SELECT stage FROM run_launch"),
             "verified"
@@ -479,16 +701,256 @@ mod tests {
             "s1",
             "launched",
             "an unknown dialog",
-            &[],
+            &Sight::none(),
         )
         .unwrap();
         assert_eq!(one::<String>(&w, "SELECT status FROM runs"), "failed");
         assert_eq!(
-            one::<i64>(
+            one::<String>(
                 &w,
-                "SELECT count(*) FROM messages WHERE kind = 'notice' AND recipient = 'secretary'"
+                "SELECT body FROM messages WHERE kind = 'notice' AND recipient = 'secretary'"
             ),
-            1
+            "Launch of t1 failed at stage launched: an unknown dialog. Seen: no terminal of the launch."
+        );
+    }
+
+    /// A terminal `name` carrying the spawn id `s1`.
+    fn terminal(base: &Stub, name: &str) {
+        base.launch(&LaunchSpec {
+            argv: vec![],
+            cwd: "/".into(),
+            name: name.into(),
+            tags: BTreeMap::from([(TAG_SPAWN.to_string(), "s1".to_string())]),
+            env: BTreeMap::new(),
+            unset: vec![],
+        })
+        .unwrap();
+    }
+
+    /// The payload of the one `worker_spawn_failed` and the body of the one notice.
+    fn failure(w: &StateWriter) -> (serde_json::Value, String) {
+        let p: String = one(
+            w,
+            "SELECT payload_json FROM events WHERE kind = 'worker_spawn_failed'",
+        );
+        let body = one(w, "SELECT body FROM messages WHERE kind = 'notice'");
+        (serde_json::from_str(&p).unwrap(), body)
+    }
+
+    /// The database's clock `ms` ago, as it writes times.
+    fn ago(w: &StateWriter, ms: i64) -> String {
+        one(
+            w,
+            &format!(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-{} seconds')",
+                ms as f64 / 1000.0
+            ),
+        )
+    }
+
+    /// Issue 333: a gap between passes longer than `STALL` starts the clocks again. A launch 10 s
+    /// past a 5 s timeout is not failed, and a working status recorded now verifies it.
+    #[test]
+    fn a_stall_of_the_loop_restarts_the_clock() {
+        let (_d, w) = org("dialog_passed", 10_000);
+        record(&w, "terminal_status", "s1", json!({"state": "working"}));
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.last = Instant::now().checked_sub(STALL + Duration::from_secs(1));
+        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "verified"
+        );
+        // At `launched`, with no record: not failed either.
+        let (_d, w) = org("launched", 10_000);
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.last = Instant::now().checked_sub(STALL + Duration::from_secs(1));
+        v.pass(&w, &Stub::new(), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "launched"
+        );
+    }
+
+    /// The stand-in whose list waits `.1` and whose read with no history is its whole screen.
+    struct Held(Stub, Duration);
+
+    impl Base for Held {
+        fn name(&self) -> &'static str {
+            self.0.name()
+        }
+        fn hello(&self) -> std::result::Result<crate::base::BaseInfo, crate::base::BaseError> {
+            self.0.hello()
+        }
+        fn launch(
+            &self,
+            s: &LaunchSpec,
+        ) -> std::result::Result<TerminalRef, crate::base::BaseError> {
+            self.0.launch(s)
+        }
+        fn list(&self) -> std::result::Result<Vec<Terminal>, crate::base::BaseError> {
+            std::thread::sleep(self.1);
+            self.0.list()
+        }
+        fn get(&self, t: &TerminalRef) -> std::result::Result<Terminal, crate::base::BaseError> {
+            self.0.get(t)
+        }
+        fn read(
+            &self,
+            t: &TerminalRef,
+            lines: usize,
+        ) -> std::result::Result<Vec<String>, crate::base::BaseError> {
+            self.0.read(t, if lines == 0 { usize::MAX } else { lines })
+        }
+        fn keys(
+            &self,
+            t: &TerminalRef,
+            k: &[&str],
+        ) -> std::result::Result<(), crate::base::BaseError> {
+            self.0.keys(t, k)
+        }
+        fn send(
+            &self,
+            t: &TerminalRef,
+            text: &str,
+            idle: bool,
+        ) -> std::result::Result<(), crate::base::BaseError> {
+            self.0.send(t, text, idle)
+        }
+        fn end(&self, t: &TerminalRef) -> std::result::Result<(), crate::base::BaseError> {
+            self.0.end(t)
+        }
+        fn events(&self) -> std::result::Result<crate::base::EventStream, crate::base::BaseError> {
+            self.0.events()
+        }
+        fn start(&self) -> std::result::Result<(), crate::base::BaseError> {
+            self.0.start()
+        }
+        fn worker_denies(&self) -> crate::base::BaseDenies {
+            self.0.worker_denies()
+        }
+    }
+
+    /// Issue 333: a pass held in its own read of the screen fails nothing on it, and the clock
+    /// starts again after it.
+    #[test]
+    fn a_pass_held_in_its_own_read_fails_nothing() {
+        let (_d, w) = org("launched", 10_000);
+        let stub = Stub::new();
+        terminal(&stub, "w-t1");
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.pass(
+            &w,
+            &Held(stub, STALL + Duration::from_millis(200)),
+            &BTreeMap::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "launched"
+        );
+        assert!(v.restarted.is_some());
+    }
+
+    /// The dev-channel dialog as Claude Code draws it, cursor on the line to choose.
+    const DEV_CHANNEL: [&str; 8] = [
+        "  WARNING: Loading development channels",
+        "",
+        "  Channels: server:makiba-channel",
+        "",
+        "  \u{276f} 1. I am using this for local development",
+        "    2. Exit",
+        "",
+        "  Enter to confirm \u{b7} Esc to cancel",
+    ];
+
+    /// Issue 333: a launch at `launched` whose screen shows a dialog of the policy list at the
+    /// timeout gets one more timeout; past that it fails, the notice naming the dialog.
+    #[test]
+    fn a_known_dialog_on_the_screen_gets_one_grace() {
+        let (_d, w) = org("launched", 10_000);
+        let stub = Held(Stub::scripted(&DEV_CHANNEL), Duration::ZERO);
+        terminal(&stub.0, "w-t1");
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "launched"
+        );
+        assert!(v.graced.contains_key("s1"));
+        // Within the grace: still not failed.
+        v.next = Instant::now();
+        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "launched"
+        );
+        // Past it: failed, the dialog named; no second grace.
+        v.graced.insert("s1".into(), ago(&w, 6_000));
+        v.next = Instant::now();
+        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
+        let (p, body) = failure(&w);
+        assert_eq!(p["seen"], "dialog");
+        assert_eq!(p["dialog"], "dev-channel");
+        assert_eq!(p["terminals"], json!([{"name": "w-t1", "address": "w-t1"}]));
+        assert_eq!(
+            body,
+            "Launch of t1 failed at stage launched: no working status or turn of its terminal \
+             within 5000 ms of the launch. Seen: the known dialog dev-channel still shown. Its \
+             terminal: w-t1 at w-t1. It is left for inspection until the run is closed."
+        );
+    }
+
+    /// Issue 333: a key the dialog step pressed starts the launch's clock again.
+    #[test]
+    fn a_dialog_key_restarts_the_clock() {
+        let (_d, w) = org("launched", 10_000);
+        let mut v = Verify::new(Duration::from_secs(5));
+        let keyed = BTreeMap::from([("s1".to_string(), ago(&w, 1_000))]);
+        v.pass(&w, &Stub::new(), &keyed).unwrap();
+        assert_eq!(
+            one::<String>(&w, "SELECT stage FROM run_launch"),
+            "launched"
+        );
+        // A key longer ago than the timeout does not hold it.
+        let keyed = BTreeMap::from([("s1".to_string(), ago(&w, 6_000))]);
+        v.next = Instant::now();
+        v.pass(&w, &Stub::new(), &keyed).unwrap();
+        assert_eq!(one::<String>(&w, "SELECT stage FROM run_launch"), "failed");
+    }
+
+    /// Issue 333: what was seen is told: a status but not working, or several terminals.
+    #[test]
+    fn the_notice_says_what_was_seen() {
+        let (_d, w) = org("dialog_passed", 10_000);
+        let stub = Stub::new();
+        terminal(&stub, "w-t1");
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        let (p, body) = failure(&w);
+        assert_eq!(p["seen"], "not_working");
+        assert!(
+            body.ends_with(
+                "Seen: a status but not working: idle. Its terminal: w-t1 at w-t1. It is left for \
+                 inspection until the run is closed."
+            ),
+            "{body}"
+        );
+
+        let (_d, w) = org("dialog_passed", 10_000);
+        let stub = Stub::new();
+        terminal(&stub, "w-t1");
+        terminal(&stub, "w-t1b");
+        let mut v = Verify::new(Duration::from_secs(5));
+        v.pass(&w, &stub, &BTreeMap::new()).unwrap();
+        let (p, body) = failure(&w);
+        assert_eq!(p["seen"], "several");
+        assert!(
+            body.contains(
+                "Seen: 2 terminals carry the launch. Its terminals: w-t1 at w-t1, w-t1b at w-t1b."
+            ),
+            "{body}"
         );
     }
 }

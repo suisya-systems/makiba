@@ -192,7 +192,15 @@ impl Prepare {
                     )?;
                     if matches!(stage.as_str(), "planned" | "worktree_ready") {
                         let task = l.task.as_deref();
-                        super::verify::fail(w, l.id, task, &l.spawn, &stage, &why, &[])?;
+                        super::verify::fail(
+                            w,
+                            l.id,
+                            task,
+                            &l.spawn,
+                            &stage,
+                            &why,
+                            &super::verify::Sight::none(),
+                        )?;
                     }
                 }
             }

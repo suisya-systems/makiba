@@ -47,17 +47,19 @@ pub(super) fn end_terminals(base: &dyn Base, spawn: &str) -> bool {
 
 /// A launch at `stage` whose terminal cannot be adopted: failed by the path of M3-6 and its keys
 /// revoked, in one transaction. No terminal is ended. Nothing is written for a launch no longer at
-/// `stage` (Issue 163).
+/// `stage` (Issue 163). The terminals that carry its spawn id, as `base` lists them now, are told.
 pub(super) fn fail(
     w: &StateWriter,
+    base: &dyn Base,
     id: i64,
     task: Option<&str>,
     spawn: &str,
     stage: &str,
     why: &str,
 ) -> Result<()> {
+    let sight = super::verify::Sight::of(base, spawn, None);
     w.transaction(|w| {
-        if super::verify::fail(w, id, task, spawn, stage, why, &[])? {
+        if super::verify::fail(w, id, task, spawn, stage, why, &sight)? {
             revoke_keys(w, spawn)?;
         }
         Ok(())
@@ -91,7 +93,7 @@ pub fn pass(w: &StateWriter, base: &dyn Base) -> Result<bool> {
             0 => format!("no terminal carries {TAG_SPAWN}={spawn} after a restart"),
             n => format!("{n} terminals carry {TAG_SPAWN}={spawn}"),
         };
-        fail(w, id, task.as_deref(), &spawn, &stage, &why)?;
+        fail(w, base, id, task.as_deref(), &spawn, &stage, &why)?;
     }
     Ok(true)
 }

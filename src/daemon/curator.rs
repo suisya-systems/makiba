@@ -3,8 +3,9 @@
 //! After a close (`run_closed`, written by the door) the raw notes of the knowledge folder are
 //! counted; at `RAW_THRESHOLD` a launch of the curator that belongs to no run is added
 //! (`launch::add_launch`, Issue 166), one at a time. A curator that sent its report to the
-//! secretary is ended and its key revoked (Issue 177); one past its time limit is ended, its key
-//! revoked and the secretary told. Spec sections 2, 5.3 and 10.
+//! secretary is ended and its key revoked (Issue 177); one whose launch failed (Issue 333) is
+//! ended at once, and one past its time limit is ended, each with its key revoked and the
+//! secretary told. Spec sections 2, 5.3 and 10.
 //!
 //! The base is the truth for "one at a time": a curator terminal of this organization, or a
 //! curator launch not yet verified, means no second launch, so a restarted `makibad` needs no
@@ -80,6 +81,17 @@ pub fn count_raw(knowledge: &Path) -> io::Result<usize> {
     Ok(n)
 }
 
+/// Why a curator terminal was ended, for what is written after the end.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum End {
+    /// Its program exited: the keys revoked.
+    Exited,
+    /// Past its time limit: the keys revoked and the secretary told.
+    Limit,
+    /// Its launch failed (Issue 333): ended at once, the keys revoked and the secretary told.
+    Failed,
+}
+
 pub struct Curator {
     org: String,
     knowledge: PathBuf,
@@ -88,9 +100,9 @@ pub struct Curator {
     /// The newest `run_closed` event already counted for; -1 before the first count.
     seen: i64,
     next: Instant,
-    /// Ended curator terminals whose revoke (and notice) the database refused: `(spawn, past)`,
+    /// Ended curator terminals whose revoke (and notice) the database refused: `(spawn, why)`,
     /// written by the next pass, as the base no longer lists them.
-    unsettled: Vec<(String, bool)>,
+    unsettled: Vec<(String, End)>,
 }
 
 impl Curator {
@@ -130,10 +142,10 @@ impl Curator {
         }
         self.next = Instant::now() + EVERY;
         self.record_started(w)?;
-        for (spawn, past) in std::mem::take(&mut self.unsettled) {
-            if let Err(e) = self.finish(w, &spawn, past) {
+        for (spawn, why) in std::mem::take(&mut self.unsettled) {
+            if let Err(e) = self.finish(w, &spawn, why) {
                 eprintln!("makibad: cannot revoke the ended curator's keys: {e}");
-                self.unsettled.push((spawn, past));
+                self.unsettled.push((spawn, why));
             }
         }
         // The base cannot list: nothing is decided, the next pass tries again.
@@ -218,9 +230,10 @@ impl Curator {
         Ok(())
     }
 
-    /// A curator terminal that reported (its keys revoked first), is finished (its program exited,
-    /// the base keeps it and its name) or is past the time limit is ended, its key revoked; only
-    /// the last with a notice to the secretary.
+    /// A curator terminal that reported (its keys revoked first), whose launch failed (Issue 333),
+    /// is finished (its program exited, the base keeps it and its name) or is past the time limit
+    /// is ended, its key revoked; a failed launch and the time limit with a notice to the
+    /// secretary, written after the end.
     /// Returns whether it is gone. A failed end is tried again by the next pass.
     fn settle(&mut self, w: &StateWriter, base: &dyn Base, t: &Terminal) -> Result<bool> {
         let spawn = t.tags.get(TAG_SPAWN).cloned().unwrap_or_default();
@@ -237,34 +250,53 @@ impl Curator {
             }
             return Ok(true);
         }
-        let past = t.alive && self.age_ms(w, &spawn)?.is_some_and(|a| a >= self.limit());
-        if t.alive && !past {
+        let why = if self.failed(w, &spawn)? {
+            End::Failed
+        } else if t.alive && self.age_ms(w, &spawn)?.is_some_and(|a| a >= self.limit()) {
+            End::Limit
+        } else if t.alive {
             return Ok(false);
-        }
+        } else {
+            End::Exited
+        };
         if let Err(e) = base.end(&t.id) {
             eprintln!("makibad: cannot end the curator terminal {}: {e}", t.id.0);
             return Ok(false);
         }
-        if let Err(e) = self.finish(w, &spawn, past) {
-            self.unsettled.push((spawn, past));
+        if let Err(e) = self.finish(w, &spawn, why) {
+            self.unsettled.push((spawn, why));
             return Err(e);
         }
         Ok(true)
     }
 
-    /// After the end: the keys revoked and, past the time limit, the notice, in one transaction.
-    fn finish(&self, w: &StateWriter, spawn: &str, past: bool) -> Result<()> {
+    /// After the end: the keys revoked and, for a failed launch or past the time limit, the
+    /// notice, in one transaction.
+    fn finish(&self, w: &StateWriter, spawn: &str, why: End) -> Result<()> {
         w.transaction(|w| {
             super::resume::revoke_keys(w, spawn)?;
-            if past {
-                let body = format!(
+            let body = match why {
+                End::Exited => return Ok(()),
+                End::Limit => format!(
                     "The curator was ended after its time limit of {} minutes. Its cycle may be unfinished: the raw notes were not all curated.",
                     self.timeout.as_secs() / 60
-                );
-                super::verify::notify_secretary(w, None, &body)?;
-            }
-            Ok(())
+                ),
+                End::Failed => "The curator whose launch failed was ended and its key revoked. The next close that finds the raw notes at the threshold launches it again.".to_string(),
+            };
+            super::verify::notify_secretary(w, None, &body)
         })
+    }
+
+    /// Whether the launch `spawn` failed.
+    fn failed(&self, w: &StateWriter, spawn: &str) -> Result<bool> {
+        Ok(w.conn()
+            .query_row(
+                "SELECT stage = 'failed' FROM run_launch WHERE spawn_id = ?1",
+                [spawn],
+                |r| r.get::<_, bool>(0),
+            )
+            .optional()?
+            .unwrap_or(false))
     }
 
     /// Whether the curator of launch `spawn` sent its report (Issue 177): a message of the curator
@@ -441,9 +473,60 @@ mod tests {
         assert!(c.pass(&w, &base).is_err());
         drop(lock);
         assert!(base.list().unwrap().is_empty(), "the terminal was ended");
-        assert_eq!(c.unsettled, vec![("c-s1".to_string(), false)]);
+        assert_eq!(c.unsettled, vec![("c-s1".to_string(), End::Exited)]);
         c.next = Instant::now();
         c.pass(&w, &base).unwrap();
         assert!(c.unsettled.is_empty());
+    }
+
+    /// Issue 333: a live curator whose launch failed is ended at once; its keys revoked and its
+    /// notice, refused once by the database, are written by the next pass, after the end.
+    #[test]
+    fn a_failed_launch_is_ended_at_once_and_told() {
+        use crate::base::{LaunchSpec, stub::Stub};
+        let knowledge = notes(&[]);
+        let db = tempfile::tempdir().unwrap();
+        let path = db.path().join("state.db");
+        let w = StateWriter::open(&path).unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (spawn_id, agent, brief, worktree, stage, role)
+                 VALUES ('c-s1', 'fake', 'b', '/k', 'failed', 'curator')",
+                [],
+            )
+            .unwrap();
+        let mut c = Curator::new("org", knowledge.path().into(), TIMEOUT, "fake".into());
+        let base = Stub::new();
+        base.launch(&LaunchSpec {
+            argv: vec!["x".into()],
+            cwd: knowledge.path().into(),
+            name: "curator".into(),
+            tags: std::collections::BTreeMap::from([
+                (TAG_ROLE.to_string(), "curator".to_string()),
+                (TAG_ORG.to_string(), "org".to_string()),
+                (TAG_SPAWN.to_string(), "c-s1".to_string()),
+            ]),
+            env: Default::default(),
+            unset: vec![],
+        })
+        .unwrap();
+        let lock = locked(&path);
+        assert!(c.pass(&w, &base).is_err());
+        drop(lock);
+        assert!(base.list().unwrap().is_empty(), "the terminal was ended");
+        assert_eq!(c.unsettled, vec![("c-s1".to_string(), End::Failed)]);
+        c.next = Instant::now();
+        c.pass(&w, &base).unwrap();
+        assert!(c.unsettled.is_empty());
+        let body: String = w
+            .conn()
+            .query_row("SELECT body FROM messages WHERE kind = 'notice'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert!(
+            body.starts_with("The curator whose launch failed was ended"),
+            "{body}"
+        );
     }
 }
