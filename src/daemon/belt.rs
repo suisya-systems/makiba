@@ -1994,7 +1994,7 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
                 OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
                            AND json_extract(e.payload_json, '$.pr') = p.pr)
-           AND (NOT {} OR r.task_id IN ({AWAITED}))
+           AND (NOT {} OR r.status = 'parked' OR r.task_id IN ({AWAITED}))
          ORDER BY r.id",
         pr_closed_sql("r")
     ))?;
@@ -3328,6 +3328,67 @@ mod tests {
         assert!(has(3), "this repository named whole");
         assert!(!has(4), "created half a second before the approval");
         assert!(has(5));
+    }
+
+    /// A parked run whose pull request was read closed is still read: reopened and merged on
+    /// GitHub with nothing recorded again, its landing is seen and wakes it.
+    #[test]
+    fn a_parked_runs_pull_request_closed_then_reopened_and_merged_is_seen() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "r1-1");
+        watch(&w, "r1-1", 11, &"a".repeat(40));
+        w.conn()
+            .execute_batch(
+                "UPDATE runs SET status = 'parked' WHERE task_id = 'r1-1';
+                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage,
+                                         conversation_id)
+                 VALUES ((SELECT id FROM runs WHERE task_id = 'r1-1'), 's1', 'fake', 'b', '/w',
+                         'verified', 'c1');",
+            )
+            .unwrap();
+        let seen = |w: &StateWriter, state: &str| {
+            let o = Outcome {
+                range: None,
+                landings: vec![(
+                    "r1-1".into(),
+                    "o/p".into(),
+                    11,
+                    Some(
+                        json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                                "mergeCommit": {"oid": "m1"}}),
+                    ),
+                )],
+                clones: Vec::new(),
+            };
+            w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        };
+        seen(&w, "CLOSED");
+        assert_eq!(
+            landing_candidates(&w).unwrap().len(),
+            1,
+            "a parked run is read on while its pull request is closed"
+        );
+        seen(&w, "MERGED");
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                []
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM runs WHERE task_id = 'r1-1' AND status = 'suspended'",
+                []
+            )
+            .unwrap(),
+            1,
+            "woken by its landing"
+        );
     }
 
     /// A landing read on the thread for a pull request the task has replaced since is dropped:
