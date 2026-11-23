@@ -11,7 +11,7 @@ use std::process::Command;
 
 /// What a copy needs to build `makiba`: the manifest, the lock file, the toolchain, the sources and
 /// the files they carry, and the test agent the manifest names as a binary.
-const PARTS: [&str; 8] = [
+const PARTS: [&str; 9] = [
     "Cargo.toml",
     "Cargo.lock",
     "rust-toolchain.toml",
@@ -19,6 +19,7 @@ const PARTS: [&str; 8] = [
     "src",
     "skills",
     "roles",
+    "scripts",
     "tests/common",
 ];
 
