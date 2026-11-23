@@ -28,7 +28,7 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
   - **Blocked (`BLOCKED`):** find what blocks it (`gh pr view <n> --repo <owner>/<name> --json reviewDecision,statusCheckRollup`, branch protection or rules), then tell the person what is missing.
   - **A draft:** tell the person; it is not ready.
   - **Not known yet (`UNKNOWN`, `not read`):** do not call it ready; `makibad` sends a merge-state notice once it reads the state.
-  - **Not followed:** no merge-state notice will come. Read the state with the command the notice names; when it shows the head the CI notice was for, `state` `OPEN`, `isDraft` false and `mergeStateStatus` `CLEAN`, `HAS_HOOKS` or `UNSTABLE`, that read stands for a notice reading it mergeable now (quote it); otherwise act on its status as above.
+  - **Not followed:** no merge-state notice will come. Read the state with the command the notice names; when it shows the head the CI notice was for, `state` `OPEN`, `isDraft` false and `mergeStateStatus` `CLEAN`, `HAS_HOOKS` or `UNSTABLE`, that read stands for a notice reading it mergeable now (quote it); otherwise act on its status as above. A read that shows `UNKNOWN` is read again a few minutes later (GitHub computes the state once it is asked); when it still shows `UNKNOWN`, tell the person that it cannot be confirmed as mergeable, with its link.
 - **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push with mcp__makiba__push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
 

@@ -469,6 +469,20 @@ impl PrWatch {
         while let Ok(d) = self.rx.try_recv() {
             self.queued.push((d, now));
         }
+        // A merge, close or reopen is written first: the follows read after it no longer hold an
+        // older generation, so an open read queued before it is dropped, not told (Issue 387).
+        while let Ok(d) = self.state_rx.try_recv() {
+            self.state_queued.push(d);
+        }
+        for d in std::mem::take(&mut self.state_queued) {
+            if let Err(e) = apply_state(w, &d) {
+                eprintln!(
+                    "makibad: pr watch {}#{}: cannot record its state: {e}",
+                    d.f.repo, d.f.pr
+                );
+                self.state_queued.push(d);
+            }
+        }
         let follows = followed(w.conn(), None)?;
         let mut fresh = Vec::new();
         while let Ok(r) = self.merge_rx.try_recv() {
@@ -524,18 +538,6 @@ impl PrWatch {
                     "makibad: pr watch {}#{}: cannot record its merge state: {e}",
                     r.f.repo, r.f.pr
                 ),
-            }
-        }
-        while let Ok(d) = self.state_rx.try_recv() {
-            self.state_queued.push(d);
-        }
-        for d in std::mem::take(&mut self.state_queued) {
-            if let Err(e) = apply_state(w, &d) {
-                eprintln!(
-                    "makibad: pr watch {}#{}: cannot record its state: {e}",
-                    d.f.repo, d.f.pr
-                );
-                self.state_queued.push(d);
             }
         }
         end_merged(w)?;
@@ -1966,6 +1968,72 @@ esac"#,
             )
             .unwrap(),
             1
+        );
+    }
+
+    /// An open read and the merge read after it, queued for the same pass: the merge is written
+    /// and the open read is not told as a change of the merge state (Issue 387).
+    #[test]
+    fn an_open_read_queued_before_a_merge_is_not_told() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "1".repeat(40);
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'",
+                [],
+            )
+            .unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"}),
+        );
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let mut watch = PrWatch::from_env();
+        watch.gh = dir.path().join("no-gh").display().to_string();
+        watch
+            .told
+            .insert(told_key("o/r", 5, &head), "unknown".to_string());
+        watch.merge_tx.send(merge_read(&f, &head, "CLEAN")).unwrap();
+        watch
+            .state_tx
+            .send(StateDone {
+                f: f.clone(),
+                read: json!({"state": "MERGED", "title": "T",
+                             "mergedAt": "2026-11-23T00:00:00Z",
+                             "mergedBy": {"login": "owner"}, "headRefOid": head,
+                             "mergeCommit": {"oid": "m"}}),
+            })
+            .unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                []
+            )
+            .unwrap(),
+            1
+        );
+        assert_eq!(
+            count(
+                &w,
+                "SELECT count(*) FROM messages WHERE body LIKE 'The merge state of %'",
+                [],
+            )
+            .unwrap(),
+            0
         );
     }
 
