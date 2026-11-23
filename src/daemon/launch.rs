@@ -230,7 +230,7 @@ impl Launch {
                 Outcome::Down(why) => {
                     self.lock().remove(&row.spawn);
                     let task = row.task.as_deref();
-                    super::resume::fail(w, row.id, task, &row.spawn, "settings_ready", &why)?;
+                    super::resume::fail(w, base, row.id, task, &row.spawn, "settings_ready", &why)?;
                 }
                 Outcome::Unsure { hash, refused } => {
                     self.lock()
@@ -239,7 +239,7 @@ impl Launch {
                 Outcome::Later => {}
                 Outcome::Several(why) => {
                     let task = row.task.as_deref();
-                    super::resume::fail(w, row.id, task, &row.spawn, "settings_ready", &why)?;
+                    super::resume::fail(w, base, row.id, task, &row.spawn, "settings_ready", &why)?;
                 }
             }
         }

@@ -17,6 +17,7 @@
 //! fails the launch once it is settled instead of waiting for a deadline; the end is the status,
 //! not a visible composer.
 
+use super::verify::Sight;
 use crate::agents::{self, DialogPolicy};
 use crate::base::{Base, BlockKind, State, Status, Terminal};
 use crate::db::Result;
@@ -231,11 +232,32 @@ struct Row {
 pub struct Dialogs {
     /// Per spawn id: the screen last read since the last key, and since when it is the same.
     seen: BTreeMap<String, (Vec<String>, Instant)>,
+    /// Per spawn id under way: how many keys were pressed into it.
+    keys: BTreeMap<String, u32>,
+    /// Per spawn id under way: when the last of its first `verify::KEYS_RESTART` keys was pressed,
+    /// as the database writes times. Verification starts the launch's clock again there.
+    keyed: BTreeMap<String, String>,
 }
 
 impl Dialogs {
     pub fn new() -> Dialogs {
         Dialogs::default()
+    }
+
+    /// Per spawn id, the key that restarts its verification clock (Issue 333).
+    pub fn keyed(&self) -> &BTreeMap<String, String> {
+        &self.keyed
+    }
+
+    /// A key was pressed into `spawn`.
+    fn pressed(&mut self, w: &StateWriter, spawn: &str) -> Result<()> {
+        let n = self.keys.entry(spawn.to_string()).or_insert(0);
+        *n += 1;
+        if *n <= super::verify::KEYS_RESTART {
+            self.keyed
+                .insert(spawn.to_string(), super::verify::now_text(w)?);
+        }
+        Ok(())
     }
 
     /// Whether `screen` has stayed the same for `SETTLE` since the last key to `spawn`.
@@ -271,6 +293,18 @@ impl Dialogs {
         };
         self.seen
             .retain(|spawn, _| rows.iter().any(|r| &r.spawn == spawn));
+        // The keys count while verification may still look at the launch.
+        if !self.keys.is_empty() {
+            let pending: Vec<String> = {
+                let mut st = w.conn().prepare(
+                    "SELECT spawn_id FROM run_launch WHERE stage IN ('launched', 'dialog_passed')",
+                )?;
+                st.query_map([], |r| r.get(0))?
+                    .collect::<std::result::Result<_, _>>()?
+            };
+            self.keys.retain(|spawn, _| pending.contains(spawn));
+            self.keyed.retain(|spawn, _| pending.contains(spawn));
+        }
         if rows.is_empty() {
             return Ok(());
         }
@@ -284,12 +318,13 @@ impl Dialogs {
                 .find(|t| t.tags.get(TAG_SPAWN) == Some(&row.spawn))
             else {
                 let why = format!("no terminal carries {TAG_SPAWN}={}", row.spawn);
-                fail(w, base, &row, &why, &[])?;
+                fail(w, base, &row, &why, &Sight::none())?;
                 continue;
             };
             if !t.alive {
                 let screen = base.read(&t.id, 0).unwrap_or_default();
-                fail(w, base, &row, "the terminal ended at startup", &screen)?;
+                let sight = Sight::with_screen(&[t], screen, Some(&row.agent));
+                fail(w, base, &row, "the terminal ended at startup", &sight)?;
                 continue;
             }
             let policies = agents::by_name(&row.agent)
@@ -317,7 +352,10 @@ impl Dialogs {
             }
             match decision {
                 Decision::Wait(_) => {}
-                Decision::Unknown(why) => fail(w, base, &row, &why, &screen)?,
+                Decision::Unknown(why) => {
+                    let sight = Sight::with_screen(&[t], screen, Some(&row.agent));
+                    fail(w, base, &row, &why, &sight)?
+                }
                 Decision::Key { dialog, key } => {
                     // The rule for the dialog shown (a status shown with another dialog: wait),
                     // and again on a fresh look: the status may have changed since the list.
@@ -326,8 +364,9 @@ impl Dialogs {
                     let d = policies.iter().find(|d| d.name == dialog);
                     if key_allowed(t, d) && base.get(&t.id).is_ok_and(|now| key_allowed(&now, d)) {
                         self.seen.remove(&row.spawn);
-                        if let Err(e) = base.keys(&t.id, &[key]) {
-                            eprintln!("makibad: dialog key for {}: {e}", row.name);
+                        match base.keys(&t.id, &[key]) {
+                            Ok(()) => self.pressed(w, &row.spawn)?,
+                            Err(e) => eprintln!("makibad: dialog key for {}: {e}", row.name),
                         }
                     }
                 }
@@ -348,10 +387,11 @@ fn passed(w: &StateWriter, id: i64) -> Result<bool> {
 }
 
 /// Stage `failed` and `worker_spawn_failed`, together (spec section 10), with the run and the
-/// notice of M3-6. The terminal is left, unless the launch was failed meanwhile by somebody else.
-fn fail(w: &StateWriter, base: &dyn Base, row: &Row, why: &str, screen: &[String]) -> Result<()> {
+/// notice of M3-6, telling what was seen (`sight`). The terminal is not ended here, unless the
+/// launch was failed meanwhile by somebody else.
+fn fail(w: &StateWriter, base: &dyn Base, row: &Row, why: &str, sight: &Sight) -> Result<()> {
     let task = row.task.as_deref();
-    if !super::verify::fail(w, row.id, task, &row.spawn, "launched", why, screen)? {
+    if !super::verify::fail(w, row.id, task, &row.spawn, "launched", why, sight)? {
         let _ = super::resume::end_terminals(base, &row.spawn);
     }
     Ok(())
@@ -756,5 +796,21 @@ mod tests {
             "trailing blank rows do not count"
         );
         assert!(!d.settled("s", &screen(&["b"])), "a change starts again");
+    }
+
+    /// Issue 333: the first `KEYS_RESTART` keys into a launch restart its verification clock,
+    /// later ones do not.
+    #[test]
+    fn only_the_first_keys_restart_the_clock() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let mut d = Dialogs::new();
+        for _ in 0..super::super::verify::KEYS_RESTART {
+            d.pressed(&w, "s1").unwrap();
+        }
+        assert!(d.keyed().contains_key("s1"));
+        d.keyed.clear();
+        d.pressed(&w, "s1").unwrap();
+        assert!(d.keyed().is_empty());
     }
 }
