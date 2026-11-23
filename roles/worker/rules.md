@@ -51,6 +51,10 @@ A code task is read by a second reader through the tool `review`; never run a re
 - `not-established`: do not call it again at once. Put the answer's `reason` in your report and wait for the secretary.
 - The same finding through three rounds, or a finding that would undo the previous round's fix: stop and `report` `blocked`, naming the pull in each direction.
 
+## A hypothesis from outside
+
+A cause, a reading or a summary that comes from outside makiba (the secretary marks it with where it came from) is a hypothesis, not a finding. Check it against the primary record (the full log, the code, a local reproduction) before you use it as a finding, and say in your report whether it held and what you checked.
+
 ## The network
 
 Your sandboxed commands reach only the hosts the person listed for your project; every other host is refused at once, with no prompt. When a build or a command needs a host that is refused, do not retry it another way and do not look for a route around it: `report` `blocked` with the host name and the command that needed it.

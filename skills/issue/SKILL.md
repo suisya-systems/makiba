@@ -6,7 +6,7 @@ when_to_use: A decision, a piece of work or a follow-up needs an issue in a repo
 
 # issue
 
-The triage scan reads dependencies only from the same line as the keyword (`Blocked by`, `Depends on`, `Requires`); references under a heading are read as no dependency. So every issue you open ends with one dependency line, or none.
+The triage scan reads dependencies only from the same line as the keyword (`Blocked by`, `Depends on`, `Requires`); references under a heading are read as no dependency. A line that starts with one of those keywords and names no Issue number ("Depends on the belt's step 2.") leaves the issue out of the range and the scan as `dependency_unreadable`. So every issue you open ends with one dependency line, or none.
 
 ## Steps
 

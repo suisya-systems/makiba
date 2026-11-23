@@ -279,6 +279,55 @@ pub fn unparsed_dependency_line(text: &str) -> Option<String> {
     None
 }
 
+// A line that starts with a dependency keyword, after an optional quote, heading, list marker,
+// task box and any run of emphasis or code marks; the keyword ends at a word boundary or at a
+// closing mark (`_Depends on_`, where `_` is a word char) (Issue 299).
+re!(
+    DEP_LINE_START,
+    r"(?i)^\s*(?:>\s*)*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?[*_~`]*\s*(?P<kw>blocked\s+by|depends\s+on|requires)(?:\b|[*_~`])"
+);
+re!(ANY_NUMBER_REF, r"#\d");
+
+fn shown_line(line: &str) -> String {
+    line.trim().chars().take(120).collect()
+}
+
+/// The first line (at most 120 chars) of `body` that starts with a dependency keyword and holds
+/// no `#<digits>`: a dependency in words, which the range's read (a `#<n>` on a `Depends on`
+/// line) cannot read (Issue 299).
+pub fn dependency_line_with_no_number(body: &str) -> Option<String> {
+    splitlines(body)
+        .into_iter()
+        .find(|l| DEP_LINE_START.is_match(l) && !ANY_NUMBER_REF.is_match(l))
+        .map(shown_line)
+}
+
+/// The first line (at most 120 chars) of `body` that starts with a dependency keyword not followed
+/// on its line by a ref, while the next non-empty line does not open with one either (that case is
+/// `unparsed_dependency_line`'s warning): a dependency the triage grammar reads as none
+/// (Issue 299).
+pub fn dependency_line_unread(body: &str) -> Option<String> {
+    let lines = splitlines(body);
+    for (i, line) in lines.iter().enumerate() {
+        let Some(m) = DEP_LINE_START.captures(line).and_then(|c| c.name("kw")) else {
+            continue;
+        };
+        if LEADING_RUN.is_match(&line[m.end()..]) {
+            continue;
+        }
+        let next = lines[i + 1..]
+            .iter()
+            .find(|l| !l.trim().is_empty())
+            .copied()
+            .unwrap_or("");
+        if LEADING_RUN.is_match(next.trim_start()) {
+            continue;
+        }
+        return Some(shown_line(line));
+    }
+    None
+}
+
 /// A `blocked` / `on-hold` label makes the Issue blocked whatever its refs say.
 pub fn has_block_label(issue: &Value) -> bool {
     label_names(issue)
@@ -371,5 +420,86 @@ pub fn ref_to_disp(r: &QualRef, collapse: Option<&str>) -> String {
         format!("#{}", r.1)
     } else {
         format!("{}#{}", r.0.as_deref().unwrap_or(""), r.1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{dependency_line_unread, dependency_line_with_no_number};
+
+    const WORDS: &str = "Depends on the belt's step 2.";
+
+    /// Every Markdown lead before the keyword is read through, by both readers (Issue 299).
+    #[test]
+    fn a_dependency_in_words_is_found_behind_any_markdown_lead() {
+        for lead in [
+            "",
+            "  ",
+            "> ",
+            "## ",
+            "- ",
+            "* ",
+            "+ ",
+            "1. ",
+            "2) ",
+            "- [ ] ",
+            "- [x] ",
+            "* [X] ",
+            "**",
+            "***",
+            "_",
+            "__",
+            "`",
+            "> - [ ] **",
+        ] {
+            let body = format!("Intro.\n\n{lead}{WORDS}\n");
+            assert!(
+                dependency_line_with_no_number(&body).is_some(),
+                "range: {body:?}"
+            );
+            assert!(dependency_line_unread(&body).is_some(), "triage: {body:?}");
+        }
+    }
+
+    /// Emphasis closed right after the keyword (`_` is a word char) is read through too.
+    #[test]
+    fn a_dependency_in_words_with_closed_emphasis_is_found() {
+        for body in [
+            "_Depends on_ the previous step.",
+            "__Blocked by__ the previous step.",
+            "**Requires** the previous step.",
+            "`Depends on` the previous step.",
+        ] {
+            assert!(
+                dependency_line_with_no_number(body).is_some(),
+                "range: {body:?}"
+            );
+            assert!(dependency_line_unread(body).is_some(), "triage: {body:?}");
+        }
+    }
+
+    #[test]
+    fn a_dependency_naming_an_issue_or_prose_is_not_unreadable() {
+        for body in [
+            "Depends on #282.",
+            "- [ ] Depends on #282",
+            "***Blocked by #5***",
+            "The row budget depends on the window size.",
+            "This requires a restart.",
+        ] {
+            assert_eq!(
+                dependency_line_with_no_number(body),
+                None,
+                "range: {body:?}"
+            );
+            assert_eq!(dependency_line_unread(body), None, "triage: {body:?}");
+        }
+    }
+
+    /// The triage reader keeps the next-line ref as its warning, not as unreadable.
+    #[test]
+    fn a_ref_on_the_next_line_is_the_triage_warning_not_unreadable() {
+        assert_eq!(dependency_line_unread("Depends on\n\n#12\n"), None);
+        assert!(dependency_line_with_no_number("Depends on\n#12").is_some());
     }
 }
