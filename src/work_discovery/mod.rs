@@ -18,9 +18,9 @@ pub mod refs;
 
 use effort::{compute_priority, estimate_effort, milestone_title};
 use refs::{
-    Canon, QualRef, canon_repo, classify_q, cross_keyword_refs, dependency_text, has_block_label,
-    is_home_disp, label_names, pr_close_refs, pr_referenced_refs, ref_to_disp, ref_to_json,
-    unparsed_dependency_line,
+    Canon, QualRef, canon_repo, classify_q, cross_keyword_refs, dependency_line_unread,
+    dependency_text, has_block_label, is_home_disp, label_names, pr_close_refs, pr_referenced_refs,
+    ref_to_disp, ref_to_json, unparsed_dependency_line,
 };
 use serde_json::{Map, Value, json};
 use std::cmp::Ordering;
@@ -786,6 +786,7 @@ pub fn scan_repos(
     let mut candidates = Vec::new();
     let mut excluded_blocked = Vec::new();
     let mut excluded_merged = Vec::new();
+    let mut excluded_unreadable = Vec::new();
     let mut warnings = Vec::new();
     let mut seen: HashSet<QualRef> = HashSet::new();
     for b in bundles {
@@ -813,6 +814,15 @@ pub fn scan_repos(
                 warnings.push(json!({
                     "repo": disp_repo(repo, collapse_repo), "issue": number, "line": line,
                 }));
+            }
+            // A dependency in words (no Issue number on its keyword line) is no candidate.
+            if let Some(line) =
+                dependency_line_unread(issue.get("body").and_then(Value::as_str).unwrap_or(""))
+            {
+                excluded_unreadable.push(json!({
+                    "repo": disp_repo(repo, collapse_repo), "issue": number, "line": line,
+                }));
+                continue;
             }
             let (blocked, open_blocking, _) = classify_q(issue, repo, &x.open, &x.canon);
             if blocked {
@@ -862,6 +872,7 @@ pub fn scan_repos(
     };
     excluded_blocked.sort_by_cached_key(excl_key);
     excluded_merged.sort_by_cached_key(excl_key);
+    excluded_unreadable.sort_by_cached_key(excl_key);
     let t = truncated.copied().unwrap_or_default();
     json!({
         "status": if top.is_empty() { "no_candidates" } else { "candidates_found" },
@@ -873,6 +884,7 @@ pub fn scan_repos(
         "candidates": top,
         "recommendation": recommendation,
         "excluded_blocked": excluded_blocked,
+        "excluded_dependency_unreadable": excluded_unreadable,
         "dependency_warnings": warnings,
         "excluded_merged": excluded_merged,
         "base_branch_scan": base_branch_scan,

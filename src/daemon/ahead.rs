@@ -194,18 +194,24 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    // The landing of its current pull request only (its newest watch's): a merge of an earlier
-    // one, replaced since, is not this task's landing.
+    // The landing of its current pull request only (`belt::current_pr_sql`, Issue 345): a merge
+    // of another, replaced since or of another repository with the same number, is not this
+    // task's landing.
     let payload = |sql: &str, key: &str| -> rusqlite::Result<Option<Value>> {
         let p: Option<String> = c.query_row(sql, [task, key], |r| r.get(0)).optional()?;
         Ok(p.and_then(|p| serde_json::from_str(&p).ok()))
     };
     let merged = payload(
-        "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
-         WHERE r.task_id = ?1 AND e.kind = 'pr_merged' AND ?2 = ''
-           AND json_extract(e.payload_json, '$.pr') =
-               (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = r.id ORDER BY pw.id DESC LIMIT 1)
-         ORDER BY e.id LIMIT 1",
+        &format!(
+            "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
+             WHERE r.task_id = ?1 AND e.kind = 'pr_merged' AND ?2 = '' AND {}
+             ORDER BY e.id LIMIT 1",
+            super::belt::is_current_pr_sql(
+                "r",
+                "json_extract(e.payload_json, '$.repo')",
+                "json_extract(e.payload_json, '$.pr')"
+            )
+        ),
         "",
     )?;
     let in_clone = match merged.as_ref().and_then(|m| m["merge_commit"].as_str()) {
@@ -216,14 +222,25 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
              ORDER BY e.id LIMIT 1",
             merge,
         )?,
-        // A merge recorded before Issue 284 names no commit: the clone check read it again.
-        None if merged.is_some() => payload(
-            "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE r.task_id = ?1 AND e.kind = 'landed_in_clone' AND ?2 = ''
-             ORDER BY e.id DESC LIMIT 1",
-            "",
-        )?,
-        None => None,
+        // A merge recorded before Issue 284 names no commit: the clone check read it again, and
+        // only its record of this pull request (`repo` and `pr`, Issue 345) is this landing's.
+        None => match merged.as_ref() {
+            Some(m) => {
+                let p: Option<String> = c
+                    .query_row(
+                        "SELECT e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
+                         WHERE r.task_id = ?1 AND e.kind = 'landed_in_clone'
+                           AND lower(json_extract(e.payload_json, '$.repo')) = lower(?2)
+                           AND json_extract(e.payload_json, '$.pr') = ?3
+                         ORDER BY e.id DESC LIMIT 1",
+                        rusqlite::params![task, m["repo"].as_str(), m["pr"].as_i64()],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                p.and_then(|p| serde_json::from_str(&p).ok())
+            }
+            None => None,
+        },
     };
     let pr_closed: bool = c.query_row(
         &format!(
@@ -914,6 +931,77 @@ mod tests {
         lands(&w, 12, "m2");
         w.transaction(settle).unwrap();
         assert!(open_wait(w.conn(), "r1-2").unwrap().is_none());
+    }
+
+    /// A, then B, then A again: B's merge and clone record are not A's landing, nor are they for a
+    /// merge of A recorded without its commit; a pull request of another repository with the same
+    /// number is not landed by the old one's merge (Issue 345).
+    #[test]
+    fn only_the_merge_of_the_current_pull_request_lands_by_repository_and_number() {
+        let (_d, w) = org();
+        report_design(&w);
+        set(&w, "r1-1", "completed");
+        let reg = |kind: &str, repo: &str, pr: i64, head: &str| {
+            super::super::prwatch::register(&w, kind, "r1-1", repo, pr, head).unwrap();
+        };
+        reg("pr_opened", "o/p", 12, "bbbb");
+        reg("fix_pushed", "o/p", 11, "aaaa");
+        let waits = |w: &StateWriter| {
+            w.transaction(settle).unwrap();
+            open_wait(w.conn(), "r1-2").unwrap().is_some()
+        };
+        ev(
+            &w,
+            "pr_merged",
+            "r1-1",
+            json!({"repo": "o/p", "pr": 12, "merge_commit": "m2", "task_id": "r1-1"}),
+        );
+        ev(
+            &w,
+            "landed_in_clone",
+            "r1-1",
+            json!({"task_id": "r1-1", "merge_commit": "m2", "base": "main", "base_head": "h9",
+                   "repo": "o/p", "pr": 12}),
+        );
+        assert!(waits(&w), "B is not current");
+        ev(
+            &w,
+            "pr_merged",
+            "r1-1",
+            json!({"repo": "o/p", "pr": 11, "task_id": "r1-1"}),
+        );
+        assert!(
+            waits(&w),
+            "A's merge without its commit: B's clone record is not its"
+        );
+        let (_d2, w2) = org();
+        report_design(&w2);
+        set(&w2, "r1-1", "completed");
+        lands(&w2, 11, "m1");
+        super::super::prwatch::register(&w2, "pr_opened", "r1-1", "new/p", 11, "cccc").unwrap();
+        assert!(waits(&w2), "new/p#11 is not landed by o/p#11");
+        ev(
+            &w2,
+            "pr_merged",
+            "r1-1",
+            json!({"repo": "New/p", "pr": 11, "merge_commit": "m3", "task_id": "r1-1"}),
+        );
+        ev(
+            &w2,
+            "landed_in_clone",
+            "r1-1",
+            json!({"task_id": "r1-1", "merge_commit": "m3", "base": "main", "base_head": "h9"}),
+        );
+        assert!(!waits(&w2), "its own merge, in the clone");
+        // Back on the first: A's own clone record of the merge read without a commit.
+        ev(
+            &w,
+            "landed_in_clone",
+            "r1-1",
+            json!({"task_id": "r1-1", "merge_commit": "m1", "base": "main", "base_head": "h9",
+                   "repo": "o/p", "pr": 11}),
+        );
+        assert!(!waits(&w), "A landed");
     }
 
     /// A task asked about (its launch failed) that recovers and lands before the person answers:
