@@ -8,7 +8,7 @@
 //! that showed it, spec section 7); its newest launch is `verified`; no message to its worker is
 //! still waiting for delivery, nor taken but not yet seen taken (Issue 332: a typed one until a
 //! turn of the launch later than the turn it was typed at is recorded, any other one until a
-//! terminal record of the launch newer than it); and the newest `terminal_status` and
+//! terminal record of the launch written after it and that arrived after its delivery); and the newest `terminal_status` and
 //! `terminal_turn` of that launch say `idle` or `done`, written at least `MAKIBA_PARK_AFTER_MS`
 //! ago. The base is read once more before anything is written: the terminal must still show
 //! `idle` or `done` and no later turn. The transaction that parks checks the records again, and a
@@ -61,6 +61,12 @@ const TURN: &str = "coalesce((SELECT max(json_extract(t.payload_json, '$.turn'))
 
 /// Whether the run `r` with its newest launch `l` may be parked now; `?1` is the wait in
 /// milliseconds. Read by the pass and again by the update that parks.
+///
+/// A message to its worker keeps it while it waits for delivery, and after it until the terminal
+/// is seen past it (Issue 332): for one typed at a turn of this launch, a recorded turn above
+/// that one; for any other, a terminal record of the launch written after the message and that
+/// arrived after its delivery (`occurred_at` is the arrival time the monitor keeps, so a record
+/// written late of something seen before the send does not count).
 fn parkable() -> String {
     format!(
         "r.status = 'in_use'
@@ -78,7 +84,13 @@ fn parkable() -> String {
                                     AND json_extract(m.payload_json, '$.spawn_id') = l.spawn_id
                                     AND {TURN} <= json_extract(m.payload_json, '$.turn'))
                                 OR (json_extract(m.payload_json, '$.turn') IS NULL
-                                    AND d.source_event_id > {LAST_SEEN})))
+                                    AND NOT EXISTS (SELECT 1 FROM events s
+                                        WHERE s.run_id = r.id
+                                          AND s.kind IN ('terminal_status', 'terminal_turn')
+                                          AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
+                                          AND s.id > d.source_event_id
+                                          AND s.occurred_at > coalesce(d.delivered_at,
+                                                d.last_attempt_at, d.created_at)))))
          AND (SELECT json_extract(s.payload_json, '$.state') FROM events s
               WHERE s.run_id = r.id AND s.kind = 'terminal_status'
                 AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
@@ -603,6 +615,50 @@ mod tests {
             .unwrap();
         assert!(park(&w).is_empty());
         assert_eq!(status(&w), "in_use");
+    }
+
+    /// A message typed with no turn counter (`typed_at` seconds ago, delivered then), followed by
+    /// a terminal record of the launch that arrived `seen` seconds ago, written after the message.
+    fn typed_then_seen(typed_at: i64, seen: i64) -> (tempfile::TempDir, StateWriter) {
+        let (d, w) = org(20_000);
+        entry(&w, "question", "escalated");
+        let ago = |s: i64| format!("-{s} seconds");
+        w.conn()
+            .execute(
+                "INSERT INTO events (kind, payload_json) VALUES ('message_sent',
+                   json_object('typed', json('true'), 'spawn_id', 's1'))",
+                [],
+            )
+            .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO event_deliveries (source_event_id, recipient, status, delivered_at)
+                 VALUES ((SELECT max(id) FROM events), 'w-t', 'delivered',
+                         strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1))",
+                [ago(typed_at)],
+            )
+            .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO events (kind, run_id, occurred_at, payload_json)
+                 VALUES ('terminal_status', 1, strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?1),
+                         json_object('spawn_id', 's1', 'state', 'idle'))",
+                [ago(seen)],
+            )
+            .unwrap();
+        (d, w)
+    }
+
+    /// Issue 332, with no turn counter: an observation the monitor writes after a typed message
+    /// but that arrived before the text was typed does not let the run park; one that arrived
+    /// after it does.
+    #[test]
+    fn a_typed_message_without_a_turn_keeps_the_run_until_a_record_that_arrived_after_it() {
+        let (_d, w) = typed_then_seen(3, 5);
+        assert!(park(&w).is_empty());
+        assert_eq!(status(&w), "in_use");
+        let (_d, w) = typed_then_seen(10, 5);
+        assert_eq!(park(&w), ["t"]);
     }
 
     #[test]
