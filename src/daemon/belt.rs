@@ -1177,14 +1177,14 @@ fn open_runs(w: &StateWriter, id: i64) -> Result<i64> {
     )
 }
 
-/// Whether the run `alias` has its newest pull request (its newest watch's) read closed unmerged
-/// (`pr_closed`, Issue 284). A pull request opened again after it is not.
+/// Whether the run `alias` has its pull request read closed unmerged (`pr_closed`, Issue 284)
+/// with nothing since: no pull request recorded again (`pr_opened`, `fix_pushed`) and no read of
+/// it open again (`pr_reopened`).
 pub(super) fn pr_closed_sql(alias: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM events pc WHERE pc.run_id = {alias}.id AND pc.kind = 'pr_closed'
-           AND json_extract(pc.payload_json, '$.pr') =
-               (SELECT pw.pr FROM pr_watches pw WHERE pw.id =
-                  (SELECT max(px.id) FROM pr_watches px WHERE px.run_id = {alias}.id)))"
+           AND pc.id > coalesce((SELECT max(po.id) FROM events po WHERE po.run_id = {alias}.id
+                                 AND po.kind IN ('pr_opened', 'fix_pushed', 'pr_reopened')), 0))"
     )
 }
 
@@ -1607,13 +1607,23 @@ pub const LANDING_RETRY_ENV: &str = "MAKIBA_LANDING_RETRY_MS";
 /// A dependency of a design-only run waiting for its landing (belt.md 4.3) whose task closed
 /// `completed` and that is not yet seen in the project's clone: (task, project, default branch,
 /// its merge commit when its pull request was read merged).
-type CloneCheck = (String, String, String, Option<String>);
+struct CloneCheck {
+    task: String,
+    slug: String,
+    branch: String,
+    /// From its `pr_merged`; a merge recorded before Issue 284 has none, and is read again.
+    merge: Option<String>,
+    /// Its newest pull request, `repo` and number.
+    pr: Option<(String, i64)>,
+}
 
 fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
     let mut q = w.conn().prepare(
         "SELECT DISTINCT d.task_id, p.slug, coalesce(p.default_branch, 'main'),
                 (SELECT json_extract(m.payload_json, '$.merge_commit') FROM events m
-                 WHERE m.run_id = d.id AND m.kind = 'pr_merged' ORDER BY m.id LIMIT 1)
+                 WHERE m.run_id = d.id AND m.kind = 'pr_merged' ORDER BY m.id LIMIT 1),
+                (SELECT pw.repo FROM pr_watches pw WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1),
+                (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1)
          FROM runs r
          JOIN events e ON e.run_id = r.id AND e.kind = 'belt_dispatched'
               AND json_extract(e.payload_json, '$.design_only') = 1
@@ -1627,10 +1637,57 @@ fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
                            AND x.kind = 'landed_in_clone')
          ORDER BY d.id",
     )?;
-    Ok(
-        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
-            .collect::<std::result::Result<_, _>>()?,
-    )
+    Ok(q.query_map([], |r| {
+        let repo: Option<String> = r.get(4)?;
+        let pr: Option<i64> = r.get(5)?;
+        Ok(CloneCheck {
+            task: r.get(0)?,
+            slug: r.get(1)?,
+            branch: r.get(2)?,
+            merge: r.get(3)?,
+            pr: repo.zip(pr),
+        })
+    })?
+    .collect::<std::result::Result<_, _>>()?)
+}
+
+/// One clone check on the read's thread: the merge commit (recorded, read by this job's landings,
+/// or, for a merge recorded without one, read again with `gh pr view`), then `in_clone`. The
+/// task, merge commit, branch and the branch's head when the merge is there.
+fn check_clone(
+    gh: &str,
+    repos_dir: &Path,
+    c: &CloneCheck,
+    merged: &BTreeMap<&str, &str>,
+    cancel: &AtomicBool,
+) -> Option<(String, String, String, String)> {
+    let read_again = || -> Option<String> {
+        let (repo, pr) = c.pr.as_ref()?;
+        let v = gh_json(
+            gh,
+            &[
+                "pr",
+                "view",
+                &pr.to_string(),
+                "--repo",
+                &format!("github.com/{repo}"),
+                "--json",
+                "state,mergeCommit",
+            ],
+            cancel,
+        )
+        .ok()?;
+        (v["state"].as_str() == Some("MERGED"))
+            .then(|| v["mergeCommit"]["oid"].as_str().map(String::from))
+            .flatten()
+    };
+    let merge = c
+        .merge
+        .clone()
+        .or_else(|| merged.get(c.task.as_str()).map(|m| m.to_string()))
+        .or_else(read_again)?;
+    let head = in_clone(&repos_dir.join(&c.slug), &c.branch, &merge, cancel)?;
+    Some((c.task.clone(), merge, c.branch.clone(), head))
 }
 
 /// Fetch `branch` into the clone `clone` through its `origin` (what a worker's `git fetch origin`
@@ -1808,13 +1865,7 @@ impl Belt {
                     .collect();
                 let clones = checks
                     .iter()
-                    .filter_map(|(task, slug, branch, merge)| {
-                        let merge = merge
-                            .as_deref()
-                            .or_else(|| merged.get(task.as_str()).copied())?;
-                        let head = in_clone(&repos_dir.join(slug), branch, merge, &cancel)?;
-                        Some((task.clone(), merge.to_string(), branch.clone(), head))
-                    })
+                    .filter_map(|c| check_clone(&gh, &repos_dir, c, &merged, &cancel))
                     .collect();
                 if !cancel.load(Ordering::SeqCst) {
                     let _ = tx.send(Outcome {
@@ -1936,7 +1987,7 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
          WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked'
                 OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id)
-           AND NOT {}
+           AND (NOT {} OR r.task_id IN ({AWAITED}))
          ORDER BY r.id",
         pr_closed_sql("r")
     ))?;
@@ -2417,20 +2468,31 @@ fn record(
         )?;
         let closed = count(
             w,
-            "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE e.kind = 'pr_closed' AND r.task_id = ?1
-               AND json_extract(e.payload_json, '$.pr') = ?2",
-            params![task, pr],
+            &format!(
+                "SELECT count(*) FROM runs r WHERE r.task_id = ?1 AND {}",
+                pr_closed_sql("r")
+            ),
+            [task],
         )?;
-        // A pull request closed without its merge: it will not land (belt.md 4.3, a dependency
-        // dropped), and it is not read again unless the task records another.
-        if known == 0 && closed == 0 && v["state"].as_str() == Some("CLOSED") {
+        // A pull request closed without its merge: it will not land as it is (belt.md 4.3). The
+        // tasks a design-only run waits for are read on, and one read open again is reopened.
+        let state = v["state"].as_str();
+        if known == 0 && closed == 0 && state == Some("CLOSED") {
             event(
                 w,
                 "pr_closed",
                 "makibad",
                 Some(task),
                 json!({"repo": repo, "pr": pr, "title": v["title"], "task_id": task}),
+            )?;
+        }
+        if closed > 0 && state == Some("OPEN") {
+            event(
+                w,
+                "pr_reopened",
+                "makibad",
+                Some(task),
+                json!({"repo": repo, "pr": pr, "task_id": task}),
             )?;
         }
         if known == 0 && v["state"].as_str() == Some("MERGED") {
@@ -3125,22 +3187,121 @@ mod tests {
                 .collect()
         };
         assert_eq!(read(&w), [11]);
-        let o = Outcome {
-            range: None,
-            landings: vec![(
-                "r1-1".into(),
-                "o/p".into(),
-                11,
-                Some(json!({"state": "CLOSED", "title": "T"})),
-            )],
-            clones: Vec::new(),
+        let seen = |w: &StateWriter, state: &str| {
+            let o = Outcome {
+                range: None,
+                landings: vec![(
+                    "r1-1".into(),
+                    "o/p".into(),
+                    11,
+                    Some(
+                        json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                                "mergeCommit": {"oid": "m1"}}),
+                    ),
+                )],
+                clones: Vec::new(),
+            };
+            w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
         };
-        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
-        assert_eq!(read(&w), Vec::<i64>::new(), "closed: not read again");
+        let kinds = |w: &StateWriter, kind: &str| -> i64 {
+            count(w, "SELECT count(*) FROM events WHERE kind = ?1", [kind]).unwrap()
+        };
+        seen(&w, "CLOSED");
+        seen(&w, "CLOSED");
+        assert_eq!(kinds(&w, "pr_closed"), 1, "closed once");
         assert!(ahead_of(w.conn(), id, 1).unwrap().is_none());
-        watch(&w, "r1-1", 12, &"b".repeat(40));
-        assert_eq!(read(&w), [12], "another pull request is read");
+        assert_eq!(read(&w), [11], "awaited: read on while closed");
+        seen(&w, "OPEN");
+        assert_eq!(kinds(&w, "pr_reopened"), 1);
         assert_eq!(ahead_of(w.conn(), id, 1).unwrap().as_deref(), Some("r1-1"));
+        seen(&w, "MERGED");
+        assert_eq!(
+            kinds(&w, "pr_merged"),
+            1,
+            "the same pull request reopened, then merged"
+        );
+        assert_eq!(read(&w), Vec::<i64>::new(), "merged: not read again");
+    }
+
+    /// A dependency's merge recorded before Issue 284 has no merge commit: the clone check reads
+    /// its pull request again for it, then looks for it in the clone.
+    #[test]
+    fn a_merge_recorded_without_its_commit_is_read_again_for_the_clone_check() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |at: &Path, args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args([
+                    "-c",
+                    "init.defaultBranch=main",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(at)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let origin = root.join("origin.git");
+        let clone = root.join("repos").join("p");
+        git(root, &["init", "-q", "--bare", &origin.to_string_lossy()]);
+        std::fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q", "-b", "main"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(
+            &clone,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        git(
+            &clone,
+            &["commit", "-q", "--allow-empty", "-m", "the merge"],
+        );
+        git(&clone, &["push", "-q", "origin", "main"]);
+        let merge = git(&clone, &["rev-parse", "HEAD"]);
+        let gh = root.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                "#!/bin/sh\necho '{}'\n",
+                json!({"state": "MERGED", "mergeCommit": {"oid": merge}})
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let check = CloneCheck {
+            task: "r1-1".into(),
+            slug: "p".into(),
+            branch: "main".into(),
+            merge: None,
+            pr: Some(("o/p".into(), 11)),
+        };
+        let never = AtomicBool::new(false);
+        let found = check_clone(
+            &gh.to_string_lossy(),
+            &root.join("repos"),
+            &check,
+            &BTreeMap::new(),
+            &never,
+        );
+        assert_eq!(
+            found,
+            Some(("r1-1".into(), merge.clone(), "main".into(), merge.clone()))
+        );
+        let none = CloneCheck { pr: None, ..check };
+        assert_eq!(
+            check_clone(
+                &gh.to_string_lossy(),
+                &root.join("repos"),
+                &none,
+                &BTreeMap::new(),
+                &never
+            ),
+            None,
+            "no pull request to read"
+        );
     }
 
     /// A merge is seen in the project's clone only once its default branch, fetched from its

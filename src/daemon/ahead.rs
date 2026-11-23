@@ -302,7 +302,7 @@ pub fn settle(w: &StateWriter) -> Result<()> {
             .map(|d| d.issue)
             .collect();
         if landed.is_empty() {
-            // Every task let go: the run is woken as answered (`park::settle`).
+            // Every task let go: the run is woken (or, not parked, told) to build without them.
             event(
                 w,
                 "ahead_settled",
@@ -310,6 +310,21 @@ pub fn settle(w: &StateWriter) -> Result<()> {
                 json!({"task_id": task, "outcome": "released", "issues": wait.issues,
                        "released": let_go}),
             )?;
+            let body = format!(
+                "The person let you go on without {}: your design-only wait is over. Build on the base as it is: code, tests, the reviews, then report done.",
+                named(&let_go)
+            );
+            if status == "parked" {
+                super::park::wake_with_notice(
+                    w,
+                    &task,
+                    "released",
+                    json!({"released": let_go}),
+                    &body,
+                )?;
+            } else {
+                super::door::notice(w, &crate::spec::worker_agent_id(&task), &task, &body)?;
+            }
             continue;
         }
         let prs: Vec<Value> = landed
@@ -703,6 +718,17 @@ mod tests {
                 open_wait(w.conn(), "r1-2").unwrap().is_none(),
                 "{how}: yes lets it go"
             );
+            // Not parked yet: told to build, since nothing else reaches it.
+            assert_eq!(status(&w, "r1-2"), "in_use");
+            assert_eq!(
+                n(
+                    &w,
+                    "SELECT count(*) FROM messages WHERE recipient = 'w-r1-2' AND kind = 'notice'
+                       AND body LIKE 'The person let you go on without #1:%'"
+                ),
+                1,
+                "{how}"
+            );
             assert_eq!(
                 n(
                     &w,
@@ -713,6 +739,29 @@ mod tests {
                 "{how}"
             );
         }
+    }
+
+    /// A parked run whose every task was let go is woken with the reason `released`.
+    #[test]
+    fn a_parked_run_let_go_is_woken_to_build() {
+        let (_d, w) = org();
+        report_design(&w);
+        set(&w, "r1-2", "parked");
+        set(&w, "r1-1", "abandoned");
+        w.transaction(settle).unwrap();
+        let id = n(&w, "SELECT max(id) FROM pending");
+        answered(&w, id, "yes").unwrap();
+        assert_eq!(status(&w, "r1-2"), "suspended");
+        let reason: String = w
+            .conn()
+            .query_row(
+                "SELECT json_extract(payload_json, '$.reason') FROM events
+                 WHERE kind = 'run_unparked'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(reason, "released");
     }
 
     /// With two tasks waited for, letting one go keeps the run waiting for the other: it may not
