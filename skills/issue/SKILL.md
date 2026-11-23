@@ -20,6 +20,7 @@ The triage scan reads dependencies only from the same line as the keyword (`Bloc
 | followup | What was seen, Ask, Goal clause |
 
    The goal clause is one line: the clause number and its heading, from the project's goal ledger.
+   A followup also carries, each on a line of its own before the dependency line: `Follow-up of #N` (the Issue it was found on), `Needs host: <host>, <host>` when its work needs a network host, and `Stop line: <line>` when it would hit a stop line (`decision`, `irreversible`, ...). A range whose follow-ups are inside takes a followup by itself unless it needs a host the project does not list or names a stop line: then it is asked for.
 3. Dependencies: check each number exists in that repository (`gh issue view <N> --repo <owner>/<name>`); a number that does not exist is a mistake to fix, not to drop. Give each number once. If there is any, the last line of the body is `Depends on #N #M`, alone, on one line.
 4. Write the body to a file in `$TMPDIR` and run `gh issue create --repo <owner>/<name> --title "<title>" --body-file <file>`. It prints the issue's link: use that.
 

@@ -74,8 +74,9 @@ const TURN: &str = "coalesce((SELECT max(json_extract(t.payload_json, '$.turn'))
 fn parkable() -> String {
     format!(
         "r.status = 'in_use'
-         AND EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
-                     AND p.status = 'escalated' AND p.kind = 'question')
+         AND (EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
+                      AND p.status = 'escalated' AND p.kind = 'question')
+              OR {landing})
          AND NOT EXISTS (SELECT 1 FROM pending p WHERE p.run_id = r.id
                          AND (p.status = 'open' OR (p.status = 'escalated' AND p.kind = 'prompt')))
          AND l.stage = 'verified' AND l.conversation_id IS NOT NULL
@@ -105,7 +106,8 @@ fn parkable() -> String {
               ORDER BY s.id DESC LIMIT 1) IN ('idle', 'done')
          AND (julianday('now') - julianday((SELECT occurred_at FROM events WHERE id = {LAST_SEEN})))
              * 86400000.0 >= ?1",
-        prefix = crate::spec::WORKER_AGENT_PREFIX
+        prefix = crate::spec::WORKER_AGENT_PREFIX,
+        landing = super::belt::LANDING_WAIT
     )
 }
 
@@ -270,12 +272,26 @@ impl Park {
                 )?
                 .query_map([c.run], |r| r.get(0))?
                 .collect::<std::result::Result<_, _>>()?;
+            // A run waiting for a landing (Issue 284): the Issues it waits for.
+            let landing: bool = w.conn().query_row(
+                &format!(
+                    "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1 AND {})",
+                    super::belt::LANDING_WAIT
+                ),
+                [c.run],
+                |r| r.get(0),
+            )?;
+            let waits_for = if landing {
+                super::ahead::open_wait(w.conn(), &c.task)?.map(|wait| wait.issues)
+            } else {
+                None
+            };
             w.append_event(&NewEvent {
                 kind: "run_parked",
                 actor: Some("makibad"),
                 payload: Some(&json!({
                     "task_id": c.task, "spawn_id": c.spawn, "pending": pending,
-                    "idle_since": c.idle_since,
+                    "idle_since": c.idle_since, "waits_for": waits_for,
                 })),
                 run_task_id: Some(&c.task),
                 ..Default::default()
@@ -355,7 +371,8 @@ pub fn parked_worker(w: &StateWriter, agent: &str) -> Result<Option<String>> {
 
 /// Wake every parked run that no longer has an escalated question, in the caller's transaction:
 /// its last one was answered or withdrawn (by the secretary, the person or `makibad`), so nothing
-/// would bring it back otherwise. The reason is what became of its newest entry.
+/// would bring it back otherwise. The reason is what became of its newest entry. A run waiting
+/// for a landing (Issue 284) is left parked: its landing wakes it (`ahead::settle`).
 pub fn settle(w: &StateWriter) -> Result<()> {
     type Row = (
         String,
@@ -366,14 +383,16 @@ pub fn settle(w: &StateWriter) -> Result<()> {
     );
     let runs: Vec<Row> = w
         .conn()
-        .prepare(
+        .prepare(&format!(
             "SELECT r.task_id, p.status, p.id, p.question, p.answer FROM runs r
              LEFT JOIN pending p ON p.id = (SELECT max(id) FROM pending WHERE run_id = r.id)
              WHERE r.status = 'parked'
                AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id = r.id
                                AND q.status = 'escalated' AND q.kind = 'question')
+               AND NOT {}
              ORDER BY r.id",
-        )?
+            super::belt::LANDING_WAIT
+        ))?
         .query_map([], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
         })?
@@ -425,6 +444,9 @@ pub fn read_fields(c: &rusqlite::Connection, task: &str, status: &str) -> rusqli
                 "why": newest.lines().next().unwrap_or_default(),
             }),
         );
+    } else if let Some(landing) = super::ahead::waiting_field(c, task)? {
+        // A design-only run waiting for a landing (Issue 284).
+        out.insert("waiting".into(), landing);
     }
     if status != "parked" {
         let woken: Option<(String, String)> = c
