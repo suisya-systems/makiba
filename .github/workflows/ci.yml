@@ -48,12 +48,10 @@ jobs:
         with:
           python-version: "3.11"
       - run: python3 tools/check_language.py
-      - name: Shell scripts parse, and shellcheck finds no error (SC2218, a function used before its definition, is one)
+      - name: Every tracked shell script parses, and shellcheck finds no error (SC2218, a function used before its definition, is one)
+        # The list is git's own (git ls-files '*.sh'), so no glob has to follow the tree (#354).
         # shellcheck is preinstalled on ubuntu-latest; nothing is downloaded.
-        run: |
-          shellcheck --version
-          for f in scripts/*.sh scripts/probes/*.sh scripts/runbooks/*.sh; do bash -n "$f" || exit 1; done
-          shellcheck --severity=error scripts/*.sh scripts/probes/*.sh scripts/runbooks/*.sh
+        run: python3 tools/shell_lint.py
       - name: Each probe runs once - its --help, then a dry run through its exit handler
         # PROBE_DRY_RUN=1 stops before the base, makibad or an agent is started (scripts/probes/README.md);
         # no hc, claude or secret is needed. timeout bounds a hang, such as an exit handler that calls itself.
