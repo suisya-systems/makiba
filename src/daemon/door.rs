@@ -1019,6 +1019,8 @@ impl Question {
                 self.id
             )));
         }
+        // A `no` to a failed dependency's question releases a design-only wait (Issue 284).
+        super::ahead::answered(w, self.id, &self.answer).map_err(internal)?;
         // A stop answered to the secretary may have been a parked run's last (Issue 283).
         super::park::settle(w).map_err(internal)?;
         Ok(json!({"id": self.id, "status": "answered", "message": message}))
@@ -1435,10 +1437,27 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     } else {
         None
     };
-    let body = match &review {
+    // A design-only run waiting for a landing (Issue 284): its `blocked` is its design, its
+    // `done` waits for the landing.
+    let ahead = if role == Role::Worker {
+        super::ahead::report(w.conn(), task, state).map_err(internal)?
+    } else {
+        super::ahead::Report::Plain
+    };
+    if let super::ahead::Report::Refused(why) = &ahead {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            why.clone(),
+            "you are woken on this conversation when what you wait for lands",
+        ));
+    }
+    let mut body = match &review {
         Some(r) => format!("{text}\n\n[makiba] {}", review_line(r)),
         None => text.to_string(),
     };
+    if let super::ahead::Report::Design(line, _) = &ahead {
+        body.push_str(&format!("\n\n{line}"));
+    }
     let kind = format!("report_{state}");
     let id = store_message(
         w,
@@ -1458,6 +1477,9 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
             ..Default::default()
         })
         .map_err(internal)?;
+    }
+    if let super::ahead::Report::Design(_, wait) = &ahead {
+        super::ahead::design_reported(w, task, wait).map_err(internal)?;
     }
     if state == "done" {
         w.conn()
@@ -3962,7 +3984,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: heads pushed to a task's pull request after the first before it is a stop, default 3): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: heads pushed to a task's pull request after the first before it is a stop, default 3; follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -3979,6 +4001,11 @@ fn tool(v: Verb) -> Value {
                 ("budget_tasks".into(), json!({"type": "integer"})),
                 ("budget_hours".into(), json!({"type": "number"})),
                 ("budget_fixes".into(), json!({"type": "integer"})),
+                (
+                    "follow_ups".into(),
+                    json!({"type": "string", "enum": ["inside", "ask"]}),
+                ),
+                ("design_ahead".into(), json!({"type": "boolean"})),
                 ("brief_head".into(), text.clone()),
                 ("replaces".into(), json!({"type": "integer"})),
                 ("issue".into(), json!({"type": "integer"})),

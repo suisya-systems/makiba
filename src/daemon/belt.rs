@@ -59,12 +59,28 @@ const STOP_KINDS: [&str; 5] = ["design", "scope", "order", "naming", "other"];
 /// `budget_fixes` of a proposal that names none (belt.md 2.1).
 const DEFAULT_FIXES: i64 = 3;
 
-/// A run `r` waits only for the person: it has an escalated pending entry (belt.md 4.1). Such a
-/// run counts neither against its range's `at_once` nor against `max_concurrent_workers`. A run
-/// woken from parking (`run_unparked`, Issue 283) is at work again: it counts from the wake until
-/// it is parked again or escalates an entry newer than the wake (`pending_max`), even while an
-/// older entry is still escalated.
-pub const WAITING: &str = "EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.id
+/// The SQL of `LANDING_WAIT`, as a literal so that `WAITING` can be one constant.
+macro_rules! landing_wait {
+    () => {
+        "(EXISTS (SELECT 1 FROM events lb WHERE lb.run_id = r.id AND lb.kind = 'belt_dispatched'
+                 AND json_extract(lb.payload_json, '$.design_only') = 1)
+          AND EXISTS (SELECT 1 FROM events lr WHERE lr.run_id = r.id AND lr.kind = 'design_reported')
+          AND NOT EXISTS (SELECT 1 FROM events ls WHERE ls.run_id = r.id AND ls.kind = 'ahead_settled'))"
+    };
+}
+
+/// A run `r` waits for a landing (belt.md 4.3, Issue 284): it was dispatched for its design
+/// only, has reported its design, and what it waits for has not been settled (landed, dropped or
+/// released). It may be parked (`park.rs`) as a run waiting for the person is.
+pub const LANDING_WAIT: &str = landing_wait!();
+
+/// A run `r` that counts in neither count (belt.md 3.2, 4.1, 4.3): it waits only for the person
+/// (an escalated pending entry), or it waits for a landing. A run woken from parking
+/// (`run_unparked`, Issue 283) is at work again: it counts from the wake until it is parked again,
+/// escalates an entry newer than the wake (`pending_max`) or reports its design again, even while
+/// an older entry is still escalated or its landing has not come.
+pub const WAITING: &str = concat!(
+    "(EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.id
     AND wp.status = 'escalated'
     AND (NOT EXISTS (SELECT 1 FROM events wu WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')
          OR wp.id > (SELECT json_extract(wu.payload_json, '$.pending_max') FROM events wu
@@ -73,7 +89,18 @@ pub const WAITING: &str = "EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.
          OR coalesce((SELECT max(wk.id) FROM events wk
                       WHERE wk.run_id = r.id AND wk.kind = 'run_parked'), 0)
             > (SELECT max(wu.id) FROM events wu
-               WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')))";
+               WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')))
+    OR (",
+    landing_wait!(),
+    " AND (coalesce((SELECT max(lu.id) FROM events lu
+                      WHERE lu.run_id = r.id AND lu.kind = 'run_unparked'), 0)
+              < (SELECT max(ld.id) FROM events ld
+                 WHERE ld.run_id = r.id AND ld.kind = 'design_reported')
+           OR coalesce((SELECT max(lk.id) FROM events lk
+                        WHERE lk.run_id = r.id AND lk.kind = 'run_parked'), 0)
+              > coalesce((SELECT max(lu.id) FROM events lu
+                          WHERE lu.run_id = r.id AND lu.kind = 'run_unparked'), 0))))"
+);
 
 /// `chain`: the range `?1` and every range it replaced (each `ended` `replaced`). Their runs stay
 /// theirs (where a run came from), and count for the range that replaced them.
@@ -251,6 +278,20 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
             .filter(|n| *n >= 1)
             .ok_or_else(|| usage("budget_fixes is at least 1"))?,
     };
+    // Follow-ups found on the way are inside a proposal unless it says `ask` (belt.md 2.1, Q3).
+    let follow_ups = match args.get("follow_ups") {
+        None | Some(Value::Null) => "inside",
+        Some(v) => match v.as_str() {
+            Some(f @ ("ask" | "inside")) => f,
+            _ => return Err(usage("follow_ups is ask or inside")),
+        },
+    };
+    let design_ahead = match args.get("design_ahead") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| usage("design_ahead is true or false"))?,
+    };
     let head = str_arg(args, "brief_head")?;
     if head.trim().is_empty() {
         return Err(usage("the brief head is not empty"));
@@ -270,8 +311,9 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let store = || -> Result<i64> {
         w.conn().execute(
             "INSERT INTO ranges (project_id, issues_json, takes, at_once, budget_tasks, brief_head,
-                                 replaces, proposed_by, budget_hours, budget_fixes)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                                 replaces, proposed_by, budget_hours, budget_fixes, follow_ups,
+                                 design_ahead)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)",
             params![
                 project,
                 json!(issues).to_string(),
@@ -282,7 +324,9 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
                 replaces.as_ref().map(|g| g.id),
                 actor,
                 hours,
-                fixes
+                fixes,
+                follow_ups,
+                design_ahead
             ],
         )?;
         let id = w.conn().last_insert_rowid();
@@ -606,26 +650,26 @@ pub(super) fn stop_parts_missing(c: &Connection, id: i64) -> rusqlite::Result<Ve
 /// A stop `makibad` writes (belt.md section 5): the question for the person with its context
 /// parts, as the secretary would have written them. `task` is `None` for a stop of the whole
 /// range. `key` names what is stopped: a second stop with the same key in the range is not written.
-struct Stop<'a> {
-    range: i64,
-    task: Option<&'a str>,
-    line: &'a str,
-    key: String,
-    question: String,
-    background: String,
-    if_yes: String,
-    if_no: String,
-    recommend: &'a str,
-    why: &'a str,
-    recommend_answer: &'a str,
+pub(super) struct Stop<'a> {
+    pub(super) range: i64,
+    pub(super) task: Option<&'a str>,
+    pub(super) line: &'a str,
+    pub(super) key: String,
+    pub(super) question: String,
+    pub(super) background: String,
+    pub(super) if_yes: String,
+    pub(super) if_no: String,
+    pub(super) recommend: &'a str,
+    pub(super) why: &'a str,
+    pub(super) recommend_answer: &'a str,
     /// More context keys (the pull request and head of a gate stop).
-    more: Value,
+    pub(super) more: Value,
 }
 
 /// Write the stop inside the caller's transaction: a pending entry `escalated` at once (so its
 /// run waits only for the person and counts in neither count), `belt_stopped`, and a notice to
 /// the secretary, who puts it to the person. Returns the entry's id, and whether it is new.
-fn stop(w: &StateWriter, s: &Stop) -> Result<(i64, bool)> {
+pub(super) fn stop(w: &StateWriter, s: &Stop) -> Result<(i64, bool)> {
     // The newest entry of this subject stands, whatever its status, except one `makibad` itself
     // withdrew because the pull request had moved to another head (`head_recorded`): a pull
     // request that comes back to that head is stopped again, by a new entry.
@@ -1133,19 +1177,50 @@ fn open_runs(w: &StateWriter, id: i64) -> Result<i64> {
     )
 }
 
+/// The task of the range `id` (or its chain) that a design-only candidate may wait for, for the
+/// Issue `issue` (belt.md 4.3): the run dispatched for it, not abandoned or failed, with a pull
+/// request recorded, no pull request read closed unmerged, and not waiting for the person (4.2: a
+/// candidate does not go in on an answer not given yet). `None` when there is no such task.
+pub(super) fn ahead_of(c: &Connection, id: i64, issue: i64) -> rusqlite::Result<Option<String>> {
+    c.query_row(
+        &format!(
+            "{CHAIN} SELECT r.task_id FROM runs r
+             WHERE r.range_id IN (SELECT id FROM chain)
+               AND r.task_id IN (SELECT json_extract(e.payload_json, '$.task_id') FROM events e
+                   WHERE e.kind = 'belt_dispatched'
+                     AND json_extract(e.payload_json, '$.range_id') IN (SELECT id FROM chain)
+                     AND json_extract(e.payload_json, '$.issue') = ?2)
+               AND r.status NOT IN ('abandoned', 'failed')
+               AND EXISTS (SELECT 1 FROM pr_watches p WHERE p.run_id = r.id)
+               AND NOT EXISTS (SELECT 1 FROM events x WHERE x.run_id = r.id AND x.kind = 'pr_closed')
+               AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id = r.id
+                               AND q.status = 'escalated')
+             ORDER BY r.id LIMIT 1"
+        ),
+        params![id, issue],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 struct Next {
     issue: i64,
     title: String,
     body: String,
     comments: String,
+    /// A design-only candidate: the Issues it waits for and their tasks (belt.md 4.3).
+    waits: Option<(Vec<i64>, Vec<String>)>,
 }
 
 /// The first admitted candidate of the range's newest read that the records still allow: not
 /// dispatched or skipped by the range or its chain, no run of this task id, no open run of any
-/// range or none naming the Issue.
+/// range or none naming the Issue. Ready candidates go before those admitted for their design
+/// only, and one of these goes in only while each Issue it waits for is still a task it may wait
+/// for (`ahead_of`, checked again here since the read).
 fn next_candidate(w: &StateWriter, id: i64, slug: &str) -> Result<Option<Next>> {
     let sql = format!(
-        "{CHAIN} SELECT c.issue, c.title, c.body, c.comments_json FROM range_candidates c
+        "{CHAIN} SELECT c.issue, c.title, c.body, c.comments_json, c.waits_json
+         FROM range_candidates c
          WHERE c.range_id = ?1 AND c.admitted = 1
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind IN ('belt_dispatched', 'belt_skipped')
                  AND json_extract(e.payload_json, '$.range_id') IN (SELECT id FROM chain)
@@ -1154,21 +1229,56 @@ fn next_candidate(w: &StateWriter, id: i64, slug: &str) -> Result<Option<Next>> 
            AND NOT EXISTS (SELECT 1 FROM runs o
                  JOIN json_each(CASE WHEN json_valid(o.issue_refs) THEN o.issue_refs ELSE '[]' END) j
                  WHERE o.status NOT IN ('completed', 'abandoned') AND j.value = ?2 || '#' || c.issue)
-         ORDER BY c.position LIMIT 1"
+         ORDER BY c.waits_json IS NOT NULL, c.position"
     );
-    Ok(w.conn()
-        .query_row(&sql, params![id, slug], |r| {
-            Ok(Next {
-                issue: r.get(0)?,
-                title: r.get(1)?,
-                body: r.get(2)?,
-                comments: r.get(3)?,
-            })
-        })
-        .optional()?)
+    let rows: Vec<(i64, String, String, String, Option<String>)> = w
+        .conn()
+        .prepare(&sql)?
+        .query_map(params![id, slug], |r| {
+            Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    for (issue, title, body, comments, waits) in rows {
+        let waits = match waits {
+            None => None,
+            Some(j) => {
+                let issues: Vec<i64> = serde_json::from_str(&j).unwrap_or_default();
+                let mut tasks = Vec::new();
+                for d in &issues {
+                    match ahead_of(w.conn(), id, *d)? {
+                        Some(t) => tasks.push(t),
+                        None => break,
+                    }
+                }
+                if issues.is_empty() || tasks.len() != issues.len() {
+                    continue;
+                }
+                Some((issues, tasks))
+            }
+        };
+        return Ok(Some(Next {
+            issue,
+            title,
+            body,
+            comments,
+            waits,
+        }));
+    }
+    Ok(None)
 }
 
-/// The brief of a range task: the range's head, then the Issue's title, body and comments.
+/// The Issues a design-only task waits for, as the brief and the notices name them: `#1` or
+/// `#1, #3`.
+pub(super) fn named(issues: &[i64]) -> String {
+    issues
+        .iter()
+        .map(|n| format!("#{n}"))
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+/// The brief of a range task: the range's head, then the Issue's title, body and comments, then,
+/// for a task dispatched for its design only, what it waits for and what to do (belt.md 4.3).
 fn brief(head: &str, n: &Next) -> String {
     let mut b = format!(
         "{}\n\nIssue #{}: {}\n\n{}\n",
@@ -1188,6 +1298,16 @@ fn brief(head: &str, n: &Next) -> String {
                 c["body"].as_str().unwrap_or_default().trim_end()
             ));
         }
+    }
+    if let Some((issues, _)) = &n.waits {
+        let (what, verb) = if issues.len() == 1 {
+            (named(issues), "has")
+        } else {
+            (named(issues), "have")
+        };
+        b.push_str(&format!(
+            "\nDesign only: {what} {verb} not landed. Write the design and have it read as the brief head says, then report blocked with the design, and stop: no code and no commit. When {what} {verb} landed you are woken on this conversation, told what landed, and you bring your branch up to the base and build.\n"
+        ));
     }
     b
 }
@@ -1243,7 +1363,13 @@ fn dispatch(
         "belt_dispatched",
         "makibad",
         Some(&task),
-        json!({"range_id": id, "issue": n.issue, "task_id": task, "design_only": false}),
+        match &n.waits {
+            None => json!({"range_id": id, "issue": n.issue, "task_id": task,
+                           "design_only": false}),
+            Some((issues, tasks)) => json!({"range_id": id, "issue": n.issue, "task_id": task,
+                                            "design_only": true, "waits_for": issues,
+                                            "waits_tasks": tasks}),
+        },
     )?;
     Ok(task)
 }
@@ -1429,6 +1555,8 @@ struct Spec {
     origin: Option<String>,
     listed: Vec<i64>,
     takes: Takes,
+    /// `follow_ups` is `inside`: the dependencies of a follow-up are read too.
+    follow_inside: bool,
 }
 
 /// What a read brings back from GitHub. `views`: an Issue read by itself (a listed one not open,
@@ -1445,8 +1573,69 @@ type ReadResult = std::result::Result<Fetched, (String, bool)>;
 
 struct Outcome {
     range: Option<(Spec, ReadResult)>,
-    /// (task, repo, pr, the pull request read merged)
+    /// (task, repo, pr, the pull request as read, when the read succeeded)
     landings: Vec<(String, String, i64, Option<Value>)>,
+    /// A dependency's merge found in the project's clone after a fetch of its default branch:
+    /// (task, merge commit, branch, the branch's head there).
+    clones: Vec<(String, String, String, String)>,
+}
+
+/// `$MAKIBA_LANDING_RETRY_MS`: how often the landings are read again (default `RETRY_MS`).
+pub const LANDING_RETRY_ENV: &str = "MAKIBA_LANDING_RETRY_MS";
+
+/// A dependency of a design-only run waiting for its landing (belt.md 4.3) whose task closed
+/// `completed` and that is not yet seen in the project's clone: (task, project, default branch,
+/// its merge commit when its pull request was read merged).
+type CloneCheck = (String, String, String, Option<String>);
+
+fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
+    let mut q = w.conn().prepare(
+        "SELECT DISTINCT d.task_id, p.slug, coalesce(p.default_branch, 'main'),
+                (SELECT json_extract(m.payload_json, '$.merge_commit') FROM events m
+                 WHERE m.run_id = d.id AND m.kind = 'pr_merged' ORDER BY m.id LIMIT 1)
+         FROM runs r
+         JOIN events e ON e.run_id = r.id AND e.kind = 'belt_dispatched'
+              AND json_extract(e.payload_json, '$.design_only') = 1
+         JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
+         JOIN runs d ON d.task_id = j.value
+         JOIN projects p ON p.id = d.project_id
+         WHERE r.status IN ('queued', 'in_use', 'suspended', 'parked')
+           AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = r.id AND s.kind = 'ahead_settled')
+           AND d.status = 'completed'
+           AND NOT EXISTS (SELECT 1 FROM events x WHERE x.run_id = d.id
+                           AND x.kind = 'landed_in_clone')
+         ORDER BY d.id",
+    )?;
+    Ok(
+        q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+            .collect::<std::result::Result<_, _>>()?,
+    )
+}
+
+/// Fetch `branch` into the clone `clone` through its `origin` (what a worker's `git fetch origin`
+/// then reads), and its head there when `merge` is in it; `None` when the fetch fails or the
+/// merge is not there yet.
+fn in_clone(clone: &Path, branch: &str, merge: &str, cancel: &AtomicBool) -> Option<String> {
+    let dir = clone.display().to_string();
+    let tracking = format!("refs/remotes/origin/{branch}");
+    let git = |args: &[&str]| {
+        let mut all = vec!["-C", dir.as_str(), "-c", super::run_repo::HOOKS_OFF];
+        all.extend_from_slice(args);
+        run_gh("git", &all, cancel).ok()
+    };
+    git(&[
+        "fetch",
+        "--no-tags",
+        "--quiet",
+        "origin",
+        &format!("+refs/heads/{branch}:{tracking}"),
+    ])?;
+    git(&["merge-base", "--is-ancestor", merge, &tracking])?;
+    Some(
+        git(&["rev-parse", "--verify", &tracking])?
+            .trim()
+            .to_string(),
+    )
 }
 
 struct Job {
@@ -1475,6 +1664,7 @@ pub struct Belt {
     agent: String,
     job: Option<Job>,
     last_landing: Option<Instant>,
+    landing_retry: Duration,
 }
 
 impl Belt {
@@ -1492,6 +1682,12 @@ impl Belt {
                 .unwrap_or_else(|| "claude_code".into()),
             job: None,
             last_landing: None,
+            landing_retry: Duration::from_millis(
+                std::env::var(LANDING_RETRY_ENV)
+                    .ok()
+                    .and_then(|v| v.trim().parse().ok())
+                    .unwrap_or(RETRY_MS as u64),
+            ),
         }
     }
 
@@ -1521,24 +1717,28 @@ impl Belt {
                 }
             }
         }
-        // The catch-all: a slot freed where no fill ran (a restart, a launch settled).
-        w.transaction(|w| fill(w, &self.agent))?;
+        // The catch-all: a design-only wait settled by what changed elsewhere (a dependency
+        // abandoned or failed), a slot freed where no fill ran (a restart, a launch settled).
+        w.transaction(|w| {
+            super::ahead::settle(w)?;
+            fill(w, &self.agent)
+        })?;
         if self.job.is_some() {
             return Ok(());
         }
         let due = due(w, self.interval_ms)?;
-        let landings = if self
+        let (landings, checks) = if self
             .last_landing
-            .is_none_or(|t| t.elapsed() >= Duration::from_millis(RETRY_MS as u64))
+            .is_none_or(|t| t.elapsed() >= self.landing_retry)
         {
-            landing_candidates(w)?
+            (landing_candidates(w)?, clone_checks(w)?)
         } else {
-            Vec::new()
+            (Vec::new(), Vec::new())
         };
-        if due.is_none() && landings.is_empty() {
+        if due.is_none() && landings.is_empty() && checks.is_empty() {
             return Ok(());
         }
-        if !landings.is_empty() {
+        if !landings.is_empty() || !checks.is_empty() {
             self.last_landing = Some(Instant::now());
         }
         let (through, activation) = due.as_ref().map_or((0, None), |(_, t, a)| (*t, *a));
@@ -1553,7 +1753,7 @@ impl Belt {
                     let f = read(&gh, &s, &repos_dir, &cancel);
                     (s, f)
                 });
-                let landings = landings
+                let landings: Vec<(String, String, i64, Option<Value>)> = landings
                     .into_iter()
                     .map(|(task, repo, pr)| {
                         let v = gh_json(
@@ -1565,17 +1765,42 @@ impl Belt {
                                 "--repo",
                                 &format!("github.com/{repo}"),
                                 "--json",
-                                "state,mergedAt,title",
+                                "state,mergedAt,title,mergeCommit",
                             ],
                             &cancel,
                         )
-                        .ok()
-                        .filter(|v| v["state"].as_str() == Some("MERGED"));
+                        .ok();
                         (task, repo, pr, v)
                     })
                     .collect();
+                // A dependency of a design-only run has landed for its worker only once its merge
+                // is in the project's clone, the worker's `origin` (belt.md 4.3).
+                let merged: BTreeMap<&str, &str> = landings
+                    .iter()
+                    .filter_map(|(task, _, _, v)| {
+                        let v = v.as_ref()?;
+                        (v["state"].as_str() == Some("MERGED"))
+                            .then_some(())
+                            .and(v["mergeCommit"]["oid"].as_str())
+                            .map(|m| (task.as_str(), m))
+                    })
+                    .collect();
+                let clones = checks
+                    .iter()
+                    .filter_map(|(task, slug, branch, merge)| {
+                        let merge = merge
+                            .as_deref()
+                            .or_else(|| merged.get(task.as_str()).copied())?;
+                        let head = in_clone(&repos_dir.join(slug), branch, merge, &cancel)?;
+                        Some((task.clone(), merge.to_string(), branch.clone(), head))
+                    })
+                    .collect();
                 if !cancel.load(Ordering::SeqCst) {
-                    let _ = tx.send(Outcome { range, landings });
+                    let _ = tx.send(Outcome {
+                        range,
+                        landings,
+                        clones,
+                    });
                 }
             })
         };
@@ -1604,9 +1829,11 @@ impl Drop for Belt {
 /// a newest read that failed, after `RETRY_MS`; an active range's newest read older than the
 /// interval.
 fn due(w: &StateWriter, interval_ms: i64) -> Result<Option<(Spec, i64, Option<i64>)>> {
-    let ranges: Vec<(i64, String, String, Option<String>, String, String)> = {
+    type Due = (i64, String, String, Option<String>, String, String, String);
+    let ranges: Vec<Due> = {
         let mut q = w.conn().prepare(
-            "SELECT g.id, g.status, p.slug, p.origin_url, g.issues_json, g.takes FROM ranges g
+            "SELECT g.id, g.status, p.slug, p.origin_url, g.issues_json, g.takes, g.follow_ups
+             FROM ranges g
              JOIN projects p ON p.id = g.project_id
              WHERE g.status IN ('proposed', 'active') ORDER BY g.id",
         )?;
@@ -1618,18 +1845,19 @@ fn due(w: &StateWriter, interval_ms: i64) -> Result<Option<(Spec, i64, Option<i6
                 r.get(3)?,
                 r.get(4)?,
                 r.get(5)?,
+                r.get(6)?,
             ))
         })?
         .collect::<std::result::Result<_, _>>()?
     };
-    for (id, status, slug, origin, issues, takes) in ranges {
+    for (id, status, slug, origin, issues, takes, follow_ups) in ranges {
         let trigger: i64 = count(
             w,
             &format!(
                 "{CHAIN} SELECT coalesce(max(e.id), 0) FROM events e WHERE
                    (e.kind IN ('range_proposed', 'range_approved', 'range_resumed')
                     AND json_extract(e.payload_json, '$.range_id') = ?1)
-                   OR (e.kind = 'run_closed' AND e.run_id IN
+                   OR (e.kind IN ('run_closed', 'pr_opened') AND e.run_id IN
                        (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain)))"
             ),
             [id],
@@ -1669,6 +1897,7 @@ fn due(w: &StateWriter, interval_ms: i64) -> Result<Option<(Spec, i64, Option<i6
                 origin,
                 listed,
                 takes: Takes::parse(&takes).unwrap_or_default(),
+                follow_inside: follow_ups == "inside",
             };
             return Ok(Some((spec, trigger, activation)));
         }
@@ -1682,7 +1911,8 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
         "SELECT r.task_id, p.repo, p.pr FROM runs r
          JOIN pr_watches p ON p.id = (SELECT max(id) FROM pr_watches WHERE run_id = r.id)
          WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked')
-           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id)
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind IN ('pr_merged', 'pr_closed')
+                           AND e.run_id = r.id)
          ORDER BY r.id",
     )?;
     Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
@@ -1745,7 +1975,9 @@ fn read(gh: &str, s: &Spec, repos_dir: &Path, cancel: &AtomicBool) -> ReadResult
         .collect();
     for i in &open {
         let n = i["number"].as_i64().unwrap_or(0);
-        if s.listed.contains(&n) || s.takes.matches(i) {
+        let follow_up = s.follow_inside
+            && !refs_on_lines(i["body"].as_str().unwrap_or(""), "follow-up of").is_empty();
+        if s.listed.contains(&n) || s.takes.matches(i) || follow_up {
             need.extend(
                 refs_on_lines(i["body"].as_str().unwrap_or(""), "depends on")
                     .into_iter()
@@ -1790,10 +2022,39 @@ struct Candidate {
     comments: Vec<Value>,
     why: Option<String>,
     clause: u32,
+    /// Admitted for its design only: the Issues it waits for (belt.md 4.3).
+    waits: Option<Vec<i64>>,
 }
 
-/// Apply the range to a read: every Issue the list names or the condition matches, admitted or
-/// left out with why (belt.md 2.1), in the read's order (goal clause, then number).
+/// The values of the body's lines that start with `prefix` (any case): what follows it, split
+/// at commas and spaces, lowercased.
+fn values_on_lines(body: &str, prefix: &str) -> Vec<String> {
+    body.lines()
+        .map(str::trim)
+        .filter(|l| l.to_lowercase().starts_with(prefix))
+        .flat_map(|l| {
+            l[prefix.len()..]
+                .split(|c: char| c == ',' || c.is_whitespace())
+                .filter(|v| !v.is_empty())
+                .map(|v| v.to_ascii_lowercase())
+                .collect::<Vec<_>>()
+        })
+        .collect()
+}
+
+/// Whether a worker of the project may reach `host`: it is listed, or a listed `*.name` covers
+/// it (project.rs, Issue 244).
+fn host_listed(listed: &[String], host: &str) -> bool {
+    listed.iter().any(|h| {
+        h == host
+            || h.strip_prefix("*.")
+                .is_some_and(|name| host.ends_with(&format!(".{name}")))
+    })
+}
+
+/// Apply the range to a read: every Issue the list names or the condition matches, and with
+/// `follow_ups` `inside` every follow-up of these, admitted or left out with why (belt.md 2.1), in
+/// the read's order (goal clause, then number).
 fn admit(
     w: &StateWriter,
     s: &Spec,
@@ -1823,6 +2084,16 @@ fn admit(
             .as_array()
             .is_some_and(|a| a.len() >= NESTED_LIMIT)
     });
+    // A range with no row (none in practice) is read as a range of `ask` and no design ahead.
+    let (inside, design_ahead): (bool, bool) = w
+        .conn()
+        .query_row(
+            "SELECT follow_ups = 'inside', design_ahead = 1 FROM ranges WHERE id = ?1",
+            [s.id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?
+        .unwrap_or((false, false));
     let mut out = Vec::new();
     let mut numbers: BTreeSet<i64> = s.listed.iter().copied().collect();
     numbers.extend(
@@ -1830,7 +2101,30 @@ fn admit(
             .filter(|(_, i)| s.takes.matches(i))
             .map(|(n, _)| *n),
     );
-    // The range's Issues in this read: a follow-up of any of them is asked for.
+    // A follow-up of `set`: created after the approval, with a line `Follow-up of #<n>` naming an
+    // Issue of `set` or one the range dispatched (belt.md 2.1).
+    let follow_of = |i: &Value, set: &BTreeSet<i64>| -> bool {
+        let after = approved_at.is_some_and(|at| i["createdAt"].as_str().is_some_and(|c| c > at));
+        after
+            && refs_on_lines(i["body"].as_str().unwrap_or(""), "follow-up of")
+                .iter()
+                .any(|f| set.contains(f) || dispatched_in(w, s.id, *f).unwrap_or(false))
+    };
+    // With `inside`, the follow-ups of the range's Issues are its Issues too, and theirs in turn.
+    let mut followed = BTreeSet::new();
+    let mut more_to_find = inside;
+    while more_to_find {
+        let more: Vec<i64> = open
+            .iter()
+            .filter(|(n, i)| !numbers.contains(n) && follow_of(i, &numbers))
+            .map(|(n, _)| *n)
+            .collect();
+        more_to_find = !more.is_empty();
+        followed.extend(more.iter().copied());
+        numbers.extend(more);
+    }
+    let hosts = super::project::hosts_of(w.conn(), &s.slug)?;
+    // The range's Issues in this read: with `ask`, a follow-up of any of them is asked for.
     let members = numbers.clone();
     for n in numbers {
         let listed = s.listed.contains(&n);
@@ -1852,6 +2146,7 @@ fn admit(
                 comments: Vec::new(),
                 why: Some(why.into()),
                 clause: u32::MAX,
+                waits: None,
             });
             continue;
         };
@@ -1862,23 +2157,27 @@ fn admit(
         if labels >= NESTED_LIMIT || comments.len() >= NESTED_LIMIT || too_many_refs {
             why = Some("unreadable (too large to read whole)".into());
         }
-        if why.is_none() && !listed {
-            // A follow-up found on the way is asked for until step 4 (belt.md Q3): not in the range.
-            let follow = refs_on_lines(&body, "follow-up of");
-            let after =
-                approved_at.is_some_and(|at| i["createdAt"].as_str().is_some_and(|c| c > at));
-            if after
-                && follow
-                    .iter()
-                    .any(|f| members.contains(f) || dispatched_in(w, s.id, *f).unwrap_or(false))
+        if why.is_none() && !listed && !inside && follow_of(i, &members) {
+            // With `ask`, a follow-up found on the way is not in the range (belt.md Q3).
+            why = Some("follow_up (ask)".into());
+        }
+        if why.is_none() && followed.contains(&n) {
+            // With `inside`, a follow-up the range takes only as one stays out when it needs a
+            // host the project does not list, or names the stop line it would hit.
+            if let Some(h) = values_on_lines(&body, "needs host:")
+                .into_iter()
+                .find(|h| !host_listed(&hosts, h))
             {
-                why = Some("follow_up (ask)".into());
+                why = Some(format!("follow_up (ask: needs host {h})"));
+            } else if let Some(line) = values_on_lines(&body, "stop line:").first() {
+                why = Some(format!("follow_up (ask: stop line {line})"));
             }
         }
+        let mut waits = None;
         if why.is_none() {
             let deps: Vec<i64> = refs_on_lines(&body, "depends on");
-            let waiting: Vec<String> = deps
-                .iter()
+            let waiting: Vec<i64> = deps
+                .into_iter()
                 .filter(|d| {
                     open.contains_key(d)
                         || f.views
@@ -1887,10 +2186,26 @@ fn admit(
                             .flatten()
                             .is_none_or(|v| v["state"].as_str() != Some("CLOSED"))
                 })
-                .map(|d| format!("#{d}"))
                 .collect();
-            if !waiting.is_empty() {
-                why = Some(format!("waits_for {}", waiting.join(" ")));
+            // With `design_ahead`, a candidate whose every open dependency is a task of the range
+            // it may wait for goes in for its design only (belt.md 4.3).
+            let mut ahead = design_ahead && !waiting.is_empty();
+            for d in &waiting {
+                if ahead && ahead_of(w.conn(), s.id, *d)?.is_none() {
+                    ahead = false;
+                }
+            }
+            if ahead {
+                waits = Some(waiting);
+            } else if !waiting.is_empty() {
+                why = Some(format!(
+                    "waits_for {}",
+                    waiting
+                        .iter()
+                        .map(|d| format!("#{d}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                ));
             }
         }
         if why.is_none()
@@ -1912,6 +2227,7 @@ fn admit(
                            "at": c["createdAt"], "body": c["body"]})
                 })
                 .collect(),
+            waits: waits.filter(|_| why.is_none()),
             why,
             clause: crate::work_discovery::goals::named_clause(i["body"].as_str().unwrap_or(""))
                 .unwrap_or(u32::MAX),
@@ -2035,8 +2351,8 @@ fn record(
                     for (pos, c) in cands.iter().enumerate() {
                         w.conn().execute(
                             "INSERT INTO range_candidates (range_id, read_id, position, issue, title,
-                               body, comments_json, admitted, left_out_why)
-                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                               body, comments_json, admitted, left_out_why, waits_json)
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                             params![
                                 s.id,
                                 read,
@@ -2046,7 +2362,8 @@ fn record(
                                 c.body,
                                 Value::Array(c.comments.clone()).to_string(),
                                 c.why.is_none(),
-                                c.why
+                                c.why,
+                                c.waits.as_ref().map(|d| json!(d).to_string())
                             ],
                         )?;
                     }
@@ -2054,22 +2371,33 @@ fn record(
             }
         }
     }
-    for (task, repo, pr, merged) in &o.landings {
-        let Some(v) = merged else { continue };
+    for (task, repo, pr, read) in &o.landings {
+        let Some(v) = read else { continue };
         let known = count(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
-             WHERE e.kind = 'pr_merged' AND r.task_id = ?1",
+             WHERE e.kind IN ('pr_merged', 'pr_closed') AND r.task_id = ?1",
             [task],
         )?;
-        if known == 0 {
+        // A pull request closed without its merge: it will not land (belt.md 4.3, a dependency
+        // dropped), and it is not read again.
+        if known == 0 && v["state"].as_str() == Some("CLOSED") {
+            event(
+                w,
+                "pr_closed",
+                "makibad",
+                Some(task),
+                json!({"repo": repo, "pr": pr, "title": v["title"], "task_id": task}),
+            )?;
+        }
+        if known == 0 && v["state"].as_str() == Some("MERGED") {
             event(
                 w,
                 "pr_merged",
                 "makibad",
                 Some(task),
                 json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
-                       "task_id": task}),
+                       "merge_commit": v["mergeCommit"]["oid"], "task_id": task}),
             )?;
             // A parked run whose pull request landed is brought back with that reason, and told
             // (Issue 283).
@@ -2085,6 +2413,25 @@ fn record(
             )?;
         }
     }
+    for (task, merge, branch, head) in &o.clones {
+        let known = count(
+            w,
+            "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
+             WHERE e.kind = 'landed_in_clone' AND r.task_id = ?1",
+            [task],
+        )?;
+        if known == 0 {
+            event(
+                w,
+                "landed_in_clone",
+                "makibad",
+                Some(task),
+                json!({"task_id": task, "merge_commit": merge, "base": branch,
+                       "base_head": head}),
+            )?;
+        }
+    }
+    super::ahead::settle(w)?;
     fill(w, agent)?;
     Ok(())
 }
@@ -2094,14 +2441,16 @@ fn record(
 /// The read of the candidates of range `id`, for the approval and the read surface.
 fn candidates(c: &Connection, id: i64) -> rusqlite::Result<Vec<Value>> {
     let mut q = c.prepare(
-        "SELECT issue, title, admitted, left_out_why FROM range_candidates
+        "SELECT issue, title, admitted, left_out_why, waits_json FROM range_candidates
          WHERE range_id = ?1 ORDER BY position",
     )?;
     q.query_map([id], |r| {
+        let waits: Option<String> = r.get(4)?;
         Ok(
             json!({"issue": r.get::<_, i64>(0)?, "title": r.get::<_, String>(1)?,
                   "admitted": r.get::<_, i64>(2)? == 1,
-                  "left_out_why": r.get::<_, Option<String>>(3)?}),
+                  "left_out_why": r.get::<_, Option<String>>(3)?,
+                  "design_only_waits": waits.and_then(|w| serde_json::from_str::<Value>(&w).ok())}),
         )
     })?
     .collect()
@@ -2151,7 +2500,8 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 (SELECT occurred_at FROM events WHERE id = g.approved_read_id),
                 (SELECT count(*) FROM runs WHERE range_id = g.id),
                 g.budget_hours, g.budget_fixes,
-                round((julianday(coalesce(g.ended_at, 'now')) - julianday(g.approved_at)) * 24.0, 3)
+                round((julianday(coalesce(g.ended_at, 'now')) - julianday(g.approved_at)) * 24.0, 3),
+                g.follow_ups, g.design_ahead = 1
          FROM ranges g JOIN projects p ON p.id = g.project_id WHERE g.id = ?1",
         [id],
         |r| {
@@ -2168,6 +2518,8 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 "approved_at": r.get::<_, Option<String>>(11)?,
                 "approved_read_at": r.get::<_, Option<String>>(13)?,
                 "used": {"tasks": r.get::<_, i64>(14)?, "hours": r.get::<_, Option<f64>>(17)?},
+                "follow_ups": r.get::<_, String>(18)?,
+                "design_ahead": r.get::<_, bool>(19)?,
             }))
         },
     )?;
@@ -2285,6 +2637,14 @@ fn items(
                 |r| Ok((r.get(0)?, r.get(1)?)),
             )
             .optional()?;
+        // A design-only run (belt.md 4.3, 7.1): `design_only` at work, `waits_landing #<n>` in
+        // review once its design is reported, until what it waits for has landed.
+        let landing: bool = c.query_row(
+            &format!("SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1 AND {LANDING_WAIT})"),
+            [run],
+            |r| r.get(0),
+        )?;
+        let open_wait = super::ahead::open_wait(c, &task)?;
         if let Some((why, since)) = stop {
             it["place"] = json!("waiting_person");
             it["why"] = json!(why.lines().next().unwrap_or_default());
@@ -2293,6 +2653,16 @@ fn items(
             if status == "parked" {
                 it["stage"] = json!("parked");
             }
+        } else if landing && let Some(wait) = &open_wait {
+            it["place"] = json!("review");
+            it["stage"] = json!(format!(
+                "waits_landing {}",
+                wait.issues
+                    .iter()
+                    .map(|n| format!("#{n}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            ));
         } else {
             match status.as_str() {
                 "review" => {
@@ -2348,6 +2718,8 @@ fn items(
                         .optional()?;
                     it["stage"] = json!(if status == "failed" {
                         "launch_failed"
+                    } else if open_wait.is_some() {
+                        "design_only"
                     } else if status == "in_use" && stage.as_deref() == Some("verified") {
                         "at_work"
                     } else {
@@ -2493,8 +2865,10 @@ mod tests {
                 "t".into(),
                 "o/r".into(),
                 5,
-                Some(json!({"title": "T", "mergedAt": "2026-11-23T00:00:00Z"})),
+                Some(json!({"state": "MERGED", "title": "T",
+                            "mergedAt": "2026-11-23T00:00:00Z"})),
             )],
+            clones: Vec::new(),
         };
         w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
         let n = |sql: &str| -> i64 { w.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
@@ -2585,6 +2959,7 @@ mod tests {
             origin: None,
             listed: Vec::new(),
             takes: Takes::parse("label:bug").unwrap(),
+            follow_inside: false,
         };
         let issue = |n: i64, body: &str, at: &str| {
             json!({"number": n, "title": "t", "body": body, "labels": [{"name": "bug"}],
@@ -2603,6 +2978,77 @@ mod tests {
         let why = |n: i64| c.iter().find(|c| c.issue == n).unwrap().why.clone();
         assert_eq!(why(5), None);
         assert_eq!(why(6).as_deref(), Some("follow_up (ask)"));
+    }
+
+    /// A merge is seen in the project's clone only once its default branch, fetched from its
+    /// origin, holds it (belt.md 4.3): a merge commit not there yet, or a clone whose fetch fails,
+    /// is no landing.
+    #[test]
+    fn a_merge_is_in_the_clone_only_once_its_fetched_branch_holds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let git = |at: &Path, args: &[&str]| -> String {
+            let out = std::process::Command::new("git")
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+                .args([
+                    "-c",
+                    "init.defaultBranch=main",
+                    "-c",
+                    "core.hooksPath=/dev/null",
+                ])
+                .args(args)
+                .current_dir(at)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}");
+            String::from_utf8_lossy(&out.stdout).trim().to_string()
+        };
+        let origin = root.join("origin.git");
+        let clone = root.join("clone");
+        let other = root.join("other");
+        git(root, &["init", "-q", "--bare", &origin.to_string_lossy()]);
+        std::fs::create_dir_all(&clone).unwrap();
+        git(&clone, &["init", "-q", "-b", "main"]);
+        git(&clone, &["commit", "-q", "--allow-empty", "-m", "first"]);
+        git(
+            &clone,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        git(&clone, &["push", "-q", "origin", "main"]);
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &other.to_string_lossy(),
+            ],
+        );
+        git(
+            &other,
+            &["commit", "-q", "--allow-empty", "-m", "the merge"],
+        );
+        let merge = git(&other, &["rev-parse", "HEAD"]);
+        let never = AtomicBool::new(false);
+        assert_eq!(
+            in_clone(&clone, "main", &merge, &never),
+            None,
+            "not pushed yet"
+        );
+        git(&other, &["push", "-q", "origin", "main"]);
+        assert_eq!(
+            in_clone(&clone, "main", &merge, &never),
+            Some(merge.clone())
+        );
+        assert_eq!(
+            git(&clone, &["rev-parse", "refs/remotes/origin/main"]),
+            merge,
+            "what a worker's fetch of the clone reads"
+        );
+        assert_eq!(
+            in_clone(&root.join("missing"), "main", &merge, &never),
+            None
+        );
     }
 
     /// A range whose only candidate could not be read whole is not used up: it waits for a read.
