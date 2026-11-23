@@ -3,6 +3,7 @@
 
 pub mod agents;
 pub mod base;
+pub mod build;
 pub mod channel;
 pub mod cli;
 pub mod daemon;
