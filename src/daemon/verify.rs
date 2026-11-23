@@ -457,7 +457,7 @@ pub(super) fn fail(
         })?;
         if resumed {
             super::resume::revoke_keys(w, spawn)?;
-            super::launch::add_relaunch(w, id, None)?;
+            super::launch::add_relaunch(w, id, None, "makibad")?;
             return Ok(true);
         }
         if let Some(task) = task {
