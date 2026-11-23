@@ -34,6 +34,7 @@ pub mod run_repo;
 pub mod secretary;
 mod triage;
 pub use project::hosts_of;
+pub use push::sync_request;
 pub use triage::owner_repo_from_url;
 mod verify;
 
@@ -167,7 +168,11 @@ fn beat(w: &StateWriter) -> Result<(), String> {
 }
 
 fn event(w: &StateWriter, kind: &str, base: &str, version: &str) -> crate::db::Result<()> {
-    let payload = json!({"pid": std::process::id(), "base": base, "base_version": version});
+    // The mode the gate reads (Issue 383): makibad's environment is fixed at exec and makibad never
+    // sets the variable, so the value at start is the one of this process's life; the person's
+    // `status` reads it from here.
+    let payload = json!({"pid": std::process::id(), "base": base, "base_version": version,
+                         "merge_approval_mode": gate::merge_approval_mode()});
     w.append_event(&NewEvent {
         kind,
         actor: Some("makibad"),
