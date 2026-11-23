@@ -76,6 +76,10 @@ pub const PERSON_CONFIG: &[&str] = &["XDG_CONFIG_HOME", "GH_CONFIG_DIR"];
 /// the task, and the brief again reads as a second request.
 pub const RESUME_PROMPT: &str = "The organization was restarted. Go on with the task you were working on in this conversation. If it is already done and reported, do nothing and do not report again.";
 
+/// What a worker woken from parking is given in place of its brief (Issue 283): its terminal was
+/// let go while it waited for the person, and what woke it is delivered as a message.
+pub const UNPARK_PROMPT: &str = "Your terminal was let go while you waited for the person, and you are back in this conversation. Read your messages: what brought you back is there. Then go on with the task.";
+
 pub struct Launch {
     org: String,
     settings: PathBuf,
@@ -124,6 +128,8 @@ struct Row {
     resume: Option<String>,
     /// Whether the run had an earlier launch: a relaunch first ends the run's old terminals.
     relaunch: bool,
+    /// Whether the launch wakes a parked run (a `run_unparked` names its spawn id, Issue 283).
+    unpark: bool,
 }
 
 impl Launch {
@@ -146,7 +152,10 @@ impl Launch {
                 "SELECT l.id, r.id, r.task_id, l.role, l.spawn_id, l.agent, l.model, l.brief,
                         l.worktree, l.conversation_id,
                         EXISTS (SELECT 1 FROM run_launch e WHERE e.run_id = l.run_id AND e.id < l.id),
-                        p.slug
+                        p.slug,
+                        EXISTS (SELECT 1 FROM events u WHERE u.kind = 'run_unparked'
+                                AND u.run_id = l.run_id
+                                AND json_extract(u.payload_json, '$.spawn_id') = l.spawn_id)
                  FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
                  LEFT JOIN projects p ON p.id = r.project_id
                  WHERE l.stage = 'settings_ready' ORDER BY l.id",
@@ -165,6 +174,7 @@ impl Launch {
                     resume: r.get(9)?,
                     relaunch: r.get(10)?,
                     project: r.get(11)?,
+                    unpark: r.get(12)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -255,6 +265,7 @@ impl Launch {
             &AgentLaunch {
                 role,
                 brief: Some(match row.resume {
+                    Some(_) if row.unpark => UNPARK_PROMPT,
                     Some(_) => RESUME_PROMPT,
                     None => &row.brief,
                 }),
@@ -359,11 +370,14 @@ impl Launch {
                     && t.tags.get(TAG_TASK_ID) == Some(task)
                     && t.tags.get(TAG_SPAWN) != Some(&row.spawn)
             }) {
+                // Two workers in one workplace would be worse than a wait: the launch is tried
+                // again on the next pass (Issue 283).
                 if let Err(e) = base.end(&t.id) {
-                    return Outcome::Down(format!(
-                        "cannot end the earlier terminal {}: {e}",
+                    eprintln!(
+                        "makibad: cannot end the earlier terminal {} of {task}, the launch waits: {e}",
                         t.id.0
-                    ));
+                    );
+                    return Outcome::Later;
                 }
             }
         }
@@ -584,6 +598,7 @@ mod tests {
             project: None,
             resume: None,
             relaunch: false,
+            unpark: false,
         };
         (dir, w, row)
     }

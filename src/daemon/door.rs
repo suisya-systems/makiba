@@ -381,12 +381,19 @@ impl Door {
                     .and_then(|to| Ok((to, str_arg(&args, "text")?)))
                     .and_then(|(to, text)| {
                         recipient(&w, role, to)?;
+                        // A parked worker has no terminal: the message is stored, which wakes it.
+                        if parked(&w, to)? {
+                            return Ok(None);
+                        }
                         Ok(Some((to.to_string(), text.to_string(), None)))
                     }),
                 // An answer to a stop makibad wrote goes to the secretary, as a message: never typed.
-                Verb::Answer => question(&w, &args).map(|q| {
-                    q.filter(|q| q.to != crate::spec::AGENT_SECRETARY)
-                        .map(|q| (q.to.clone(), q.body.clone(), Some(q)))
+                // Nor is one to a parked worker, which has no terminal (Issue 283).
+                Verb::Answer => question(&w, &args).and_then(|q| match q {
+                    Some(q) if q.to != crate::spec::AGENT_SECRETARY && !parked(&w, &q.to)? => {
+                        Ok(Some((q.to.clone(), q.body.clone(), Some(q))))
+                    }
+                    _ => Ok(None),
                 }),
                 _ => Ok(None),
             };
@@ -886,6 +893,9 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
             if changed == 1 {
                 if action == "escalate" {
                     super::belt::stopped(w, "makibad", id).map_err(internal)?;
+                } else {
+                    // A parked run whose last question is withdrawn waits for nobody (Issue 283).
+                    super::park::settle(w).map_err(internal)?;
                 }
                 return Ok(json!({"id": id, "status": to}));
             }
@@ -1009,6 +1019,8 @@ impl Question {
                 self.id
             )));
         }
+        // A stop answered to the secretary may have been a parked run's last (Issue 283).
+        super::park::settle(w).map_err(internal)?;
         Ok(json!({"id": self.id, "status": "answered", "message": message}))
     }
 }
@@ -1092,6 +1104,12 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
 /// and nothing is pressed.
 fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Response {
     if let Some(q) = question(w, args)? {
+        // A parked worker is woken by its answer, named as such (Issue 283).
+        if q.to != crate::spec::AGENT_SECRETARY
+            && let Some(task) = &q.task
+        {
+            super::park::unpark(w, task, "answer", json!(q.id)).map_err(internal)?;
+        }
         let id = store_message(w, actor, &q.to, "message", q.task.as_deref(), &q.body)?;
         return q.answered(w, actor, id);
     }
@@ -1305,6 +1323,13 @@ fn recipient(w: &StateWriter, role: Role, to: &str) -> Result<(), DoorError> {
     }
 }
 
+/// Whether `agent` is the worker of a parked run (Issue 283).
+fn parked(w: &StateWriter, agent: &str) -> Result<bool, DoorError> {
+    super::park::parked_worker(w, agent)
+        .map(|t| t.is_some())
+        .map_err(internal)
+}
+
 fn run_exists(w: &StateWriter, task: &str) -> Result<bool, DoorError> {
     w.conn()
         .query_row("SELECT 1 FROM runs WHERE task_id = ?1", [task], |_| Ok(()))
@@ -1353,6 +1378,11 @@ fn message_row(
     body: &str,
 ) -> crate::db::Result<i64> {
     let store = || -> crate::db::Result<i64> {
+        // A message to a parked worker wakes it (Issue 283); an answer has already done so with
+        // its own reason, and a run no longer parked is left as it is.
+        if let Some(task) = super::park::parked_worker(w, recipient)? {
+            super::park::unpark(w, &task, "message", json!({"from": sender, "kind": kind}))?;
+        }
         let event = w.append_event(&NewEvent {
             kind: "message_sent",
             actor: Some(sender),

@@ -60,9 +60,20 @@ const STOP_KINDS: [&str; 5] = ["design", "scope", "order", "naming", "other"];
 const DEFAULT_FIXES: i64 = 3;
 
 /// A run `r` waits only for the person: it has an escalated pending entry (belt.md 4.1). Such a
-/// run counts neither against its range's `at_once` nor against `max_concurrent_workers`.
-pub const WAITING: &str =
-    "EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.id AND wp.status = 'escalated')";
+/// run counts neither against its range's `at_once` nor against `max_concurrent_workers`. A run
+/// woken from parking (`run_unparked`, Issue 283) is at work again: it counts from the wake until
+/// it is parked again or escalates an entry newer than the wake (`pending_max`), even while an
+/// older entry is still escalated.
+pub const WAITING: &str = "EXISTS (SELECT 1 FROM pending wp WHERE wp.run_id = r.id
+    AND wp.status = 'escalated'
+    AND (NOT EXISTS (SELECT 1 FROM events wu WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')
+         OR wp.id > (SELECT json_extract(wu.payload_json, '$.pending_max') FROM events wu
+                     WHERE wu.run_id = r.id AND wu.kind = 'run_unparked'
+                     ORDER BY wu.id DESC LIMIT 1)
+         OR coalesce((SELECT max(wk.id) FROM events wk
+                      WHERE wk.run_id = r.id AND wk.kind = 'run_parked'), 0)
+            > (SELECT max(wu.id) FROM events wu
+               WHERE wu.run_id = r.id AND wu.kind = 'run_unparked')))";
 
 /// `chain`: the range `?1` and every range it replaced (each `ended` `replaced`). Their runs stay
 /// theirs (where a run came from), and count for the range that replaced them.
@@ -944,7 +955,8 @@ pub(super) fn gate_allowed(
             no_edited_tests
         ],
     )?;
-    Ok(())
+    // A parked run whose last stop went waits for nobody (Issue 283).
+    super::park::settle(w)
 }
 
 /// `text` as one sentence: its first line, ended by a full stop.
@@ -982,6 +994,7 @@ pub(super) fn head_recorded(
            AND json_extract(context_json, '$.head') != ?2",
         params![format!("{}#{pr}", repo.to_lowercase()), head],
     )?;
+    super::park::settle(w)?;
     let budget: i64 = w.conn().query_row(
         "SELECT budget_fixes FROM ranges WHERE id = ?1",
         [range],
@@ -1668,7 +1681,7 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
     let mut q = w.conn().prepare(
         "SELECT r.task_id, p.repo, p.pr FROM runs r
          JOIN pr_watches p ON p.id = (SELECT max(id) FROM pr_watches WHERE run_id = r.id)
-         WHERE r.range_id IS NOT NULL AND r.status = 'completed'
+         WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked')
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id)
          ORDER BY r.id",
     )?;
@@ -2058,6 +2071,18 @@ fn record(
                 json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
                        "task_id": task}),
             )?;
+            // A parked run whose pull request landed is brought back with that reason, and told
+            // (Issue 283).
+            super::park::wake_with_notice(
+                w,
+                task,
+                "landed",
+                json!({"repo": repo, "pr": pr}),
+                &format!(
+                    "Your pull request {repo}#{pr} landed (merged at {}).",
+                    v["mergedAt"].as_str().unwrap_or("an unknown time")
+                ),
+            )?;
         }
     }
     fill(w, agent)?;
@@ -2264,6 +2289,10 @@ fn items(
             it["place"] = json!("waiting_person");
             it["why"] = json!(why.lines().next().unwrap_or_default());
             it["since"] = json!(since);
+            // Its terminal let go while it waits (Issue 283).
+            if status == "parked" {
+                it["stage"] = json!("parked");
+            }
         } else {
             match status.as_str() {
                 "review" => {
@@ -2431,6 +2460,59 @@ pub(super) fn in_force_line(w: &StateWriter) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A parked run outside every range is in the landing poll, and its pull request read merged
+    /// writes `pr_merged`, wakes it with the reason `landed` and tells its worker (Issue 283).
+    #[test]
+    fn a_landing_wakes_a_parked_run_and_tells_its_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute_batch(
+                "UPDATE runs SET status = 'parked';
+                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage, conversation_id)
+                 VALUES (1, 's1', 'fake', 'b', '/w', 'verified', 'c1');
+                 INSERT INTO pending (run_id, kind, question, status) VALUES (1, 'question', 'q', 'escalated');
+                 INSERT INTO pr_watches (repo, pr, head_oid, run_id) VALUES ('o/r', 5, 'abc', 1);",
+            )
+            .unwrap();
+        assert_eq!(
+            landing_candidates(&w).unwrap(),
+            [("t".to_string(), "o/r".to_string(), 5)]
+        );
+        let o = Outcome {
+            range: None,
+            landings: vec![(
+                "t".into(),
+                "o/r".into(),
+                5,
+                Some(json!({"title": "T", "mergedAt": "2026-11-23T00:00:00Z"})),
+            )],
+        };
+        w.transaction(|w| record(w, 0, None, &o, "fake")).unwrap();
+        let n = |sql: &str| -> i64 { w.conn().query_row(sql, [], |r| r.get(0)).unwrap() };
+        assert_eq!(n("SELECT count(*) FROM events WHERE kind = 'pr_merged'"), 1);
+        assert_eq!(n("SELECT count(*) FROM runs WHERE status = 'suspended'"), 1);
+        assert_eq!(
+            n("SELECT count(*) FROM events WHERE kind = 'run_unparked'
+               AND json_extract(payload_json, '$.reason') = 'landed'"),
+            1
+        );
+        assert_eq!(
+            n(
+                "SELECT count(*) FROM messages WHERE recipient = 'w-t' AND body LIKE '%o/r#5 landed%'"
+            ),
+            1
+        );
+        assert!(landing_candidates(&w).unwrap().is_empty());
+    }
 
     #[test]
     fn the_condition_parses_its_four_words_and_refuses_others() {

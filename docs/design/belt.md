@@ -1,6 +1,6 @@
 # The belt: work inside an approved range
 
-Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Steps 1 and 2 are built (Issues 257 and 282): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
+Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Steps 1, 2 and 3 are built (Issues 257, 282 and 283): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
 
 Today the person is the clock: a run closes, `makibad` scans, the secretary proposes, the person picks. The conveyor skill lets the secretary keep going inside a scope, but the scope lives in the conversation, the count of slots is the secretary's own, and every stop holds a slot. On 2026-11-21 claude-org-ja ran this belt by hand over about a dozen makiba Issues; this note says what of that becomes a record or a verb here.
 
@@ -335,7 +335,7 @@ The nine findings of the design review (Issue 248, 2026-11-22):
 | 3 | Replacing a range, its budget | Built: runs keep their range; `at_once` counts the replaced chain; the budget counts the range's own dispatches. |
 | 4 | A failed read | Built. A failed or truncated read is recorded `complete` false and keeps the candidates, which are not dispatched from: a range dispatches only from a newest read that is complete and was started after its newest approval or resume. Only a complete read ends a range `used_up`. |
 | 5 | What proves a landing | Built. `pr_merged`, from the run's recorded pull request read merged; `landed` needs it, `closed` otherwise. |
-| 6 | A parked run and another open stop | Deferred to step 3, which parks. In step 1 nothing parks; a run with any escalated entry counts in neither count until every one is answered. |
+| 6 | A parked run and another open stop | Deferred to step 3, which parks. In step 1 nothing parks; a run with any escalated entry counts in neither count until every one is answered. Decided in step 3 (11.2): parking is computed from the records on each pass, never a latch. |
 | 7 | What the gate holds | Section 5 now says what it does not hold (`Cargo.toml`, the lock file, a script on disk); the gate's check of edited tests is step 2 (built, 11.1). |
 | 8 | The resume brief | Built. A renewed secretary's brief names the ranges in force first, right after its fixed line, and says to read `status` before anything else. |
 | 9 | `budget_hours`, "ended" and "ending" | Worded in 2.4: "ending" is the stretch before the last task closes, never a status. `budget_hours` is not built in step 1. |
@@ -365,4 +365,26 @@ Choices of the build beyond this note, made with the secretary's answer of 2026-
 - A budget of the range is a stop only while it keeps a candidate out, so that a range that finishes what it planned asks nothing.
 - `budget_fixes` stops again after each further `budget_fixes` heads: a yes buys that many more.
 
-Deferred, with their steps unchanged: parking and unparking (step 3); `design_ahead` and `follow_ups: inside` (step 4); the `belt[]` and `pending[].stop_line` read fields (step 5); `dispatch` naming a range; `answers: recommend`. Not held by the report of edited tests: a test kept outside a folder `tests` (the unit tests inside a source file), and `Cargo.toml` or the lock file (section 5, line 3). A stop of a whole range is not on `ranges[].items[]`, which lists Issues; it is in `pending` and in `belt_stopped`.
+Deferred, with their steps unchanged: parking and unparking (step 3, since built, 11.2); `design_ahead` and `follow_ups: inside` (step 4); the `belt[]` and `pending[].stop_line` read fields (step 5); `dispatch` naming a range; `answers: recommend`. Not held by the report of edited tests: a test kept outside a folder `tests` (the unit tests inside a source file), and `Cargo.toml` or the lock file (section 5, line 3). A stop of a whole range is not on `ranges[].items[]`, which lists Issues; it is in `pending` and in `belt_stopped`.
+
+### 11.2 Step 3 as built (Issue 283)
+
+Built: parking and waking (spec section 5.8, `src/daemon/park.rs`), the status `parked` (migration v10, which makes `runs` again), the read fields `runs[].waiting`, `runs[].unparked` and the stage `parked` of an item waiting for the person, and `down` and `up` leaving a parked run alone.
+
+| Part | As built |
+| --- | --- |
+| Who is parked | A run `in_use` with an escalated question, no entry `open` and no prompt entry escalated, its newest launch verified, no message to its worker waiting for delivery, and its terminal's newest status and turn `idle` or `done` for `MAKIBA_PARK_AFTER_MS` (default 120 s), with the base read again first. Any run, in a range or not. |
+| Parking | The run `parked`, its worker's keys revoked and `run_parked`, in one transaction; then its terminals ended, again on a later pass when that fails. Workplace, branch and conversation kept. |
+| Waking | `parked` to `suspended` with a relaunch on the conversation of its newest verified launch, and `run_unparked` with the reason: `answer`, `message` (any other message to its worker), `answered` or `withdrawn` (it has no escalated question left), `ci_failed`, `landed`. The relaunch is told why in a line of its own (`UNPARK_PROMPT`); the answer or message comes by the delivery. |
+| The count | A woken run counts again from its wake, even while an older question is still escalated, until it is parked again or escalates a newer one (section 3.2: "a run that comes back counts again at once"). |
+| `down`, `up` | Leave a parked run as it is. |
+
+Finding 6 of the design review (a parked run and another open stop) is decided: parking is recomputed from the records on each pass, never a latch. A run woken by the answer to one of two questions counts and works again; if it still waits on the other once its terminal has been idle for the wait, it is parked again.
+
+Choices of the build beyond this note, made with the person's answer of 2026-11-23:
+
+- An entry `open` keeps the terminal: it is the secretary's to answer, so the run does not wait only for the person.
+- A relaunch that cannot end an earlier terminal of its run waits and is tried again instead of failing, for every relaunch: two workers in one workplace would be worse than a wait.
+- A conflict and a review finding have no record of `makibad`'s to wake a run by; they reach a parked worker as the secretary's `send`.
+
+Not built: parking a design-ahead run that waits for a landing (step 4, which uses the reason `landed`); a notice to the person when a run is parked.

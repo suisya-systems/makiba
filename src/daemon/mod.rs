@@ -18,6 +18,7 @@ pub mod language;
 pub mod launch;
 mod monitor;
 pub mod notify_gate;
+pub mod park;
 pub mod person_key;
 pub mod prepare;
 mod project;
@@ -350,6 +351,7 @@ fn serve_until(
     // The subscription is recorded once; a refused write is tried again on the next tick.
     let mut started_recorded = false;
     let mut resumed = false;
+    let mut park = park::Park::new(&org.to_string_lossy(), park::after_from_env());
     while !stop.load(Ordering::SeqCst) {
         match rx.recv_timeout(TICK) {
             Ok(Msg::Subscribed(Ok(()))) => subscribed = true,
@@ -430,6 +432,10 @@ fn serve_until(
                 }
                 if let Err(e) = prompts.pass(&w, &*events_base) {
                     eprintln!("makibad: prompts: {e}");
+                }
+                // After the prompts: a prompt recorded on this tick keeps its terminal.
+                if let Err(e) = park.pass(&w, &*events_base) {
+                    eprintln!("makibad: park: {e}");
                 }
             }
             if let Err(e) = prwatch.pass(&w) {
