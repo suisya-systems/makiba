@@ -6,9 +6,14 @@
 //! `in_use`; it has an `escalated` entry of kind `question`; it has no entry `open` (the
 //! secretary's to answer) and no prompt entry `escalated` (a prompt's answer needs the terminal
 //! that showed it, spec section 7); its newest launch is `verified`; no message to its worker is
-//! still waiting for delivery; and the newest `terminal_status` and `terminal_turn` of that launch
-//! say `idle` or `done`, written at least `MAKIBA_PARK_AFTER_MS` ago. The base is read once more
-//! before anything is written: the terminal must still show `idle` or `done` and no later turn.
+//! still waiting for delivery, nor taken but not yet seen taken (Issue 332: a typed one until a
+//! turn of the launch later than the turn it was typed at is recorded, any other one until a
+//! terminal record of the launch newer than it); and the newest `terminal_status` and
+//! `terminal_turn` of that launch say `idle` or `done`, written at least `MAKIBA_PARK_AFTER_MS`
+//! ago. The base is read once more before anything is written: the terminal must still show
+//! `idle` or `done` and no later turn. The transaction that parks checks the records again, and a
+//! typed send checks the run in the transaction that records its message (`delivery::send_typed`),
+//! so a text is either typed to a run that is not parked after it or stored for a parked one.
 //!
 //! Parking is one transaction (the run `parked`, its worker's keys revoked, `run_parked`), then the
 //! run's terminals of this organization are ended; one that cannot be ended is ended on a later
@@ -49,6 +54,11 @@ const LAST_SEEN: &str = "(SELECT max(e.id) FROM events e WHERE e.run_id = r.id
     AND e.kind IN ('terminal_status', 'terminal_turn')
     AND json_extract(e.payload_json, '$.spawn_id') = l.spawn_id)";
 
+/// The newest turn recorded for the terminal of the launch `l`, 0 for none.
+const TURN: &str = "coalesce((SELECT max(json_extract(t.payload_json, '$.turn')) FROM events t
+    WHERE t.run_id = r.id AND t.kind = 'terminal_turn'
+      AND json_extract(t.payload_json, '$.spawn_id') = l.spawn_id), 0)";
+
 /// Whether the run `r` with its newest launch `l` may be parked now; `?1` is the wait in
 /// milliseconds. Read by the pass and again by the update that parks.
 fn parkable() -> String {
@@ -61,8 +71,14 @@ fn parkable() -> String {
          AND l.stage = 'verified' AND l.conversation_id IS NOT NULL
          AND NOT EXISTS (SELECT 1 FROM events g WHERE g.run_id = r.id AND g.kind = 'terminal_gone'
                          AND json_extract(g.payload_json, '$.spawn_id') = l.spawn_id)
-         AND NOT EXISTS (SELECT 1 FROM event_deliveries d
-                         WHERE d.recipient = '{prefix}' || r.task_id AND d.status = 'pending')
+         AND NOT EXISTS (SELECT 1 FROM event_deliveries d JOIN events m ON m.id = d.source_event_id
+                         WHERE d.recipient = '{prefix}' || r.task_id
+                           AND (d.status = 'pending'
+                                OR (json_extract(m.payload_json, '$.turn') IS NOT NULL
+                                    AND json_extract(m.payload_json, '$.spawn_id') = l.spawn_id
+                                    AND {TURN} <= json_extract(m.payload_json, '$.turn'))
+                                OR (json_extract(m.payload_json, '$.turn') IS NULL
+                                    AND d.source_event_id > {LAST_SEEN})))
          AND (SELECT json_extract(s.payload_json, '$.state') FROM events s
               WHERE s.run_id = r.id AND s.kind = 'terminal_status'
                 AND json_extract(s.payload_json, '$.spawn_id') = l.spawn_id
@@ -187,10 +203,7 @@ impl Park {
 
     fn candidates(&self, w: &StateWriter) -> Result<Vec<Candidate>> {
         let sql = format!(
-            "SELECT r.id, r.task_id, l.spawn_id,
-                    coalesce((SELECT max(json_extract(t.payload_json, '$.turn')) FROM events t
-                              WHERE t.run_id = r.id AND t.kind = 'terminal_turn'
-                                AND json_extract(t.payload_json, '$.spawn_id') = l.spawn_id), 0),
+            "SELECT r.id, r.task_id, l.spawn_id, {TURN},
                     (SELECT occurred_at FROM events WHERE id = {LAST_SEEN})
              FROM runs r JOIN {NEWEST} WHERE {} ORDER BY r.id",
             parkable()
