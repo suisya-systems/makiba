@@ -1188,6 +1188,32 @@ pub(super) fn pr_closed_sql(alias: &str) -> String {
     )
 }
 
+/// The current pull request of the run `alias` (Issue 345), its `field` (`repo` or `pr`): that of
+/// its newest registration (`pr_opened` or `fix_pushed`, which every `makiba pr` writes, also one
+/// that returns to a pull request registered before, whose watch row is then left older than
+/// another's). Without any such event (rows older than the events), its newest watch's. The one
+/// definition every reader of a run's current pull request uses.
+pub(super) fn current_pr_sql(alias: &str, field: &str) -> String {
+    debug_assert!(field == "repo" || field == "pr");
+    format!(
+        "coalesce((SELECT json_extract(cp.payload_json, '$.{field}') FROM events cp
+                   WHERE cp.run_id = {alias}.id AND cp.kind IN ('pr_opened', 'fix_pushed')
+                   ORDER BY cp.id DESC LIMIT 1),
+                  (SELECT cw.{field} FROM pr_watches cw WHERE cw.run_id = {alias}.id
+                   ORDER BY cw.id DESC LIMIT 1))"
+    )
+}
+
+/// Whether the pull request `repo`, `pr` (SQL expressions) is the current pull request of the run
+/// `alias`: the same repository (any case, as GitHub reads it) and number.
+pub(super) fn is_current_pr_sql(alias: &str, repo: &str, pr: &str) -> String {
+    format!(
+        "(lower({repo}) = lower({}) AND {pr} = {})",
+        current_pr_sql(alias, "repo"),
+        current_pr_sql(alias, "pr")
+    )
+}
+
 /// The tasks open design-only runs wait for (Issue 284): their landings and closures are read
 /// whatever their status.
 const AWAITED: &str = "SELECT j.value FROM runs o
@@ -1211,12 +1237,13 @@ pub(super) fn ahead_of(c: &Connection, id: i64, issue: i64) -> rusqlite::Result<
                      AND json_extract(e.payload_json, '$.range_id') IN (SELECT id FROM chain)
                      AND json_extract(e.payload_json, '$.issue') = ?2)
                AND r.status NOT IN ('abandoned', 'failed')
-               AND EXISTS (SELECT 1 FROM pr_watches p WHERE p.run_id = r.id)
+               AND {current} IS NOT NULL
                AND NOT {closed}
                AND NOT EXISTS (SELECT 1 FROM pending q WHERE q.run_id = r.id
                                AND q.status = 'escalated')
              ORDER BY r.id LIMIT 1",
-            closed = pr_closed_sql("r")
+            closed = pr_closed_sql("r"),
+            current = current_pr_sql("r", "pr")
         ),
         params![id, issue],
         |r| r.get(0),
@@ -1596,9 +1623,20 @@ struct Outcome {
     range: Option<(Spec, ReadResult)>,
     /// (task, repo, pr, the pull request as read, when the read succeeded)
     landings: Vec<(String, String, i64, Option<Value>)>,
-    /// A dependency's merge found in the project's clone after a fetch of its default branch:
-    /// (task, merge commit, branch, the branch's head there).
-    clones: Vec<(String, String, String, String)>,
+    /// A dependency's merge found in the project's clone after a fetch of its default branch.
+    clones: Vec<InClone>,
+}
+
+/// A dependency's merge seen in the project's clone.
+#[derive(Debug, PartialEq)]
+struct InClone {
+    task: String,
+    merge: String,
+    branch: String,
+    /// The branch's head there.
+    head: String,
+    /// The pull request the merge is of, `repo` and number (its current one when checked).
+    pr: Option<(String, i64)>,
 }
 
 /// `$MAKIBA_LANDING_RETRY_MS`: how often the landings are read again (default `RETRY_MS`).
@@ -1618,31 +1656,39 @@ struct CloneCheck {
 }
 
 fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
-    let mut q = w.conn().prepare(
+    // The merge of its current pull request (`current_pr_sql`), if read: a merge of another, even
+    // one of another repository with the same number, is not its landing. A merge recorded
+    // without its commit is seen in the clone only by a `landed_in_clone` of the same pull request.
+    let mut q = w.conn().prepare(&format!(
         "SELECT DISTINCT d.task_id, p.slug, coalesce(p.default_branch, 'main'), m.merge,
-                (SELECT pw.repo FROM pr_watches pw WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1),
-                (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1)
+                {repo}, {pr}
          FROM runs r
          JOIN events e ON e.run_id = r.id AND e.kind = 'belt_dispatched'
               AND json_extract(e.payload_json, '$.design_only') = 1
          JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
          JOIN runs d ON d.task_id = j.value
          JOIN projects p ON p.id = d.project_id
-         -- The merge of its current pull request (its newest watch's), if read.
-         LEFT JOIN (SELECT run_id, json_extract(payload_json, '$.pr') AS pr,
+         LEFT JOIN (SELECT run_id, json_extract(payload_json, '$.repo') AS repo,
+                           json_extract(payload_json, '$.pr') AS pr,
                            json_extract(payload_json, '$.merge_commit') AS merge, min(id)
-                    FROM events WHERE kind = 'pr_merged' GROUP BY run_id, pr) m
-              ON m.run_id = d.id AND m.pr = (SELECT pw.pr FROM pr_watches pw
-                                             WHERE pw.run_id = d.id ORDER BY pw.id DESC LIMIT 1)
+                    FROM events WHERE kind = 'pr_merged'
+                    GROUP BY run_id, lower(json_extract(payload_json, '$.repo')), pr) m
+              ON m.run_id = d.id AND {merged}
          WHERE r.status IN ('queued', 'in_use', 'suspended', 'parked')
            AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = r.id AND s.kind = 'ahead_settled')
            AND d.status = 'completed'
            AND NOT EXISTS (SELECT 1 FROM events x WHERE x.run_id = d.id
                            AND x.kind = 'landed_in_clone' AND m.run_id IS NOT NULL
-                           AND (m.merge IS NULL
-                                OR json_extract(x.payload_json, '$.merge_commit') = m.merge))
+                           AND (json_extract(x.payload_json, '$.merge_commit') = m.merge
+                                OR (m.merge IS NULL
+                                    AND lower(json_extract(x.payload_json, '$.repo'))
+                                        = lower(m.repo)
+                                    AND json_extract(x.payload_json, '$.pr') = m.pr)))
          ORDER BY d.id",
-    )?;
+        repo = current_pr_sql("d", "repo"),
+        pr = current_pr_sql("d", "pr"),
+        merged = is_current_pr_sql("d", "m.repo", "m.pr"),
+    ))?;
     Ok(q.query_map([], |r| {
         let repo: Option<String> = r.get(4)?;
         let pr: Option<i64> = r.get(5)?;
@@ -1666,7 +1712,7 @@ fn check_clone(
     c: &CloneCheck,
     merged: &BTreeMap<&str, &str>,
     cancel: &AtomicBool,
-) -> Option<(String, String, String, String)> {
+) -> Option<InClone> {
     let read_again = || -> Option<String> {
         let (repo, pr) = c.pr.as_ref()?;
         let v = gh_json(
@@ -1693,7 +1739,13 @@ fn check_clone(
         .or_else(|| merged.get(c.task.as_str()).map(|m| m.to_string()))
         .or_else(read_again)?;
     let head = in_clone(&repos_dir.join(&c.slug), &c.branch, &merge, cancel)?;
-    Some((c.task.clone(), merge, c.branch.clone(), head))
+    Some(InClone {
+        task: c.task.clone(),
+        merge,
+        branch: c.branch.clone(),
+        head,
+        pr: c.pr.clone(),
+    })
 }
 
 /// Fetch `branch` into the clone `clone` through its `origin` (what a worker's `git fetch origin`
@@ -1988,14 +2040,23 @@ fn landing_candidates(w: &StateWriter) -> Result<Vec<(String, String, i64)>> {
     // Also every task an open design-only run waits for, whatever its status but abandoned, so
     // that its pull request closed unmerged is seen while it is still in review (Issue 284). A
     // pull request read closed is read on until it merges: it may be reopened on GitHub.
+    // Its current pull request (`current_pr_sql`), with no merge of it recorded: a merge of
+    // another, even one of another repository with the same number, is not its landing.
     let mut q = w.conn().prepare(&format!(
-        "SELECT r.task_id, p.repo, p.pr FROM runs r
-         JOIN pr_watches p ON p.id = (SELECT max(id) FROM pr_watches WHERE run_id = r.id)
+        "SELECT r.task_id, {repo}, {pr} FROM runs r
          WHERE ((r.range_id IS NOT NULL AND r.status = 'completed') OR r.status = 'parked'
                 OR (r.status != 'abandoned' AND r.task_id IN ({AWAITED})))
+           AND {repo} IS NOT NULL AND {pr} IS NOT NULL
            AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
-                           AND json_extract(e.payload_json, '$.pr') = p.pr)
-         ORDER BY r.id"
+                           AND {merged})
+         ORDER BY r.id",
+        repo = current_pr_sql("r", "repo"),
+        pr = current_pr_sql("r", "pr"),
+        merged = is_current_pr_sql(
+            "r",
+            "json_extract(e.payload_json, '$.repo')",
+            "json_extract(e.payload_json, '$.pr')"
+        ),
     ))?;
     Ok(q.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<std::result::Result<_, _>>()?)
@@ -2507,10 +2568,11 @@ fn record(
         // Read on the thread: a pull request the task has replaced since is no longer its own.
         let current = count(
             w,
-            "SELECT count(*) FROM runs r WHERE r.task_id = ?1
-               AND (SELECT pw.pr FROM pr_watches pw WHERE pw.run_id = r.id
-                    ORDER BY pw.id DESC LIMIT 1) = ?2",
-            params![task, pr],
+            &format!(
+                "SELECT count(*) FROM runs r WHERE r.task_id = ?1 AND {}",
+                is_current_pr_sql("r", "?2", "?3")
+            ),
+            params![task, repo, pr],
         )?;
         if current == 0 {
             continue;
@@ -2519,8 +2581,9 @@ fn record(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
              WHERE e.kind = 'pr_merged' AND r.task_id = ?1
-               AND json_extract(e.payload_json, '$.pr') = ?2",
-            params![task, pr],
+               AND lower(json_extract(e.payload_json, '$.repo')) = lower(?2)
+               AND json_extract(e.payload_json, '$.pr') = ?3",
+            params![task, repo, pr],
         )?;
         let closed = count(
             w,
@@ -2574,7 +2637,15 @@ fn record(
             )?;
         }
     }
-    for (task, merge, branch, head) in &o.clones {
+    for InClone {
+        task,
+        merge,
+        branch,
+        head,
+        pr,
+    } in &o.clones
+    {
+        let (repo, pr) = (pr.as_ref().map(|p| &p.0), pr.as_ref().map(|p| p.1));
         let known = count(
             w,
             "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
@@ -2589,7 +2660,7 @@ fn record(
                 "makibad",
                 Some(task),
                 json!({"task_id": task, "merge_commit": merge, "base": branch,
-                       "base_head": head}),
+                       "base_head": head, "repo": repo, "pr": pr}),
             )?;
         }
     }
@@ -3539,7 +3610,13 @@ mod tests {
         );
         assert_eq!(
             found,
-            Some(("r1-1".into(), merge.clone(), "main".into(), merge.clone()))
+            Some(InClone {
+                task: "r1-1".into(),
+                merge: merge.clone(),
+                branch: "main".into(),
+                head: merge.clone(),
+                pr: Some(("o/p".into(), 11)),
+            })
         );
         let none = CloneCheck { pr: None, ..check };
         assert_eq!(
@@ -4179,5 +4256,175 @@ mod tests {
             "Depends on #3 and #4\nThis mentions depends on #5\n  depends on: #6\nFollow-up of #7";
         assert_eq!(refs_on_lines(body, "depends on"), vec![3, 4, 6]);
         assert_eq!(refs_on_lines(body, "follow-up of"), vec![7]);
+    }
+
+    /// A completed run `dep` and a design-only run `wait` waiting for it (Issue 345 tests).
+    fn waited_for(w: &StateWriter) {
+        let id = active_range(w, None);
+        run_of(w, id, "dep");
+        run_of(w, id, "wait");
+        event(
+            w,
+            "belt_dispatched",
+            "makibad",
+            Some("dep"),
+            json!({"range_id": id, "issue": 1, "task_id": "dep", "design_only": false}),
+        )
+        .unwrap();
+        event(
+            w,
+            "belt_dispatched",
+            "makibad",
+            Some("wait"),
+            json!({"range_id": id, "issue": 2, "task_id": "wait", "design_only": true,
+                   "waits_for": [1], "waits_tasks": ["dep"]}),
+        )
+        .unwrap();
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'completed' WHERE task_id = 'dep'",
+                [],
+            )
+            .unwrap();
+    }
+
+    fn landing(w: &StateWriter, kind: &str, payload: Value) {
+        event(w, kind, "makibad", Some("dep"), payload).unwrap();
+    }
+
+    /// A, then B, then A again (A's watch row is left older than B's): A is the current pull
+    /// request of the landing read, of `ahead_of` and of the record of a landing, and a merge of
+    /// B is not the landing (Issue 345).
+    #[test]
+    fn a_pull_request_registered_again_is_current_for_every_reader() {
+        let (_dir, w) = org();
+        waited_for(&w);
+        let reg = |kind: &str, pr: i64, head: &str| {
+            super::super::prwatch::register(&w, kind, "dep", "o/p", pr, head).unwrap();
+        };
+        let (h1, h2) = ("1".repeat(40), "2".repeat(40));
+        reg("pr_opened", 11, &h1);
+        reg("pr_opened", 12, &h2);
+        reg("fix_pushed", 11, &h1);
+        let candidates = |w: &StateWriter| landing_candidates(w).unwrap();
+        assert_eq!(candidates(&w), [("dep".into(), "o/p".into(), 11)]);
+        let range: i64 = w
+            .conn()
+            .query_row("SELECT range_id FROM runs WHERE task_id = 'dep'", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(
+            ahead_of(w.conn(), range, 1).unwrap().as_deref(),
+            Some("dep")
+        );
+        // A read of B merged, in flight while A was registered again: not recorded.
+        let read = |pr: i64, merge: &str| Outcome {
+            range: None,
+            landings: vec![(
+                "dep".into(),
+                "o/p".into(),
+                pr,
+                Some(
+                    json!({"state": "MERGED", "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                            "mergeCommit": {"oid": merge}}),
+                ),
+            )],
+            clones: Vec::new(),
+        };
+        w.transaction(|w| record(w, 0, None, &read(12, "m12"), "fake"))
+            .unwrap();
+        let merges = |w: &StateWriter| {
+            count(
+                w,
+                "SELECT count(*) FROM events WHERE kind = 'pr_merged'",
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(merges(&w), 0, "B is not current");
+        // B's merge recorded before A came back is not A's landing either.
+        landing(
+            &w,
+            "pr_merged",
+            json!({"repo": "o/p", "pr": 12, "merge_commit": "m12", "task_id": "dep"}),
+        );
+        assert_eq!(candidates(&w), [("dep".into(), "o/p".into(), 11)]);
+        w.transaction(|w| record(w, 0, None, &read(11, "m11"), "fake"))
+            .unwrap();
+        assert_eq!(merges(&w), 2, "A's landing");
+        assert!(candidates(&w).is_empty());
+    }
+
+    /// The clone check is for the merge of the current pull request: not B's after A, B, A; a
+    /// merge of A recorded without its commit is not seen in the clone by B's record; a pull
+    /// request of another repository with the same number is not landed by the old one's merge
+    /// (Issue 345).
+    #[test]
+    fn the_clone_check_is_for_the_merge_of_the_current_pull_request() {
+        let (_dir, w) = org();
+        waited_for(&w);
+        let reg = |kind: &str, repo: &str, pr: i64, head: &str| {
+            super::super::prwatch::register(&w, kind, "dep", repo, pr, head).unwrap();
+        };
+        let (h1, h2, h3) = ("1".repeat(40), "2".repeat(40), "3".repeat(40));
+        reg("pr_opened", "o/p", 11, &h1);
+        reg("pr_opened", "o/p", 12, &h2);
+        reg("fix_pushed", "o/p", 11, &h1);
+        type Check = (String, Option<String>, Option<(String, i64)>);
+        let checks = |w: &StateWriter| -> Vec<Check> {
+            clone_checks(w)
+                .unwrap()
+                .into_iter()
+                .map(|c| (c.task, c.merge, c.pr))
+                .collect()
+        };
+        let a: Check = ("dep".into(), None, Some(("o/p".into(), 11)));
+        assert_eq!(checks(&w), std::slice::from_ref(&a));
+        landing(
+            &w,
+            "pr_merged",
+            json!({"repo": "o/p", "pr": 12, "merge_commit": "m12", "task_id": "dep"}),
+        );
+        landing(
+            &w,
+            "landed_in_clone",
+            json!({"task_id": "dep", "merge_commit": "m12", "base": "main", "base_head": "m12",
+                   "repo": "o/p", "pr": 12}),
+        );
+        assert_eq!(checks(&w), std::slice::from_ref(&a), "B's merge is not A's");
+        // A merge of A recorded without its commit (before v11): B's clone record is not its.
+        landing(
+            &w,
+            "pr_merged",
+            json!({"repo": "o/p", "pr": 11, "task_id": "dep"}),
+        );
+        assert_eq!(
+            checks(&w),
+            std::slice::from_ref(&a),
+            "read again for its commit"
+        );
+        landing(
+            &w,
+            "landed_in_clone",
+            json!({"task_id": "dep", "merge_commit": "m11", "base": "main", "base_head": "m11",
+                   "repo": "O/p", "pr": 11}),
+        );
+        assert!(checks(&w).is_empty(), "A is in the clone");
+        // Replaced by new/p#11: the merge of o/p#11 is not its landing.
+        reg("pr_opened", "new/p", 11, &h3);
+        assert_eq!(
+            checks(&w),
+            [("dep".into(), None, Some(("new/p".into(), 11)))]
+        );
+        landing(
+            &w,
+            "pr_merged",
+            json!({"repo": "new/p", "pr": 11, "merge_commit": "mn", "task_id": "dep"}),
+        );
+        assert_eq!(
+            checks(&w),
+            [("dep".into(), Some("mn".into()), Some(("new/p".into(), 11)))]
+        );
     }
 }
