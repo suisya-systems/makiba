@@ -2823,10 +2823,25 @@ fn gate_review(rows: &GateRows, clone: &Path, base: &str, head: &str, docs: bool
     if let Some(rh) = l["head"].as_str()
         && rh != head
     {
-        let same =
-            l["verdict"] == json!("passed") && super::gate::same_changes(clone, base, rh, head);
+        // Issue 344: carried only over clean merges of the base that keep the own changes.
+        let after = super::gate::after_review(clone, base, rh, head);
+        let merges_only = matches!(&after, Ok((_, not_merges)) if not_merges.is_empty());
+        let same = merges_only
+            && l["verdict"] == json!("passed")
+            && super::gate::same_changes(clone, base, rh, head);
         if !same {
             r["state"] = json!("stale");
+            match after {
+                Ok((all, not_merges)) => {
+                    let unread = if not_merges.is_empty() {
+                        all
+                    } else {
+                        not_merges
+                    };
+                    r["unread"] = json!(unread);
+                }
+                Err(e) => r["unread_error"] = json!(e.0),
+            }
         }
         r["same_changes"] = json!(same);
     }
@@ -2860,10 +2875,21 @@ fn gate_review_line(r: &Value) -> String {
             r["reader"].as_str().unwrap_or("?"),
             r["findings"]["blocker"]
         ),
-        "stale" => format!(
-            "review of {head}: stale (the last diff review read {}, and this head's changes differ)",
-            short(&r["reviewed_head"])
-        ),
+        "stale" => {
+            let unread: Vec<String> = r["unread"]
+                .as_array()
+                .map(|a| a.iter().map(short).collect())
+                .unwrap_or_default();
+            let named = match unread.len() {
+                0 => "unknown".to_string(),
+                n if n > 20 => format!("{}, and {} more", unread[..20].join(", "), n - 20),
+                _ => unread.join(", "),
+            };
+            format!(
+                "review of {head}: stale (the last diff review read {}; commits no diff review read: {named})",
+                short(&r["reviewed_head"])
+            )
+        }
         "not-required" => {
             format!("review of {head}: not required (only Markdown or docs/ changed)")
         }
@@ -3042,9 +3068,16 @@ impl Door {
         let mut reason = reason;
         if let Some(rv) = &review {
             let line = gate_review_line(rv);
-            let bad = ["none", "stale", "not-established", "blockers"]
-                .contains(&rv["state"].as_str().unwrap_or_default());
-            if allow && bad && mode == "acceptance" {
+            let state = rv["state"].as_str().unwrap_or_default();
+            let bad = ["none", "stale", "not-established", "blockers"].contains(&state);
+            // Issue 344: a head the last diff review did not read is refused under either mode.
+            if allow && state == "stale" {
+                allow = false;
+                verdict = "review_missing".into();
+                reason = format!(
+                    "{line}; an unreviewed head is not merged under either merge_approval_mode: have the worker run a diff review round at this head (a worker out of rounds needs the secretary to raise its allowance with mcp__makiba__review task, allowed and reason) ({reason})"
+                );
+            } else if allow && bad && mode == "acceptance" {
                 allow = false;
                 verdict = "review_missing".into();
                 reason = format!(
