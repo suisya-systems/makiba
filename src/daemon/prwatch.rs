@@ -14,7 +14,8 @@
 //! and the old-`gh` fallback.
 //!
 //! The pull request's state (Issue 388, in place of claude-org-ja's merge watch): each pull
-//! request a run follows (`followed`, rebuilt from the ledger) has one state poller, which reads
+//! request a run follows (`followed`, rebuilt from the ledger; a run closed with `--abandon` for
+//! a day after its close, Issue 385) has one state poller, which reads
 //! `gh pr view` each interval and brings back a merge, or a close or a reopen it did not start
 //! with. The loop writes it (`apply_state`) only for the generation it was read for: the merge
 //! (`pr_merged`, with who merged it and whether the gate allowed that head), the close
@@ -709,7 +710,8 @@ pub(super) struct Followed {
 /// The pull requests the runs follow (of `task` only, when given): each run's current pull
 /// request (`current_pr_sql`) with no `pr_merged` of it, while the run is open, a completed run of
 /// a range, a run an open design-only run waits for (`AWAITED`, not abandoned), or, unless its
-/// pull request was read closed, a run outside a range completed within a day.
+/// pull request was read closed, a run outside a range completed, or any run closed with
+/// `--abandon` (Issue 385: its work may still land), within a day of its close.
 pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followed>> {
     let mut q = c.prepare(&format!(
         "SELECT r.task_id, {repo}, {pr},
@@ -726,9 +728,10 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
            AND (r.status IN ('queued', 'in_use', 'review', 'suspended', 'parked')
                 OR (r.range_id IS NOT NULL AND r.status = 'completed')
                 OR (r.status != 'abandoned' AND r.task_id IN ({awaited}))
-                OR (NOT {closed} AND r.range_id IS NULL AND r.status = 'completed'
-                    AND r.completed_at IS NOT NULL
-                    AND julianday('now') - julianday(r.completed_at) <= 1.0))
+                OR (NOT {closed} AND r.completed_at IS NOT NULL
+                    AND julianday('now') - julianday(r.completed_at) <= 1.0
+                    AND ((r.range_id IS NULL AND r.status = 'completed')
+                         OR r.status = 'abandoned')))
          ORDER BY r.id",
         repo = current_pr_sql("r", "repo"),
         pr = current_pr_sql("r", "pr"),
