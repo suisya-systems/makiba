@@ -15,6 +15,8 @@ CI = Path(".github") / "workflows" / "ci.yml"
 STEP = "- name: Shell scripts parse"
 LOOP = "for f in "
 SHELLCHECK = "shellcheck --severity=error "
+# Glob syntax where bash and fnmatch differ, or that bash expands before globbing: refused, not guessed.
+UNREAD = set("[]{}\\'\"$`~")
 
 
 def _indent(line):
@@ -45,7 +47,14 @@ def lint_globs(ci_text):
     sc = next((l for l in block if l.startswith(SHELLCHECK)), None)
     if loop is None or sc is None:
         raise ValueError("the shell step has no `for f in ...; do bash -n` loop or no shellcheck line")
-    return _words(loop[len(LOOP):loop.index("; do")]), _words(sc[len(SHELLCHECK):])
+    globs = _words(loop[len(LOOP):loop.index("; do")]), _words(sc[len(SHELLCHECK):])
+    for g in globs[0] + globs[1]:
+        if any(c in UNREAD for c in g):
+            raise ValueError(
+                f"the shell step's glob {g!r} uses syntax this check does not read as bash does "
+                "(brackets, braces, quotes, escapes, expansions); write it with literal characters, * and ? only"
+            )
+    return globs
 
 
 def _words(text):

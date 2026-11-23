@@ -2,6 +2,8 @@
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("shell_lint_coverage", ROOT / "tools" / "shell_lint_coverage.py")
 cl = importlib.util.module_from_spec(spec)
@@ -44,3 +46,12 @@ def test_operator_ends_the_arguments():
 
 def test_options_are_not_globs():
     assert cl.uncovered(SYN("scripts/*.sh", "-x scripts/*.sh"), ["scripts/a.sh"]) == []
+
+
+def test_glob_syntax_bash_reads_differently_raises():
+    for g in ("scripts/[^x]*.sh", "scripts/[!x]*.sh", "scripts/{a,b}.sh", '"scripts/a b.sh"', "scripts/\\*.sh",
+              "$DIR/*.sh", "~/x.sh"):
+        with pytest.raises(ValueError):
+            cl.uncovered(SYN(g, "scripts/*.sh"), ["scripts/x.sh"])
+        with pytest.raises(ValueError):
+            cl.uncovered(SYN("scripts/*.sh", g), ["scripts/x.sh"])
