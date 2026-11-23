@@ -1259,7 +1259,15 @@ const ISSUE_READ_TIMEOUT: Duration = Duration::from_secs(20);
 type IssueRead = Result<String, String>;
 
 /// The Issue a dispatch names, when it names a valid one.
+/// Only for a dispatch whose kind and project are valid: the project becomes a path in the read
+/// (`triage::repo_of`), so nothing is read for one that `dispatch` refuses.
 fn dispatch_issue(args: &Value) -> Option<i64> {
+    let kind = args.get("kind").and_then(Value::as_str);
+    if !matches!(kind, Some("code" | "document"))
+        || plain_name("project", dispatch_project(args)).is_err()
+    {
+        return None;
+    }
     args.get("issue").and_then(Value::as_i64).filter(|n| *n > 0)
 }
 
@@ -1286,10 +1294,16 @@ fn dispatch_project(args: &Value) -> &str {
 /// Read Issue `n` of the dispatch's project with `gh issue view`, outside the door's lock: its
 /// title, body and comments, in the form a range's brief has (`belt::issue_text`).
 fn read_issue(args: &Value, origin: Option<&str>, n: i64) -> IssueRead {
+    // One deadline for the whole read: finding the repository, then `gh`.
+    let started = Instant::now();
     let slug = dispatch_project(args);
     let repos = super::prepare::Places::from_env(Path::new("")).repos;
     let repo = super::triage::repo_of(slug, origin, &repos)
         .ok_or_else(|| format!("project {slug} has no GitHub repository"))?;
+    let left = ISSUE_READ_TIMEOUT.saturating_sub(started.elapsed());
+    if left.is_zero() {
+        return Err("gh timed out".into());
+    }
     let program = super::gh::program();
     let never = std::sync::atomic::AtomicBool::new(false);
     let text = super::gh::run_gh_for(
@@ -1304,7 +1318,7 @@ fn read_issue(args: &Value, origin: Option<&str>, n: i64) -> IssueRead {
             "title,body,comments",
         ],
         &never,
-        ISSUE_READ_TIMEOUT,
+        left,
     )
     .map_err(|e| match e {
         super::gh::GhError::Missing => format!("{program} not found"),
@@ -4187,7 +4201,30 @@ fn tool(v: Verb) -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{CONTEXT_PARTS, Verb, curator_at_work, json, save_note, tool};
+    use super::{CONTEXT_PARTS, Verb, curator_at_work, dispatch_issue, json, save_note, tool};
+
+    /// Issue 317: the project becomes a path in the read, so a dispatch that `dispatch` would
+    /// refuse for its project or kind reads nothing, neither git nor GitHub.
+    #[test]
+    fn only_a_dispatch_with_a_valid_project_and_kind_reads_its_issue() {
+        let a = |kind: &str, project: Option<&str>| {
+            let mut v = json!({"kind": kind, "issue": 7});
+            if let Some(p) = project {
+                v["project"] = json!(p);
+            }
+            dispatch_issue(&v)
+        };
+        assert_eq!(a("code", Some("p")), Some(7));
+        assert_eq!(a("document", None), Some(7));
+        for p in ["../x", "/abs", ".hidden", "-x", "a/b"] {
+            assert_eq!(a("code", Some(p)), None, "{p}");
+        }
+        assert_eq!(a("other", Some("p")), None);
+        assert_eq!(
+            dispatch_issue(&json!({"kind": "code", "project": "p", "issue": 0})),
+            None
+        );
+    }
 
     #[test]
     fn a_curator_key_not_revoked_means_the_curator_is_at_work() {
