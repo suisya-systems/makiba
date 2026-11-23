@@ -5,6 +5,7 @@ The lint job in .github/workflows/ci.yml names its scripts by globs, twice: in t
 (git ls-files, any depth) must be matched by a glob of both, or it goes unchecked.
 Run: python3 tools/shell_lint_coverage.py [root]. The tests job runs it through
 tests/test_shell_lint_coverage.py."""
+import re
 import subprocess
 import sys
 from fnmatch import fnmatchcase
@@ -13,7 +14,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 CI = Path(".github") / "workflows" / "ci.yml"
 STEP = "- name: Shell scripts parse"
-LOOP = "for f in "
+# The loop must parse its own variable: `bash -n` on another operand checks none of the globs.
+LOOP_RE = re.compile(r'for (\w+) in (.*?); do bash -n ("?)\$(?:\1|\{\1\})\3(?:[ ;]|$)')
 SHELLCHECK = "shellcheck --severity=error "
 # Glob syntax where bash and fnmatch differ, or that bash expands before globbing: refused, not guessed.
 UNREAD = set("[]{}\\'\"$`~")
@@ -43,11 +45,11 @@ def _run_block(ci_text):
 def lint_globs(ci_text):
     """The globs of the `bash -n` loop and of the shellcheck line of the lint job's shell step."""
     block = _run_block(ci_text)
-    loop = next((l for l in block if l.startswith(LOOP) and "; do" in l and "bash -n" in l), None)
+    loop = next((m for l in block if (m := LOOP_RE.match(l))), None)
     sc = next((l for l in block if l.startswith(SHELLCHECK)), None)
     if loop is None or sc is None:
-        raise ValueError("the shell step has no `for f in ...; do bash -n` loop or no shellcheck line")
-    globs = _words(loop[len(LOOP):loop.index("; do")]), _words(sc[len(SHELLCHECK):])
+        raise ValueError('the shell step has no `for f in ...; do bash -n "$f"` loop or no shellcheck line')
+    globs = _words(loop.group(2)), _words(sc[len(SHELLCHECK):])
     for g in globs[0] + globs[1]:
         if any(c in UNREAD for c in g):
             raise ValueError(

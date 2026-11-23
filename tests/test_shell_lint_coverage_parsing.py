@@ -55,3 +55,23 @@ def test_glob_syntax_bash_reads_differently_raises():
             cl.uncovered(SYN(g, "scripts/*.sh"), ["scripts/x.sh"])
         with pytest.raises(ValueError):
             cl.uncovered(SYN("scripts/*.sh", g), ["scripts/x.sh"])
+
+
+def loop_body(body):
+    return (
+        "jobs:\n"
+        "  lint:\n"
+        "    steps:\n"
+        "      - name: Shell scripts parse, and shellcheck finds no error\n"
+        "        run: |\n"
+        f"          for f in scripts/*.sh tools/*.sh; do {body} || exit 1; done\n"
+        "          shellcheck --severity=error scripts/*.sh tools/*.sh\n"
+    )
+
+
+def test_loop_must_parse_its_own_variable():
+    for body in ("bash -n scripts/install-base.sh", 'bash -n "$g"', "bash -n $ff", "echo bash -n"):
+        with pytest.raises(ValueError):
+            cl.uncovered(loop_body(body), ["tools/x.sh"])
+    for body in ('bash -n "$f"', "bash -n $f", 'bash -n "${f}"'):
+        assert cl.uncovered(loop_body(body), ["tools/x.sh"]) == [], body
