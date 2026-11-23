@@ -107,9 +107,30 @@ impl Org {
 
     /// Put `bytes` at `<root>/bin/makiba` as an install does: a new executable file renamed over
     /// the path.
+    ///
+    /// The executable is written by a `cp` child, never by this process (Issue 374). A descriptor
+    /// this process opens for writing is inherited by every child another test thread forks until
+    /// that child execs, and exec of a file some process holds open for writing fails with
+    /// ETXTBSY. A rename does not help: the inherited descriptor still points at the renamed
+    /// inode. So the bytes go to a side file this process writes (which is never run), `cp`
+    /// writes the executable from it, and once `cp` has exited no process holds a write
+    /// descriptor to it. The mode and the rename go by path and open nothing.
     fn install(&self, bytes: &[u8]) {
+        let staged = self.root.join("bin/makiba.bytes");
         let new = self.root.join("bin/makiba.new");
-        std::fs::write(&new, bytes).unwrap();
+        std::fs::write(&staged, bytes).unwrap();
+        let cp = Command::new("cp")
+            .arg(&staged)
+            .arg(&new)
+            .stdin(Stdio::null())
+            .status()
+            .unwrap();
+        assert!(
+            cp.success(),
+            "cp {} {}: {cp}",
+            staged.display(),
+            new.display()
+        );
         std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).unwrap();
         std::fs::rename(&new, self.exe()).unwrap();
     }
