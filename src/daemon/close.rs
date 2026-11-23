@@ -47,8 +47,47 @@ fn git(dir: &Path, args: &[&str]) -> Option<String> {
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
 }
 
+/// The paths Claude Code's sandbox masks inside a worker's work tree (Issue 318). A session that
+/// ends badly can leave them on disk as empty regular files; those are not work.
+const SANDBOX_MASKS: [&str; 23] = [
+    ".bash_profile",
+    ".bashrc",
+    ".gitconfig",
+    ".gitmodules",
+    ".profile",
+    ".ripgreprc",
+    ".zprofile",
+    ".zshrc",
+    ".mcp.json",
+    ".idea",
+    ".vscode",
+    ".claude/agents",
+    ".claude/commands",
+    ".claude/hooks",
+    ".claude/launch.json",
+    ".claude/loop.md",
+    ".claude/output-styles",
+    ".claude/routines",
+    ".claude/scheduled_tasks.json",
+    ".claude/settings.json",
+    ".claude/settings.local.json",
+    ".claude/skills",
+    ".claude/workflows",
+];
+
+/// Whether a line of `git status --porcelain` is a sandbox mask placeholder left in the work tree
+/// `path`: untracked, at a path of `SANDBOX_MASKS` exactly, and an empty regular file (a symlink,
+/// a folder or a device is not one). Anything else is work.
+fn mask_leftover(path: &Path, line: &str) -> bool {
+    line.strip_prefix("?? ")
+        .filter(|p| SANDBOX_MASKS.contains(p))
+        .and_then(|p| std::fs::symlink_metadata(path.join(p)).ok())
+        .is_some_and(|m| m.file_type().is_file() && m.len() == 0)
+}
+
 /// Why the run's work tree at `path` holds work a removal would lose, if it does: uncommitted
-/// changes (untracked files included, whatever git's settings say), a submodule checked out, or
+/// changes (untracked files included, whatever git's settings say, but not the sandbox's empty
+/// mask placeholders, Issue 318, which go with the work tree), a submodule checked out, or
 /// unpushed commits (`unpushed`). A work tree without a repository of its own, or
 /// one git cannot read, counts as unsaved. The run's repository is only read (`run_repo`).
 pub(super) fn unsaved(gitdir: &Path, path: &Path, repo: &Path, branch: &str) -> Option<String> {
@@ -61,7 +100,7 @@ pub(super) fn unsaved(gitdir: &Path, path: &Path, repo: &Path, branch: &str) -> 
     }
     match run_repo::status(gitdir, path, true) {
         Err(_) => return Some(format!("git cannot read the worktree {shown}")),
-        Ok(s) if !s.is_empty() => {
+        Ok(s) if s.lines().any(|l| !mask_leftover(path, l)) => {
             return Some(format!("worktree {shown} has uncommitted changes"));
         }
         Ok(_) => {}

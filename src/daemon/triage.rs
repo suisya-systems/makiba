@@ -20,7 +20,6 @@ use rusqlite::OptionalExtension;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, TryRecvError, channel};
@@ -305,28 +304,59 @@ pub fn owner_repo_from_url(url: &str) -> Option<String> {
     (ok(owner) && ok(repo) && parts.next().is_none()).then(|| format!("{owner}/{repo}"))
 }
 
+/// How long `repo_of`'s git may take to read a clone's configuration (Issue 355): a local read,
+/// so far longer than it needs, and shorter than a `gh` call may take.
+const REPO_LOOKUP_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// The project's repository: its URL, else the `origin` of its clone as the clone's own
-/// configuration writes it (before any `insteadOf` rewrite), exactly one URL (Issue 211).
+/// configuration writes it (before any `insteadOf` rewrite), exactly one URL (Issue 211). The git
+/// call is ended at `REPO_LOOKUP_TIMEOUT`, and the answer is none then.
 pub(crate) fn repo_of(slug: &str, url: Option<&str>, repos_dir: &Path) -> Option<String> {
+    repo_with_git("git", slug, url, repos_dir, None)
+}
+
+/// `repo_of` whose `git` is ended at `timeout`: none then (a read someone waits for, Issue 317).
+pub(crate) fn repo_of_within(
+    slug: &str,
+    url: Option<&str>,
+    repos_dir: &Path,
+    timeout: std::time::Duration,
+) -> Option<String> {
+    repo_with_git("git", slug, url, repos_dir, Some(timeout))
+}
+
+fn repo_with_git(
+    git: &str,
+    slug: &str,
+    url: Option<&str>,
+    repos_dir: &Path,
+    timeout: Option<std::time::Duration>,
+) -> Option<String> {
     if let Some(r) = url.and_then(owner_repo_from_url) {
         return Some(r);
     }
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(repos_dir.join(slug))
-        .args([
+    // Issue 355: the bounded runner, so that the deadline holds until the output is collected
+    // and a descendant that keeps the pipe open is ended with git. The slug is taken from the
+    // repositories folder, where git runs.
+    let never = std::sync::atomic::AtomicBool::new(false);
+    let out = super::gh::run_bounded(
+        git,
+        &[
+            "-C",
+            slug,
             "config",
             "--local",
             "--null",
             "--get-all",
             "remote.origin.url",
-        ])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    out.status.success().then_some(())?;
-    let urls = String::from_utf8_lossy(&out.stdout);
+        ],
+        Some(repos_dir),
+        &never,
+        timeout.unwrap_or(REPO_LOOKUP_TIMEOUT),
+        "git",
+    )
+    .ok()?;
+    let urls = String::from_utf8_lossy(&out);
     let [origin] = urls.strip_suffix('\0')?.split('\0').collect::<Vec<_>>()[..] else {
         return None;
     };
@@ -579,6 +609,18 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
             leave(&b["repo"], b["issue"].clone(), "blocked", reason);
         }
     }
+    for d in arr(&scan["excluded_dependency_unreadable"]) {
+        let reason = format!(
+            "a dependency line names no Issue number: \"{}\"; write it as Depends on #<n>, or remove it",
+            s(&d["line"])
+        );
+        leave(
+            &d["repo"],
+            d["issue"].clone(),
+            "dependency_unreadable",
+            reason,
+        );
+    }
     for slug in &o.norepo {
         left_out.push(
             json!({"project": slug, "repo": null, "issue": null, "kind": "no_repository",
@@ -757,6 +799,32 @@ fn notice(
 #[cfg(test)]
 mod tests {
     use super::owner_repo_from_url as f;
+
+    /// Issue 317: a `git` that does not answer is ended at the timeout, and the answer is none.
+    #[test]
+    fn a_stalled_git_is_ended_at_the_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let git = dir.path().join("git");
+        std::fs::write(&git, "#!/bin/sh\nexec sleep 30\n").unwrap();
+        std::fs::set_permissions(&git, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let started = std::time::Instant::now();
+        let r = super::repo_with_git(
+            &git.display().to_string(),
+            "p",
+            None,
+            dir.path(),
+            Some(std::time::Duration::from_millis(300)),
+        );
+        assert_eq!(r, None);
+        assert!(started.elapsed() < std::time::Duration::from_secs(10));
+        // A URL needs no git at all.
+        let url = Some("https://github.com/o/r");
+        assert_eq!(
+            super::repo_with_git("/nonexistent/git", "p", url, dir.path(), None),
+            Some("o/r".into())
+        );
+    }
 
     #[test]
     fn a_github_url_gives_its_owner_and_repository() {

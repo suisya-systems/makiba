@@ -1,7 +1,7 @@
 //! The curator at the threshold (Issue 39, carried from claude-org-ja `check_curate_threshold.py`).
 //!
 //! After a close (`run_closed`, written by the door) the raw notes of the knowledge folder are
-//! counted; at `RAW_THRESHOLD` a launch of the curator that belongs to no run is added
+//! counted, only those new since the last reported cycle (Issue 335); at `RAW_THRESHOLD` a launch of the curator that belongs to no run is added
 //! (`launch::add_launch`, Issue 166), one at a time. A curator that sent its report to the
 //! secretary is ended and its key revoked (Issue 177); one whose launch failed (Issue 333) is
 //! ended at once, and one past its time limit is ended, each with its key revoked and the
@@ -17,6 +17,8 @@ use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::{self, TAG_ORG, TAG_ROLE, TAG_SPAWN};
 use rusqlite::OptionalExtension;
 use serde_json::json;
+use std::collections::HashSet;
+use std::ffi::OsString;
 use std::io;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -58,27 +60,84 @@ pub fn timeout_from_env() -> Duration {
 /// `archive/`); any other read error is an error, never a silent 0, so no launch is suppressed
 /// unseen.
 pub fn count_raw(knowledge: &Path) -> io::Result<usize> {
+    raw_notes(knowledge).map(|n| n.len())
+}
+
+/// The names of the notes `count_raw` counts, sorted.
+pub fn raw_notes(knowledge: &Path) -> io::Result<Vec<OsString>> {
     let raw = knowledge.join("raw");
     match std::fs::metadata(&raw) {
         Ok(m) if m.is_dir() => {}
-        Ok(_) => return Ok(0),
-        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(0),
+        Ok(_) => return Ok(Vec::new()),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(e) => return Err(e),
     }
-    let mut n = 0;
+    let mut notes = Vec::new();
     for entry in std::fs::read_dir(&raw)? {
         let entry = entry?;
-        if entry.file_name().to_string_lossy().starts_with('.') {
+        let name = entry.file_name();
+        if name.to_string_lossy().starts_with('.') {
             continue;
         }
         match std::fs::metadata(entry.path()) {
-            Ok(m) if m.is_file() => n += 1,
+            Ok(m) if m.is_file() => notes.push(name),
             Ok(_) => {}
             Err(e) if e.kind() == io::ErrorKind::NotFound => {}
             Err(e) => return Err(e),
         }
     }
-    Ok(n)
+    notes.sort();
+    Ok(notes)
+}
+
+/// How many of `notes` are new against `baseline` (Issue 335): all of them with no baseline; a
+/// name that is not UTF-8 is never in a snapshot, so it is always new.
+fn new_notes(notes: &[OsString], baseline: Option<&HashSet<String>>) -> usize {
+    let Some(seen) = baseline else {
+        return notes.len();
+    };
+    notes
+        .iter()
+        .filter(|n| n.to_str().is_none_or(|n| !seen.contains(n)))
+        .count()
+}
+
+/// The notes of the last reported cycle for the knowledge folder `folder` (Issue 335): the snapshot
+/// of the newest `curator_counted` of that folder whose launch is `verified` and whose curator
+/// sent its report to the secretary after it and before the next `curator_counted` (event ids,
+/// not times, give the order; one curator runs at a time). A launch that failed, or a curator
+/// ended at its time limit, reported nothing, so neither moves it. `None` when there is none.
+fn baseline(w: &StateWriter, folder: &str) -> Result<Option<HashSet<String>>> {
+    let payload: Option<String> = w
+        .conn()
+        .query_row(
+            "SELECT c.payload_json FROM events c
+             JOIN run_launch l ON l.spawn_id = json_extract(c.payload_json, '$.spawn_id')
+             WHERE c.kind = 'curator_counted'
+               AND json_extract(c.payload_json, '$.knowledge') = ?1
+               AND l.role = 'curator' AND l.stage = 'verified'
+               AND EXISTS (
+                 SELECT 1 FROM messages m
+                 WHERE m.sender = ?2 AND m.recipient = ?3 AND m.kind = 'message'
+                   AND m.event_id > c.id
+                   AND m.event_id < COALESCE(
+                     (SELECT min(n.id) FROM events n
+                      WHERE n.kind = 'curator_counted' AND n.id > c.id),
+                     9223372036854775807))
+             ORDER BY c.id DESC LIMIT 1",
+            [folder, spec::AGENT_CURATOR, spec::AGENT_SECRETARY],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(payload.map(|p| {
+        serde_json::from_str::<serde_json::Value>(&p)
+            .ok()
+            .and_then(|v| v.get("notes").and_then(|n| n.as_array()).cloned())
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|n| n.as_str().map(String::from))
+            .collect()
+    }))
 }
 
 /// Why a curator terminal was ended, for what is written after the end.
@@ -177,27 +236,62 @@ impl Curator {
         if running || in_flight {
             return Ok(());
         }
-        match count_raw(&self.knowledge) {
-            Err(e) => eprintln!(
-                "makibad: cannot count the raw notes in {}: {e}",
-                self.knowledge.display()
-            ),
-            Ok(n) if n >= RAW_THRESHOLD => {
-                if let Err(e) = super::launch::add_launch(
-                    w,
-                    spec::Role::Curator,
-                    &self.knowledge,
-                    BRIEF,
-                    None,
-                    &self.agent,
-                ) {
-                    eprintln!("makibad: cannot add the curator launch: {e}");
-                    self.seen = before;
-                }
+        let notes = match raw_notes(&self.knowledge) {
+            Ok(notes) => notes,
+            Err(e) => {
+                eprintln!(
+                    "makibad: cannot count the raw notes in {}: {e}",
+                    self.knowledge.display()
+                );
+                return Ok(());
             }
-            Ok(_) => {}
+        };
+        let folder = self.folder();
+        let baseline = baseline(w, &folder)?;
+        if new_notes(&notes, baseline.as_ref()) < RAW_THRESHOLD {
+            return Ok(());
+        }
+        // The launch and the snapshot of the notes it was counted on, in one transaction: a
+        // launch always has its snapshot.
+        let names: Vec<&str> = notes.iter().filter_map(|n| n.to_str()).collect();
+        let launched = w.transaction(|w| {
+            let spawn = match super::launch::add_launch(
+                w,
+                spec::Role::Curator,
+                &self.knowledge,
+                BRIEF,
+                None,
+                &self.agent,
+            ) {
+                Ok(spawn) => spawn,
+                Err(e) => return Ok(Err(e)),
+            };
+            w.append_event(&NewEvent {
+                kind: "curator_counted",
+                actor: Some("makibad"),
+                payload: Some(&json!({"spawn_id": spawn, "knowledge": folder, "notes": names})),
+                ..Default::default()
+            })?;
+            Ok(Ok(()))
+        });
+        let refused = match launched {
+            Ok(Ok(())) => None,
+            Ok(Err(e)) => Some(e),
+            Err(e) => Some(e.to_string()),
+        };
+        if let Some(e) = refused {
+            eprintln!("makibad: cannot add the curator launch: {e}");
+            self.seen = before;
         }
         Ok(())
+    }
+
+    /// The knowledge folder as the snapshots name it: absolute, as the launch's folder is.
+    fn folder(&self) -> String {
+        std::path::absolute(&self.knowledge)
+            .unwrap_or_else(|_| self.knowledge.clone())
+            .display()
+            .to_string()
     }
 
     fn is_ours(&self, t: &Terminal) -> bool {

@@ -83,6 +83,10 @@ A repository counts as present only when it is registered with the organization.
 
 Before you agree or disagree with a premise the person states (a number, a setting, a behaviour), open the record or the code once and answer with its source. Do this even when you read it earlier in the conversation: it may have changed. If you cannot open it, say so instead of agreeing. A hook adds one reminder line when the person's message carries a claim, but it cannot see whether you opened the record: the check is yours.
 
+## Readings from outside makiba
+
+A cause, a reading or a summary that comes from outside makiba (another tool, another organization, a pasted analysis) goes to a worker only marked as a hypothesis, with where it came from. Never pass it on as a finding. The brief or the message asks the worker to establish the cause from the primary record (the full log, the code) and to say whether the hypothesis held.
+
 ## Git and GitHub
 
 - You have `makibad` push the workers' commits with `push` and bring a pushed branch up to date with `update`, open pull requests for them, and record each with `pr`.
