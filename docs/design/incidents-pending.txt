@@ -2,4 +2,4 @@
 tests/close_mask_leftovers.rs
 tests/close_accepted_limit.rs
 tests/ci_failure_reason.rs
-tests/status_binary_replaced.rs
+tests/binary_replaced.rs
