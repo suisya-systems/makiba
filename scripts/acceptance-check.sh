@@ -20,7 +20,13 @@
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
 # none, 1 some, 2 usage. The merge gate in makibad runs this mode, so both judge by one rule.
 set -u
-declared() { git log -1 --format='%(trailers:key=Acceptance-Test,valueonly)' "$1" | sed '/^[[:space:]]*$/d'; }
+# The declared paths, each trimmed and with empty and "." segments dropped, as the merge gate reads
+# them (src/daemon/gate.rs, find_manifest): "./tests/a.rs" and "tests//a.rs" declare tests/a.rs.
+declared() {
+  git log -1 --format='%(trailers:key=Acceptance-Test,valueonly)' "$1" |
+    sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's#//*#/#g' -e ':a' -e 's#\(^\|/\)\./#\1#' -e 'ta' \
+      -e 's#/\.$##' -e 's#^\.$##' -e '/^$/d'
+}
 under() { # under <file> <path>: the file is the path or inside it
   local p=${2%/}; [ "$1" = "$p" ] || case $1 in "$p"/*) true ;; *) false ;; esac
 }
@@ -38,10 +44,12 @@ is_declared() { local p; while IFS= read -r p; do under "$1" "$p" && return 0; d
 refused_in_test_commit() { # refused_in_test_commit <sha>
   local paths f
   paths=$(declared "$1")
-  while IFS= read -r f; do
+  # NUL-delimited: git would quote a name with non-ASCII bytes, a tab or a quote, and the quoted
+  # form would match no declared path and no helper.
+  while IFS= read -r -d '' f; do
     [ -n "$f" ] || continue
     is_declared "$f" || is_helper "$f" || printf '%s\n' "$f"
-  done < <(git diff --no-renames --name-only "$1^" "$1")
+  done < <(git diff --no-renames --name-only -z "$1^" "$1")
 }
 if [ "${1:-}" = --test-commit ]; then
   [ $# -eq 2 ] || { echo "usage: acceptance-check.sh --test-commit SHA" >&2; exit 2; }
@@ -80,15 +88,16 @@ done < <(refused_in_test_commit "$first")
 
 # 2. protected paths unchanged by the branch's own commits after the test commit. A merge (of
 # the base) counts only for files it leaves different from every parent: its own resolution.
+# Names are read unquoted (-z), as in refused_in_test_commit, so a non-ASCII helper is still seen.
 own_changes() {
   local c ps p
   for c in $(printf '%s\n' "$commits" | tail -n +2); do
     ps=$(git rev-list --parents -n 1 "$c" | cut -d' ' -f2-)
     if [ "$(echo $ps | wc -w)" -eq 1 ]; then
-      git diff --no-renames --name-only "$c^" "$c"
+      git diff --no-renames --name-only -z "$c^" "$c" | tr '\0' '\n'
     else
       local f
-      for p in $ps; do git diff --no-renames --name-only "$p" "$c"; done | sort | uniq -c |
+      for p in $ps; do git diff --no-renames --name-only -z "$p" "$c" | tr '\0' '\n'; done | sort | uniq -c |
         while read -r n f; do [ "$n" -lt "$(echo $ps | wc -w)" ] || printf '%s\n' "$f"; done
     fi
   done | sed '/^$/d' | sort -u
