@@ -448,6 +448,87 @@ pub fn same_changes(repo: &Path, base: &str, a: &str, b: &str) -> bool {
     matches!((own(a), own(b)), (Some(x), Some(y)) if x == y)
 }
 
+/// The commits after the head `read` that a diff review read, up to `head` (Issue 344): `(all,
+/// not_merges)`, oldest first. `all` is `read..head` less the commits of the base (which a
+/// merge of the base brings), or `base..head` when `read` is not an ancestor of `head` (a rebase,
+/// or a head the clone lacks). `not_merges` are those of `all` that
+/// are not a clean merge of the base: a commit with two parents, one of them in `base`, whose tree
+/// is the one `git merge-tree --write-tree` makes of its parents with no conflict. A git that fails
+/// is an error, never "only merges".
+pub fn after_review(
+    repo: &Path,
+    base: &str,
+    read: &str,
+    head: &str,
+) -> Result<(Vec<String>, Vec<String>), Reject> {
+    let range = if git_ok(
+        repo,
+        &[
+            "merge-base",
+            "--is-ancestor",
+            &format!("{read}^{{commit}}"),
+            head,
+        ],
+    ) {
+        format!("^{read}")
+    } else {
+        format!("^{base}")
+    };
+    let mut all = Vec::new();
+    let mut not_merges = Vec::new();
+    for line in git(
+        repo,
+        &[
+            "rev-list",
+            "--reverse",
+            "--parents",
+            head,
+            &range,
+            &format!("^{base}"),
+        ],
+    )?
+    .lines()
+    {
+        let ids: Vec<&str> = line.split_whitespace().collect();
+        let Some((c, parents)) = ids.split_first() else {
+            continue;
+        };
+        all.push(c.to_string());
+        if !clean_base_merge(repo, base, c, parents)? {
+            not_merges.push(c.to_string());
+        }
+    }
+    Ok((all, not_merges))
+}
+
+/// Commit `c` with `parents` merges the base in and resolves nothing (see `after_review`).
+fn clean_base_merge(repo: &Path, base: &str, c: &str, parents: &[&str]) -> Result<bool, Reject> {
+    let [p1, p2] = parents else {
+        return Ok(false);
+    };
+    let in_base = |p: &str| git_ok(repo, &["merge-base", "--is-ancestor", p, base]);
+    if !in_base(p1) && !in_base(p2) {
+        return Ok(false);
+    }
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args(["-c", HOOKS_OFF, "merge-tree", "--write-tree", p1, p2])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| Reject(format!("cannot run git: {e}")))?;
+    match out.status.code() {
+        Some(0) => {}
+        // A conflict: the commit resolved one.
+        Some(1) => return Ok(false),
+        _ => return reject(format!("git merge-tree failed for {p1} {p2}")),
+    }
+    let made = String::from_utf8_lossy(&out.stdout);
+    let tree = git(repo, &["rev-parse", &format!("{c}^{{tree}}")])?;
+    Ok(made.lines().next().map(str::trim) == Some(tree.trim()))
+}
+
 // ---- GitHub --------------------------------------------------------------------------------------
 
 /// One JSON value per line of `gh api --paginate <path> --jq <jq>`.
