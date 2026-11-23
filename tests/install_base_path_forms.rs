@@ -118,6 +118,29 @@ fn an_empty_hc_bin_is_named() {
     assert!(err.contains("HC_BIN is set and empty"), "{err}");
 }
 
+/// A bare HC_BIN that PATH does not find is named, even when the current folder holds a file of
+/// that name (makiba looks a bare name up on PATH, never in the current folder).
+#[test]
+fn a_bare_hc_bin_not_on_path_is_named() {
+    let (dir, url) = release("bare-hc-bin");
+    let bin = dir.join("prefix/bin");
+    fs::create_dir_all(&bin).unwrap();
+    std::os::unix::fs::symlink("herdr-core", bin.join("makiba-382-absent")).unwrap();
+    let path = format!("{}:{}", dir.join("empty").display(), own_path());
+    let out = Command::new("bash")
+        .arg(root().join("scripts/install-base.sh"))
+        .arg(dir.join("prefix"))
+        .current_dir(&bin)
+        .env("HERDR_RELEASES_URL", &url)
+        .env("PATH", path)
+        .env("HC_BIN", "makiba-382-absent")
+        .output()
+        .expect("bash runs");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("which PATH does not find"), "{err}");
+    assert_eq!(out.status.code(), Some(3), "{err}");
+}
+
 #[test]
 fn hc_bin_naming_the_installed_link_passes() {
     let (dir, url) = release("hc-bin-ok");

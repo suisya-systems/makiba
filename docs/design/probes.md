@@ -377,7 +377,7 @@ Cases, each from a stopped core (`server stop` with the same session at the end 
 - `layout`: `PATH=S/new/bin:<a PATH with no other hc or herdr-core>`, then `S/new/bin/hc server start`. Expected: the pinned version, executable `S/new/bin/herdr-core`.
 - `beside`: a separate folder `S/beside/bin` holding a copy of the pinned binary as `hc` (a plain file, not a link) and the older binary as `herdr-core`, the layout the script made before #382; `PATH` as in `layout` but with `S/beside/bin` in place of `S/new/bin`; `S/beside/bin/hc server start`. Records whether the sibling is preferred.
 - `on-path`: `PATH=S/old:S/new/bin:<as above>`, then `S/new/bin/hc server start` by its full path. Records whether `PATH` is searched.
-- `self`: a folder holding only a plain copy of the pinned binary as `hc`, no `herdr-core` anywhere on `PATH`; start it by its full path. Expected: the pinned version (CI's `real-base` job does this).
+- `self`: a folder holding only a plain copy of the pinned binary as `hc`, no `herdr-core` anywhere on `PATH`; start it by its full path. Expected: the pinned version (CI's `real-base` job did this before #382; since then it installs the layout of `layout`).
 
 Record, per case: the version `hello` answered, the executable path, and the exit code of `server start`.
 

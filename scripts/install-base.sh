@@ -79,10 +79,13 @@ if [ "${HC_BIN+set}" = set ]; then
   case "$HC_BIN" in
     '') named= ;;
     */*) named=$HC_BIN ;;
-    *) named=$(type -P "$HC_BIN") || named=$HC_BIN ;;
+    *) named=$(type -P "$HC_BIN") || named=NOTFOUND ;;
   esac
   if [ -z "$named" ]; then
     echo "install-base: installed at $bin/herdr-core, but HC_BIN is set and empty; makiba up cannot run it: point HC_BIN at $bin/hc or unset it" >&2
+    other=1
+  elif [ "$named" = NOTFOUND ]; then
+    echo "install-base: installed at $bin/herdr-core, but HC_BIN names $HC_BIN, which PATH does not find; makiba up cannot run it: point HC_BIN at $bin/hc or unset it" >&2
     other=1
   elif ! [ "$named" -ef "$bin/herdr-core" ]; then
     echo "install-base: installed at $bin/herdr-core, but HC_BIN names $named; makiba up runs that one: point HC_BIN at $bin/hc or unset it" >&2
