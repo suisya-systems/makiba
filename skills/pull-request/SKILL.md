@@ -25,6 +25,10 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
 - **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push with mcp__makiba__push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
 
+## A rerun of failed jobs
+
+When a check failed for a cause outside the change (a flaky test) and you rerun its failed jobs with `gh run rerun <run> --failed`, call mcp__makiba__pr with `state` `rerun` and the same `repo`, `pr`, `head` and `task` in the same turn, then end your turn. The watch of that head starts again and sends you a notice of the rerun's result, as for a first run; the merge gate reads that newest result. `rerun` is refused for a head never recorded (`not_found`), for a head that is not the pull request's current one, and for a head whose CI already passed (`conflict`); while the head is still watched, it changes nothing. It records no new head: a new commit is `pushed`, never `rerun`.
+
 ## Merging
 
 The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
