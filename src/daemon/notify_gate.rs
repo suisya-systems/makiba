@@ -24,8 +24,8 @@ const fn d(send: bool, reason: &'static str) -> Decision {
     Decision { send, reason }
 }
 
-/// The gate for a notice about `kind` (an anomaly rule name, `unknown_terminal`, or
-/// `worker_spawn_failed`). The two anomalies about the secretary are told to the person, not to
+/// The gate for a notice about `kind` (an anomaly rule name, `unknown_terminal`,
+/// `binary_replaced`, or `worker_spawn_failed`). The two anomalies about the secretary are told to the person, not to
 /// the secretary; every other known kind is actionable, and an unknown one is sent.
 pub fn decide(kind: &str) -> Decision {
     match kind {
@@ -33,6 +33,8 @@ pub fn decide(kind: &str) -> Decision {
         "blocked_question" | "blocked_permission" | "blocked_auth" | "error" | "gone"
         | "done_no_report" | "no_status" | "unknown_terminal" => d(true, "actionable"),
         "worker_spawn_failed" => d(true, "actionable"),
+        // Issue 340: the secretary has the person run `makiba down` and `makiba up`.
+        "binary_replaced" => d(true, "actionable"),
         _ => d(true, "unknown_kind"),
     }
 }

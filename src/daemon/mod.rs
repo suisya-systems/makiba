@@ -12,6 +12,7 @@ pub mod delivery;
 mod dialogs;
 pub mod dispatch;
 pub mod door;
+pub mod exe;
 pub mod gate;
 mod gh;
 pub mod inbox;
@@ -251,6 +252,11 @@ fn serve_until(
         signal_hook::flag::register(sig, Arc::clone(&stop)).map_err(|e| e.to_string())?;
     }
     let w = open_state(&dir.join("state.db"))?;
+    // Issue 340: this start runs the file on disk, so a replacement an earlier makibad saw is over.
+    if let Err(e) = exe::clear_at_start(&w) {
+        eprintln!("makibad: cannot clear the earlier binary_replaced: {e}");
+    }
+    let mut exe_watch = exe::Watch::start(Arc::clone(&stop));
     let base = connect();
     // Not subscribed yet: the row says so, and the heartbeat already runs.
     w.conn()
@@ -380,6 +386,10 @@ fn serve_until(
                 Ok(()) => started_recorded = true,
                 Err(e) => eprintln!("makibad: cannot record the subscription: {e}"),
             }
+        }
+        // Needs only state.db: not held back by the reconcile.
+        if let Err(e) = exe_watch.pass(&w) {
+            eprintln!("makibad: the executable's watch: {e}");
         }
         // Not before the subscription is recorded: the first Resync's records come after it.
         if started_recorded {

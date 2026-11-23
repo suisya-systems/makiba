@@ -3825,7 +3825,12 @@ fn serve_socket(door: &Door, mut s: UnixStream) {
             ),
         },
     };
-    let _ = writeln!(s, "{}", line(&r));
+    // Issue 340: the build makibad runs, so that a client of another build can say so.
+    let mut answer = line(&r);
+    if let Some(build) = super::exe::running_digest() {
+        answer["build"] = build.into();
+    }
+    let _ = writeln!(s, "{answer}");
 }
 
 /// Does the connection ask for the channel path? Looks at its first bytes without taking them.
