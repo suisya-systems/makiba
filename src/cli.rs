@@ -817,7 +817,7 @@ pub fn main(c: Command) -> ExitCode {
                 eprintln!("{hint}");
             }
             // Issue 340: a makibad of another build may not know what this makiba asks.
-            if let Some(other) = crate::daemon::exe::other_build_line(&answer) {
+            if let Some(other) = crate::build::other_build_line(&answer) {
                 eprintln!("{other}");
             }
             let code = ErrorKind::ALL

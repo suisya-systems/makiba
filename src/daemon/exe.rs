@@ -8,7 +8,7 @@
 //! - `running_digest`: the digest of the file this process runs (`/proc/self/exe`, which names it
 //!   after the path was replaced), filled once by the watcher thread; hashing a debug binary takes
 //!   seconds, so it never runs on the daemon's tick thread. The door's socket answers carry it.
-//! - `own_digest`: the same, computed on demand by a client of the door when a call failed.
+//! - `crate::build`: the digest and the client's line, without the database.
 //! - `Watch`: the watcher thread looks at the path every second. A file whose identity (device,
 //!   inode, size, modification time) has held still for one look is hashed through an opened
 //!   descriptor, and the result is kept only when the file did not change while it was read. Same
@@ -16,13 +16,12 @@
 //!   the rule `binary_replaced` and a notice to the secretary, written by `pass` on the daemon's
 //!   thread. The next start clears it (`clear_at_start`): the file on disk is what runs then.
 
+use crate::build::{digest_of, hash, running_file, short};
 use crate::db::writer::NewEvent;
 use crate::db::{Result, StateWriter};
 use crate::spec::AGENT_SECRETARY;
 use rusqlite::params;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::io::Read;
 use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -36,62 +35,9 @@ const LOOK: Duration = Duration::from_secs(1);
 
 static RUNNING: OnceLock<Option<String>> = OnceLock::new();
 
-/// The file this process runs: `/proc/self/exe` on Linux, which keeps naming it after its path
-/// was given to another file; elsewhere the path it was started from.
-fn running_file() -> Option<PathBuf> {
-    if cfg!(target_os = "linux") {
-        Some(PathBuf::from("/proc/self/exe"))
-    } else {
-        std::env::current_exe().ok()
-    }
-}
-
-fn hash(r: &mut impl Read) -> std::io::Result<String> {
-    let mut h = Sha256::new();
-    let mut buf = vec![0u8; 1 << 20];
-    loop {
-        let n = r.read(&mut buf)?;
-        if n == 0 {
-            break;
-        }
-        h.update(&buf[..n]);
-    }
-    Ok(h.finalize().iter().map(|b| format!("{b:02x}")).collect())
-}
-
-fn digest_of(path: &Path) -> Option<String> {
-    hash(&mut std::fs::File::open(path).ok()?).ok()
-}
-
-/// The digest of the executable this process runs, computed now. For a client of the door, once a
-/// call failed.
-pub fn own_digest() -> Option<String> {
-    digest_of(&running_file()?)
-}
-
 /// `makibad`'s digest once the watcher has hashed it; `None` before, or when it could not.
 pub fn running_digest() -> Option<&'static str> {
     RUNNING.get().and_then(|d| d.as_deref())
-}
-
-/// The first twelve hex digits: enough to tell two builds apart in a line.
-pub fn short(digest: &str) -> &str {
-    digest.get(..12).unwrap_or(digest)
-}
-
-/// The line a client adds to a failed call when `makibad` answered with another `build` than its
-/// own; `None` when the builds are the same, or either is unknown.
-pub fn other_build_line(answer: &Value) -> Option<String> {
-    let theirs = answer["build"].as_str()?;
-    let mine = own_digest()?;
-    (theirs != mine).then(|| {
-        format!(
-            "makibad runs another build of makiba ({}) than this makiba ({}); makiba down and \
-             makiba up bring them together.",
-            short(theirs),
-            short(&mine)
-        )
-    })
 }
 
 /// What the watcher saw: the file at `path` is another build than the one running.
@@ -125,6 +71,17 @@ impl Ident {
     }
 }
 
+/// The path `makibad` was started from. On Linux `current_exe()` reads `/proc/self/exe`, which
+/// says `<path> (deleted)` once the file at the path was replaced, before the watcher began too:
+/// the path is the part before the suffix, and the file there is the replacement.
+fn started_from(exe: &Path) -> PathBuf {
+    const DELETED: &str = " (deleted)";
+    match exe.to_str().and_then(|s| s.strip_suffix(DELETED)) {
+        Some(p) if cfg!(target_os = "linux") => PathBuf::from(p),
+        _ => exe.to_path_buf(),
+    }
+}
+
 /// The digest of the file at `path` when it held still while it was read: the descriptor's
 /// identity and the path's are the same `want` before and after.
 fn stable_digest(path: &Path, want: Ident) -> Option<String> {
@@ -152,7 +109,7 @@ impl Watch {
             found: Arc::clone(&found),
             written: false,
         };
-        let Ok(path) = std::env::current_exe() else {
+        let Ok(path) = std::env::current_exe().map(|p| started_from(&p)) else {
             eprintln!("makibad: cannot tell the path of its own executable; it is not watched");
             return w;
         };
@@ -343,10 +300,13 @@ pub fn clear_at_start(w: &StateWriter) -> Result<()> {
 mod tests {
     use super::*;
 
+    /// A replacement before the watcher began: the path it watches is still the one started from.
+    #[cfg(target_os = "linux")]
     #[test]
-    fn the_short_form_is_twelve_digits() {
-        assert_eq!(short("0123456789abcdef"), "0123456789ab");
-        assert_eq!(short("abc"), "abc");
+    fn a_path_replaced_before_the_watch_is_the_path_started_from() {
+        let p = Path::new("/opt/bin/makiba");
+        assert_eq!(started_from(Path::new("/opt/bin/makiba (deleted)")), p);
+        assert_eq!(started_from(p), p);
     }
 
     #[test]
@@ -358,19 +318,5 @@ mod tests {
         assert!(stable_digest(&p, id).is_some());
         std::fs::write(&p, b"other content").unwrap();
         assert_eq!(stable_digest(&p, id), None);
-    }
-
-    #[test]
-    fn an_answer_without_build_adds_nothing() {
-        assert_eq!(other_build_line(&json!({"ok": false})), None);
-    }
-
-    #[test]
-    fn an_answer_of_another_build_says_so() {
-        let line = other_build_line(&json!({"ok": false, "build": "f".repeat(64)})).unwrap();
-        assert!(line.contains("ffffffffffff"), "{line}");
-        assert!(line.contains("makiba down and makiba up"), "{line}");
-        let mine = own_digest().unwrap();
-        assert_eq!(other_build_line(&json!({"ok": false, "build": mine})), None);
     }
 }
