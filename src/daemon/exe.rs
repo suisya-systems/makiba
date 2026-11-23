@@ -16,7 +16,7 @@
 //!   the rule `binary_replaced` and a notice to the secretary, written by `pass` on the daemon's
 //!   thread. The next start clears it (`clear_at_start`): the file on disk is what runs then.
 
-use crate::build::{digest_of, hash, running_file, short};
+use crate::build::{hash, running_file, short};
 use crate::db::writer::NewEvent;
 use crate::db::{Result, StateWriter};
 use crate::spec::AGENT_SECRETARY;
@@ -113,13 +113,20 @@ impl Watch {
             eprintln!("makibad: cannot tell the path of its own executable; it is not watched");
             return w;
         };
-        // The running file's identity, before anything may replace it.
-        let running_ident = running_file()
-            .and_then(|f| std::fs::metadata(f).ok())
-            .map(|m| Ident::of(&m));
+        // The running file, opened now: where the path names the file on disk (not Linux), a
+        // replacement before the hash would otherwise be hashed as the running build. Its identity
+        // and its digest are read through this descriptor.
+        let Some(mut running) = running_file().and_then(|f| std::fs::File::open(f).ok()) else {
+            eprintln!("makibad: cannot open its own executable; it is not watched");
+            return w;
+        };
+        let running_ident = running.metadata().ok().map(|m| Ident::of(&m));
         let spawned = std::thread::Builder::new()
             .name("exe-watch".into())
-            .spawn(move || watch(&path, running_ident, &stop, &found));
+            .spawn(move || {
+                let digest = RUNNING.get_or_init(|| hash(&mut running).ok()).clone();
+                watch(&path, digest, running_ident, &stop, &found)
+            });
         if let Err(e) = spawned {
             eprintln!("makibad: cannot start the executable's watcher: {e}");
         }
@@ -150,13 +157,11 @@ impl Watch {
 
 fn watch(
     path: &Path,
+    running: Option<String>,
     running_ident: Option<Ident>,
     stop: &AtomicBool,
     found: &Mutex<Option<Replaced>>,
 ) {
-    let running = RUNNING
-        .get_or_init(|| running_file().and_then(|f| digest_of(&f)))
-        .clone();
     let Some(running) = running else {
         eprintln!("makibad: cannot read its own executable; it is not watched");
         return;
