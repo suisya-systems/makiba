@@ -38,7 +38,7 @@ Stop lines:
 2. The head you would merge is not the head the CI notice was for.
 3. The change needs a decision the person has not made, or goes beyond the task's brief.
 4. The change cannot be undone by a revert: a release, a migration of stored data, a deletion outside the repository, a change of access or settings.
-5. The worker ran out of its review rounds or its time, or reported a blocker.
+5. The worker ran out of its review rounds or its time, or reported a blocker, or the task's last diff review did not read the head you would merge.
 6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
 7. The merge gate refused.
 
@@ -46,7 +46,9 @@ The merge, in either mode, is this one command alone on one line, with the full 
 
 `gh pr merge <n> --repo <owner>/<name> --squash --match-head-commit <head>`
 
-Your merge gate hook runs the acceptance gate in `makibad` before it lets the command run: the head and the passed CI must match, the test commit must be the first commit and unchanged since, and either the repository's own acceptance check passed at the head or the test failed in CI at the test commit and passed at the head. It refuses every other way to merge from a command line (another form of the merge command, a write to a `pulls/<n>/merge` path, a GraphQL merge, `curl` or `wget` to the GitHub API). Never try another way after a refusal, never `--admin`: tell the person. Write every GitHub CLI, `curl` or `wget` command plainly, as the command itself: no variable, substitution, glob or escape before its subcommand (for `gh api`, `curl` and `wget`, anywhere), a redirection as a word of its own, and not under another program that runs it (`xargs`, `ssh`, `flock`); the hook refuses what it cannot read with certainty. Text you only mention (a commit message, an `echo`, a `grep` pattern, a here-document fed to `cat`) is fine. The hook stops mistakes; what stops a merge around the gate is the repository's branch protection, which the person sets.
+An unreviewed head is not merged, in either mode: when the task's last diff review read an earlier head (the worker committed after it), ask the worker for a diff review round at this head first. A worker out of rounds needs you to raise its allowance with mcp__makiba__review `task`, `allowed` and `reason`; the reason is recorded. Only commits that merge the base in cleanly, without changing a file the pull request changes, keep the earlier review.
+
+Your merge gate hook runs the acceptance gate in `makibad` before it lets the command run: the head and the passed CI must match, the test commit must be the first commit and unchanged since, and either the repository's own acceptance check passed at the head or the test failed in CI at the test commit and passed at the head; and a code pull request's head must be the one its last diff review read (Issue 344), or the gate refuses and names the commits no review read. It refuses every other way to merge from a command line (another form of the merge command, a write to a `pulls/<n>/merge` path, a GraphQL merge, `curl` or `wget` to the GitHub API). Never try another way after a refusal, never `--admin`: tell the person. Write every GitHub CLI, `curl` or `wget` command plainly, as the command itself: no variable, substitution, glob or escape before its subcommand (for `gh api`, `curl` and `wget`, anywhere), a redirection as a word of its own, and not under another program that runs it (`xargs`, `ssh`, `flock`); the hook refuses what it cannot read with certainty. Text you only mention (a commit message, an `echo`, a `grep` pattern, a here-document fed to `cat`) is fine. The hook stops mistakes; what stops a merge around the gate is the repository's branch protection, which the person sets.
 
 ## New commits on an open pull request
 
