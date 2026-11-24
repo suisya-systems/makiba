@@ -454,3 +454,41 @@ fn a_dependency_written_in_words_is_left_out_of_the_next_work() {
     assert!(issues.contains(&&json!(72)), "{v}");
     assert!(!issues.contains(&&json!(71)), "{v}");
 }
+
+/// Issue 410: an Issue the scan leaves out carries its title, as the scan read it; an entry for a
+/// whole repository has the key `title`, null.
+#[test]
+fn an_issue_left_out_carries_its_title() {
+    let mut aside = issue(94, "Set aside by hand", "x");
+    aside["labels"] = json!([{"name": "on-hold"}]);
+    let org = Org::scanned(
+        "titled",
+        true,
+        &[
+            issue(91, "Step three in words", "Depends on the belt's step 2."),
+            issue(92, "Held by another", "Blocked by #93"),
+            issue(93, "The blocker", NAMES_G1),
+            aside,
+        ],
+    );
+    let v = org.next_work();
+    let words = entry(&v, "left_out", "issue", json!(91));
+    assert_eq!(words["kind"], json!("dependency_unreadable"), "{v}");
+    assert_eq!(words["title"], json!("Step three in words"), "{v}");
+    let held = entry(&v, "left_out", "issue", json!(92));
+    assert_eq!(held["kind"], json!("blocked"), "{v}");
+    assert_eq!(held["title"], json!("Held by another"), "{v}");
+    let put = entry(&v, "left_out", "issue", json!(94));
+    assert_eq!(put["kind"], json!("put_aside"), "{v}");
+    assert_eq!(put["title"], json!("Set aside by hand"), "{v}");
+
+    let bare = Org::scanned("untitled", false, &[issue(95, "Any", "x")]);
+    let w = bare.next_work();
+    let e = entry(&w, "left_out", "project", json!("untitled"));
+    assert_eq!(e["kind"], json!("no_goal_ledger"), "{w}");
+    assert!(
+        e.as_object().is_some_and(|o| o.contains_key("title")),
+        "{w}"
+    );
+    assert_eq!(e["title"], Value::Null, "{w}");
+}
