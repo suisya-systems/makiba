@@ -1763,7 +1763,12 @@ fn check_clone(gh: &str, repos_dir: &Path, c: &CloneCheck, cancel: &AtomicBool) 
 /// Fetch `branch` into the clone `clone` through its `origin` (what a worker's `git fetch origin`
 /// then reads), and its head there when `merge` is in it; `None` when the fetch fails or the
 /// merge is not there yet.
-fn in_clone(clone: &Path, branch: &str, merge: &str, cancel: &AtomicBool) -> Option<String> {
+pub(super) fn in_clone(
+    clone: &Path,
+    branch: &str,
+    merge: &str,
+    cancel: &AtomicBool,
+) -> Option<String> {
     let dir = clone.display().to_string();
     let tracking = format!("refs/remotes/origin/{branch}");
     let git = |args: &[&str]| {
