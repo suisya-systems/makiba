@@ -865,14 +865,164 @@
         "trigger": "close",
         "status": "candidates_found",
         "through_close_id": 931,
-        "candidate_refs": "example-org/loom#60,example-org/loom#64,example-org/loom#67,example-org/loom#68,example-org/loom#71,example-org/loom#73",
+        "candidate_refs": "example-org/harbor#31,example-org/loom#60,example-org/loom#64,example-org/loom#67,example-org/loom#68,example-org/loom#71,example-org/loom#73,example-org/quill#27,example-org/quill#30",
         "diagnostics": "norepo:atlas",
         "candidate_count": 3,
-        "truncated_count": 3,
+        "truncated_count": 6,
         "free_workers": 1,
-        "repos": 1,
+        "repos": 3,
         "notified": true,
-        "error": null
+        "error": null,
+        "input_truncated": "",
+        "candidates": [
+          {
+            "repo": "example-org/quill",
+            "issue": 30,
+            "title": "Footnotes in the exporter",
+            "clause_id": "G1",
+            "clause_heading": "Every document exports",
+            "why": "priority G1; effort M",
+            "size": "M",
+            "size_estimated": true,
+            "recommended": true,
+            "forwarded": true
+          },
+          {
+            "repo": "example-org/harbor",
+            "issue": 31,
+            "title": "Publish a checksum file",
+            "clause_id": "G2",
+            "clause_heading": "Releases can be checked",
+            "why": "priority G2; effort S",
+            "size": "S",
+            "size_estimated": false,
+            "recommended": false,
+            "forwarded": true
+          },
+          {
+            "repo": "example-org/quill",
+            "issue": 27,
+            "title": "Keep the heading numbers",
+            "clause_id": "G3",
+            "clause_heading": "Exports read like the source",
+            "why": "priority G3; effort S",
+            "size": "S",
+            "size_estimated": true,
+            "recommended": false,
+            "forwarded": true
+          },
+          {
+            "repo": "example-org/loom",
+            "issue": 60,
+            "title": "Document the config keys",
+            "clause_id": "G2",
+            "clause_heading": "Every setting is documented",
+            "why": "priority G2; effort S",
+            "size": "S",
+            "size_estimated": false,
+            "recommended": false,
+            "forwarded": false
+          },
+          {
+            "repo": "example-org/loom",
+            "issue": 64,
+            "title": "Report the time spent per file",
+            "clause_id": "G2",
+            "clause_heading": "Every setting is documented",
+            "why": "priority G2; follows #55; effort M",
+            "size": "M",
+            "size_estimated": true,
+            "recommended": false,
+            "forwarded": false
+          },
+          {
+            "repo": "example-org/loom",
+            "issue": 67,
+            "title": "Colour the output when it is a terminal",
+            "clause_id": "G4",
+            "clause_heading": "Output a person can read",
+            "why": "priority G4; effort S",
+            "size": "S",
+            "size_estimated": true,
+            "recommended": false,
+            "forwarded": false
+          },
+          {
+            "repo": "example-org/loom",
+            "issue": 68,
+            "title": "A flag to print the parsed tree",
+            "clause_id": "G4",
+            "clause_heading": "Output a person can read",
+            "why": "priority G4; effort M",
+            "size": "M",
+            "size_estimated": false,
+            "recommended": false,
+            "forwarded": false
+          },
+          {
+            "repo": "example-org/loom",
+            "issue": 71,
+            "title": "Accept tabs in indentation",
+            "clause_id": "G6",
+            "clause_heading": "Inputs from other tools",
+            "why": "priority G6; effort S",
+            "size": "S",
+            "size_estimated": true,
+            "recommended": false,
+            "forwarded": false
+          },
+          {
+            "repo": "example-org/loom",
+            "issue": 73,
+            "title": "Tidy the examples folder",
+            "clause_id": null,
+            "clause_heading": null,
+            "why": "names no goal clause; effort S",
+            "size": "S",
+            "size_estimated": true,
+            "recommended": false,
+            "forwarded": false
+          }
+        ],
+        "candidates_not_recorded": 0,
+        "left_out": [
+          {
+            "project": "loom",
+            "repo": "example-org/loom",
+            "issue": 63,
+            "kind": "blocked",
+            "reason": "held by #55"
+          },
+          {
+            "project": "loom",
+            "repo": "example-org/loom",
+            "issue": 66,
+            "kind": "put_aside",
+            "reason": "put aside by a blocked or on-hold label; remove the label to bring it back"
+          },
+          {
+            "project": "loom",
+            "repo": "example-org/loom",
+            "issue": 70,
+            "kind": "dependency_unreadable",
+            "reason": "a dependency line names no Issue number: \"after the parser work\"; write it as Depends on #<n>, or remove it"
+          },
+          {
+            "project": "harbor",
+            "repo": "example-org/harbor",
+            "issue": 33,
+            "kind": "blocked",
+            "reason": "held by #14"
+          },
+          {
+            "project": "atlas",
+            "repo": null,
+            "issue": null,
+            "kind": "no_repository",
+            "reason": "no GitHub repository: register it with makiba project <slug> <OWNER/NAME>"
+          }
+        ],
+        "left_out_not_recorded": 0
       }
     },
     {
@@ -987,6 +1137,21 @@
       "task_id": null,
       "payload": {
         "command_id": 5131
+      }
+    },
+    {
+      "id": 968,
+      "occurred_at": "2026-11-24T09:58:10.000Z",
+      "actor": "makibad",
+      "kind": "anomaly_raised",
+      "task_id": null,
+      "payload": {
+        "task_id": null,
+        "rule": "binary_replaced",
+        "pid": 41872,
+        "path": "/usr/local/bin/makiba",
+        "running": "6f1c0e9a2b3d4c5e",
+        "on_disk": "a83d2f17c4b5e6d7"
       }
     }
   ]

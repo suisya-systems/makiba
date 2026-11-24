@@ -326,6 +326,11 @@
       "task_id": "r6-15",
       "rule": "error",
       "since": "2026-11-24T09:45:03.000Z"
+    },
+    {
+      "task_id": null,
+      "rule": "binary_replaced",
+      "since": "2026-11-24T09:58:10.000Z"
     }
   ],
   "pending": [
