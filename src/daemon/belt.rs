@@ -1198,7 +1198,7 @@ fn open_runs(w: &StateWriter, id: i64) -> Result<i64> {
 /// Whether the run `alias` has its pull request read closed unmerged (`pr_closed`, Issue 284)
 /// with nothing since: no pull request recorded again (`pr_opened`, `fix_pushed`) and no read of
 /// it open again (`pr_reopened`).
-pub(super) fn pr_closed_sql(alias: &str) -> String {
+pub(crate) fn pr_closed_sql(alias: &str) -> String {
     format!(
         "EXISTS (SELECT 1 FROM events pc WHERE pc.run_id = {alias}.id AND pc.kind = 'pr_closed'
            AND pc.id > coalesce((SELECT max(po.id) FROM events po WHERE po.run_id = {alias}.id
@@ -1211,7 +1211,7 @@ pub(super) fn pr_closed_sql(alias: &str) -> String {
 /// that returns to a pull request registered before, whose watch row is then left older than
 /// another's). Without any such event (rows older than the events), its newest watch's. The one
 /// definition every reader of a run's current pull request uses.
-pub(super) fn current_pr_sql(alias: &str, field: &str) -> String {
+pub(crate) fn current_pr_sql(alias: &str, field: &str) -> String {
     debug_assert!(field == "repo" || field == "pr");
     format!(
         "coalesce((SELECT json_extract(cp.payload_json, '$.{field}') FROM events cp
