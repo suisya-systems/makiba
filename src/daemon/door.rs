@@ -3729,7 +3729,8 @@ impl Door {
                                 "head": head, "method": method, "mode": j.mode});
             w.conn()
                 .execute(
-                    "UPDATE commands SET result_json = ?1 WHERE id = ?2",
+                    // The provisional line was an error: its kind goes with it.
+                    "UPDATE commands SET result_json = ?1, error_kind = NULL WHERE id = ?2",
                     params![line(&Ok(answer.clone())).to_string(), command],
                 )
                 .map_err(|e| e.to_string())?;
