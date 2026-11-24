@@ -101,16 +101,33 @@ commit together or not at all. The gate's checks, warnings and verdicts do not c
 `acceptance_gate` payload gains `"via": "merge"` or `"via": "gate"` so a reader can tell which
 verb judged.
 
-Before the attempt or the entry is written, in the same transaction, the verb refuses with
-`conflict` when the pull request already has an open attempt (an `merge_attempted` with no outcome
-event, section 4.2) or an open pending merge entry. That check runs after the lock is taken again,
-so two calls that ran their gates at once cannot both write one. A call with the same `idem` is
-answered from `commands` as every verb is (`replay`, `door.rs:588`).
+Before the attempt or the entry is written, in the same transaction and after the lock is taken
+again (so two calls that ran their gates at once cannot both write one), the verb applies these
+rules, in order:
+
+1. The pull request has an open attempt (a `merge_attempted` with no outcome event, section 4.2):
+   `conflict`, for every action.
+2. `request` that would write a pending entry, and an open merge entry exists for the same pull
+   request and head: that entry is answered again (no second entry; section 5.1).
+3. `request` and an open merge entry exists for the same pull request at another head: that entry
+   is withdrawn (its head is no longer the pull request's, which the gate just read) and the
+   request goes on.
+4. `approve`: its own entry is consumed by a conditional update in this transaction (section 5.2);
+   no other open entry can exist for the pull request, by rules 2 and 3.
+
+A pull request that is not some run's current pull request (`current_pr_sql`) is refused with
+`conflict` before the gate runs (one never recorded with `pr` has no passed `ci_completed` and
+would be refused by the gate too), so the act never runs on a pull request the PR watch cannot
+follow (section 7). A call
+with the same `idem` is answered from `commands` as every verb is (`replay`, `door.rs:588`).
 
 ### 3.2 Answers
 
 - Refused: `{"status": "refused", "verdict", "reason", "mode", "repo", "pr", "head", "review"?}`;
-  the command `rejected`, as a refused `gate` is today.
+  the command `rejected`. This is a change: a refused `gate` answers `Ok` with `allow` false and
+  its command is recorded `done` (`status_of`, `door.rs:166-177`); `merge` records a refusal as
+  `rejected`, so a reader of `commands` sees a merge request that did nothing. `gate` keeps its
+  recording.
 - Attempt: `{"status": "accepted", "attempt": <event id>, "repo", "pr", "head", "method", "mode"}`;
   the command stays `accepted` until the outcome finishes it (`done` or `failed`), as `push`.
 - Pending: `{"status": "pending", "pending_id", "repo", "pr", "head", "mode", "warnings": [...]}`;
@@ -171,11 +188,18 @@ An attempt is **open** while it has none of `merge_done`, `merge_enqueued`, `mer
    <head>})` [unverified: the mutation's name and its `expectedHeadOid`; source to read:
    https://docs.github.com/en/graphql/reference/mutations#enqueuepullrequest]. `method` is
    recorded but not sent: the queue's merge method is the branch's setting [unverified].
-4. The outcome: a readable success is `merge_done` or `merge_enqueued`; a readable refusal from
-   GitHub (an HTTP status and a message, or a GraphQL error) is `merge_failed` with `sent` true;
-   anything else (a timeout, a kill, an exit with nothing readable) is followed by the read of step
-   1 again and recorded `merge_unknown` with what it observed. A failure is read again for the
-   state, never sent again.
+4. The outcome: a readable success is `merge_done` or `merge_enqueued`. `merge_failed` with `sent`
+   true only for a **definitive rejection**, one that says the request was not carried out: for
+   the REST merge the statuses 403, 404, 405 (not mergeable), 409 (head modified) and 422
+   [unverified: that these mean "not merged"; the build confirms the list from the REST page
+   before it relies on it]; for the enqueue, a GraphQL error with no `data` for the mutation and a
+   type in a fixed list (`UNPROCESSABLE`, `FORBIDDEN`, `NOT_FOUND`) [unverified: the error types
+   GitHub gives]. Every other answer, readable or not (a 5xx, any other status, a GraphQL error
+   beside partial data, an error resolving the mutation's result fields, a timeout, a kill, an exit
+   with nothing readable), may have come after the mutation took effect, and is followed by the
+   read of step 1 again and recorded `merge_unknown` with what it observed. A failure is read
+   again for the state, never sent again. To tell these apart the act needs gh's response body,
+   its stderr and its exit status on a failure (section 8).
 
 The call uses `gh.rs`'s `run_bounded` with its timeout (120 s, `gh.rs:12`), so no attempt stays
 open for ever in a running makibad.
@@ -257,15 +281,27 @@ and each warning, and makibad's `merge_approval_mode`, asks y/N unless `--yes`, 
 
 The door, for the person only:
 
-1. The entry must be `open` and its `text_sum` equal to `shown`; else `stale` (the entry changed
-   since it was printed).
+1. A first check, before the lock is released: the entry must be `open` and its `text_sum` equal
+   to `shown`; else `stale` (the entry changed since it was printed). This only saves a gate run;
+   it decides nothing.
 2. It runs the gate again at the entry's head (section 3.1, the lock released as for `gate`).
-3. Refused: the entry stays open, the answer carries the verdict, and the secretary is told.
-   Allowed with exactly the entry's warnings, or fewer: the entry `answered` (`approved`,
-   `answered_by` `person`) and `merge_attempted` with `approved_by` `person` and `pending_id`, in
-   one transaction; the act follows as in section 4. Allowed with a warning the entry did not
-   carry: the entry's context and `text_sum` are replaced with the new reading and the answer is
-   `stale`, so the person approves what they were shown and nothing else.
+3. In the final transaction, after the lock is taken again, the entry is consumed by one
+   conditional update: `UPDATE pending SET status = 'answered', answer = 'approved', answered_by
+   = 'person', ... WHERE id = ?1 AND kind = 'merge' AND status = 'open' AND
+   json_extract(context_json, '$.text_sum') = ?2`, only when the gate allowed with exactly the
+   entry's warnings, or fewer. `merge_attempted` (with `approved_by` `person` and `pending_id`) is
+   written only when that update changed one row; zero rows (a refusal, a withdrawal, another
+   approval or a new text since step 1) rolls the transaction back and answers `stale`. So a
+   concurrent `refuse`, `withdraw` or second `approve` can never be overwritten, and one entry
+   makes at most one attempt. The act follows as in section 4.
+4. The gate refused: the entry stays open, the answer carries the verdict, and the secretary is
+   told. Allowed with a warning the entry did not carry: the entry's context and `text_sum` are
+   replaced with the new reading (by the same kind of conditional update, on `status = 'open'` and
+   the old `text_sum`) and the answer is `stale`, so the person approves what they were shown and
+   nothing else.
+
+`refuse` and `withdraw` consume the entry by the same conditional update on `status = 'open'`; a
+zero-row update answers `stale`.
 
 The person's direct `request` with no warning acts at once (their key is the word); with a warning
 it writes an entry too, so a warning is always printed before the person's key lets it land.
@@ -288,12 +324,20 @@ bound against merging around makibad stays GitHub's branch protection, set by th
 
 - **Classification.** On `MERGED`, `merged_via` is read from the act records of that pull request
   at `headRefOid`, newest first, ignoring any `acceptance_gate` row:
-  - `gate`: a `merge_done`, or a `merge_enqueued` with no `merge_dequeued` after it.
-  - `unknown`: a `merge_unknown` (any `observed` but `merged_other_head`), or a `merge_enqueued`
-    followed by a `merge_dequeued` and no later act (the person may have enqueued it again by
-    hand).
+  - `gate`: a `merge_done`; or a `merge_enqueued` whose continuity to the landing is shown (below).
+  - `unknown`: a `merge_unknown` (any `observed` but `merged_other_head`); or a `merge_enqueued`
+    whose continuity is not shown, or that a `merge_dequeued` follows with no later act.
   - `hand`: none of these.
   `pr_merged` gains `attempt` (the act's event id) when there is one.
+- **Continuity of a queue entry.** That no dequeue was observed does not prove that makibad's
+  enqueue landed the pull request: it may have been removed and enqueued again by hand between two
+  reads, or while makibad was down. So a queued landing is `gate` only on durable evidence from
+  GitHub: on the `MERGED` read the poller also reads the pull request's timeline items of the
+  queue kinds after the act's time [unverified: the timeline items `AddedToMergeQueueEvent` and
+  `RemovedFromMergeQueueEvent` on `PullRequest.timelineItems`; source to read:
+  https://docs.github.com/en/graphql/reference/unions#pullrequesttimelineitems], and finds exactly
+  one addition and no removal since `merge_enqueued`. Anything else, or a timeline it cannot read,
+  is `unknown`. The landing is never `gate` on the absence of an observation.
 - **Ordering with the act.** While the pull request has an open attempt (section 4.2), a `MERGED`
   read is not written: the read is dropped and the poller reads again on its next interval. The
   attempt gets its outcome within the call's timeout, or at a restart from the reconciliation, so
@@ -304,21 +348,35 @@ bound against merging around makibad stays GitHub's branch protection, set by th
   (makibad's merge)"; for `unknown`, "landed; makibad cannot tell whether its attempt or another
   merge landed it"; for `hand`, as today (`prwatch.rs:1085-1092`). Each ends with the retro and
   the close, as today.
-- **The queue.** The state read gains the queue entry of the pull request [unverified: whether `gh
-  pr view --json` has a field for it; if not, the state read becomes one `gh api graphql` query
-  with the same fields, still one call per interval, no second poller]. When the newest act record
-  of the pull request at its head is `merge_enqueued` (or `merge_unknown` with `observed`
-  `enqueued`), and a read shows it `OPEN` with no queue entry, the poller reads once more on its
-  next interval; when that read shows the same, `merge_dequeued` is written and the secretary told:
-  "<repo>#<pr> left the merge queue without landing (the queue's checks failed, or someone removed
-  it). Read why on the pull request; fix it or ask again with merge." The second read guards a
-  pull request read between leaving the queue and showing `MERGED` [unverified: whether GitHub
-  shows such a state]; the first read is kept in the poller's memory only, so a restart costs one
-  more interval, nothing else. The reason for the removal is not read [unverified: GitHub's
-  timeline has a removal event with a reason].
+- **The queue read.** The state read (`STATE_FIELDS` and `poll_state`, `prwatch.rs:814-954`) gains
+  the queue entry of the pull request (whether it is in the queue, and the entry's id)
+  [unverified: whether `gh pr view --json` has a field for it; if not, the state read becomes one
+  `gh api graphql` query with the same fields, still one call per interval, no second poller].
+  Today `poll_state` returns only a `MERGED` or `CLOSED` read (or a reopen) to `apply_state`, and
+  sends each ordinary `OPEN` read to the loop as a `MergeRead` (`prwatch.rs:933-941`, the struct
+  at `:1135-1144`), which carries no queue field. So `MergeRead` gains `queued: Option<bool>`
+  (`None` when the read did not carry it) and `entry: Option<String>`, and the loop's consumer of
+  `MergeRead`s (beside `apply_merge`, `prwatch.rs:1236`) calls a new `apply_queue` in its own
+  transaction for each read. `apply_queue`: when the newest act record of the pull request at its
+  head is `merge_enqueued` (or `merge_unknown` with `observed` `enqueued`) with no
+  `merge_dequeued` after it, and the read is `OPEN` at that head with `queued` `Some(false)`, it
+  notes the read in `PrWatch`'s memory (a map from the attempt to the read's start); a second such
+  read at least one interval later writes `merge_dequeued` and tells the secretary: "<repo>#<pr>
+  left the merge queue without landing (the queue's checks failed, or someone removed it). Read why
+  on the pull request; fix it or ask again with merge." A read with `queued` `Some(true)` clears
+  the note. The second read guards a pull request read between leaving the queue and showing
+  `MERGED` [unverified: whether GitHub shows such a state]. The note is memory only: a restart
+  costs one more interval, and the classification above does not depend on it. The reason for the
+  removal is not read [unverified: a removal timeline item carries a reason].
 
-`followed` (`prwatch.rs:837`) needs no change: an enqueued pull request has no `pr_merged`, so it is
-followed until it lands, closes or is dequeued.
+`followed` (`prwatch.rs:837`) is not enough as it is: it follows a run's current pull request only
+while the run is open, a completed range run, an awaited run, or for a day after a completion or
+abandonment, so a queue that lands or ejects later would go unread. It gains one more condition:
+any run whose current pull request has an open queue act (a `merge_enqueued`, or a `merge_unknown`
+with `observed` `enqueued`, with no `merge_dequeued` and no `pr_merged` after it), whatever the
+run's status or age. The act needs the run's current pull request: the `merge` verb refuses
+(`conflict`) a pull request that is not some run's current one (`current_pr_sql`, as `followed`
+reads it).
 
 ## 8. The hook with no allowed form, and gh's stderr
 
@@ -333,9 +391,14 @@ followed until it lands, closes or is dequeued.
   request out of the queue only narrows.
 - `ask_gate` and `gate_answer` go: the hook asks nothing and needs no door, so a hook that cannot
   read its input still refuses (L-K11), and it refuses the same with makibad down.
-- The other refusals stay (`gh api` writing to `pulls/<n>/merge`, `curl` or `wget` to the GitHub
-  API, the wrappers and runners). The hook still stops mistakes, not an adversary; the bound is
-  branch protection.
+- The REST merge path rule widens. Today `refused_gh` refuses a writing `gh api` only on a path
+  ending in `pulls/<n>/merge` (`merge_gate.rs`, the `merge_path` pattern in `refused_gh`), so a
+  write to `pulls/<n>/merge-async`, which the design reader reports GitHub documents as able to
+  merge or enqueue [unverified here: https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously],
+  passes. The pattern becomes any writing call to a path whose last part under `pulls/<n>/` starts
+  with `merge` (`merge`, `merge-async`, and any later sibling), with a regression case for each.
+  The other refusals stay (`curl` or `wget` to the GitHub API, the wrappers and runners). The hook
+  still stops mistakes, not an adversary; the bound is branch protection.
 
 The gate key is retired with it: the door no longer accepts it (`is_gate_key`, `door.rs:247-253`,
 `:275-291`), makibad stops writing it (`door.rs:3877`, `src/daemon/person_key.rs`), and the
@@ -343,10 +406,19 @@ secretary's launch stops naming it (`launch.rs:316-319`). The deny rules and the
 `gate.key` (`src/status_local.rs:551`, `src/daemon/prepare.rs:365`, `src/daemon/review.rs:767`,
 `:936`) stay, since an old file may still be on disk.
 
-`src/daemon/gh.rs`: `run_bounded` keeps stderr (piped and read on its own thread like stdout, the
-first 4 KiB kept), and `GhError::Failed` carries it beside the exit status. The existing callers
-keep their messages and may append it. The act needs it to tell GitHub's refusal from a failure to
-answer; gh writes an API error's message to stderr and exits non-zero [unverified].
+`src/daemon/gh.rs`: on a non-zero exit `run_bounded` today returns only "exited with <status>"
+(`gh.rs:116-118`): stderr is never read (`gh.rs:65`) and the stdout already collected is dropped.
+`gh api` writes the response body to stdout and its error line to stderr when the call fails
+[unverified here; the design reader cites the CLI's source,
+https://github.com/cli/cli/blob/trunk/pkg/cmd/api/api.go]. So `run_bounded` keeps, on a failure,
+the exit status, the first 16 KiB of stdout (the response body, where GitHub's status and message
+are) and the first 4 KiB of stderr (read on its own thread like stdout), and `GhError::Failed`
+carries them as fields beside its message. The act runs the API call with `--include` so the HTTP
+status line is in stdout too [unverified: that `--include` prints the status line before the body
+on an error], and classifies from that status and body (section 4.2, step 4); a failure whose
+status it cannot read is never a definitive rejection. The existing callers keep their messages
+and may append stderr.
+
 
 ## 9. Texts that change (the build writes them; this note does not edit those files)
 
@@ -426,53 +498,72 @@ state,mergedAt,mergedBy,headRefOid,mergeCommit,...` gives the fields the PR watc
 (`prwatch.rs:814-815`); makibad's gh and the secretary's find the same stored login
 (`gh.rs:17-22`, `launch.rs:296-310`).
 
-[unverified], to be read before or during the build (Issue 1 confirms 1-4 and records the source in
-this section):
+[unverified], to be read before or during the build (Issue 1 confirms 1-4, Issue 4 confirms 5-6,
+and each records its source in this section):
 
 1. `PUT /repos/{o}/{r}/pulls/{n}/merge` with `sha` refuses when the head is not `sha`, and answers
-   `merged` and the merge commit's `sha`; its error statuses. Source:
+   `merged` and the merge commit's `sha`; which error statuses mean "not merged" (403, 404, 405,
+   409, 422 are this note's reading). Source:
    https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request
 2. On a branch that requires the merge queue, the REST merge is refused, and the GraphQL mutation
    `enqueuePullRequest` with `expectedHeadOid` enqueues bound to that head; the queue's merge method
-   is the branch's setting. Source: https://docs.github.com/en/graphql/reference/mutations#enqueuepullrequest
+   is the branch's setting; which GraphQL error types mean "not enqueued". Source:
+   https://docs.github.com/en/graphql/reference/mutations#enqueuepullrequest
 3. `PullRequest` has `isMergeQueueEnabled`, `isInMergeQueue` and `mergeQueueEntry`, readable in one
    query; whether `gh pr view --json` exposes any of them. Source:
    https://docs.github.com/en/graphql/reference/objects#pullrequest
-4. gh writes an API error's message to stderr and exits non-zero (`gh api`). Source:
-   https://cli.github.com/manual/gh_api
-5. Whether a pull request leaving the queue to land can be read `OPEN` with no entry for a moment.
-6. What `mergedBy` reads after a queue merge; whether a removal from the queue carries a readable
-   reason (a timeline event).
-7. `gh pr merge` on a queue branch, and its `--match-head-commit` there (merge-wait.md claim 5):
-   no longer needed by this design, which does not use `gh pr merge`.
+4. On a failed call, `gh api` writes the response body to stdout and an error line to stderr and
+   exits non-zero, and `--include` puts the HTTP status line before the body. Source:
+   https://cli.github.com/manual/gh_api (the design reader cites the CLI's own source,
+   https://github.com/cli/cli/blob/trunk/pkg/cmd/api/api.go, for the first part).
+5. The timeline items `AddedToMergeQueueEvent` and `RemovedFromMergeQueueEvent` are readable on
+   the pull request, with their time; whether a removal carries a reason. Source:
+   https://docs.github.com/en/graphql/reference/unions#pullrequesttimelineitems
+6. Whether a pull request leaving the queue to land can be read `OPEN` with no entry for a moment.
+7. What `mergedBy` reads after a queue merge.
+8. `pulls/{n}/merge-async` exists and can merge or enqueue (the design reader's reading of
+   https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously). The hook
+   refuses it whether or not it exists, so the design does not depend on it.
+9. `gh pr merge` on a queue branch, and its `--match-head-commit` there (merge-wait.md claim 5):
+   no longer needed by this design, which does not use that command.
 
 ## 11. Proposed build Issues (not filed until approved)
 
 1. **The `merge` verb and its records.** What: `Verb::Merge` (spec.rs), the gate split in
-   `door.rs` (section 3.1), `merge_attempted` in the verb's transaction, the pass
-   `src/daemon/merge.rs` with `boot` and `running` (section 4.3), the REST merge and the enqueue,
-   the outcome events and notices, the restart reconciliation; first confirm claims 1-4 of section
-   10. Depends on: 5. Acceptance: a fake gh shows an allowed request merged at the judged head with
-   `merge_done`, a refused one sending nothing, and an open attempt of another `boot` reconciled as
-   `merge_unknown` `observed` `merged` and never sent again.
+   `door.rs` (section 3.1) with the conflict rules of 3.1, `merge_attempted` in the verb's
+   transaction, the pass `src/daemon/merge.rs` with `boot` and `running` (section 4.3), the REST
+   merge and the enqueue, the definitive-rejection list, the outcome events and notices, the
+   restart reconciliation; first confirm claims 1-4 of section 10. Depends on: 5. Acceptance: a
+   fake gh shows an allowed request merged at the judged head with `merge_done`, a refused one
+   sending nothing, a 502 answer recorded `merge_unknown` (not `merge_failed`), and an open attempt
+   of another `boot` reconciled as `merge_unknown` `observed` `merged` and never sent again.
 2. **The person's approval of a pending merge.** What: the `pending` kind `merge` (a schema step),
-   `request` under `human` writing the entry, `approve` / `refuse` / `withdraw`, `makiba merge
-   approve <id>` with its preview, `answer` refusing the kind, withdrawal on a new head or a
-   landing. Depends on: 1. Acceptance: under `human` the secretary's request lands nothing until the
-   person's key approves the printed entry; a changed entry or a new warning answers `stale`.
-3. **The hook with no allowed form.** What: `merge_gate.rs` refuses every `gh pr merge` and the
-   `enqueuePullRequest` mutation and asks no door; the gate key retired (section 8). Depends on: 1
-   (the secretary needs the verb first). Acceptance: the former allowed form and an enqueue mutation
-   are refused naming the verb; the hook's tests pass with makibad down.
-4. **PR watch classification from the act record, and queue ejection.** What: `apply_state`'s
-   `merged_via` from act records (`gate`, `unknown`, `hand`), the wait while an attempt is open, the
-   queue entry in the state read and `merge_dequeued` with its notice. Depends on: 1, and on Issue
-   424 ask 1 (the notice of every merge), which lands first. Acceptance: an `acceptance_gate` allow
-   alone gives `hand`; a `merge_unknown` gives `unknown`; a fake queue read that drops the entry
-   twice writes one `merge_dequeued` and one notice.
-5. **gh.rs keeps stderr.** What: `run_bounded` collects stderr (bounded) and `GhError::Failed`
-   carries it. Depends on: nothing. Acceptance: a fake gh that writes an error and exits 1 gives
-   that text in the error; existing callers' tests pass.
+   `request` under `human` writing the entry, `approve` / `refuse` / `withdraw` consuming it by a
+   conditional update, `makiba merge approve <id>` with its preview, `answer` refusing the kind,
+   withdrawal on a new head or a landing. Depends on: 1. Acceptance: under `human` the secretary's
+   request lands nothing until the person's key approves the printed entry; a changed entry, a new
+   warning, or a `refuse` committed while the approval's gate ran answers `stale` and writes no
+   attempt.
+3. **The hook with no allowed form.** What: `merge_gate.rs` refuses every merge command form, the
+   `enqueuePullRequest` mutation and a write to any `pulls/<n>/merge*` path, and asks no door; the
+   gate key retired (section 8). Depends on: 1 (the secretary needs the verb first). Acceptance:
+   the former allowed form, an enqueue mutation and a write to `pulls/<n>/merge-async` are refused
+   naming the verb; the hook's tests pass with makibad down.
+4. **PR watch classification from the act record, and the queue.** What: `apply_state`'s
+   `merged_via` from act records (`gate`, `unknown`, `hand`) with the timeline continuity check for
+   a queued landing, the wait while an attempt is open, the queue fields in the state read and in
+   `MergeRead`, `apply_queue` and `merge_dequeued` with its notice, `followed` keeping a pull
+   request with an open queue act; first confirm claims 5-6. Depends on: 1, and on Issue 424 ask 1
+   (the notice of every merge), which lands first. Acceptance: an `acceptance_gate` allow alone
+   gives `hand`; a `merge_unknown` gives `unknown`; a queued landing whose timeline shows a removal
+   and a second addition gives `unknown`; a fake queue read that drops the entry twice writes one
+   `merge_dequeued` and one notice; a completed run's enqueued pull request is still read after a
+   day.
+5. **gh.rs keeps what a failure says.** What: on a non-zero exit `run_bounded` keeps the exit
+   status, bounded stdout and bounded stderr, and `GhError::Failed` carries them. Depends on:
+   nothing. Acceptance: a fake gh that writes a body to stdout, an error to stderr and exits 1 gives
+   both in the error; existing callers' tests pass.
+
 6. **The docs and lines rows.** What: the texts of section 9 (lines.md L-K2, L-K9, L-K10;
    rules.md:54; SKILL.md "Merging"; spec.md sections 3, 5.6 and 12; the self-hosting runbook step;
    merge-wait.md build Issues 3 and 4 marked replaced), the secretary's allow rule. Depends on: 1-4
@@ -500,8 +591,9 @@ build Issue 6 here writes together with this note's L-K9 text.
 
 **merge-wait.md build Issue 4** ("PR watch: read the queue state ... tell the secretary when a pull
 request leaves the queue without landing; keep `merged_via` keyed on `headRefOid`"): replaced by
-build Issue 4 here, with one change: `merged_via` is keyed on makibad's act record at
-`headRefOid`, not on the gate's allowance.
+build Issue 4 here, with two changes: `merged_via` is keyed on makibad's act record at
+`headRefOid`, not on the gate's allowance, and a queued landing is `gate` only when the pull
+request's timeline shows the entry makibad made is the one that landed (section 7).
 
 **Issue 424**: its ask 2 (call a merge `gate` only when the command is known to have run; an
 allowance counting only for a merge seen within some minutes) is replaced by section 7: there is no
