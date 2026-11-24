@@ -13,7 +13,6 @@ use makiba::base::{
 };
 use makiba::db::writer::{RunUpsert, StateWriter};
 use serde_json::Value;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -111,8 +110,7 @@ fn a_claude_code_run_is_launched_with_the_role_rules_and_both_sets_of_denies() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(&claude, "#!/bin/sh\necho 'stand-in claude' >&2\nexit 1\n").unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(&claude, "#!/bin/sh\necho 'stand-in claude' >&2\nexit 1\n");
     let path = std::env::join_paths(std::iter::once(bin.clone()).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))

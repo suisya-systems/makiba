@@ -18,7 +18,6 @@ use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -59,8 +58,7 @@ fn init() -> PathBuf {
     INIT.call_once(|| {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let script = home.path().join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         for d in ["answers", "goals/o", "repos"] {
             std::fs::create_dir_all(home.path().join(d)).unwrap();
         }

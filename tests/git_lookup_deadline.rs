@@ -10,12 +10,13 @@
 //! stand-in found first on `PATH`, and `gh` one named by `MAKIBA_GH`; both record each call, so
 //! no test reaches a real repository or the network.
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::StateWriter;
 use makiba::spec::Role;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Once, OnceLock};
 use std::time::{Duration, Instant};
@@ -45,8 +46,7 @@ exit 1
 "#;
 
 fn script(path: &Path, text: &str, root: &Path) {
-    std::fs::write(path, text.replace("@ROOT@", &root.display().to_string())).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, text.replace("@ROOT@", &root.display().to_string()));
 }
 
 /// The folder the tests share: the stand-ins, their records, repositories and workplaces.

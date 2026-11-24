@@ -19,7 +19,6 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use std::io::{Read, Write};
 use std::net::TcpStream;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::Arc;
@@ -77,8 +76,7 @@ impl Org {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         let claude = root.join("bin/claude");
-        std::fs::write(&claude, "#!/bin/sh\nexit 1\n").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&claude, "#!/bin/sh\nexit 1\n");
         let path = std::env::join_paths(std::iter::once(root.join("bin")).chain(
             std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
         ))

@@ -16,7 +16,6 @@ use makiba::base::{
 };
 use makiba::db::writer::{RunUpsert, StateWriter};
 use rusqlite::{Connection, OpenFlags};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -99,8 +98,7 @@ impl Drop for Org {
 }
 
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 /// Poll `f` for up to 20 seconds.

@@ -24,7 +24,6 @@ use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use makiba::spec::Role;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Output, Stdio};
 use std::sync::{Arc, OnceLock};
@@ -59,8 +58,7 @@ fn git(dir: &Path, args: &[&str]) -> String {
 fn hook(dir: &Path, name: &str, body: &str) {
     std::fs::create_dir_all(dir).unwrap();
     let path = dir.join(name);
-    std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(&path, format!("#!/bin/sh\n{body}\n"));
 }
 
 /// A hook body that appends its working folder to the marker `marks/label`, reads its input and
@@ -588,8 +586,7 @@ fn gate_home() -> &'static Path {
     HOME.get_or_init(|| {
         let home = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
         let script = home.join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         std::fs::create_dir_all(home.join("repos")).unwrap();
         // SAFETY: set once; the variables are read by this process's door only.
         unsafe {

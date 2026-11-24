@@ -76,6 +76,7 @@ impl Org {
         for d in ["home", "state", "config", "data", "run", "xdg-state", "bin"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
+        // not an executable: the run folder, kept to its owner
         std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
         Org {
             _tmp: tmp,
@@ -106,33 +107,9 @@ impl Org {
     }
 
     /// Put `bytes` at `<root>/bin/makiba` as an install does: a new executable file renamed over
-    /// the path.
-    ///
-    /// The executable is written by a `cp` child, never by this process (Issue 374). A descriptor
-    /// this process opens for writing is inherited by every child another test thread forks until
-    /// that child execs, and exec of a file some process holds open for writing fails with
-    /// ETXTBSY. A rename does not help: the inherited descriptor still points at the renamed
-    /// inode. So the bytes go to a side file this process writes (which is never run), `cp`
-    /// writes the executable from it, and once `cp` has exited no process holds a write
-    /// descriptor to it. The mode and the rename go by path and open nothing.
+    /// the path. `common::exe` writes it in a `cp` child, never in this process (Issues 374, 379).
     fn install(&self, bytes: &[u8]) {
-        let staged = self.root.join("bin/makiba.bytes");
-        let new = self.root.join("bin/makiba.new");
-        std::fs::write(&staged, bytes).unwrap();
-        let cp = Command::new("cp")
-            .arg(&staged)
-            .arg(&new)
-            .stdin(Stdio::null())
-            .status()
-            .unwrap();
-        assert!(
-            cp.success(),
-            "cp {} {}: {cp}",
-            staged.display(),
-            new.display()
-        );
-        std::fs::set_permissions(&new, std::fs::Permissions::from_mode(0o755)).unwrap();
-        std::fs::rename(&new, self.exe()).unwrap();
+        common::exe::write(&self.exe(), bytes);
     }
 
     /// The environment of every `makiba` this test runs: the scratch folder, nothing inherited.

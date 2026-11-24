@@ -11,6 +11,8 @@
 // Some copied helpers are not used here.
 #![allow(dead_code)]
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::channel::Hub;
 use makiba::daemon::door::{self, Door, issue_key};
@@ -19,7 +21,6 @@ use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use makiba::spec::Role;
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once, OnceLock};
@@ -67,8 +68,7 @@ fn init() -> PathBuf {
     INIT.call_once(|| {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let script = home.path().join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         std::fs::create_dir_all(home.path().join("repos")).unwrap();
         // SAFETY: set once, before this file's tests read the environment.
         unsafe {

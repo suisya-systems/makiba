@@ -551,6 +551,13 @@
       ],
       "candidates": [
         {
+          "issue": 58,
+          "title": "Cache parsed files on disk",
+          "admitted": false,
+          "left_out_why": "skipped",
+          "design_only_waits": null
+        },
+        {
           "issue": 60,
           "title": "Document the config keys",
           "admitted": true,

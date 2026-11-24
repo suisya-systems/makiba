@@ -17,7 +17,6 @@ use makiba::daemon::launch::add_launch;
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
 use sha2::{Digest, Sha256};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Output;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -85,8 +84,7 @@ fn wait<T>(secs: u64, mut f: impl FnMut() -> Option<T>) -> Option<T> {
 }
 
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 /// The first 32 lowercase hex digits of the SHA-256 of `text`.
