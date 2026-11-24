@@ -902,6 +902,7 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `next_work.left_out[].project` | the project's slug, one entry per project of the repository, null when no project has it |
 | `next_work.left_out[].repo` | the repository, null for a project with none |
 | `next_work.left_out[].issue` | the Issue number, null for a reason of the whole repository |
+| `next_work.left_out[].title` | the Issue's title as the scan read it, null for a reason of the whole repository or when the read had none |
 | `next_work.left_out[].kind` | `no_goal_ledger`, `goal_ledger_error`, `no_repository`, `blocked` (an open dependency), `put_aside` (a `blocked` or `on-hold` label the person set) or `dependency_unreadable` (a dependency line of the body that names no Issue number) |
 | `next_work.left_out[].reason` | what to do about it, in one sentence |
 | `next_work.left_out_not_recorded` | entries past the bound of 100, 0 when none |
