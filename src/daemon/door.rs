@@ -323,6 +323,9 @@ impl Door {
         if v == Verb::Gate {
             return self.gate(w, &actor, &args, idem);
         }
+        if v == Verb::Merge {
+            return self.merge(w, &actor, role, &args, idem);
+        }
         if v == Verb::Review && role == Role::Worker {
             return self.review(w, &actor, &args, idem);
         }
@@ -1924,9 +1927,46 @@ fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
             )),
         };
     }
+    // Issue 431 [R1]: the run's current pull request stays current while makibad's merge act on it
+    // awaits its landing, so the PR watch, which follows the current one, reads that landing.
+    let current: Option<(Option<String>, Option<i64>)> = w
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT {}, {} FROM runs r WHERE r.task_id = ?1",
+                super::belt::current_pr_sql("r", "repo"),
+                super::belt::current_pr_sql("r", "pr")
+            ),
+            [task],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()
+        .map_err(internal)?;
+    if let Some((Some(crepo), Some(cpr))) = current
+        && !(crepo.eq_ignore_ascii_case(repo) && cpr == number)
+        && let Some(a) = act_awaiting(w.conn(), &crepo, cpr).map_err(internal)?
+    {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!(
+                "{crepo}#{cpr}, the current pull request of {task}, has a merge act of makibad awaiting its landing (attempt {}); {repo}#{number} was not recorded",
+                a.attempt
+            ),
+            "wait for its landing, or for the queue to drop it",
+        ));
+    }
+    // Issue 431 [R4]: a queue entry makibad made is bound to its head; a new head recorded for the
+    // pull request ends that queue act.
+    let dequeued = match act_awaiting(w.conn(), repo, number).map_err(internal)? {
+        Some(a) if kind == "fix_pushed" && a.queue && a.head != head => Some(a),
+        _ => None,
+    };
     let base_merge = base_merge && kind == "fix_pushed";
     let r = super::prwatch::register_with(w, kind, task, repo, number, head, base_merge)
         .map_err(internal)?;
+    if let Some(a) = dequeued {
+        merge_dequeued(w, task, repo, number, &a).map_err(internal)?;
+    }
     // The belt (Issue 282): the stops of an older head go, and a fix that reaches the range's
     // `budget_fixes` is a stop of the task; a clean merge of the base is no fix (Issue 358). The
     // push is recorded whatever the count.
@@ -3135,11 +3175,46 @@ impl Door {
         if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
             return Err(internal(e));
         }
-        let now = match gate_rows(&w, &repo, pr) {
+        let judged = match self.judge(&w, actor, &repo, pr, &head, &rows, found, "gate") {
+            Ok(j) => j,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        let r: Response = Ok(judged.answer);
+        if !record(&w, actor, "gate", args, idem, &r) || w.conn().is_autocommit() {
+            let _ = w.rollback();
+            return Err(internal(
+                "the request could not be recorded; nothing was done",
+            ));
+        }
+        if let Err(e) = w.commit() {
+            let _ = w.rollback();
+            return Err(internal(e));
+        }
+        r
+    }
+
+    /// The gate's judgment (Issue 431: shared by `gate` and `merge`), inside the transaction the
+    /// caller began with `BEGIN IMMEDIATE`: the rows it judged from read again, the verdict, the
+    /// `acceptance_gate` row (with `via`, the verb that judged), the belt's stop and fill, and the
+    /// withdrawal of an older stop. On an error the transaction is rolled back and nothing stands.
+    #[allow(clippy::too_many_arguments)]
+    fn judge(
+        &self,
+        w: &StateWriter,
+        actor: &str,
+        repo: &str,
+        pr: i64,
+        head: &str,
+        rows: &GateRows,
+        found: Found,
+        via: &str,
+    ) -> Result<Judged, DoorError> {
+        let (repo, head) = (repo.to_string(), head.to_string());
+        let now = match gate_rows(w, &repo, pr) {
             Ok(r) => r,
             Err(e) => {
                 let _ = w.rollback();
-                return fail(&w, Err(internal(e)));
+                return Err(internal(e));
             }
         };
         let mode = super::gate::merge_approval_mode();
@@ -3233,12 +3308,12 @@ impl Door {
         // Issue 282: a range task's pull request lands without the person only when the range was
         // approved under acceptance and the mode read now is acceptance too. The checks above are
         // those of the mode read now; a pair that is not both only adds the question to the person.
-        let range = match now.task.as_deref().map(|t| super::belt::approval_of(&w, t)) {
+        let range = match now.task.as_deref().map(|t| super::belt::approval_of(w, t)) {
             None => None,
             Some(Ok(r)) => r,
             Some(Err(e)) => {
                 let _ = w.rollback();
-                return fail(&w, Err(internal(e)));
+                return Err(internal(e));
             }
         };
         if let Some((id, range_mode)) = &range {
@@ -3284,6 +3359,7 @@ impl Door {
         if let Some(rv) = &review {
             payload["review"] = rv.clone();
         }
+        payload["via"] = json!(via);
         let written = w.append_event(&NewEvent {
             kind: "acceptance_gate",
             actor: Some(actor),
@@ -3291,15 +3367,15 @@ impl Door {
             run_task_id: now.task.as_deref(),
             ..Default::default()
         });
-        if let Err(e) = written {
-            let _ = w.rollback();
-            return fail(
-                &w,
-                Err(internal(format!(
+        let event_id = match written {
+            Ok(id) => id,
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(format!(
                     "the verdict (this PR's pin) could not be recorded: {e}"
-                ))),
-            );
-        }
+                )));
+            }
+        };
         // The belt: a refusal, or edited tests, on a range task's pull request is a stop written
         // here, then the pause rule, then the fill (belt.md 3.4), all with the verdict's record.
         let mut pending_id = None;
@@ -3316,16 +3392,13 @@ impl Door {
                 reason: &reason,
                 edited_tests: &edited,
             };
-            let stopped = super::belt::gate_stop(&w, &stop)
-                .and_then(|id| super::belt::fill(&w, &self.agent).map(|_| id));
+            let stopped = super::belt::gate_stop(w, &stop)
+                .and_then(|id| super::belt::fill(w, &self.agent).map(|_| id));
             match stopped {
                 Ok(id) => pending_id = id,
                 Err(e) => {
                     let _ = w.rollback();
-                    return fail(
-                        &w,
-                        Err(internal(format!("the stop could not be recorded: {e}"))),
-                    );
+                    return Err(internal(format!("the stop could not be recorded: {e}")));
                 }
             }
         }
@@ -3333,18 +3406,15 @@ impl Door {
         // its tests stop too when no edited test is reported any more.
         if allow
             && range.is_some()
-            && let Err(e) = super::belt::gate_allowed(&w, &repo, pr, &head, edited.is_empty())
+            && let Err(e) = super::belt::gate_allowed(w, &repo, pr, &head, edited.is_empty())
         {
             let _ = w.rollback();
-            return fail(
-                &w,
-                Err(internal(format!("the stop could not be withdrawn: {e}"))),
-            );
+            return Err(internal(format!("the stop could not be withdrawn: {e}")));
         }
         let mut answer = json!({"verdict": verdict, "allow": allow, "reason": reason,
                                 "mode": mode, "repo": repo, "pr": pr, "head": head});
-        if let Some(rv) = review {
-            answer["review"] = rv;
+        if let Some(rv) = &review {
+            answer["review"] = rv.clone();
             answer["warn"] = json!(warn);
         } else if warn {
             answer["warn"] = json!(warn);
@@ -3355,9 +3425,327 @@ impl Door {
         if let Some(id) = pending_id {
             answer["pending_id"] = json!(id);
         }
-        let r: Response = Ok(answer);
-        if !record(&w, actor, "gate", args, idem, &r) || w.conn().is_autocommit() {
-            let _ = w.rollback();
+        Ok(Judged {
+            answer,
+            allow,
+            warn,
+            verdict,
+            reason,
+            mode,
+            review,
+            event: event_id,
+        })
+    }
+}
+
+/// What `Door::judge` decided and recorded (the `acceptance_gate` row `event`), in the open
+/// transaction.
+struct Judged {
+    /// The answer `gate` gives.
+    answer: Value,
+    allow: bool,
+    warn: bool,
+    verdict: String,
+    reason: String,
+    mode: &'static str,
+    review: Option<Value>,
+    event: i64,
+}
+
+// ---- merge (Issue 431, docs/design/merge-act.md) ------------------------------------------------
+
+/// The events that end an attempt of makibad's merge: its outcomes.
+pub(super) const MERGE_OUTCOMES: &str =
+    "'merge_done', 'merge_enqueued', 'merge_failed', 'merge_unknown'";
+
+/// A merge act of makibad that awaits its landing (merge-act.md section 7): the newest attempt of
+/// the pull request is open, or ended `merge_done` (or `merge_unknown` observed `merged`) with no
+/// `pr_merged` of the pull request after the attempt; or it ended `merge_enqueued` (or
+/// `merge_unknown` observed `enqueued`), a queue act, with no `merge_dequeued`, `pr_merged` or
+/// `pr_closed` of the pull request after the attempt. The attempt's id is the boundary, so a
+/// landing read before the outcome was written still ends the act.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct Awaiting {
+    pub attempt: i64,
+    pub head: String,
+    pub queue: bool,
+}
+
+/// The act of `repo#pr` awaiting its landing, if any: the one reader of the `merge` verb's checks
+/// and of the `pr` verb's.
+pub(super) fn act_awaiting(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+) -> rusqlite::Result<Option<Awaiting>> {
+    let of_pr = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                 AND json_extract(payload_json, '$.pr') = ?2";
+    let newest: Option<(i64, Option<String>)> = c
+        .query_row(
+            &format!(
+                "SELECT id, json_extract(payload_json, '$.head') FROM events
+                 WHERE kind = 'merge_attempted' AND {of_pr} ORDER BY id DESC LIMIT 1"
+            ),
+            params![repo, pr],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((attempt, head)) = newest else {
+        return Ok(None);
+    };
+    let outcome: Option<(String, Option<String>)> = c
+        .query_row(
+            &format!(
+                "SELECT kind, json_extract(payload_json, '$.observed') FROM events
+                 WHERE kind IN ({MERGE_OUTCOMES}) AND json_extract(payload_json, '$.attempt') = ?1
+                 ORDER BY id LIMIT 1"
+            ),
+            [attempt],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let queue = match outcome.as_ref().map(|(k, o)| (k.as_str(), o.as_deref())) {
+        None | Some(("merge_done", _)) | Some(("merge_unknown", Some("merged"))) => false,
+        Some(("merge_enqueued", _)) | Some(("merge_unknown", Some("enqueued"))) => true,
+        Some(_) => return Ok(None),
+    };
+    let ends = if queue {
+        "'pr_merged', 'pr_closed', 'merge_dequeued'"
+    } else {
+        "'pr_merged'"
+    };
+    let ended: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind IN ({ends}) AND id > ?3 AND {of_pr})"
+        ),
+        params![repo, pr, attempt],
+        |r| r.get(0),
+    )?;
+    Ok((!ended).then(|| Awaiting {
+        attempt,
+        head: head.unwrap_or_default(),
+        queue,
+    }))
+}
+
+/// End the queue act `a` of `repo#pr` because another head of the pull request was recorded
+/// (`why` `head recorded`), and tell the secretary, in the caller's transaction.
+pub(super) fn merge_dequeued(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    a: &Awaiting,
+) -> crate::db::Result<()> {
+    w.append_event(&NewEvent {
+        kind: "merge_dequeued",
+        actor: Some("makibad"),
+        payload: Some(
+            &json!({"repo": repo, "pr": pr, "head": a.head, "attempt": a.attempt,
+                               "why": "head recorded"}),
+        ),
+        run_task_id: Some(task),
+        ..Default::default()
+    })?;
+    notice(
+        w,
+        crate::spec::AGENT_SECRETARY,
+        task,
+        &format!(
+            "makibad's merge queue act for {repo}#{pr} at {} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge.",
+            a.head
+        ),
+    )?;
+    Ok(())
+}
+
+/// The `merge` verb's check, before the gate and again in its final transaction: the pull request
+/// is the current one of a run the PR watch follows (`prwatch::followed`), and it has no act
+/// awaiting its landing. The run's task.
+fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError> {
+    let followed = super::prwatch::followed(w.conn(), None).map_err(internal)?;
+    let Some(task) = followed
+        .into_iter()
+        .find(|f| f.pr == pr && f.repo.eq_ignore_ascii_case(repo))
+        .map(|f| f.task)
+    else {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!(
+                "{repo}#{pr} is not a pull request makibad follows (the current pull request of an open run, or of a run closed less than a day ago); nothing was judged or sent"
+            ),
+            "record the pull request with pr first; a pull request makibad does not follow is merged by the person in the GitHub web UI",
+        ));
+    };
+    if let Some(a) = act_awaiting(w.conn(), repo, pr).map_err(internal)? {
+        let what = if a.queue {
+            "is in the merge queue by makibad's act"
+        } else {
+            "has a merge act of makibad that has not landed yet"
+        };
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!(
+                "{repo}#{pr} {what} (attempt {}); nothing was judged or sent",
+                a.attempt
+            ),
+            "wait for the act's notice, the landing, or the queue dropping it",
+        ));
+    }
+    Ok(task)
+}
+
+impl Door {
+    /// `merge` (Issue 431, merge-act.md section 3): `request` runs the gate at `head` and, on an
+    /// allowance that needs no person, commits the attempt (`merge_attempted`) with the gate's row
+    /// and the command `accepted`; makibad's merge pass runs the act afterwards. A refusal answers
+    /// the verdict and sends nothing; an allowance that needs the person writes no attempt.
+    fn merge(
+        &self,
+        w: MutexGuard<'_, StateWriter>,
+        actor: &str,
+        role: Role,
+        args: &Value,
+        idem: Option<&str>,
+    ) -> Response {
+        let fail = |w: &StateWriter, r: Response| {
+            let _ = record(w, actor, "merge", args, idem, &r);
+            r
+        };
+        let parsed = (|| -> Result<_, DoorError> {
+            let action = match args.get("action") {
+                None | Some(Value::Null) => "request",
+                Some(a) => a
+                    .as_str()
+                    .ok_or_else(|| usage("action is the text request"))?,
+            };
+            if action != "request" {
+                return Err(usage(format!(
+                    "action is request, not {action:?} (approve, refuse and withdraw come with build Issue 2)"
+                )));
+            }
+            let (repo, pr, head) = gate_args(args)?;
+            let method = match args.get("method") {
+                None | Some(Value::Null) => "squash",
+                Some(m) => m
+                    .as_str()
+                    .filter(|m| ["squash", "merge", "rebase"].contains(m))
+                    .ok_or_else(|| usage("method is squash, merge or rebase"))?,
+            };
+            Ok((repo, pr, head, method.to_string()))
+        })();
+        let (repo, pr, head, method) = match parsed {
+            Ok(p) => p,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        if let Err(e) = merge_check(&w, &repo, pr) {
+            return fail(&w, Err(e));
+        }
+        let rows = match gate_rows(&w, &repo, pr) {
+            Ok(r) => r,
+            Err(e) => return fail(&w, Err(internal(e))),
+        };
+        drop(w);
+        let found = gate_outside(&rows, &repo, pr, &head);
+        let w = self.writer();
+        // The same request may have been recorded while the lock was released.
+        if let Some(idem) = idem
+            && let Some(first) = replay(&w, actor, idem).map_err(internal)?
+        {
+            return first;
+        }
+        if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+            return Err(internal(e));
+        }
+        let j = match self.judge(&w, actor, &repo, pr, &head, &rows, found, "merge") {
+            Ok(j) => j,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        // Checked again with the lock: an act or a replacement recorded while the gate ran makes
+        // the whole request nothing, the gate's row too.
+        let task = match merge_check(&w, &repo, pr) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = w.rollback();
+                return fail(&w, Err(e));
+            }
+        };
+        let finish = |w: &StateWriter, status: &str, r: Response| -> Response {
+            if insert_command(w, actor, "merge", args, idem, status, &r).is_none()
+                || w.conn().is_autocommit()
+            {
+                let _ = w.rollback();
+                return Err(internal(
+                    "the request could not be recorded; nothing was done",
+                ));
+            }
+            if let Err(e) = w.commit() {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+            r
+        };
+        if !j.allow {
+            let mut answer = json!({"status": "refused", "verdict": j.verdict, "reason": j.reason,
+                                    "mode": j.mode, "repo": repo, "pr": pr, "head": head});
+            if let Some(rv) = j.review {
+                answer["review"] = rv;
+            }
+            return finish(&w, "rejected", Ok(answer));
+        }
+        if j.warn || (j.mode != "acceptance" && role != Role::Person) {
+            return finish(
+                &w,
+                "rejected",
+                Err(refuse(
+                    ErrorKind::Denied,
+                    format!(
+                        "needs the person: makiba merge approve comes with build Issue 2; until then the GitHub web UI ({})",
+                        j.reason
+                    ),
+                    "tell the person the pull request and the gate's reason; the person merges it in the GitHub web UI",
+                )),
+            );
+        }
+        let attempted = (|| -> Result<Value, String> {
+            let provisional: Response = Err(internal("the attempt was not recorded"));
+            let command = insert_command(&w, actor, "merge", args, idem, "accepted", &provisional)
+                .ok_or("the command could not be recorded")?;
+            let attempt = w
+                .append_event(&NewEvent {
+                kind: "merge_attempted",
+                actor: Some(actor),
+                payload: Some(&json!({
+                    "repo": repo, "pr": pr, "head": head, "method": method,
+                    "gate_event": j.event, "command": command,
+                    "approved_by": if role == Role::Person { json!("person") } else { Value::Null },
+                    "boot": super::merge::boot(), "task_id": task,
+                })),
+                run_task_id: Some(&task),
+                ..Default::default()
+            })
+                .map_err(|e| e.to_string())?;
+            let answer = json!({"status": "accepted", "attempt": attempt, "repo": repo, "pr": pr,
+                                "head": head, "method": method, "mode": j.mode});
+            w.conn()
+                .execute(
+                    // The provisional line was an error: its kind goes with it.
+                    "UPDATE commands SET result_json = ?1, error_kind = NULL WHERE id = ?2",
+                    params![line(&Ok(answer.clone())).to_string(), command],
+                )
+                .map_err(|e| e.to_string())?;
+            Ok(answer)
+        })();
+        let answer = match attempted {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(format!(
+                    "the attempt could not be recorded; nothing was done: {e}"
+                )));
+            }
+        };
+        if w.conn().is_autocommit() {
             return Err(internal(
                 "the request could not be recorded; nothing was done",
             ));
@@ -3366,7 +3754,7 @@ impl Door {
             let _ = w.rollback();
             return Err(internal(e));
         }
-        r
+        Ok(answer)
     }
 }
 
@@ -4345,6 +4733,23 @@ fn tool(v: Verb) -> Value {
                 ("reason".into(), text.clone()),
             ]),
             &[],
+        ),
+        Verb::Merge => (
+            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. An allowance that needs the person is denied for now (the person merges in the GitHub web UI). Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing.",
+            Map::from_iter([
+                (
+                    "action".into(),
+                    json!({"type": "string", "enum": ["request"]}),
+                ),
+                ("repo".into(), text.clone()),
+                ("pr".into(), json!({"type": "integer"})),
+                ("head".into(), text.clone()),
+                (
+                    "method".into(),
+                    json!({"type": "string", "enum": ["squash", "merge", "rebase"]}),
+                ),
+            ]),
+            &["repo", "pr", "head"],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
     };
