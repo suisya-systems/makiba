@@ -145,7 +145,7 @@ with the same `idem` is answered from `commands` as every verb is (`replay`, `do
 | `merge_enqueued` | same | GitHub answered that the pull request is in the queue | `attempt`, `entry` (the queue entry's id and position, when read) |
 | `merge_failed` | same | GitHub answered a refusal, or makibad found before sending that it cannot act | `attempt`, `sent` (bool), `exit`, `http_status` (when read), `stderr` (bounded, section 8), `state` (the pull request's state read right after) |
 | `merge_unknown` | same, or the restart reconciliation | the answer could not be read (a timeout, a killed or crashed call, unreadable output), or makibad restarted with the attempt open | `attempt`, `observed` (`merged`, `merged_other_head`, `enqueued`, `open`, `closed` or `unreadable`), `actor` (`unknown`), `state` (the read), `why` |
-| `merge_dequeued` | the PR watch | a pull request makibad enqueued left the queue without landing | `repo`, `pr`, `head`, `attempt`, `state` (the read) |
+| `merge_dequeued` | the PR watch, or the `pr` verb (section 7) | a pull request makibad enqueued left the queue without landing, or its head or state moved on | `repo`, `pr`, `head`, `attempt`, `why` (`left the queue`, `head moved`, `closed`, `head recorded`), `state` (the read) |
 
 Each outcome event is written with the attempt's command finished (`done` for `merge_done` and
 `merge_enqueued`, `failed` for the others) and one notice to the secretary, in one transaction, as
@@ -336,8 +336,14 @@ bound against merging around makibad stays GitHub's branch protection, set by th
   queue kinds after the act's time [unverified: the timeline items `AddedToMergeQueueEvent` and
   `RemovedFromMergeQueueEvent` on `PullRequest.timelineItems`; source to read:
   https://docs.github.com/en/graphql/reference/unions#pullrequesttimelineitems], and finds exactly
-  one addition and no removal since `merge_enqueued`. Anything else, or a timeline it cannot read,
-  is `unknown`. The landing is never `gate` on the absence of an observation.
+  one addition and no removal after the boundary. The boundary is the `merge_attempted` event's
+  time, written before anything is sent (section 4.3), not `merge_enqueued`, which is written after
+  GitHub has already added the entry: the addition the act itself made falls after the boundary and
+  is the one counted. Where GitHub's answer to the enqueue named the entry, `merge_enqueued` keeps
+  its id and the one addition must be it [unverified: that the addition timeline item names the
+  entry]. Anything else, or a timeline it cannot read, is `unknown`. The landing is never `gate` on
+  the absence of an observation. The clocks compared are makibad's and GitHub's, so the boundary is
+  taken a minute early; an addition by hand in that minute before the act is the known limit.
 - **Ordering with the act.** While the pull request has an open attempt (section 4.2), a `MERGED`
   read is not written: the read is dropped and the poller reads again on its next interval. The
   attempt gets its outcome within the call's timeout, or at a restart from the reconciliation, so
@@ -368,13 +374,29 @@ bound against merging around makibad stays GitHub's branch protection, set by th
   `MERGED` [unverified: whether GitHub shows such a state]. The note is memory only: a restart
   costs one more interval, and the classification above does not depend on it. The reason for the
   removal is not read [unverified: a removal timeline item carries a reason].
+- **A queue act whose head or state moves.** The entry may be removed and another commit pushed
+  before the next read, or the pull request closed. So a queue act still open (as above) is also
+  ended with `merge_dequeued`, with `why`, by a single read, with no second read: a read `OPEN` at
+  another head (`why` `head moved`; a new head cannot be the entry makibad made, which was bound to
+  the old head), and a `CLOSED` read (`why` `closed`, written by `apply_state` before its
+  `pr_closed`, in the same transaction). The `pr` verb's `pushed` of another head ends it the same
+  way in its own transaction (`why` `head recorded`). Each tells the secretary as above, so no queue
+  act stays open once its pull request has moved on.
 
 `followed` (`prwatch.rs:837`) is not enough as it is: it follows a run's current pull request only
 while the run is open, a completed range run, an awaited run, or for a day after a completion or
-abandonment, so a queue that lands or ejects later would go unread. It gains one more condition:
-any run whose current pull request has an open queue act (a `merge_enqueued`, or a `merge_unknown`
-with `observed` `enqueued`, with no `merge_dequeued` and no `pr_merged` after it), whatever the
-run's status or age. The act needs the run's current pull request: the `merge` verb refuses
+abandonment, so a landing or an ejection after that would go unread, for a direct merge as well as
+a queued one. It gains one more condition, whatever the run's status or age: the run's current
+pull request has an **act awaiting its landing**, one of
+- an open attempt (section 4.2);
+- a `merge_done`, or a `merge_unknown` with `observed` `merged`, with no `pr_merged` after it (the
+  landing is recorded by the watch's next read);
+- a `merge_enqueued`, or a `merge_unknown` with `observed` `enqueued`, with no `merge_dequeued`
+  and no `pr_merged` after it.
+
+An act that ended without a landing (`merge_failed`, `merge_unknown` with `observed` `open`,
+`closed`, `merged_other_head` or `unreadable`, `merge_dequeued`) adds nothing: the run is followed
+or not as before. The act needs the run's current pull request: the `merge` verb refuses
 (`conflict`) a pull request that is not some run's current one (`current_pr_sql`, as `followed`
 reads it).
 
@@ -555,10 +577,12 @@ and each records its source in this section):
    `MergeRead`, `apply_queue` and `merge_dequeued` with its notice, `followed` keeping a pull
    request with an open queue act; first confirm claims 5-6. Depends on: 1, and on Issue 424 ask 1
    (the notice of every merge), which lands first. Acceptance: an `acceptance_gate` allow alone
-   gives `hand`; a `merge_unknown` gives `unknown`; a queued landing whose timeline shows a removal
-   and a second addition gives `unknown`; a fake queue read that drops the entry twice writes one
-   `merge_dequeued` and one notice; a completed run's enqueued pull request is still read after a
-   day.
+   gives `hand`; a `merge_unknown` gives `unknown`; an uninterrupted queued landing (one addition
+   after `merge_attempted`) gives `gate`, and one whose timeline shows a removal and a second
+   addition gives `unknown`; a fake queue read that drops the entry twice writes one
+   `merge_dequeued` and one notice, and a read at another head, or closed, ends the queue act at
+   once; a completed run older than a day is still read while it has an act awaiting its landing,
+   for a direct merge and for a queued one.
 5. **gh.rs keeps what a failure says.** What: on a non-zero exit `run_bounded` keeps the exit
    status, bounded stdout and bounded stderr, and `GhError::Failed` carries them. Depends on:
    nothing. Acceptance: a fake gh that writes a body to stdout, an error to stderr and exits 1 gives
