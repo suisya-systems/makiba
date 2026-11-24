@@ -68,7 +68,7 @@ pub fn read(path: &Path) -> Result<Value, String> {
 
 /// The same read as an object, with no age in it, so two reads of one heartbeat agree:
 /// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}, "merge_approval_mode",
-/// "merge_approval_mode_here"}`. `merge_approval_mode` is `makibad`'s mode as `reader` can know it
+/// "merge_approval_mode_here", "organization"}`. `merge_approval_mode` is `makibad`'s mode as `reader` can know it
 /// (null when the person's read finds no running `makibad` that recorded one);
 /// `merge_approval_mode_here` is this process's environment: the person's shell, or through the
 /// door `makibad`'s own.
@@ -95,6 +95,10 @@ pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
         Reader::Makibad => Some(here.to_string()),
         Reader::Person => recorded_mode(&conn, running),
     };
+    let organization = match reader {
+        Reader::Makibad => Some(crate::daemon::base_session()),
+        Reader::Person => recorded_session(&conn),
+    };
     let projects: Vec<Value> = projects(&conn)
         .into_iter()
         .map(|(slug, repo, branch)| {
@@ -107,7 +111,7 @@ pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
     let sql = |e: rusqlite::Error| format!("cannot read {}: {e}", path.display());
     let mut v = json!({"makibad": {"pid": pid, "heartbeat_at": beat, "subscribed": subscribed == 1,
                           "running": running}, "merge_approval_mode": mode,
-        "merge_approval_mode_here": here, "projects": projects,
+        "merge_approval_mode_here": here, "organization": organization, "projects": projects,
         "runs": runs(&conn).map_err(sql)?, "terminals": terminals(&conn).map_err(sql)?,
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?});
@@ -144,6 +148,26 @@ fn recorded_mode(conn: &Connection, running: bool) -> Option<String> {
         .ok()
         .flatten();
     value.filter(|m| m == "human" || m == "acceptance")
+}
+
+/// The organization's name (Issue 411): the base session the `makibad` of the `dispatcher` row
+/// recorded in its newest `dispatcher_started` at or after that row's start, whether or not it
+/// runs now, so the name stays readable when `makibad` is dead. None when it has not recorded one:
+/// a restart that has not subscribed (or failed) is not named after the start before it, and the
+/// newest start of a build before Issue 411 has no session.
+fn recorded_session(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT json_extract(e.payload_json, '$.base_session')
+         FROM events e JOIN dispatcher d ON d.id = 1
+         WHERE e.kind = 'dispatcher_started'
+           AND json_extract(e.payload_json, '$.pid') = d.pid
+           AND e.occurred_at >= d.started_at
+         ORDER BY e.id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
+    .flatten()
 }
 
 /// The text's line of the merge approval mode: `makibad`'s, and this shell's when it differs or
@@ -509,15 +533,21 @@ const EVENTS_MAX: u32 = 1000;
 
 /// The events after `after`, in order, at most `limit` (Issue 168): `{"events": [{"id",
 /// "occurred_at", "actor", "kind", "task_id", "payload"}]}`. A launch's screen is not shown.
-pub fn events(path: &Path, after: i64, limit: Option<u32>) -> Result<Value, String> {
+/// With `task`, only the events whose `task_id` is that task, the limit counting those (Issue 413).
+pub fn events(
+    path: &Path,
+    after: i64,
+    limit: Option<u32>,
+    task: Option<&str>,
+) -> Result<Value, String> {
     let conn = open(path)?;
     let limit = limit.unwrap_or(EVENTS_LIMIT).min(EVENTS_MAX);
     let mut events = rows(
         &conn,
         "SELECT e.id, e.occurred_at, e.actor, e.kind, r.task_id, e.payload_json AS payload
          FROM events e LEFT JOIN runs r ON r.id = e.run_id
-         WHERE e.id > ?1 ORDER BY e.id LIMIT ?2",
-        rusqlite::params![after, limit],
+         WHERE e.id > ?1 AND (?3 IS NULL OR r.task_id = ?3) ORDER BY e.id LIMIT ?2",
+        rusqlite::params![after, limit, task],
     )
     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     for e in &mut events {
@@ -534,9 +564,9 @@ pub fn events(path: &Path, after: i64, limit: Option<u32>) -> Result<Value, Stri
 }
 
 /// `makiba events`: the read above, as one object (`--json`) or one line per event.
-pub fn events_main(after: i64, limit: Option<u32>, as_json: bool) -> ExitCode {
+pub fn events_main(after: i64, limit: Option<u32>, task: Option<&str>, as_json: bool) -> ExitCode {
     let path = crate::daemon::state_dir().join("state.db");
-    match events(&path, after, limit) {
+    match events(&path, after, limit, task) {
         Ok(v) if as_json => println!("{v}"),
         Ok(v) => {
             for e in v["events"].as_array().into_iter().flatten() {
