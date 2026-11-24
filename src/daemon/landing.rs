@@ -10,8 +10,8 @@
 //!   the older ones.
 //! - On a thread (one at a time, its result written by the loop's thread in one transaction):
 //!   the default branch fetched into the clone and P's merge seen in it (`belt::in_clone`, the
-//!   tip T); the paths changed from the tip scanned last (with none, from the first parent of
-//!   the oldest merge not scanned yet) to T; with one
+//!   tip T); the paths changed from the tip scanned last (with none, from the common ancestor
+//!   of the first parents of every merge not scanned yet) to T; with one
 //!   under `tools/`, `.github/` or `tests/common/`, each open run of the project other than P's,
 //!   with a current pull request, is read: its pull request fetched as the gate does
 //!   (`gate::fetch_with`, killed at makibad's stop) and its test commit found
@@ -64,9 +64,9 @@ struct Due {
     merge: String,
     /// `base_head` of the project's newest `landing_scanned`.
     prev: Option<String>,
-    /// The merge commit of the oldest merge not scanned yet (P's when it is the only one): with
-    /// no tip scanned before, the paths are read from its first parent.
-    first: String,
+    /// The merge commits of every merge not scanned yet (P's among them): with no tip scanned
+    /// before, the paths are read from the common ancestor of their first parents.
+    unscanned: Vec<String>,
     runs: Vec<Candidate>,
 }
 
@@ -207,7 +207,7 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
                 task: r.get(4)?,
                 repo: r.get(5)?,
                 pr: r.get(6)?,
-                first: r.get(7)?,
+                unscanned: Vec::new(),
                 merge: r.get(7)?,
                 prev: None,
                 runs: Vec::new(),
@@ -227,8 +227,10 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
             )
             .optional()?
             .flatten();
-        let first: Option<String> = c
-            .query_row(
+        // Every merge not scanned yet, whatever order they were recorded in: the order of the
+        // records need not be the order of the merges.
+        d.unscanned = c
+            .prepare(
                 "SELECT json_extract(e.payload_json, '$.merge_commit') FROM events e
                  JOIN runs r ON r.id = e.run_id
                  WHERE e.kind = 'pr_merged' AND r.project_id = ?1
@@ -237,14 +239,10 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
                                         FROM events s JOIN runs rs ON rs.id = s.run_id
                                         WHERE s.kind = 'landing_scanned'
                                           AND rs.project_id = ?1), 0)
-                 ORDER BY e.id LIMIT 1",
-                [d.project],
-                |r| r.get(0),
-            )
-            .optional()?;
-        if let Some(f) = first {
-            d.first = f;
-        }
+                 ORDER BY e.id",
+            )?
+            .query_map([d.project], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
         d.runs = candidates(w, d.project, &d.task)?;
         out.push(d);
     }
@@ -293,20 +291,45 @@ fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
     let in_tip = |c: &String| git(&["merge-base", "--is-ancestor", c, &tip]).is_some();
     let parent =
         |m: &str| git(&["rev-parse", "--verify", &format!("{m}^1")]).map(|s| s.trim().to_string());
-    // The tip scanned last; with none (or one the branch no longer holds), the first parent of
-    // the oldest merge not scanned yet, so that landings before the first scan are read too.
+    // The tip scanned last; with none (or one the branch no longer holds), the common ancestor
+    // of the first parents of every merge not scanned yet, so that landings before the first
+    // scan are read too, in whatever order they were recorded.
+    let parents: Vec<String> = d
+        .unscanned
+        .iter()
+        .filter_map(|m| parent(m))
+        .filter(in_tip)
+        .collect();
+    let common = || {
+        let mut args = vec!["merge-base", "--octopus"];
+        args.extend(parents.iter().map(String::as_str));
+        (!parents.is_empty())
+            .then(|| git(&args).map(|s| s.trim().to_string()))
+            .flatten()
+    };
     let from = d
         .prev
         .clone()
         .filter(in_tip)
-        .or_else(|| parent(&d.first).filter(in_tip))
+        .or_else(common)
         .or_else(|| parent(&d.merge))?;
-    // NUL-separated: a path git would quote (a tab, a newline, a non-ASCII byte) is read as it is.
-    let changed = git(&["diff", "-z", "--name-only", "--no-renames", &from, &tip])?;
+    // Paths git quotes (a tab, a newline, any byte past ASCII, so also one that is no UTF-8) come
+    // C-quoted and ASCII: the output is always text, and each path is unquoted to be matched.
+    let changed = git(&[
+        "-c",
+        "core.quotePath=true",
+        "diff",
+        "--name-only",
+        "--no-renames",
+        &from,
+        &tip,
+    ])?;
     let matched: Vec<String> = changed
-        .split('\0')
-        .filter(|p| WATCHED.iter().any(|w| p.starts_with(w)))
-        .map(String::from)
+        .lines()
+        .filter(|l| !l.is_empty())
+        .map(unquote)
+        .filter(|p| WATCHED.iter().any(|w| p.starts_with(w.as_bytes())))
+        .map(|p| String::from_utf8_lossy(&p).into_owned())
         .collect();
     let mut s = Scan {
         tip: tip.clone(),
@@ -336,6 +359,47 @@ fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
         }
     }
     Some(s)
+}
+
+/// A path as `git diff --name-only` prints it: as it is, or C-quoted (`"tools/\303\244.py"`).
+fn unquote(line: &str) -> Vec<u8> {
+    let Some(inner) = line.strip_prefix('"').and_then(|l| l.strip_suffix('"')) else {
+        return line.as_bytes().to_vec();
+    };
+    let b = inner.as_bytes();
+    let mut out = Vec::with_capacity(b.len());
+    let mut i = 0;
+    while i < b.len() {
+        if b[i] != b'\\' || i + 1 == b.len() {
+            out.push(b[i]);
+            i += 1;
+            continue;
+        }
+        let c = b[i + 1];
+        let octal = b
+            .get(i + 1..i + 4)
+            .filter(|o| o.iter().all(|d| (b'0'..=b'7').contains(d)));
+        if let Some(o) = octal {
+            out.push(
+                o.iter()
+                    .fold(0u8, |n, d| n.wrapping_mul(8).wrapping_add(d - b'0')),
+            );
+            i += 4;
+            continue;
+        }
+        out.push(match c {
+            b'a' => 7,
+            b'b' => 8,
+            b't' => b'\t',
+            b'n' => b'\n',
+            b'v' => 11,
+            b'f' => 12,
+            b'r' => b'\r',
+            other => other,
+        });
+        i += 2;
+    }
+    out
 }
 
 fn short(s: &str) -> &str {
@@ -471,8 +535,10 @@ fn write(w: &StateWriter, d: &Due, s: &Scan) -> Result<()> {
 mod tests {
     use super::*;
     use crate::db::writer::RunUpsert;
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
 
-    fn git(at: &Path, args: &[&str]) -> String {
+    fn git(at: &Path, args: &[&OsStr]) -> String {
         let out = std::process::Command::new("git")
             .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
             .args([
@@ -489,42 +555,46 @@ mod tests {
         String::from_utf8_lossy(&out.stdout).trim().to_string()
     }
 
-    /// A commit on `main` of the work tree `at` adding `path`, merged with `--no-ff` from a side
-    /// branch as a pull request lands; the merge commit.
-    fn land(at: &Path, branch: &str, path: &str) -> String {
-        git(at, &["checkout", "-q", "-b", branch, "main"]);
-        let dest = at.join(path);
-        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
-        std::fs::write(&dest, "x\n").unwrap();
-        git(at, &["add", path]);
-        git(at, &["commit", "-q", "-m", branch]);
-        git(at, &["checkout", "-q", "main"]);
-        git(at, &["merge", "-q", "--no-ff", "-m", "merge", branch]);
-        git(at, &["rev-parse", "HEAD"])
+    fn g(at: &Path, args: &[&str]) -> String {
+        let args: Vec<&OsStr> = args.iter().map(OsStr::new).collect();
+        git(at, &args)
     }
 
-    /// Before the first scan, two landings are read together from the oldest one's first parent:
-    /// a `tools/` change in the older one is not lost behind a newer one that changes only
-    /// `README.md`. A path git would quote (non-ASCII) is read as it is.
-    #[test]
-    fn the_first_scan_reads_every_landing_not_scanned_and_paths_as_they_are() {
-        let dir = tempfile::tempdir().unwrap();
-        let root = dir.path();
+    /// A side branch adding `path` (bytes: a name need not be UTF-8), merged into `main` with
+    /// `--no-ff` as a pull request lands; the merge commit.
+    fn land(at: &Path, branch: &str, path: &[u8]) -> String {
+        g(at, &["checkout", "-q", "-b", branch, "main"]);
+        let rel = Path::new(OsStr::from_bytes(path));
+        let dest = at.join(rel);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, "x\n").unwrap();
+        git(at, &[OsStr::new("add"), OsStr::new("--"), rel.as_os_str()]);
+        g(at, &["commit", "-q", "-m", branch]);
+        g(at, &["checkout", "-q", "main"]);
+        g(at, &["merge", "-q", "--no-ff", "-m", "merge", branch]);
+        g(at, &["rev-parse", "HEAD"])
+    }
+
+    /// A clone of a project whose main has `landings` merged in order; the merge commits.
+    fn world(root: &Path, landings: &[&[u8]]) -> (PathBuf, Vec<String>) {
         let work = root.join("work");
         std::fs::create_dir_all(&work).unwrap();
-        git(&work, &["init", "-q", "-b", "main"]);
-        git(&work, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        g(&work, &["init", "-q", "-b", "main"]);
+        g(&work, &["commit", "-q", "--allow-empty", "-m", "base"]);
         let origin = root.join("origin.git");
-        git(root, &["init", "-q", "--bare", &origin.to_string_lossy()]);
-        git(
+        g(root, &["init", "-q", "--bare", &origin.to_string_lossy()]);
+        g(
             &work,
             &["remote", "add", "origin", &origin.to_string_lossy()],
         );
-        let l1 = land(&work, "one", "tools/\u{65e5}\u{672c}.py");
-        let l2 = land(&work, "two", "README.md");
-        git(&work, &["push", "-q", "origin", "main"]);
+        let merges = landings
+            .iter()
+            .enumerate()
+            .map(|(n, p)| land(&work, &format!("b{n}"), p))
+            .collect();
+        g(&work, &["push", "-q", "origin", "main"]);
         let clone = root.join("clone");
-        git(
+        g(
             root,
             &[
                 "clone",
@@ -533,7 +603,11 @@ mod tests {
                 &clone.to_string_lossy(),
             ],
         );
-        let due = |first: &str| Due {
+        (clone, merges)
+    }
+
+    fn due_of(merge: &str, unscanned: &[&String]) -> Due {
+        Due {
             project: 1,
             slug: "p".into(),
             branch: "main".into(),
@@ -541,24 +615,63 @@ mod tests {
             task: "t".into(),
             repo: Some("o/p".into()),
             pr: Some(2),
-            merge: l2.clone(),
+            merge: merge.into(),
             prev: None,
-            first: first.into(),
+            unscanned: unscanned.iter().map(|s| s.to_string()).collect(),
             runs: Vec::new(),
-        };
+        }
+    }
+
+    /// Before the first scan, every landing not scanned is read, in whatever order the merges
+    /// were recorded: a `tools/` change in an older landing is not lost behind a newer one that
+    /// changes only `README.md`.
+    #[test]
+    fn the_first_scan_reads_every_landing_not_scanned_in_any_recorded_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, m) = world(dir.path(), &[b"tools/check.py", b"README.md"]);
         let never = AtomicBool::new(false);
-        let s = scan(&clone, &due(&l1), &never).expect("the merge is in the tip");
-        assert_eq!(s.tip, l2);
-        assert_eq!(s.matched, vec!["tools/\u{65e5}\u{672c}.py".to_string()]);
-        assert_eq!(s.from, git(&work, &["rev-parse", &format!("{l1}^1")]));
+        for order in [[&m[0], &m[1]], [&m[1], &m[0]]] {
+            let s = scan(&clone, &due_of(&m[1], &order), &never).expect("in the tip");
+            assert_eq!(s.tip, m[1]);
+            assert_eq!(s.matched, vec!["tools/check.py".to_string()], "{order:?}");
+        }
         // Only the newest merge: its own change, not the older one's.
-        let only = scan(&clone, &due(&l2), &never).unwrap();
+        let only = scan(&clone, &due_of(&m[1], &[&m[1]]), &never).unwrap();
         assert!(only.matched.is_empty(), "{:?}", only.matched);
     }
 
-    /// `first` is the oldest merge newer than the newest scan, `merge` the newest.
+    /// A path git quotes (past ASCII, or no UTF-8 at all, inside or outside the watched folders)
+    /// does not stop the scan, and a watched one is matched.
     #[test]
-    fn a_scan_due_names_the_oldest_merge_not_scanned_yet() {
+    fn paths_git_would_quote_are_read_and_matched() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, m) = world(
+            dir.path(),
+            &[
+                "tools/\u{65e5}\u{672c}.py".as_bytes(),
+                b"docs/\xfe.md",
+                b"tools/\xff.py",
+                b"tools/a\tb.py",
+            ],
+        );
+        let never = AtomicBool::new(false);
+        let all: Vec<&String> = m.iter().collect();
+        let s = scan(&clone, &due_of(&m[3], &all), &never).expect("the scan is written");
+        let mut got = s.matched.clone();
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "tools/a\tb.py".to_string(),
+                "tools/\u{65e5}\u{672c}.py".to_string(),
+                "tools/\u{fffd}.py".to_string(),
+            ]
+        );
+    }
+
+    /// Every merge newer than the newest scan is unscanned; `merge` is the newest.
+    #[test]
+    fn a_scan_due_names_every_merge_not_scanned_yet() {
         let dir = tempfile::tempdir().unwrap();
         let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
         w.ensure_project("p", None, Some("https://github.com/o/p"))
@@ -582,16 +695,16 @@ mod tests {
             })
             .unwrap()
         };
-        let e1 = merged("a", "m1");
-        merged("b", "m2");
+        merged("a", "m1");
+        let e2 = merged("b", "m2");
         let d = due(&w).unwrap();
         assert_eq!(d.len(), 1);
-        assert_eq!((d[0].first.as_str(), d[0].merge.as_str()), ("m1", "m2"));
-        assert_eq!(d[0].prev, None);
+        assert_eq!(d[0].unscanned, vec!["m1", "m2"]);
+        assert_eq!((d[0].merge.as_str(), d[0].prev.as_deref()), ("m2", None));
         w.append_event(&NewEvent {
             kind: "landing_scanned",
             actor: Some("makibad"),
-            payload: Some(&json!({"landed_event": e1 + 1, "base_head": "m2"})),
+            payload: Some(&json!({"landed_event": e2, "base_head": "m2"})),
             run_task_id: Some("b"),
             ..Default::default()
         })
@@ -600,10 +713,19 @@ mod tests {
         merged("c", "m3");
         merged("d", "m4");
         let d = due(&w).unwrap();
-        assert_eq!((d[0].first.as_str(), d[0].merge.as_str()), ("m3", "m4"));
-        assert_eq!(d[0].prev.as_deref(), Some("m2"));
+        assert_eq!(d[0].unscanned, vec!["m3", "m4"]);
+        assert_eq!(
+            (d[0].merge.as_str(), d[0].prev.as_deref()),
+            ("m4", Some("m2"))
+        );
         assert_eq!(d[0].task, "d");
-        let others: Vec<&str> = d[0].runs.iter().map(|r| r.0.as_str()).collect();
-        assert!(others.is_empty(), "no run has a pull request: {others:?}");
+        assert!(d[0].runs.is_empty(), "no run has a pull request");
+    }
+
+    #[test]
+    fn a_quoted_path_is_unquoted_to_its_bytes() {
+        assert_eq!(unquote("tools/a.py"), b"tools/a.py".to_vec());
+        assert_eq!(unquote(r#""tools/\377.py""#), b"tools/\xff.py".to_vec());
+        assert_eq!(unquote(r#""a\tb\\c\"d""#), b"a\tb\\c\"d".to_vec());
     }
 }
