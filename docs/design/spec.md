@@ -848,6 +848,9 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `runs[].stage` | `run_launch.stage` of the run's newest launch, null without one |
 | `runs[].waiting` | null unless the run has an `escalated` pending entry or waits for a landing; then an object of `for` (`person`), `pending` (the ids of those entries) and `why` (the first line of the newest one's question), or, for a design-only run that reported its design (Issue 284), of `for` (`landing`), `issues` (what it waits for) and `why` |
 | `runs[].unparked` | null unless the run is not `parked` and was woken from parking; then an object of `reason`, `detail` and `at` of its newest `run_unparked` |
+| `runs[].notice` | null unless the run is `failed`; then the notice, as `anomalies[].notice` reads it, of the newest of its `worker_spawn_failed` and its `anomaly_raised` of rule `gone` not `suppressed` (Issue 406), null when none was written |
+| `runs[].secretary_acted_at` | `commands.received_at` of the newest `commands` row of actor `secretary` whose verb reads the run's task from its arguments, whatever its status (Issue 406): `task_id` for `dispatch`, `close`, `peek`; `task` for `pr`, `note`, `push`, `update`, `review` and `pending` `add`; `to` its worker for `send`; `id` one of its `pending` entries for `answer` and `pending` `escalate` or `withdraw`. Null when none |
+| `runs[].secretary_acted_verb` | that row's `verb`, null when none |
 | `terminals[].role` | `run_launch.role` of the newest launch of each role and run whose key (`agents.spawn_id`) is not revoked and whose newest `terminal_status` or `terminal_gone` is not a `terminal_gone` |
 | `terminals[].name` | `secretary`, `curator` or `w-<task_id>` |
 | `terminals[].state` | `state` of its newest `terminal_status`, null before the first |
@@ -855,6 +858,7 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `anomalies[].task_id` | an `anomaly_raised` with no later `anomaly_cleared` of the same payload (without `suppressed`) |
 | `anomalies[].rule` | its `rule` |
 | `anomalies[].since` | its `occurred_at` |
+| `anomalies[].notice` | null when its raise told nobody (`suppressed`, or no notice written); else the notice of the raise (Issue 406): the first `message_sent` of `makibad` after the raise, about the same run or none, whose `messages` row is a `notice` to `secretary`, with no other `anomaly_raised` or `worker_spawn_failed` of that run between them; an object of `to` (`messages.recipient`), `state` (`delivered` when its `event_deliveries` row is `delivered`, else `queued`), `written_at` (the event's `occurred_at`) and `delivered_at` (`event_deliveries.delivered_at` when `delivered`, else null). The body is not shown |
 | `pending[].id` | `pending.id`, entries `open` or `escalated` |
 | `pending[].task_id` | `runs.task_id` of `pending.run_id` |
 | `pending[].kind` | `pending.kind` |
