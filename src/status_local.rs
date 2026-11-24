@@ -509,15 +509,21 @@ const EVENTS_MAX: u32 = 1000;
 
 /// The events after `after`, in order, at most `limit` (Issue 168): `{"events": [{"id",
 /// "occurred_at", "actor", "kind", "task_id", "payload"}]}`. A launch's screen is not shown.
-pub fn events(path: &Path, after: i64, limit: Option<u32>) -> Result<Value, String> {
+/// With `task`, only the events whose `task_id` is that task, the limit counting those (Issue 413).
+pub fn events(
+    path: &Path,
+    after: i64,
+    limit: Option<u32>,
+    task: Option<&str>,
+) -> Result<Value, String> {
     let conn = open(path)?;
     let limit = limit.unwrap_or(EVENTS_LIMIT).min(EVENTS_MAX);
     let mut events = rows(
         &conn,
         "SELECT e.id, e.occurred_at, e.actor, e.kind, r.task_id, e.payload_json AS payload
          FROM events e LEFT JOIN runs r ON r.id = e.run_id
-         WHERE e.id > ?1 ORDER BY e.id LIMIT ?2",
-        rusqlite::params![after, limit],
+         WHERE e.id > ?1 AND (?3 IS NULL OR r.task_id = ?3) ORDER BY e.id LIMIT ?2",
+        rusqlite::params![after, limit, task],
     )
     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     for e in &mut events {
@@ -534,9 +540,9 @@ pub fn events(path: &Path, after: i64, limit: Option<u32>) -> Result<Value, Stri
 }
 
 /// `makiba events`: the read above, as one object (`--json`) or one line per event.
-pub fn events_main(after: i64, limit: Option<u32>, as_json: bool) -> ExitCode {
+pub fn events_main(after: i64, limit: Option<u32>, task: Option<&str>, as_json: bool) -> ExitCode {
     let path = crate::daemon::state_dir().join("state.db");
-    match events(&path, after, limit) {
+    match events(&path, after, limit, task) {
         Ok(v) if as_json => println!("{v}"),
         Ok(v) => {
             for e in v["events"].as_array().into_iter().flatten() {
