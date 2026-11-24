@@ -716,7 +716,7 @@ One condition holds for every button: **today the screen can only show the line 
 | "a notice was written to the secretary" (a hand merge, a close) | a `message_sent` by `makibad` with the task, right after the event | Whether it was delivered (D) | see D | Keep, worded as written, not as delivered, until D |
 | Issues to start: not ready, and why | `next_work.left_out[]` (`kind`, `reason`) | The title (B) | `triage.rs` `shown`, S: the scan reads the title already | Keep |
 | Projects not ranked | `next_work.left_out[]` with a null `issue` | - | - | Keep |
-| One-off tasks | `runs[]` not named by a range's item; `terminals[]` for the age | Title, start, Issue (A) | S, as above | Keep |
+| One-off tasks | `runs[]` not named by a range's item; the age from the record of the state shown (2.5, Rows) | Title, start, Issue (A) | S, as above | Keep |
 | Task history: started, began, review rounds, pull request, checks, gate, merged, closed | events `belt_dispatched`, `worker_spawned`, `worker_spawn_verified`, `codex_round_started`, `pr_opened`, `ci_completed`, `acceptance_gate`, `pr_merged`, `run_closed` | "Reported its plan" and "Reported done" when no review answered: `worker_reported` is written only with a review (`door.rs`, `report`); otherwise only a `message_sent` whose kind is not shown | `door.rs` `report`, S: write `worker_reported` for every report, with `review` null when there is none | Keep |
 
 **The conversation, display, keys**
