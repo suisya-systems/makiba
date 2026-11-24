@@ -219,6 +219,17 @@ pub trait Base: Send + Sync {
     fn launch(&self, spec: &LaunchSpec) -> Result<TerminalRef, BaseError>;
     /// Only terminals tagged with this organization.
     fn list(&self) -> Result<Vec<Terminal>, BaseError>;
+    /// Every live terminal of the base's session, whatever its organization's tag (this
+    /// organization's, another's, none), on a connection with or without an organization: the
+    /// inventory `makiba base upgrade` reads before it stops the core (docs/design/base-upgrade.md
+    /// S2). Complete or refused. A base that cannot list its session refuses.
+    fn list_session(&self) -> Result<Vec<Terminal>, BaseError> {
+        Err(BaseError::Other(Detail {
+            kind: "list_session".into(),
+            message: format!("the base {} cannot list its session", self.name()),
+            hint: None,
+        }))
+    }
     fn get(&self, t: &TerminalRef) -> Result<Terminal, BaseError>;
     fn read(&self, t: &TerminalRef, lines: usize) -> Result<Vec<String>, BaseError>;
     fn keys(&self, t: &TerminalRef, keys: &[&str]) -> Result<(), BaseError>;

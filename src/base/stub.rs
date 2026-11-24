@@ -196,6 +196,16 @@ impl Base for Stub {
             .collect())
     }
 
+    fn list_session(&self) -> Result<Vec<Terminal>, BaseError> {
+        let inner = self.lock();
+        Ok(inner
+            .terminals
+            .values()
+            .map(|e| e.terminal.clone())
+            .filter(|t| t.alive)
+            .collect())
+    }
+
     fn get(&self, t: &TerminalRef) -> Result<Terminal, BaseError> {
         Ok(self.lock().entry(t)?.terminal.clone())
     }

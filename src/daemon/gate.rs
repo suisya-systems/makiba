@@ -643,7 +643,7 @@ pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Rejec
                 match e {
                     GhError::Missing => format!("no program {program}"),
                     GhError::Cancelled => "cancelled".into(),
-                    GhError::Failed(why) => why,
+                    GhError::Failed(f) => f.message,
                 }
             ))
         })?;
@@ -960,7 +960,7 @@ pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, St
             match e {
                 GhError::Missing => format!("no program {program}"),
                 GhError::Cancelled => "cancelled".into(),
-                GhError::Failed(why) => why,
+                GhError::Failed(f) => f.message,
             }
         ))
     })?;
@@ -983,9 +983,20 @@ pub fn fetch(
     pr: i64,
     base_branch: &str,
 ) -> Result<(String, String), Reject> {
+    fetch_with(clone, repo, pr, base_branch, &AtomicBool::new(false))
+}
+
+/// As `fetch`; the git child is killed when `cancel` is set (a pass's thread at makibad's stop,
+/// Issue 461).
+pub fn fetch_with(
+    clone: &Path,
+    repo: &str,
+    pr: i64,
+    base_branch: &str,
+    cancel: &AtomicBool,
+) -> Result<(String, String), Reject> {
     let origin = origin_of(clone, repo)?;
     let r = format!("refs/makiba/gate/{repo}/{pr}");
-    let never = AtomicBool::new(false);
     let dir = clone.display().to_string();
     gh::run_gh(
         "git",
@@ -1002,7 +1013,7 @@ pub fn fetch(
             &format!("+refs/pull/{pr}/head:{r}/head"),
             &format!("+refs/heads/{base_branch}:{r}/base"),
         ],
-        &never,
+        cancel,
     )
     .map_err(|_| {
         Reject(format!(

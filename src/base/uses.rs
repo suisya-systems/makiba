@@ -110,4 +110,9 @@ pub const USES: &[Use] = &[
         params: &["labels"],
         result: &[f("seq", "integer"), f("terminals[].address", "string")],
     },
+    Use {
+        method: "server.stop",
+        params: &[],
+        result: &[],
+    },
 ];

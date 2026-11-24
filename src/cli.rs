@@ -378,6 +378,10 @@ pub enum Command {
         /// approve without asking (the draft and its read are still printed).
         #[arg(long)]
         yes: bool,
+        /// approve: the read the person looked at, sent instead of the newest read printed; a read
+        /// that is not the newest is refused (`stale`).
+        #[arg(long)]
+        read: Option<i64>,
     },
     /// Run the acceptance gate for a pull request at a head; merges nothing.
     Gate {
@@ -444,6 +448,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             replaces,
             reason,
             yes: _,
+            read: shown_read,
         } => {
             let mut args = json!({"action": action});
             if design_ahead {
@@ -481,6 +486,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
                 ("budget_tasks", budget_tasks),
                 ("budget_fixes", budget_fixes),
                 ("replaces", replaces),
+                ("read", shown_read),
             ] {
                 if let Some(v) = v {
                     args[k] = v.into();
@@ -685,8 +691,9 @@ pub fn exit(code: i32) -> ExitCode {
 }
 
 /// Before `range approve`: print the draft and `makibad`'s newest complete read of it, read from
-/// `state.db` as `status` reads it, and ask on the terminal unless `yes`. The read's id goes with
-/// the approval, so a read made since is refused (`stale`) instead of approved unseen.
+/// `state.db` as `status` reads it, with its id, and ask on the terminal unless `yes`. The read's
+/// id goes with the approval (or the read named with `--read`, Issue 408), so a read made since is
+/// refused (`stale`) instead of approved unseen.
 fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
     let status = crate::status_local::read_here()?;
     let range = status["ranges"]
@@ -738,7 +745,7 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
     }
     println!("Brief head:\n{}", text("brief_head"));
     println!(
-        "Read at {} - in the order they would go in:",
+        "Read {read} at {} - in the order they would go in:",
         text("read_at")
     );
     for c in range["candidates"].as_array().into_iter().flatten() {
@@ -803,7 +810,9 @@ pub fn main(c: Command) -> ExitCode {
             .map_err(String::from)
             .and_then(|id| approve_preview(id, yes))
         {
-            Ok(read) => request["read"] = read.into(),
+            // A read named with `--read` goes as named; else the newest read printed.
+            Ok(read) if request["read"].is_null() => request["read"] = read.into(),
+            Ok(_) => {}
             Err(e) => {
                 eprintln!("makiba: {e}");
                 return exit(ErrorKind::Conflict.exit_code());

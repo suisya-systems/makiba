@@ -7,6 +7,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+mod common;
+
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
@@ -157,9 +159,14 @@ fn sha256(file: &Path) -> String {
 /// the manifest's hash of it (the real hash when None). The archive holds the files named in
 /// `entries` at its root, each containing its own name. Returns (releases url, prefix).
 fn release(name: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf) {
+    release_at(name, base_version::PINNED, entries, sha)
+}
+
+/// As `release`, with the manifest and the archive under `version` instead of PINNED.
+fn release_at(name: &str, version: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf) {
     let dir = std::env::temp_dir().join(format!("makiba-m0-2-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    let version_dir = dir.join("releases/core").join(base_version::PINNED);
+    let version_dir = dir.join("releases/core").join(version);
     let src = dir.join("src");
     fs::create_dir_all(&version_dir).unwrap();
     fs::create_dir_all(&src).unwrap();
@@ -218,6 +225,7 @@ fn install(url: &str, prefix: &Path) -> std::process::Output {
         .env("HERDR_RELEASES_URL", url)
         .env("PATH", path)
         .env_remove("HC_BIN")
+        .env_remove("MAKIBA_BASE_PINNED")
         .output()
         .expect("bash runs")
 }
@@ -258,4 +266,163 @@ fn install_base_installs_nothing_and_fails_when_the_archive_lacks_herdr_core() {
     let out = install(&url, &prefix);
     assert!(!out.status.success());
     assert!(!prefix.join("bin/hc").exists());
+}
+
+// --- MAKIBA_BASE_PINNED (Issue 419) ---
+
+/// A copy of the install script alone, at <tmp>/makiba-419-<pid>-<name>/scripts/install-base.sh,
+/// with no src/base/version.rs beside it, as an installed makiba has no checkout.
+fn lone_script(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("makiba-419-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    let script = dir.join("scripts/install-base.sh");
+    common::exe::copy(&root().join("scripts/install-base.sh"), &script);
+    assert!(!dir.join("src/base/version.rs").exists());
+    script
+}
+
+/// Runs `script` for `prefix` with the releases at `url`. MAKIBA_BASE_PINNED is `pinned`, or
+/// removed when None; HC_BIN is `hc_bin`, or removed when None; PATH is `first` (in order) ahead of
+/// the test's own PATH.
+fn run_script(
+    script: &Path,
+    prefix: &Path,
+    url: &str,
+    pinned: Option<&str>,
+    hc_bin: Option<&Path>,
+    first: &[&Path],
+) -> std::process::Output {
+    let mut path: Vec<String> = first.iter().map(|p| p.display().to_string()).collect();
+    path.push(std::env::var("PATH").unwrap_or_default());
+    let mut cmd = Command::new("bash");
+    cmd.arg(script)
+        .arg(prefix)
+        .env("HERDR_RELEASES_URL", url)
+        .env("PATH", path.join(":"));
+    match pinned {
+        Some(v) => cmd.env("MAKIBA_BASE_PINNED", v),
+        None => cmd.env_remove("MAKIBA_BASE_PINNED"),
+    };
+    match hc_bin {
+        Some(p) => cmd.env("HC_BIN", p),
+        None => cmd.env_remove("HC_BIN"),
+    };
+    cmd.output().expect("bash runs")
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[test]
+fn install_base_takes_the_version_from_makiba_base_pinned_without_a_checkout() {
+    let (url, prefix) = release_at("419-lone", "9.8.7", &FULL, None);
+    let script = lone_script("lone");
+    let bin = prefix.join("bin");
+    let out = run_script(&script, &prefix, &url, Some("9.8.7"), None, &[&bin]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        fs::read_to_string(bin.join("hc")).unwrap(),
+        "#!/bin/sh\necho herdr-core\n"
+    );
+    assert!(
+        text(&out.stdout).contains("herdr-core 9.8.7"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn install_base_prefers_makiba_base_pinned_over_the_checkout() {
+    let (url, prefix) = release_at("419-checkout", "9.8.7", &FULL, None);
+    let script = root().join("scripts/install-base.sh");
+    let bin = prefix.join("bin");
+    let out = run_script(&script, &prefix, &url, Some("9.8.7"), None, &[&bin]);
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(bin.join("hc").exists());
+    assert!(
+        text(&out.stdout).contains("herdr-core 9.8.7"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn install_base_refuses_a_makiba_base_pinned_that_is_not_plain() {
+    let (url, prefix) = release("419-not-plain", &FULL, None);
+    let script = root().join("scripts/install-base.sh");
+    let bin = prefix.join("bin");
+    for value in ["", "0.1.22-rc1", "../0.1.22", "0.1", "0.1.22 "] {
+        let out = run_script(&script, &prefix, &url, Some(value), None, &[&bin]);
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{value:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(!bin.join("hc").exists(), "{value:?}");
+        assert!(!bin.join("herdr-core").exists(), "{value:?}");
+        assert!(
+            text(&out.stderr).contains("MAKIBA_BASE_PINNED"),
+            "{value:?}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn install_base_without_the_variable_or_a_checkout_installs_nothing() {
+    let (url, prefix) = release("419-neither", &FULL, None);
+    let script = lone_script("neither");
+    let bin = prefix.join("bin");
+    let out = run_script(&script, &prefix, &url, None, None, &[&bin]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("src/base/version.rs"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!bin.join("hc").exists());
+}
+
+/// The upgrade verb stages a new base beside the person's install: with the person's environment
+/// the check after installing finds the existing install and exits 3; with HC_BIN removed and the
+/// staging bin first on PATH it exits 0, and the person's files are left as they were.
+#[test]
+fn install_base_for_staging_passes_its_check_beside_the_person_install() {
+    const OLD: &str = "#!/bin/sh\necho old\n";
+    let (url, staging) = release_at("419-staging", "9.8.7", &FULL, None);
+    let other = staging.parent().unwrap().join("other/bin");
+    fs::create_dir_all(&other).unwrap();
+    common::exe::write(&other.join("hc"), OLD);
+    common::exe::write(&other.join("herdr-core"), OLD);
+    let script = lone_script("staging");
+
+    let person = run_script(
+        &script,
+        &staging,
+        &url,
+        Some("9.8.7"),
+        Some(&other.join("hc")),
+        &[&other],
+    );
+    assert_eq!(person.status.code(), Some(3), "{}", text(&person.stderr));
+
+    let staged_bin = staging.join("bin");
+    let staged = run_script(
+        &script,
+        &staging,
+        &url,
+        Some("9.8.7"),
+        None,
+        &[&staged_bin, &other],
+    );
+    assert_eq!(staged.status.code(), Some(0), "{}", text(&staged.stderr));
+    assert_eq!(
+        fs::read_to_string(staged_bin.join("hc")).unwrap(),
+        "#!/bin/sh\necho herdr-core\n"
+    );
+    assert_eq!(fs::read_to_string(other.join("hc")).unwrap(), OLD);
+    assert_eq!(fs::read_to_string(other.join("herdr-core")).unwrap(), OLD);
 }

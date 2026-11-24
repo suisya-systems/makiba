@@ -3,7 +3,8 @@
 //!
 //! - A run closed with `--abandon` (of a range or not) is followed by the PR watch for a day after
 //!   its close, unless its pull request was read closed: a merge then is recorded (`pr_merged`),
-//!   and a hand merge is told to the secretary. A run abandoned longer ago is not read.
+//!   and told to the secretary (Issue 424: every merge; an allowance of the gate alone decides
+//!   nothing). A run abandoned longer ago is not read.
 //! - `makiba up`'s relaunch is the person's, not `makibad`'s: its `run_taken` has the actor
 //!   `person`.
 //!
@@ -272,7 +273,8 @@ impl Org {
 }
 
 /// A range task closed with `--abandon` whose pull request is merged (the gate allowed that
-/// head): its landing is recorded once, as the gate's, its watch ends and nothing is told.
+/// head, and nothing records that its command ran): its landing is recorded once, by hand
+/// (Issue 424), its watch ends and the secretary is told once, naming the allowance.
 #[test]
 fn a_range_run_closed_with_abandon_whose_pull_request_merges_gets_pr_merged() {
     let home = init();
@@ -293,9 +295,11 @@ fn a_range_run_closed_with_abandon_whose_pull_request_merges_gets_pr_merged() {
     assert_eq!(m[0]["repo"], repo);
     assert_eq!(m[0]["pr"], 5);
     assert_eq!(m[0]["head_oid"], json!(head));
-    assert_eq!(m[0]["merged_via"], "gate");
+    assert_eq!(m[0]["merged_via"], "hand");
     assert_eq!(org.watch_status(repo, 5, &head), "failed");
-    assert!(org.notices_naming("o/a1#5").is_empty());
+    let told = org.notices_naming("o/a1#5");
+    assert_eq!(told.len(), 1, "{told:?}");
+    assert!(told[0].contains("the gate allowed that head"), "{told:?}");
 }
 
 /// A run outside a range closed with `--abandon` an hour ago, its pull request then merged by
