@@ -243,8 +243,111 @@ fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
                 .expect("a row is an object")
                 .extend(more);
         }
+        // Who is on it (Issue 406): the notice of a failed run's failure, and the secretary's
+        // newest request about its task.
+        let notice = match status.as_str() {
+            "failed" => match failure_event(conn, &task)? {
+                Some(source) => notice_after(conn, source)?,
+                None => Value::Null,
+            },
+            _ => Value::Null,
+        };
+        let (acted_at, acted_verb) = secretary_act(conn, &task)?;
+        let m = run.as_object_mut().expect("a row is an object");
+        m.insert("notice".into(), notice);
+        m.insert("secretary_acted_at".into(), acted_at);
+        m.insert("secretary_acted_verb".into(), acted_verb);
     }
     Ok(all)
+}
+
+/// The event that failed the run of `task` (Issue 406): the newest of its `worker_spawn_failed`
+/// and its `gone` raise told to the secretary, the only two records that fail a run.
+fn failure_event(conn: &Connection, task: &str) -> rusqlite::Result<Option<i64>> {
+    conn.query_row(
+        "SELECT max(e.id) FROM events e
+         WHERE e.run_id = (SELECT id FROM runs WHERE task_id = ?1)
+           AND (e.kind = 'worker_spawn_failed'
+                OR (e.kind = 'anomaly_raised'
+                    AND json_extract(e.payload_json, '$.rule') = 'gone'
+                    AND json_extract(e.payload_json, '$.suppressed') IS NULL))",
+        [task],
+        |r| r.get(0),
+    )
+}
+
+/// The notice that told the secretary of the event `source` (Issue 406): the first `message_sent`
+/// of `makibad` after it, about the same run (or none), whose message is a `notice` to the
+/// secretary, with no other raise or launch failure of that run between them. Every writer of
+/// such an event writes its notice in the same transaction. Null when there is none.
+/// `{"to", "state": "queued"|"delivered", "written_at", "delivered_at"}`; never the body.
+fn notice_after(conn: &Connection, source: i64) -> rusqlite::Result<Value> {
+    let found = rows(
+        conn,
+        "SELECT m.recipient AS \"to\", e.occurred_at AS written_at,
+                CASE WHEN d.status = 'delivered' THEN 'delivered' ELSE 'queued' END AS state,
+                CASE WHEN d.status = 'delivered' THEN d.delivered_at END AS delivered_at
+         FROM events s
+         JOIN events e ON e.id > s.id AND e.kind = 'message_sent' AND e.actor = 'makibad'
+                      AND e.run_id IS s.run_id
+         JOIN messages m ON m.event_id = e.id AND m.kind = 'notice' AND m.recipient = 'secretary'
+         LEFT JOIN event_deliveries d ON d.source_event_id = e.id AND d.recipient = m.recipient
+         WHERE s.id = ?1
+           AND NOT EXISTS (SELECT 1 FROM events x WHERE x.id > s.id AND x.id < e.id
+                             AND x.kind IN ('anomaly_raised', 'worker_spawn_failed')
+                             AND x.run_id IS s.run_id)
+         ORDER BY e.id LIMIT 1",
+        [source],
+    )?;
+    Ok(found.into_iter().next().unwrap_or(Value::Null))
+}
+
+/// The secretary's verbs that name a task by `task_id` (Issue 406).
+const ACT_BY_TASK_ID: &[&str] = &["dispatch", "close", "peek"];
+/// The secretary's verbs that name a task by `task` (`update` reads it through `push`); `pending`
+/// does with `action` `add` only.
+const ACT_BY_TASK: &[&str] = &["pr", "note", "push", "update", "review"];
+
+/// The secretary's newest request about `task` (Issue 406): `received_at` and `verb` of the newest
+/// `commands` row of `secretary` whose verb reads the task from its arguments (`ACT_BY_TASK_ID`,
+/// `ACT_BY_TASK`, `pending add`, `send` to its worker, `answer` and `pending escalate|withdraw`
+/// of one of its entries), whatever its status. An argument a verb does not read never counts.
+fn secretary_act(conn: &Connection, task: &str) -> rusqlite::Result<(Value, Value)> {
+    let list = |verbs: &[&str]| {
+        verbs
+            .iter()
+            .map(|v| format!("'{v}'"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
+    let sql = format!(
+        "SELECT c.received_at, c.verb FROM commands c
+         WHERE c.actor = ?1
+           AND ((c.verb IN ({by_id}) AND json_extract(c.args_json, '$.task_id') = ?2)
+             OR ((c.verb IN ({by_task})
+                  OR (c.verb = 'pending' AND json_extract(c.args_json, '$.action') = 'add'))
+                 AND json_extract(c.args_json, '$.task') = ?2)
+             OR (c.verb = 'send' AND json_extract(c.args_json, '$.to') = ?3)
+             OR ((c.verb = 'answer'
+                  OR (c.verb = 'pending'
+                      AND json_extract(c.args_json, '$.action') IN ('escalate', 'withdraw')))
+                 AND json_extract(c.args_json, '$.id') IN
+                     (SELECT p.id FROM pending p JOIN runs r ON r.id = p.run_id
+                      WHERE r.task_id = ?2)))
+         ORDER BY c.id DESC LIMIT 1",
+        by_id = list(ACT_BY_TASK_ID),
+        by_task = list(ACT_BY_TASK),
+    );
+    let worker = crate::spec::worker_agent_id(task);
+    let found = rows(
+        conn,
+        &sql,
+        rusqlite::params![crate::spec::AGENT_SECRETARY, task, worker],
+    )?;
+    Ok(match found.into_iter().next() {
+        Some(r) => (r["received_at"].clone(), r["verb"].clone()),
+        None => (Value::Null, Value::Null),
+    })
 }
 
 /// The Issue a run works on: the number of the first `<project>#<N>` of its `issue_refs`, as
@@ -308,26 +411,37 @@ fn terminals(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 /// The open anomalies: each raise with no later clear of the same subject (its payload without
 /// `suppressed`), in the order they were raised.
 fn anomalies(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
-    let mut open: Vec<(Value, Value)> = Vec::new();
+    // Each open subject, its entry, and its raise when that raise told the secretary (Issue 406).
+    let mut open: Vec<(Value, Value, Option<i64>)> = Vec::new();
     for e in rows(
         conn,
-        "SELECT kind, payload_json, occurred_at FROM events
+        "SELECT id, kind, payload_json, occurred_at FROM events
          WHERE kind IN ('anomaly_raised', 'anomaly_cleared') ORDER BY id",
         [],
     )? {
         let mut subject: Value =
             serde_json::from_str(e["payload_json"].as_str().unwrap_or("{}")).unwrap_or_default();
-        if let Some(m) = subject.as_object_mut() {
-            m.remove("suppressed");
-        }
-        open.retain(|(s, _)| *s != subject);
+        let suppressed = subject
+            .as_object_mut()
+            .and_then(|m| m.remove("suppressed"))
+            .is_some();
+        open.retain(|(s, _, _)| *s != subject);
         if e["kind"] == "anomaly_raised" {
             let entry = json!({"task_id": subject["task_id"], "rule": subject["rule"],
                                "since": e["occurred_at"]});
-            open.push((subject, entry));
+            let told = e["id"].as_i64().filter(|_| !suppressed);
+            open.push((subject, entry, told));
         }
     }
-    Ok(open.into_iter().map(|(_, e)| e).collect())
+    let mut out = Vec::new();
+    for (_, mut entry, told) in open {
+        entry["notice"] = match told {
+            Some(raise) => notice_after(conn, raise)?,
+            None => Value::Null,
+        };
+        out.push(entry);
+    }
+    Ok(out)
 }
 
 /// The open and escalated entries. An entry made from a screen (`prompt_text`) shows the first
