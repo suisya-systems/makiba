@@ -2,6 +2,7 @@
 
 Status: study, for the owner's approval. No code, CI or branch protection changes with it. The
 changes the chosen option needs are proposed as build Issues, not designed here.
+Issue 425 (`docs/design/merge-act.md`) replaces build Issues 3 and 4 below and answers Q3.
 
 ## 1. The problem, measured
 
