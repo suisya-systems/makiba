@@ -5,7 +5,7 @@ use makiba::base::version as base_version;
 use makiba::base::{BaseError, BaseInfo};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output};
 
 fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -157,9 +157,14 @@ fn sha256(file: &Path) -> String {
 /// the manifest's hash of it (the real hash when None). The archive holds the files named in
 /// `entries` at its root, each containing its own name. Returns (releases url, prefix).
 fn release(name: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf) {
+    release_at(name, base_version::PINNED, entries, sha)
+}
+
+/// As `release`, with the manifest under `version` instead of `PINNED`.
+fn release_at(name: &str, version: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf) {
     let dir = std::env::temp_dir().join(format!("makiba-m0-2-{}-{name}", std::process::id()));
     let _ = fs::remove_dir_all(&dir);
-    let version_dir = dir.join("releases/core").join(base_version::PINNED);
+    let version_dir = dir.join("releases/core").join(version);
     let src = dir.join("src");
     fs::create_dir_all(&version_dir).unwrap();
     fs::create_dir_all(&src).unwrap();
@@ -205,8 +210,9 @@ fn release(name: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf)
 const FULL: [&str; 3] = ["herdr-core", "LICENSE", "THIRD-PARTY-NOTICES"];
 
 /// PREFIX/bin comes first on PATH and HC_BIN is removed, so that an hc of the machine running the
-/// test is not found ahead of the one installed (the script exits 3 then: #382).
-fn install(url: &str, prefix: &Path) -> std::process::Output {
+/// test is not found ahead of the one installed (the script exits 3 then: #382). MAKIBA_BASE_PINNED
+/// is removed, so that one exported by the person does not replace the checkout's PINNED (#419).
+fn install(url: &str, prefix: &Path) -> Output {
     let path = format!(
         "{}:{}",
         prefix.join("bin").display(),
@@ -218,6 +224,7 @@ fn install(url: &str, prefix: &Path) -> std::process::Output {
         .env("HERDR_RELEASES_URL", url)
         .env("PATH", path)
         .env_remove("HC_BIN")
+        .env_remove("MAKIBA_BASE_PINNED")
         .output()
         .expect("bash runs")
 }
@@ -258,4 +265,179 @@ fn install_base_installs_nothing_and_fails_when_the_archive_lacks_herdr_core() {
     let out = install(&url, &prefix);
     assert!(!out.status.success());
     assert!(!prefix.join("bin/hc").exists());
+}
+
+// --- MAKIBA_BASE_PINNED (#419): an installed makiba has no checkout ---
+
+const HERDR_CORE: &str = "#!/bin/sh\necho herdr-core\n";
+const OLD: &str = "#!/bin/sh\necho old\n";
+
+/// A copy of scripts/install-base.sh alone in a scratch folder: no src/base/version.rs beside it.
+fn lone_script(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("makiba-419-{}-{name}", std::process::id()));
+    let _ = fs::remove_dir_all(&dir);
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    let script = dir.join("scripts/install-base.sh");
+    fs::copy(root().join("scripts/install-base.sh"), &script).unwrap();
+    assert!(!dir.join("src/base/version.rs").exists());
+    script
+}
+
+/// Runs `script PREFIX` with HERDR_RELEASES_URL set to `url`, PATH the folders of `path_front`
+/// then the test's own PATH, HC_BIN and MAKIBA_BASE_PINNED removed unless `envs` gives them.
+fn run_script(
+    script: &Path,
+    url: &str,
+    prefix: &Path,
+    path_front: &[&Path],
+    envs: &[(&str, &str)],
+) -> Output {
+    let mut path: Vec<String> = path_front.iter().map(|p| p.display().to_string()).collect();
+    path.push(std::env::var("PATH").unwrap_or_default());
+    let mut cmd = Command::new("bash");
+    cmd.arg(script)
+        .arg(prefix)
+        .env("HERDR_RELEASES_URL", url)
+        .env("PATH", path.join(":"))
+        .env_remove("HC_BIN")
+        .env_remove("MAKIBA_BASE_PINNED");
+    for (k, v) in envs {
+        cmd.env(k, v);
+    }
+    cmd.output().expect("bash runs")
+}
+
+fn text(bytes: &[u8]) -> String {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
+#[test]
+fn install_base_takes_the_version_from_makiba_base_pinned_without_a_checkout() {
+    let (url, prefix) = release_at("419-var", "9.8.7", &FULL, None);
+    let script = lone_script("var");
+    let out = run_script(
+        &script,
+        &url,
+        &prefix,
+        &[&prefix.join("bin")],
+        &[("MAKIBA_BASE_PINNED", "9.8.7")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        fs::read_to_string(prefix.join("bin/hc")).unwrap(),
+        HERDR_CORE
+    );
+    assert!(
+        text(&out.stdout).contains("herdr-core 9.8.7"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn install_base_prefers_makiba_base_pinned_over_the_checkout() {
+    // Only 9.8.7 has a manifest: reading PINNED from the checkout would fail.
+    let (url, prefix) = release_at("419-over", "9.8.7", &FULL, None);
+    let script = root().join("scripts/install-base.sh");
+    let out = run_script(
+        &script,
+        &url,
+        &prefix,
+        &[&prefix.join("bin")],
+        &[("MAKIBA_BASE_PINNED", "9.8.7")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert!(prefix.join("bin/hc").exists());
+    assert!(
+        text(&out.stdout).contains("herdr-core 9.8.7"),
+        "{}",
+        text(&out.stdout)
+    );
+}
+
+#[test]
+fn install_base_refuses_a_makiba_base_pinned_that_is_not_plain() {
+    // A release at PINNED exists, so falling back to the checkout would install.
+    let (url, prefix) = release("419-plain", &FULL, None);
+    let script = root().join("scripts/install-base.sh");
+    for value in ["", "0.1.22-rc1", "../0.1.22", "0.1", "0.1.22 "] {
+        let out = run_script(
+            &script,
+            &url,
+            &prefix,
+            &[&prefix.join("bin")],
+            &[("MAKIBA_BASE_PINNED", value)],
+        );
+        assert_eq!(
+            out.status.code(),
+            Some(1),
+            "{value:?}: {}",
+            text(&out.stderr)
+        );
+        assert!(
+            !prefix.join("bin/hc").exists() && !prefix.join("bin/herdr-core").exists(),
+            "{value:?} installed something"
+        );
+        assert!(
+            text(&out.stderr).contains("MAKIBA_BASE_PINNED"),
+            "{value:?}: {}",
+            text(&out.stderr)
+        );
+    }
+}
+
+#[test]
+fn install_base_without_the_variable_or_a_checkout_installs_nothing() {
+    let (url, prefix) = release("419-none", &FULL, None);
+    let script = lone_script("none");
+    let out = run_script(&script, &url, &prefix, &[&prefix.join("bin")], &[]);
+    assert!(!out.status.success());
+    assert!(
+        text(&out.stderr).contains("src/base/version.rs"),
+        "{}",
+        text(&out.stderr)
+    );
+    assert!(!prefix.join("bin/hc").exists());
+}
+
+#[test]
+fn install_base_for_staging_passes_its_check_beside_the_person_install() {
+    use std::os::unix::fs::PermissionsExt;
+    let (url, staging) = release_at("419-staging", "9.8.7", &FULL, None);
+    let other = staging.parent().unwrap().join("other/bin");
+    fs::create_dir_all(&other).unwrap();
+    for name in ["hc", "herdr-core"] {
+        let file = other.join(name);
+        fs::write(&file, OLD).unwrap();
+        fs::set_permissions(&file, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let other_hc = other.join("hc").display().to_string();
+    let script = lone_script("staging");
+
+    // The person's environment: HC_BIN and PATH find the existing install.
+    let out = run_script(
+        &script,
+        &url,
+        &staging,
+        &[&other],
+        &[("HC_BIN", &other_hc), ("MAKIBA_BASE_PINNED", "9.8.7")],
+    );
+    assert_eq!(out.status.code(), Some(3), "{}", text(&out.stderr));
+
+    // The staging environment: HC_BIN removed, the staging bin first on PATH.
+    let out = run_script(
+        &script,
+        &url,
+        &staging,
+        &[&staging.join("bin"), &other],
+        &[("MAKIBA_BASE_PINNED", "9.8.7")],
+    );
+    assert_eq!(out.status.code(), Some(0), "{}", text(&out.stderr));
+    assert_eq!(
+        fs::read_to_string(staging.join("bin/hc")).unwrap(),
+        HERDR_CORE
+    );
+    for name in ["hc", "herdr-core"] {
+        assert_eq!(fs::read_to_string(other.join(name)).unwrap(), OLD);
+    }
 }
