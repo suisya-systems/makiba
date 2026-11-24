@@ -308,6 +308,19 @@ Contrast was computed for every pair the drawing uses, from the drawing's own va
 
 **Rows.** A row is a grid: the mark (18 px), the reference (`project#N`, mono, in a column of 104 px so that the projects line up), the title with its explanation on a second line in `text-3`, and the state with its age at the right (never cut; the state word takes the state's colour only for "needs you" and "did not start"). Rows are divided by hairlines, never boxed; a group of rows has a 12 px heading with its count. A capped list ends with a fold line: the link names how many more, the words after it say what they are.
 
+**The age at the right of a row** is the age of the state the row shows, taken from the same record as the state, never from another. In the rows of a run outside a range ("One-off tasks"), the state word says which record that is:
+
+| State at the right | Its age is counted from |
+|---|---|
+| needs you | `pending[].created_at` of the entry the state names |
+| An anomaly's words (no report, its terminal is gone, reports an error, stopped at a login) | `anomalies[].since` |
+| did not start | `occurred_at` of the `worker_spawn_failed` of the run's newest launch, tied as in 3.5; with no such event the age is left out, not borrowed |
+| checks failed, "N of M failed" | `occurred_at` of the newest `ci_completed` of the head |
+| checks running | `pr_watches[].started_at` |
+| The terminal's own state only (working, idle, blocked, done) | `terminals[].since` of `w-<task_id>` |
+
+The other lists already name their sources: a range's item takes `items[].since` (3.5, "The range, whole"), a review item the newest pull-request event (gap J, section 6), and a row of "Failures" the time of the failure. A run's own start is missing (`runs[].since`, gap A), so no row says how long a run has existed. When the terminal's time adds something to a row whose state comes from another record, it goes into the explanation line as a clock time ("terminal done since 09:44"), not into the age.
+
 **Missing fields.** A field the read surface does not give is drawn as a gap: a dashed, hatched box in mono that names the field ("missing: runs[].title"), never an invented value and never an empty space. A null the record holds on purpose is not a gap: it is said in words ("The secretary wrote no if yes"). The conversation, which the read surface leaves out by design, is folded to its one line (section 2) instead of being drawn as an empty box.
 
 **Empty, loading, error and stale.** Every region has the four, in the same form (the drawing's panel of the states):
@@ -374,8 +387,8 @@ One entry is shown large. Several are a list, oldest first, and the one opened i
 | Failures: a failed launch | A run whose `runs[].status` is `failed` **and** whose `runs[].stage` (its newest launch) is `failed`: the launch never reached `verified`. Neither alone says it. The status alone does not: the anomaly `gone` also sets a run `failed` when a worker that had launched well loses its terminal; its newest launch is then `verified`, and the run is shown once, as that anomaly, never also as "launch failed". The stage alone does not: `makiba down` sets a launch's stage to `failed` while it suspends the run, and writes no `worker_spawn_failed`; a run `suspended` is shown as "suspended" under the runs, not as gone wrong. The reason is shown only from a `worker_spawn_failed` event whose `spawn_id` is the run's newest launch; an older launch's failure is never attached | The status and the stage today. The reason is derivable from the events (3.5): `worker_spawn_failed` carries the task (through its run) and the `spawn_id`, and the newest launch's `spawn_id` is that of the task's newest `run_taken` or `worker_spawned`. A launch that wrote neither cannot be tied, and the row then says "launch failed" with no reason; `runs[].launch_failed_reason` (section 6) would make it sure |
 | Failures: the dispatcher is silent | `makibad.running`, `.heartbeat_at` | Today |
 | Failures: the last scan failed | `next_work.status` `error`, `.error` | Today |
-| Runs outside a range, stopped first | `runs[]`: `task_id`, `kind`, `project`, `status`, `stage`; the worker's state and age from `terminals[]` by the name `w-<task_id>` | Today, without a title and without "since" for the run itself: missing |
-| Order "stopped first" | Failed launch, then an anomaly, then `waiting_person`, then a terminal `blocked` or `idle`, then the rest by age | Computed by the screen from the fields above |
+| Runs outside a range, stopped first | `runs[]`: `task_id`, `kind`, `project`, `status`, `stage`; the worker's state from `terminals[]` by the name `w-<task_id>`; the row's age is that of the state shown (2.5, Rows) | Today, without a title and without "since" for the run itself: missing |
+| Order "stopped first" | Failed launch, then an anomaly, then `waiting_person`, then a terminal `blocked` or `idle`, then the rest by age (the age of 2.5, Rows) | Computed by the screen from the fields above |
 | Closed today | Events `run_closed` since local midnight | Today, from the events |
 | Pull requests: the heads CI is running on | `pr_watches[]`: `repo`, `pr`, `head_oid`, `task_id`, `started_at`. Only watches still `watching` are listed: a watch leaves the list the moment CI concludes | Today |
 | Pull requests: what CI concluded | Not on `status`. The panel keeps its own list from the events: a `pr` event (`opened`, `pushed`) adds or replaces a row by `repo` and `pr`; `ci_completed` of the same `head_oid` sets its conclusion (`status`, `fail_count`, `total_checks`); `pr_merged` marks it merged; `run_closed` of its task with no merge removes it | Today from the events, as a stopgap; missing as a field (section 6), and built into the first version only with that field |
@@ -479,7 +492,7 @@ The fixture: `status.json` is one object of `makiba status --json` and `events.j
 | Part | Field | State |
 | --- | --- | --- |
 | All approved items | `ranges[].items[]` in its order | Given |
-| One-off tasks: id, kind, project, status, the terminal's state and age | `runs[]` with no range item naming its `task_id`; `terminals[]` by `w-<task_id>` | Derivable (no `range_id` on a run: a run is a range's when an item of a range names it) |
+| One-off tasks: id, kind, project, status, the state and its age (2.5, Rows) | `runs[]` with no range item naming its `task_id`; `terminals[]` by `w-<task_id>`; `pending[]`, `anomalies[]`, `pr_watches[]` and the events for the age of the state shown | Derivable (no `range_id` on a run: a run is a range's when an item of a range names it) |
 | One-off tasks: title, start, Issue, range | none | Missing (A). Drawn as a gap |
 | One-off tasks: waiting for you, woken | `runs[].waiting`, `.unparked` | Given |
 | Pull requests: the open ones of runs not closed | The `pr_opened` and `fix_pushed` of tasks in `runs[]`, with what the events say of each head (above) | Derivable from the events; missing as a field (C) |
@@ -571,7 +584,7 @@ Each is a small addition to `status --json` (or `events`) with a row in the tabl
 
 | | Field | For | Without it |
 | --- | --- | --- | --- |
-| A | `runs[].title`, `runs[].since`, `runs[].issue`, `runs[].range_id` | "One-off tasks", the heading of a one-off task's question or failure, the trail's heading | A run outside a range is shown by its task id only, with its terminal's age, and its title is a gap. Whether a run is a range's is read from the ranges' items. |
+| A | `runs[].title`, `runs[].since`, `runs[].issue`, `runs[].range_id` | "One-off tasks", the heading of a one-off task's question or failure, the trail's heading | A run outside a range is shown by its task id only, with the age of its state (2.5, Rows), and its title is a gap. Whether a run is a range's is read from the ranges' items. |
 | B | `next_work.left_out[].title` | "Not ready yet" | The row shows the number and the reason; the title is a gap. |
 | C | `pull_requests[]`: every pull request of a run not closed, with `repo`, `pr`, `title`, `head_oid`, `task_id`, `ci` (`running`, or the newest conclusion at that head, or `not_watched` after a reopen), `state` (`open`, `closed`, `merged`, with `merged_via` and `merged_by`), and the merge state once Issue 387 reads it | Pull requests; telling "checks running" from "checks failed" and "reopened" in "Active now" | `pr_watches[]` lists only watches under way and `items[].stage` `ci` covers three states, so the screen folds `pr_opened`, `fix_pushed`, `ci_watch_started`, `ci_completed`, `ci_watch_failed`, `pr_closed`, `pr_reopened` and `pr_merged` itself. An open pull request of a one-off task has no title. |
 | Issue 387 | The merge state of a pull request (`mergeable`, `mergeStateStatus`: in conflict, behind the base, blocked), read in the same `gh pr view` as Issue 388's state | Pull requests: whether a passed one can be merged as it is | Not shown; a gap on each open pull request. |
@@ -703,7 +716,7 @@ One condition holds for every button: **today the screen can only show the line 
 | "a notice was written to the secretary" (a hand merge, a close) | a `message_sent` by `makibad` with the task, right after the event | Whether it was delivered (D) | see D | Keep, worded as written, not as delivered, until D |
 | Issues to start: not ready, and why | `next_work.left_out[]` (`kind`, `reason`) | The title (B) | `triage.rs` `shown`, S: the scan reads the title already | Keep |
 | Projects not ranked | `next_work.left_out[]` with a null `issue` | - | - | Keep |
-| One-off tasks | `runs[]` not named by a range's item; `terminals[]` for the age | Title, start, Issue (A) | S, as above | Keep |
+| One-off tasks | `runs[]` not named by a range's item; the age from the record of the state shown (2.5, Rows) | Title, start, Issue (A) | S, as above | Keep |
 | Task history: started, began, review rounds, pull request, checks, gate, merged, closed | events `belt_dispatched`, `worker_spawned`, `worker_spawn_verified`, `codex_round_started`, `pr_opened`, `ci_completed`, `acceptance_gate`, `pr_merged`, `run_closed` | "Reported its plan" and "Reported done" when no review answered: `worker_reported` is written only with a review (`door.rs`, `report`); otherwise only a `message_sent` whose kind is not shown | `door.rs` `report`, S: write `worker_reported` for every report, with `review` null when there is none | Keep |
 
 **The conversation, display, keys**
