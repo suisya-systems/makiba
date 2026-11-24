@@ -851,6 +851,7 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `runs[].project` | `projects.slug` |
 | `runs[].status` | `runs.status` (`parked`: waiting only for the person with no terminal, section 5.8, Issue 283) |
 | `runs[].stage` | `run_launch.stage` of the run's newest launch, null without one |
+| `runs[].failed_reason` | `run_launch.failed_reason` of the run's newest launch, null unless it failed (Issue 412) |
 | `runs[].waiting` | null unless the run has an `escalated` pending entry or waits for a landing; then an object of `for` (`person`), `pending` (the ids of those entries) and `why` (the first line of the newest one's question), or, for a design-only run that reported its design (Issue 284), of `for` (`landing`), `issues` (what it waits for) and `why` |
 | `runs[].unparked` | null unless the run is not `parked` and was woken from parking; then an object of `reason`, `detail` and `at` of its newest `run_unparked` |
 | `runs[].notice` | null unless the run is `failed`; then the notice, as `anomalies[].notice` reads it, of the newest of its `worker_spawn_failed` and its `anomaly_raised` of rule `gone` not `suppressed` (Issue 406), null when none was written |

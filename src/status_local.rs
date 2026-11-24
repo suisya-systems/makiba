@@ -224,8 +224,8 @@ fn rows(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> rusqlite::Res
 fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     let mut all = rows(
         conn,
-        "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage, r.title,
-                r.dispatched_at AS since, r.range_id, r.issue_refs FROM runs r
+        "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage, l.failed_reason,
+                r.title, r.dispatched_at AS since, r.range_id, r.issue_refs FROM runs r
          JOIN projects p ON p.id = r.project_id
          LEFT JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
          WHERE r.status NOT IN ('completed', 'abandoned') ORDER BY r.id",
