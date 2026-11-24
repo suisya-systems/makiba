@@ -8,7 +8,6 @@ mod common;
 use common::makibad;
 use makiba::agents::version::{LOWEST, NEWEST_CHECKED, REFUSED, SUPPORTED, check, check_with};
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::process::Command;
 
 fn text((a, b, c): (u64, u64, u64)) -> String {
@@ -77,8 +76,7 @@ fn up(claude_prints: &str) -> (bool, String) {
         ("hc", "exit 0".to_string()),
     ] {
         let p = bin.join(name);
-        fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
-        fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&p, format!("#!/bin/sh\n{body}\n"));
     }
     let r = |p: &str| root.path().join(p);
     let out = makibad::up(root.path())

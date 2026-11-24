@@ -24,7 +24,6 @@ use makiba::spec::Role;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use std::collections::BTreeSet;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -121,8 +120,7 @@ impl Drop for Org {
 }
 
 fn script(path: &Path, body: &str) {
-    std::fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 /// An organization whose agents follow `steps`, with the verification limit `verify_ms`, and a

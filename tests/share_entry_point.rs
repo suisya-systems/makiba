@@ -2,11 +2,12 @@
 //! hooks run, as a link to this binary, and points a link to another file back here. Preparing a
 //! launch of the test agent writes nothing into the share folder.
 
+mod common;
+
 use makiba::base::BaseDenies;
 use makiba::daemon::dispatch::Dispatch;
 use makiba::daemon::prepare::{Places, Prepare};
 use makiba::db::writer::{RunUpsert, StateWriter};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 /// A document launch of `task` by `agent`, taken by a dispatch pass.
@@ -36,8 +37,7 @@ fn a_claude_code_launch_links_the_entry_point_and_the_test_agent_writes_nothing(
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(&claude, "#!/bin/sh\nexit 1\n").unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(&claude, "#!/bin/sh\nexit 1\n");
     // SAFETY: the only test of this binary, and no thread of it has started yet.
     unsafe {
         std::env::set_var("PATH", &bin);

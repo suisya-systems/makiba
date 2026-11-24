@@ -15,7 +15,6 @@ use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once, OnceLock};
@@ -51,8 +50,7 @@ fn init() -> PathBuf {
     INIT.call_once(|| {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let script = home.path().join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         // SAFETY: before this call returns no test of this file has started a thread of its own.
         unsafe {
             std::env::set_var("MAKIBA_GH", &script);

@@ -12,6 +12,8 @@
 //! runners, GitHub's `latest` redirect, the token's right to create a release, a clean host) is checked by
 //! the owner once, as `docs/installing.md` says.
 
+mod common;
+
 use regex::Regex;
 use std::collections::BTreeSet;
 use std::fs;
@@ -66,8 +68,7 @@ fn env() -> Env {
 }
 
 fn write_exec(path: &Path, body: &str) {
-    fs::write(path, body).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, body);
 }
 
 fn sh(args: &[&str]) -> Output {
@@ -130,6 +131,7 @@ impl Env {
         assert_eq!(code(&out), 0, "{}", text(&out));
         let latest = self.p("rel/latest/download");
         fs::create_dir_all(&latest).unwrap();
+        // not an executable: the release manifest, read and never run
         fs::copy(self.manifest(version), latest.join("manifest.json")).unwrap();
     }
 

@@ -17,7 +17,6 @@ use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
 use serde_json::json;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -108,8 +107,7 @@ impl Org {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::create_dir_all(&bin).unwrap();
         let claude = bin.join("claude");
-        std::fs::write(&claude, "#!/bin/sh\nexit 1\n").unwrap();
-        std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&claude, "#!/bin/sh\nexit 1\n");
         let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
             &std::env::var_os("PATH").unwrap_or_default(),
         )))

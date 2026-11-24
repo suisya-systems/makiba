@@ -14,11 +14,12 @@
 //! answers `gh pr view` from a file per pull request, answers the CI reads of any head with one
 //! check still running, logs every call per repository and refuses anything else.
 
+mod common;
+
 use makiba::daemon::belt::Belt;
 use makiba::daemon::prwatch::{self, PrWatch};
 use makiba::db::writer::{NewEvent, StateWriter};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::{Once, OnceLock};
 use std::time::{Duration, Instant};
@@ -73,8 +74,7 @@ fn init() -> PathBuf {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let root = std::fs::canonicalize(home.path()).unwrap();
         let script = root.join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         for d in ["answers", "repos"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }

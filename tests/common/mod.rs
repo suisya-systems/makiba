@@ -3,6 +3,7 @@
 //! when the returned value is dropped.
 #![allow(dead_code)]
 
+pub mod exe;
 pub mod local;
 pub mod makibad;
 
