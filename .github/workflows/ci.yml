@@ -37,8 +37,9 @@ jobs:
   real-base:
     # The whole suite again on the real base (M0-3, #5): `tests/common/mod.rs` starts `hc` in a place of
     # its own when MAKIBA_TEST_REAL_BASE=1. A required check (#81): `tests/real_base_wire.rs` holds the
-    # wire checks that scripts/check-*-wire.sh made by hand. One test thread:
-    # the fixtures share one session per process, so concurrent tests would stop each other's base.
+    # wire checks that scripts/check-*-wire.sh made by hand. Four test threads: each fixture gets a
+    # session and a place of its own (`makiba-test-{pid}-{n}`, `mk-{pid}-{n}`), so tests that run at
+    # once never share a base (#477).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +59,7 @@ jobs:
         run: |
           export HC_BIN="$HOME/.makiba-base/bin/hc"
           "$HC_BIN" --version
-          MAKIBA_TEST_REAL_BASE=1 cargo test --locked -- --test-threads=1
+          MAKIBA_TEST_REAL_BASE=1 cargo test --locked -- --test-threads=4
       - name: The real base is what ran (a missing hc must fail the fixture)
         # A pass is read as success, so a green run cannot tell the stand-in from the real base.
         # With HC_BIN pointing nowhere, only the real base can fail: the fixture's start-up

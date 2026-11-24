@@ -56,7 +56,12 @@ fn a_real_base_runs_in_a_place_of_its_own_under_a_temp_dir() {
     match (&base.place, real_wanted()) {
         (None, false) => {}
         (Some(place), true) => {
-            assert_eq!(place.session, format!("makiba-test-{}", std::process::id()));
+            let prefix = format!("makiba-test-{}-", std::process::id());
+            assert!(
+                place.session.starts_with(&prefix),
+                "{} does not start with {prefix}",
+                place.session
+            );
             let temp = std::env::temp_dir();
             for folder in place.folders() {
                 assert!(
@@ -101,6 +106,72 @@ fn dropping_the_fixture_removes_the_place() {
         base.place.clone()
     };
     if let Some(place) = place {
+        assert!(!place.root.exists(), "{} was left", place.root.display());
+    }
+}
+
+/// Two bases alive at once in one process are apart: each has its own session and place, a
+/// terminal of the same name in each shows only its own line, and both places are gone after.
+#[test]
+fn two_fixtures_alive_at_once_do_not_share_a_base() {
+    let mark = |which: &str| format!("{LINE}-{which}");
+    let own_lines = |base: &dyn Base, t: &TerminalRef, own: &str| {
+        let until = Instant::now() + Duration::from_secs(30);
+        while Instant::now() < until {
+            if let Ok(lines) = base.read(t, 50)
+                && lines.iter().any(|l| l.contains(own))
+            {
+                return lines;
+            }
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        Vec::new()
+    };
+    let apart = |which: &str| {
+        let mut s = spec("fixture-apart");
+        s.argv[2] = format!("echo {}; sleep 60", mark(which));
+        s
+    };
+    let places = {
+        let a = base();
+        let b = base();
+        let ta = a.launch(&apart("a")).unwrap();
+        let tb = b.launch(&apart("b")).unwrap();
+        if let (Some(pa), Some(pb)) = (&a.place, &b.place) {
+            assert_ne!(pa.session, pb.session);
+            assert!(!pa.root.starts_with(&pb.root) && !pb.root.starts_with(&pa.root));
+            let seen_a = own_lines(&*a, &ta, &mark("a"));
+            let seen_b = own_lines(&*b, &tb, &mark("b"));
+            assert!(!seen_a.is_empty(), "a did not show its own line");
+            assert!(!seen_b.is_empty(), "b did not show its own line");
+            assert!(
+                !seen_a.iter().any(|l| l.contains(&mark("b"))),
+                "a showed b's line: {seen_a:?}"
+            );
+            assert!(
+                !seen_b.iter().any(|l| l.contains(&mark("a"))),
+                "b showed a's line: {seen_b:?}"
+            );
+        } else {
+            assert!(wait_for_line(&*a, &ta), "a's line was not read");
+            assert!(wait_for_line(&*b, &tb), "b's line was not read");
+        }
+        // Stopping one base leaves the other running: its place stays and its terminal still reads.
+        a.end(&ta).unwrap();
+        let place_a = a.place.clone();
+        drop(a);
+        if let (Some(pa), Some(pb)) = (&place_a, &b.place) {
+            assert!(!pa.root.exists(), "{} was left", pa.root.display());
+            assert!(pb.root.exists(), "dropping a removed b's place");
+            assert!(
+                !own_lines(&*b, &tb, &mark("b")).is_empty(),
+                "b no longer shows its line after a was dropped"
+            );
+        }
+        b.end(&tb).unwrap();
+        [place_a, b.place.clone()]
+    };
+    for place in places.into_iter().flatten() {
         assert!(!place.root.exists(), "{} was left", place.root.display());
     }
 }
