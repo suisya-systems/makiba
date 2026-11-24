@@ -19,7 +19,11 @@ bash scripts/acceptance-check.sh <base sha> <head sha>
 
 The base may be merged into the branch after the test commit; a merge that brings in anything not in the base fails. A base merge counts in rule 4 only for files it leaves different from every parent (its own conflict resolution). Renames count as both paths.
 
-No trailer: the job passes and prints `ACCEPTANCE: none`. The last line of the log is always `ACCEPTANCE: pass`, `none` or `fail`. Tests: [`tests/test_acceptance_check.py`](../tests/test_acceptance_check.py).
+No trailer: the job passes and prints `ACCEPTANCE: none`. On a pull request the last line of the log is always `ACCEPTANCE: pass`, `none` or `fail`. Tests: [`tests/test_acceptance_check.py`](../tests/test_acceptance_check.py).
+
+## On the merge queue's commit
+
+`ci.yml` also runs on `merge_group`, the event of GitHub's merge queue, so `tests`, `lint`, `real-base` and `acceptance` each report on the commit the queue would land. There `acceptance` runs no test and reads no pull request payload (one step, which reads only the runner's environment): it succeeds and prints `ACCEPTANCE: judged at the pull request's head (...)`. The declared test is judged on the pull request side, by this job on the pull request and by makiba's gate before the enqueue ([`docs/design/merge-wait.md`](design/merge-wait.md), Q2, answered; Issue 401). Every other step of the job runs on `pull_request` alone, unchanged; on `push` the job is skipped. Test: [`tests/test_ci_merge_group.py`](../tests/test_ci_merge_group.py), which also shows that it fails when `merge_group` is dropped or when `acceptance` there reads the payload or fails.
 
 ## Rule 3
 
@@ -50,6 +54,7 @@ Branch protection on `main`: require the checks `acceptance`, `tests` and `lint`
 ## Known limits
 
 - A pull request without a declaration passes (`none`).
+- On the merge queue's commit the declared test is not run again (above). Another entry in the queue can drop a declared test from discovery and the queue's `tests` and `real-base` still pass, so the commit that lands is not shown to run the declared test. Accepted by the owner (merge-wait.md, Q2), not fixed.
 - A test that needs a new dev-dependency cannot add it in the test commit (rule 2), so it fails to compile there for that reason and counts as failing; the reviewer sees it in the log.
 - `rust-toolchain.toml` is not protected by rule 4; a change to it after the test commit is a review matter.
 - The checker is taken from the base revision, but the workflow file is read from the pull request, so a PR that edits the `acceptance` job itself is not stopped by the job. Review of `.github/` changes stays with the person.
