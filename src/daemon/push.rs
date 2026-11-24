@@ -22,7 +22,9 @@
 //! leaves nothing behind), and pushes the result when origin does not have it, never forced. The
 //! worktree is not touched: the worker brings the new head in by a fast-forward of its own. Done:
 //! `branch_updated` with the old and new head, or, when nothing was merged or pushed, a notice
-//! naming origin's head. A restart runs it again. One job runs per worktree at a time.
+//! naming origin's head. A restart runs it again. One job runs per worktree and per project's
+//! repository at a time (Issue 369): two jobs of one project would fetch the same
+//! `refs/remotes/origin/<base>` at once, and git's ref lock lets only one through.
 
 use super::gate;
 use super::prepare::Places;
@@ -137,6 +139,8 @@ pub struct Push {
     running: HashSet<i64>,
     /// Their worktrees: one job per worktree at a time.
     busy: HashSet<String>,
+    /// Their projects: one job per project's repository at a time (Issue 369).
+    projects: HashSet<String>,
     tx: Sender<(Job, Outcome)>,
     rx: Receiver<(Job, Outcome)>,
 }
@@ -602,6 +606,7 @@ impl Push {
             places,
             running: HashSet::new(),
             busy: HashSet::new(),
+            projects: HashSet::new(),
             tx,
             rx,
         }
@@ -616,6 +621,7 @@ impl Push {
                     if let Some(wt) = &j.worktree {
                         self.busy.remove(wt);
                     }
+                    self.projects.remove(&j.project);
                 }
                 Err(e) => {
                     eprintln!(
@@ -664,6 +670,7 @@ impl Push {
         for mut j in jobs {
             if self.running.contains(&j.command)
                 || j.worktree.as_ref().is_some_and(|wt| self.busy.contains(wt))
+                || self.projects.contains(&j.project)
             {
                 continue;
             }
@@ -673,6 +680,7 @@ impl Push {
             if let Some(wt) = &j.worktree {
                 self.busy.insert(wt.clone());
             }
+            self.projects.insert(j.project.clone());
             let (places, tx) = (self.places.clone(), self.tx.clone());
             // ponytail: no time limit on a push; a hung remote leaves the command `accepted`
             // until makibad restarts. Add a timeout if hosts show it.
