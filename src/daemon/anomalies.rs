@@ -504,7 +504,8 @@ fn run_scene(w: &StateWriter, run: i64) -> Result<RunScene> {
 /// `worker_spawned` carries `prompt` `resume` (a launch recorded before Issue 426 carries none);
 /// the turn ends since that launch are none, or exactly one, turn 1 of that launch's terminal; and
 /// the run's newest report (by event) among start, done and blocked is done or blocked. Any other
-/// silent turn still shows (G7).
+/// silent turn still shows (G7). A run with no report yet makes the last test NULL, which counts
+/// as false: it must not fail the pass of every run.
 fn resumed_report_stands(w: &StateWriter, run: i64, since: i64) -> Result<bool> {
     let at = ms("occurred_at");
     let stands: bool = w.conn().query_row(
@@ -515,7 +516,7 @@ fn resumed_report_stands(w: &StateWriter, run: i64, since: i64) -> Result<bool> 
                                    json_extract(payload_json, '$.turn') AS turn
                             FROM events
                             WHERE run_id = ?1 AND kind = 'terminal_turn' AND {at} >= ?2)
-             SELECT
+             SELECT COALESCE(
                (SELECT json_extract(payload_json, '$.prompt') FROM events
                 WHERE run_id = ?1 AND kind = 'worker_spawned'
                   AND json_extract(payload_json, '$.spawn_id') IS (SELECT spawn_id FROM newest)
@@ -527,7 +528,8 @@ fn resumed_report_stands(w: &StateWriter, run: i64, since: i64) -> Result<bool> 
                AND (SELECT m.kind FROM messages m JOIN events e ON e.id = m.event_id
                     WHERE m.run_id = ?1
                       AND m.kind IN ('report_start', 'report_done', 'report_blocked')
-                    ORDER BY e.id DESC LIMIT 1) IN ('report_done', 'report_blocked')"
+                    ORDER BY e.id DESC LIMIT 1) IN ('report_done', 'report_blocked'),
+               0)"
         ),
         params![run, since],
         |r| r.get(0),
