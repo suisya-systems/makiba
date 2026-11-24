@@ -322,6 +322,44 @@ fn the_uses_are_listed_once_and_not_empty() {
     }
 }
 
+/// `makiba down --stop-base` calls `server.stop` with no params and reads no field of its result
+/// (`src/base/herdr.rs`), so the method is listed and a release without it, or one that makes it
+/// take a param makiba does not give, is named (Issue 421).
+#[test]
+fn server_stop_is_listed_and_checked() {
+    let stop = USES.iter().find(|u| u.method == "server.stop");
+    let stop = stop.expect("server.stop is listed in src/base/uses.rs");
+    assert!(stop.params.is_empty(), "makiba gives server.stop no param");
+    assert!(
+        stop.result.is_empty(),
+        "makiba reads no field of server.stop"
+    );
+
+    let def = vendored();
+    let mut without = def.clone();
+    methods_mut(&mut without).retain(|m| m["name"] != "server.stop");
+    let found = problems(&without, USES);
+    let want = "server.stop: the method is not in the definition".to_string();
+    assert!(found.contains(&want), "want {want:?}; got {found:?}");
+
+    let mut with_param = def.clone();
+    for m in methods_mut(&mut with_param) {
+        if m["name"] == "server.stop" {
+            m["params"].as_array_mut().unwrap().push(json!({
+                "name": "force",
+                "required": true,
+                "schema": {"type": "boolean"}
+            }));
+        }
+    }
+    let found = problems(&with_param, USES);
+    let want = "server.stop: param force is required and makiba does not give it".to_string();
+    assert!(found.contains(&want), "want {want:?}; got {found:?}");
+
+    let found = problems(&def, USES);
+    assert!(found.is_empty(), "the pinned release holds: {found:?}");
+}
+
 // ---- the reader itself, on a small definition ---------------------------------------------------
 
 fn small() -> Value {
