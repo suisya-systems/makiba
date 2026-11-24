@@ -1942,7 +1942,10 @@ fn scout_candidates(c: &Connection) -> Result<Vec<Candidate>> {
 
 /// The attempts of `repo#pr` at `head` already concluded on, by run, from the ledger: the
 /// `run_attempts` of every `ci_completed` of the head, and the `run_attempt` of every `ci_rerun`
-/// makibad saw of it that has a `ci_completed` of the head after it.
+/// makibad saw of it whose activation concluded: a `ci_completed` of the head after it with no
+/// other activation of the head (`ci_watch_started` after the take-up's own) begun between. A
+/// take-up that ended unreadable and was then watched again by `pr pushed` has not concluded on
+/// its attempt, whatever that later watch writes.
 fn consumed_attempts(c: &Connection, repo: &str, pr: i64, head: &str) -> Result<HashMap<i64, i64>> {
     let mut out: HashMap<i64, i64> = HashMap::new();
     let mut put = |run: i64, attempt: i64| {
@@ -1982,9 +1985,17 @@ fn consumed_attempts(c: &Connection, repo: &str, pr: i64, head: &str) -> Result<
            AND json_extract(r.payload_json, '$.run_id') IS NOT NULL
            AND json_extract(r.payload_json, '$.run_attempt') IS NOT NULL
            AND EXISTS (SELECT 1 FROM events e WHERE e.kind = 'ci_completed' AND e.id > r.id
-                       AND {})",
+                       AND {}
+                       AND NOT EXISTS (
+                         SELECT 1 FROM events s WHERE s.kind = 'ci_watch_started'
+                           AND s.id < e.id AND {}
+                           AND s.id > (SELECT min(s0.id) FROM events s0
+                                       WHERE s0.kind = 'ci_watch_started' AND s0.id > r.id
+                                         AND {})))",
         of_head("r"),
-        of_head("e")
+        of_head("e"),
+        of_head("s"),
+        of_head("s0")
     ))?;
     let seen: Vec<(i64, i64)> = q
         .query_map(params![repo, pr, head], |r| Ok((r.get(0)?, r.get(1)?)))?
@@ -3054,5 +3065,66 @@ esac"#,
         )
         .unwrap();
         assert_eq!(ended, 1, "the watching row of the current head ended");
+    }
+
+    /// An attempt makibad took up is concluded on only by its own activation (Issue 427): a
+    /// take-up that ended unreadable, then a `pr pushed` of the same head whose plain watch
+    /// concluded failed with the older baseline, leaves the attempt newer.
+    #[test]
+    fn a_scouted_attempt_is_consumed_only_by_its_own_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let at = json!({"repo": "o/r", "pr": 5, "head_oid": "abc"});
+        let with = |extra: Value| {
+            let mut v = at.clone();
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let failed = |runs: Value| with(json!({"status": "failed", "run_attempts": runs}));
+        let seen = |n: i64| {
+            with(json!({"watch_id": 1, "started_at": "s", "run_id": 11, "run_attempt": n}))
+        };
+        let consumed = || consumed_attempts(w.conn(), "O/r", 5, "abc").unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            None,
+            failed(json!({"11": 1})),
+        );
+        event(&w, "ci_rerun", "makibad", None, seen(2));
+        event(&w, "ci_watch_started", "makibad", None, at.clone());
+        event(
+            &w,
+            "ci_watch_failed",
+            "makibad",
+            None,
+            with(json!({"reason": "gh_unreadable"})),
+        );
+        event(&w, "ci_watch_started", "makibad", None, at.clone());
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            None,
+            failed(json!({"11": 1})),
+        );
+        assert_eq!(consumed().get(&11), Some(&1));
+        assert!(newer(&consumed(), 11, 2));
+
+        event(&w, "ci_rerun", "makibad", None, seen(2));
+        event(&w, "ci_watch_started", "makibad", None, at.clone());
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            None,
+            with(json!({"status": "failed"})),
+        );
+        assert_eq!(consumed().get(&11), Some(&2));
+        assert!(!newer(&consumed(), 11, 2));
+        assert!(newer(&consumed(), 11, 3));
     }
 }
