@@ -2,6 +2,12 @@
 # Installs the pinned herdr-core release (PINNED in src/base/version.rs) into PREFIX/bin, in the
 # base's own layout: the archive's herdr-core as PREFIX/bin/herdr-core, and PREFIX/bin/hc a link to it.
 #   bash scripts/install-base.sh PREFIX
+# MAKIBA_BASE_PINNED, when set, is the version instead, and src/base/version.rs is not read (an
+# installed makiba has no checkout); a value that is not a plain major.minor.patch is refused
+# before anything is fetched. To stage a new base beside the person's install, the upgrade verb
+# runs this script with HC_BIN removed, PATH = <staging>/bin: followed by the person's PATH,
+# MAKIBA_BASE_PINNED = its own PINNED, and HERDR_RELEASES_URL passed on when set; the check after
+# installing then finds the staged files first and exits 0.
 # Reads <HERDR_RELEASES_URL or https://releases.herdr.dev>/core/<version>/manifest.json, picks this
 # machine's target, downloads its url (a tar.gz) with curl, and installs nothing unless the archive's
 # SHA-256 equals the manifest's. A herdr-core or hc already in PREFIX/bin is replaced; one that is a
@@ -17,8 +23,14 @@ set -eu
 [ $# -eq 1 ] || { echo "usage: install-base.sh PREFIX" >&2; exit 2; }
 prefix=$1
 here=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-version=$(sed -n 's/^pub const PINNED: &str = "\(.*\)";$/\1/p' "$here/../src/base/version.rs")
-[ -n "$version" ] || { echo "install-base: no PINNED version in src/base/version.rs" >&2; exit 1; }
+if [ "${MAKIBA_BASE_PINNED+set}" = set ]; then
+  version=$MAKIBA_BASE_PINNED
+  [[ $version =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+    || { echo "install-base: MAKIBA_BASE_PINNED is $version, not a plain major.minor.patch version; nothing installed" >&2; exit 1; }
+else
+  version=$(sed -n 's/^pub const PINNED: &str = "\(.*\)";$/\1/p' "$here/../src/base/version.rs")
+  [ -n "$version" ] || { echo "install-base: no PINNED version in src/base/version.rs" >&2; exit 1; }
+fi
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) target=linux-x86_64 ;;
