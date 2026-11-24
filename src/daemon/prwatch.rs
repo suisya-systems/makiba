@@ -31,6 +31,16 @@
 //! intervals, and its notice says whether GitHub lets the pull request merge now (behind its base,
 //! a conflict, blocked, a draft, or not known yet). A later change of the merge state of a head
 //! whose CI passed (main moved under it) is told once per change.
+//!
+//! The attempt scout (Issue 427): a rerun nobody recorded with `pr rerun`. A failed result
+//! carries the attempts of the head's workflow runs it concluded on (`run_attempts`, read before
+//! the checks are read again). A candidate is a `completed` or `failed` row of the head recorded
+//! last for its pull request whose newest `ci_completed` is failed, of a run that is followed or
+//! is `failed` and closed less than a day ago, whose pull request has no `pr_merged` and is not
+//! read closed. Each candidate has one scout, which reads the runs each interval and brings back
+//! an attempt newer than every one concluded on (read from the ledger). The loop takes the row
+//! up as `pr rerun` does (`take_up`), after checking the same rule again in that transaction;
+//! the rerun's poller then writes the result.
 
 use super::belt::{AWAITED, current_pr_sql, is_current_pr_sql, pr_closed_sql};
 use super::gh::{Failure, GhError, SLICE, run_gh};
@@ -206,6 +216,90 @@ fn runs_going(
     .map(|text| text.lines().any(run_unfinished))
 }
 
+/// The workflow runs of `head` (Issue 427): `(run id, run_attempt, status)` of each.
+fn run_attempts(
+    gh: &str,
+    repo: &str,
+    head: &str,
+    cancel: &AtomicBool,
+) -> std::result::Result<Vec<(i64, i64, String)>, GhError> {
+    let text = run_gh(
+        gh,
+        &[
+            "api",
+            "--paginate",
+            &format!("repos/{repo}/actions/runs?head_sha={head}&per_page=100"),
+            "--jq",
+            ".workflow_runs[] | {id, run_attempt, status}",
+        ],
+        cancel,
+    )?;
+    Ok(json_lines(&text)?
+        .iter()
+        .filter_map(|v| {
+            Some((
+                v["id"].as_i64()?,
+                v["run_attempt"].as_i64()?,
+                v["status"].as_str().unwrap_or("").to_string(),
+            ))
+        })
+        .collect())
+}
+
+/// The baseline a failed result carries (Issue 427): `{"<run id>": n}`, n the run's attempt when
+/// it has finished and the one before it when it has not (that attempt is not concluded on yet).
+fn baseline_of(runs: &[(i64, i64, String)]) -> Value {
+    let mut out = serde_json::Map::new();
+    for (id, attempt, status) in runs {
+        let n = if run_unfinished(status) {
+            attempt - 1
+        } else {
+            *attempt
+        };
+        let key = id.to_string();
+        let max = out
+            .get(&key)
+            .and_then(Value::as_i64)
+            .map_or(n, |m| m.max(n));
+        out.insert(key, json!(max));
+    }
+    Value::Object(out)
+}
+
+/// What the reading after a failed conclusion found.
+enum AfterFailed {
+    /// The checks read again are decided failed: that summary, with the runs read before them
+    /// (`None`: unreadable) and the entries it was read from.
+    Failed(Summary, Option<Value>, Vec<Value>),
+    /// The checks read again are not a decided failure: the poll goes on.
+    GoOn,
+    Cancelled,
+}
+
+/// After a poller concluded failed: the head's runs (S), and only then its checks again (C), so
+/// an attempt that finished between the two readings is either in S or changes C.
+fn after_failed(gh: &str, repo: &str, head: &str, cancel: &AtomicBool) -> AfterFailed {
+    let runs = match run_attempts(gh, repo, head, cancel) {
+        Err(GhError::Cancelled) => return AfterFailed::Cancelled,
+        // A list with no run carries nothing: a run not named is at its first attempt.
+        Err(_) => None,
+        Ok(runs) if runs.is_empty() => None,
+        Ok(runs) => Some(baseline_of(&runs)),
+    };
+    match observe(gh, repo, head, cancel) {
+        Err(GhError::Cancelled) => AfterFailed::Cancelled,
+        Err(_) => AfterFailed::GoOn,
+        Ok(entries) => {
+            let s = summarize(&entries);
+            if s.status == "failed" && s.pending_count == 0 && s.total > 0 {
+                AfterFailed::Failed(s, runs, entries)
+            } else {
+                AfterFailed::GoOn
+            }
+        }
+    }
+}
+
 // ---- one poller --------------------------------------------------------------------------------
 
 #[derive(Debug, PartialEq, Eq)]
@@ -224,6 +318,13 @@ struct Done {
     outcome: Outcome,
     /// What a failed result's notice carries of the failed jobs' logs (Issue 327).
     excerpt: Option<String>,
+}
+
+/// What a poller's thread sends: its result and, for a failed one, the attempts of the head's
+/// workflow runs that result concluded on (Issue 427).
+struct Finished {
+    done: Done,
+    run_attempts: Option<Value>,
 }
 
 struct Poller {
@@ -264,6 +365,36 @@ fn poll_activation(
         poll_rerun(gh, repo, head, interval, budget, cancel, seen)
     } else {
         poll_into(gh, repo, head, interval, budget, cancel, seen)
+    }
+}
+
+/// `poll_activation` until a result: a failed conclusion is kept only once `after_failed` reads
+/// the checks decided failed again, with the runs it concluded on (Issue 427); otherwise the
+/// poll goes on. A failed result leaves in `seen` the entries of that second reading, which it
+/// was concluded from (Issue 327). `None`: cancelled.
+fn poll_finished(
+    gh: &str,
+    repo: &str,
+    head: &str,
+    (interval, budget): (Duration, Duration),
+    rerun: bool,
+    cancel: &AtomicBool,
+    seen: &mut Vec<Value>,
+) -> Option<(Outcome, Option<Value>)> {
+    loop {
+        match poll_activation(gh, repo, head, (interval, budget), rerun, cancel, seen)? {
+            Outcome::Concluded(s, attempts) if s.status == "failed" => {
+                match after_failed(gh, repo, head, cancel) {
+                    AfterFailed::Failed(s, runs, entries) => {
+                        *seen = entries;
+                        return Some((Outcome::Concluded(s, attempts), runs));
+                    }
+                    AfterFailed::GoOn => sleep_unless(cancel, interval),
+                    AfterFailed::Cancelled => return None,
+                }
+            }
+            other => return Some((other, None)),
+        }
     }
 }
 
@@ -818,11 +949,17 @@ pub struct PrWatch {
     interval: Duration,
     budget: Duration,
     pollers: HashMap<i64, Poller>,
-    tx: Sender<Done>,
-    rx: Receiver<Done>,
+    tx: Sender<Finished>,
+    rx: Receiver<Finished>,
     /// Results read from the pollers and not written yet, with the time the loop received each:
     /// kept until their transaction commits (a passed one also until its merge state is read).
-    queued: Vec<(Done, Instant)>,
+    queued: Vec<(Finished, Instant)>,
+    /// The attempt scouts (Issue 427), by watch: one for each candidate (`scout_candidates`).
+    scouts: HashMap<i64, Scout>,
+    seen_tx: Sender<Seen>,
+    seen_rx: Receiver<Seen>,
+    /// Newer attempts seen and not written yet: kept until their transaction commits.
+    seen_queued: Vec<Seen>,
     /// The state pollers, by task (Issue 388).
     states: HashMap<String, StatePoller>,
     state_tx: Sender<StateDone>,
@@ -847,6 +984,7 @@ impl PrWatch {
         let (tx, rx) = channel();
         let (state_tx, state_rx) = channel();
         let (merge_tx, merge_rx) = channel();
+        let (seen_tx, seen_rx) = channel();
         PrWatch {
             gh: super::gh::program(),
             interval: millis_env("MAKIBA_PRWATCH_INTERVAL_MS", DEFAULT_INTERVAL),
@@ -855,6 +993,10 @@ impl PrWatch {
             tx,
             rx,
             queued: Vec::new(),
+            scouts: HashMap::new(),
+            seen_tx,
+            seen_rx,
+            seen_queued: Vec::new(),
             states: HashMap::new(),
             state_tx,
             state_rx,
@@ -867,8 +1009,9 @@ impl PrWatch {
         }
     }
 
-    /// Write what the pollers found, end the watches of merged pull requests, then give every
-    /// `watching` row a poller of its activation and every followed pull request a state poller.
+    /// Write what the pollers found, then the newer attempts the scouts saw, end the watches of
+    /// merged pull requests, then give every `watching` row a poller of its activation, every
+    /// candidate an attempt scout and every followed pull request a state poller.
     pub fn pass(&mut self, w: &StateWriter) -> Result<()> {
         let now = Instant::now();
         while let Ok(d) = self.rx.try_recv() {
@@ -905,12 +1048,13 @@ impl PrWatch {
         };
         self.told.retain(|k, _| still(k));
         self.ci_seen.retain(|k, _| still(k));
-        for (d, received) in std::mem::take(&mut self.queued) {
-            let Some((sentence, class)) = self.merge_of(&d, received, &follows) else {
-                self.queued.push((d, received));
+        for (f, received) in std::mem::take(&mut self.queued) {
+            let d = &f.done;
+            let Some((sentence, class)) = self.merge_of(d, received, &follows) else {
+                self.queued.push((f, received));
                 continue;
             };
-            match apply_with(w, &d, Some(&sentence)) {
+            match apply_with(w, d, Some(&sentence), f.run_attempts.as_ref()) {
                 Ok(()) => {
                     if let Some(class) = class {
                         let key = told_key(&d.repo, d.pr, &d.head);
@@ -925,8 +1069,22 @@ impl PrWatch {
                 }
                 Err(e) => {
                     eprintln!("makibad: pr watch {}: cannot record its result: {e}", d.id);
-                    self.queued.push((d, received));
+                    self.queued.push((f, received));
                 }
+            }
+        }
+        // A newer attempt a scout saw (Issue 427), after the results: one written above may
+        // have changed what is a candidate, which `apply_seen` reads again.
+        while let Ok(s) = self.seen_rx.try_recv() {
+            self.seen_queued.push(s);
+        }
+        for s in std::mem::take(&mut self.seen_queued) {
+            if let Err(e) = apply_seen(w, &s) {
+                eprintln!(
+                    "makibad: pr watch {}: cannot take up the newer attempt {} of run {}: {e}",
+                    s.id, s.run_attempt, s.run_id
+                );
+                self.seen_queued.push(s);
             }
         }
         for r in newest_per_task(fresh) {
@@ -979,7 +1137,7 @@ impl PrWatch {
                     let (id, stamp, repo, pr, head) = done;
                     let mut seen = Vec::new();
                     let run = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        poll_activation(
+                        poll_finished(
                             &gh,
                             &repo,
                             &head,
@@ -989,10 +1147,10 @@ impl PrWatch {
                             &mut seen,
                         )
                     }));
-                    let outcome = match run {
+                    let (outcome, run_attempts) = match run {
                         Ok(Some(o)) => o,
                         Ok(None) => return,
-                        Err(_) => Outcome::Failed("poller_crashed".into()),
+                        Err(_) => (Outcome::Failed("poller_crashed".into()), None),
                     };
                     // The failed jobs' logs, read here and never on the loop's thread (Issue 327).
                     let excerpt = match &outcome {
@@ -1009,14 +1167,17 @@ impl PrWatch {
                         }
                         _ => None,
                     };
-                    let _ = tx.send(Done {
-                        id,
-                        stamp,
-                        repo,
-                        pr,
-                        head,
-                        outcome,
-                        excerpt,
+                    let _ = tx.send(Finished {
+                        done: Done {
+                            id,
+                            stamp,
+                            repo,
+                            pr,
+                            head,
+                            outcome,
+                            excerpt,
+                        },
+                        run_attempts,
                     });
                 })
             };
@@ -1029,7 +1190,60 @@ impl PrWatch {
                 },
             );
         }
+        self.scouts(w)?;
         self.state_pollers(w)
+    }
+
+    /// Every candidate (`scout_candidates`) has one attempt scout of its `finished_at`: one of a
+    /// row no longer a candidate, or of another `finished_at`, is stopped, and so is one that has
+    /// ended with nothing of it queued (it crashed, or what it saw was dropped); the missing ones
+    /// are started, each with the baseline read from the ledger now.
+    fn scouts(&mut self, w: &StateWriter) -> Result<()> {
+        // What a scout sent since the pass read the channel is its; written on the next pass.
+        while let Ok(s) = self.seen_rx.try_recv() {
+            self.seen_queued.push(s);
+        }
+        let now = scout_candidates(w.conn())?;
+        let ids: Vec<i64> = self.scouts.keys().copied().collect();
+        for id in ids {
+            let keep = self.scouts.get(&id).is_some_and(|s| {
+                now.iter()
+                    .any(|c| c.id == id && c.finished_at == s.finished_at)
+                    && (!s.handle.as_ref().is_none_or(JoinHandle::is_finished)
+                        || self.seen_queued.iter().any(|q| q.id == id))
+            });
+            if !keep && let Some(mut s) = self.scouts.remove(&id) {
+                s.stop();
+            }
+        }
+        for c in now {
+            if self.scouts.contains_key(&c.id) {
+                continue;
+            }
+            let consumed = consumed_attempts(w.conn(), &c.repo, c.pr, &c.head)?;
+            let cancel = Arc::new(AtomicBool::new(false));
+            let handle = {
+                let (prog, tx) = (self.gh.clone(), self.seen_tx.clone());
+                let (interval, c, cancel) = (self.interval, c.clone(), Arc::clone(&cancel));
+                std::thread::spawn(move || {
+                    let seen = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        scout(&prog, &c, &consumed, interval, &cancel)
+                    }));
+                    if let Ok(Some(seen)) = seen {
+                        let _ = tx.send(seen);
+                    }
+                })
+            };
+            self.scouts.insert(
+                c.id,
+                Scout {
+                    finished_at: c.finished_at,
+                    cancel,
+                    handle: Some(handle),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// The merge sentence of a result, once it can be written, and the class it tells (none for a
@@ -1126,11 +1340,17 @@ impl Drop for PrWatch {
         for p in self.states.values() {
             p.cancel.store(true, Ordering::SeqCst);
         }
+        for s in self.scouts.values() {
+            s.cancel.store(true, Ordering::SeqCst);
+        }
         for p in self.pollers.values_mut() {
             p.stop();
         }
         for p in self.states.values_mut() {
             p.stop();
+        }
+        for s in self.scouts.values_mut() {
+            s.stop();
         }
     }
 }
@@ -1138,13 +1358,19 @@ impl Drop for PrWatch {
 /// `apply_with` with no merge sentence.
 #[cfg(test)]
 fn apply(w: &StateWriter, d: &Done) -> Result<()> {
-    apply_with(w, d, None)
+    apply_with(w, d, None, None)
 }
 
 /// Write one result: the row, the event and the notice, together, with `merge` (Issue 387)
-/// appended to the notice of a passed result. Only the activation the poller was started for may
-/// conclude the row, so a late result of a superseded watch writes nothing.
-fn apply_with(w: &StateWriter, d: &Done, merge: Option<&str>) -> Result<()> {
+/// appended to the notice of a passed result, and `run_attempts` (Issue 427) in the event of a
+/// failed one. Only the activation the poller was started for may conclude the row, so a late
+/// result of a superseded watch writes nothing.
+fn apply_with(
+    w: &StateWriter,
+    d: &Done,
+    merge: Option<&str>,
+    run_attempts: Option<&Value>,
+) -> Result<()> {
     w.transaction(|w| {
         let (status, conclusion) = match &d.outcome {
             Outcome::Concluded(s, _) => ("completed", Some(s.status)),
@@ -1168,7 +1394,7 @@ fn apply_with(w: &StateWriter, d: &Done, merge: Option<&str>) -> Result<()> {
             )
             .optional()?;
         let short = &d.head[..d.head.len().min(7)];
-        let (kind, payload, body) = match &d.outcome {
+        let (kind, mut payload, body) = match &d.outcome {
             Outcome::Concluded(s, attempts) => (
                 "ci_completed",
                 json!({"repo": d.repo, "pr": d.pr, "head_oid": d.head, "status": s.status,
@@ -1194,6 +1420,11 @@ fn apply_with(w: &StateWriter, d: &Done, merge: Option<&str>) -> Result<()> {
                 ),
             ),
         };
+        if let (Outcome::Concluded(s, _), Some(runs)) = (&d.outcome, run_attempts)
+            && s.status == "failed"
+        {
+            payload["run_attempts"] = runs.clone();
+        }
         w.append_event(&NewEvent {
             kind,
             actor: Some("makibad"),
@@ -1947,39 +2178,345 @@ pub fn rerun(
             // The head recorded last always has its row taken up; kept for a row edited by hand.
             return Ok(Err(RerunRefused::NotCurrent(head.to_string())));
         }
-        let run_id: Option<i64> = c
-            .query_row("SELECT id FROM runs WHERE task_id = ?1", [task], |r| {
-                r.get(0)
-            })
-            .optional()?;
-        c.execute(
-            "UPDATE pr_watches SET status = 'watching', conclusion = NULL, finished_at = NULL,
-               run_id = ?2, started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = ?1",
-            params![id, run_id],
-        )?;
-        let stamp: String = c.query_row(
-            "SELECT started_at FROM pr_watches WHERE id = ?1",
-            [id],
-            |r| r.get(0),
-        )?;
-        let watched = json!({"repo": repo, "pr": pr, "head_oid": head});
-        let mut payload = watched.clone();
-        payload["watch_id"] = json!(id);
-        payload["started_at"] = json!(stamp);
-        for (kind, payload) in [("ci_rerun", &payload), ("ci_watch_started", &watched)] {
-            w.append_event(&NewEvent {
-                kind,
-                actor: Some("makibad"),
-                payload: Some(payload),
-                run_task_id: Some(task),
-                ..Default::default()
-            })?;
+        Ok(Ok(take_up(w, id, task, repo, pr, head, None)?))
+    })
+}
+
+/// The take-up of `pr rerun` and of a newer attempt seen (Issue 427), in the caller's
+/// transaction: the row `id` `watching` as a new activation, and its `ci_rerun` (with the watch's
+/// id and its new `started_at`, and the run and attempt `seen` when makibad saw it) and
+/// `ci_watch_started`.
+fn take_up(
+    w: &StateWriter,
+    id: i64,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    seen: Option<(i64, i64)>,
+) -> Result<Registered> {
+    let c = w.conn();
+    let run_id: Option<i64> = c
+        .query_row("SELECT id FROM runs WHERE task_id = ?1", [task], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    c.execute(
+        "UPDATE pr_watches SET status = 'watching', conclusion = NULL, finished_at = NULL,
+           run_id = ?2, started_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+         WHERE id = ?1",
+        params![id, run_id],
+    )?;
+    let stamp: String = c.query_row(
+        "SELECT started_at FROM pr_watches WHERE id = ?1",
+        [id],
+        |r| r.get(0),
+    )?;
+    let watched = json!({"repo": repo, "pr": pr, "head_oid": head});
+    let mut payload = watched.clone();
+    payload["watch_id"] = json!(id);
+    payload["started_at"] = json!(stamp);
+    if let Some((run, attempt)) = seen {
+        payload["run_id"] = json!(run);
+        payload["run_attempt"] = json!(attempt);
+    }
+    for (kind, payload) in [("ci_rerun", &payload), ("ci_watch_started", &watched)] {
+        w.append_event(&NewEvent {
+            kind,
+            actor: Some("makibad"),
+            payload: Some(payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })?;
+    }
+    Ok(Registered {
+        watch_id: id,
+        status: "watching".into(),
+    })
+}
+
+// ---- the attempt scout (Issue 427) -------------------------------------------------------------
+
+/// A row whose newer attempt would be taken up: decided (`completed`) or unreadable (`failed`),
+/// of the head recorded last for its pull request, whose newest `ci_completed` is `failed`, of a
+/// scouted run (`scouted_runs`). Keyed by `id` and `finished_at`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Candidate {
+    id: i64,
+    finished_at: String,
+    repo: String,
+    pr: i64,
+    head: String,
+    /// The task that follows the pull request.
+    task: String,
+}
+
+/// A newer attempt a scout saw, for the candidate it was started for.
+struct Seen {
+    id: i64,
+    finished_at: String,
+    repo: String,
+    pr: i64,
+    head: String,
+    run_id: i64,
+    run_attempt: i64,
+}
+
+struct Scout {
+    finished_at: String,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Scout {
+    fn stop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
         }
-        Ok(Ok(Registered {
-            watch_id: id,
-            status: "watching".into(),
-        }))
+    }
+}
+
+/// The runs whose pull request is scouted: each run `followed` follows, and each `failed` run
+/// closed less than a day ago (the window `followed` gives a completed run outside every range;
+/// a run whose launch or terminal was lost is `failed`, and its pull request may still be
+/// rerun). Of these, those whose current pull request has no `pr_merged` and is not read closed:
+/// `(run id, task, repo, pr)`.
+fn scouted_runs(c: &Connection) -> Result<Vec<(i64, String, String, i64)>> {
+    let mut tasks: Vec<String> = followed(c, None)?.into_iter().map(|f| f.task).collect();
+    let mut q = c.prepare(
+        "SELECT task_id FROM runs WHERE status = 'failed' AND completed_at IS NOT NULL
+           AND julianday('now') - julianday(completed_at) <= 1.0 ORDER BY id",
+    )?;
+    let failed: Vec<String> = q
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    for t in failed {
+        if !tasks.contains(&t) {
+            tasks.push(t);
+        }
+    }
+    let mut q = c.prepare(&format!(
+        "SELECT r.id, r.task_id, {repo}, {pr} FROM runs r
+         WHERE r.task_id = ?1 AND {repo} IS NOT NULL AND {pr} IS NOT NULL AND NOT {closed}
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged'
+                           AND lower(json_extract(e.payload_json, '$.repo')) = lower({repo})
+                           AND json_extract(e.payload_json, '$.pr') = {pr})",
+        repo = current_pr_sql("r", "repo"),
+        pr = current_pr_sql("r", "pr"),
+        closed = pr_closed_sql("r"),
+    ))?;
+    let mut out = Vec::new();
+    for t in tasks {
+        if let Some(run) = q
+            .query_row([&t], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .optional()?
+        {
+            out.push(run);
+        }
+    }
+    Ok(out)
+}
+
+/// The candidates (`Candidate`), read from the ledger: the scan of every pass and the check in
+/// the transaction that takes one up. The row is that of the head recorded last for the pull
+/// request of a scouted run (`scouted_runs`), and of that run.
+fn scout_candidates(c: &Connection) -> Result<Vec<Candidate>> {
+    let mut out: Vec<Candidate> = Vec::new();
+    for (run, task, f_repo, f_pr) in scouted_runs(c)? {
+        // The head recorded last, with the repository as that record spelled it, as `rerun`.
+        let current: Option<(Option<String>, Option<String>)> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.repo'), json_extract(payload_json, '$.head_oid')
+                 FROM events
+                 WHERE kind IN ('pr_opened', 'fix_pushed')
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![f_repo, f_pr],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((Some(repo), Some(head))) = current else {
+            continue;
+        };
+        let row: Option<(i64, String)> = c
+            .query_row(
+                "SELECT id, finished_at FROM pr_watches
+                 WHERE repo = ?1 AND pr = ?2 AND head_oid = ?3 AND run_id = ?4
+                   AND status IN ('completed', 'failed') AND finished_at IS NOT NULL",
+                params![repo, f_pr, head, run],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?;
+        let Some((id, finished_at)) = row else {
+            continue;
+        };
+        let newest: Option<String> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.status') FROM events
+                 WHERE kind = 'ci_completed'
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                   AND json_extract(payload_json, '$.head_oid') = ?3
+                 ORDER BY id DESC LIMIT 1",
+                params![repo, f_pr, head],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        if newest.as_deref() != Some("failed") || out.iter().any(|o| o.id == id) {
+            continue;
+        }
+        out.push(Candidate {
+            id,
+            finished_at,
+            repo,
+            pr: f_pr,
+            head,
+            task,
+        });
+    }
+    Ok(out)
+}
+
+/// The attempts of `repo#pr` at `head` already concluded on, by run, from the ledger: the
+/// `run_attempts` of every `ci_completed` of the head, and the `run_attempt` of every `ci_rerun`
+/// makibad saw of it whose activation concluded: a `ci_completed` of the head after it with no
+/// other activation of the head (`ci_watch_started` after the take-up's own) begun between. A
+/// take-up that ended unreadable and was then watched again by `pr pushed` has not concluded on
+/// its attempt, whatever that later watch writes.
+fn consumed_attempts(c: &Connection, repo: &str, pr: i64, head: &str) -> Result<HashMap<i64, i64>> {
+    let mut out: HashMap<i64, i64> = HashMap::new();
+    let mut put = |run: i64, attempt: i64| {
+        let e = out.entry(run).or_insert(attempt);
+        *e = (*e).max(attempt);
+    };
+    let of_head = |t: &str| {
+        format!(
+            "lower(json_extract({t}.payload_json, '$.repo')) = lower(?1)
+             AND json_extract({t}.payload_json, '$.pr') = ?2
+             AND json_extract({t}.payload_json, '$.head_oid') = ?3"
+        )
+    };
+    let mut q = c.prepare(&format!(
+        "SELECT json_extract(e.payload_json, '$.run_attempts') FROM events e
+         WHERE e.kind = 'ci_completed' AND {}
+           AND json_extract(e.payload_json, '$.run_attempts') IS NOT NULL",
+        of_head("e")
+    ))?;
+    let baselines: Vec<String> = q
+        .query_map(params![repo, pr, head], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    for text in baselines {
+        let Ok(Value::Object(m)) = serde_json::from_str::<Value>(&text) else {
+            continue;
+        };
+        for (run, n) in m {
+            if let (Ok(run), Some(n)) = (run.parse::<i64>(), n.as_i64()) {
+                put(run, n);
+            }
+        }
+    }
+    let mut q = c.prepare(&format!(
+        "SELECT json_extract(r.payload_json, '$.run_id'), json_extract(r.payload_json, '$.run_attempt')
+         FROM events r
+         WHERE r.kind = 'ci_rerun' AND {}
+           AND json_extract(r.payload_json, '$.run_id') IS NOT NULL
+           AND json_extract(r.payload_json, '$.run_attempt') IS NOT NULL
+           AND EXISTS (SELECT 1 FROM events e WHERE e.kind = 'ci_completed' AND e.id > r.id
+                       AND {}
+                       AND NOT EXISTS (
+                         SELECT 1 FROM events s WHERE s.kind = 'ci_watch_started'
+                           AND s.id < e.id AND {}
+                           AND s.id > (SELECT min(s0.id) FROM events s0
+                                       WHERE s0.kind = 'ci_watch_started' AND s0.id > r.id
+                                         AND {})))",
+        of_head("r"),
+        of_head("e"),
+        of_head("s"),
+        of_head("s0")
+    ))?;
+    let seen: Vec<(i64, i64)> = q
+        .query_map(params![repo, pr, head], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    for (run, attempt) in seen {
+        put(run, attempt);
+    }
+    Ok(out)
+}
+
+/// Whether `attempt` of `run` is newer than every attempt of it concluded on (none: the first).
+fn newer(consumed: &HashMap<i64, i64>, run: i64, attempt: i64) -> bool {
+    attempt >= 2 && attempt > consumed.get(&run).copied().unwrap_or(1)
+}
+
+/// Read the runs of the candidate's head each interval until one has a newer attempt. A failed
+/// read, the program missing included, is read again without bound; `None`: cancelled.
+fn scout(
+    prog: &str,
+    c: &Candidate,
+    consumed: &HashMap<i64, i64>,
+    interval: Duration,
+    cancel: &AtomicBool,
+) -> Option<Seen> {
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return None;
+        }
+        match run_attempts(prog, &c.repo, &c.head, cancel) {
+            Err(GhError::Cancelled) => return None,
+            Err(_) => {}
+            Ok(runs) => {
+                if let Some((run_id, run_attempt, _)) =
+                    runs.into_iter().find(|(r, a, _)| newer(consumed, *r, *a))
+                {
+                    return Some(Seen {
+                        id: c.id,
+                        finished_at: c.finished_at.clone(),
+                        repo: c.repo.clone(),
+                        pr: c.pr,
+                        head: c.head.clone(),
+                        run_id,
+                        run_attempt,
+                    });
+                }
+            }
+        }
+        sleep_unless(cancel, interval);
+    }
+}
+
+/// Take up the row of a newer attempt seen, in one transaction, only while it is still the same
+/// candidate and the attempt is still newer than every attempt concluded on. Whether it was.
+fn apply_seen(w: &StateWriter, s: &Seen) -> Result<bool> {
+    w.transaction(|w| {
+        let Some(c) = scout_candidates(w.conn())?
+            .into_iter()
+            .find(|c| c.id == s.id && c.finished_at == s.finished_at)
+        else {
+            return Ok(false);
+        };
+        if !(c.repo == s.repo && c.pr == s.pr && c.head == s.head) {
+            return Ok(false);
+        }
+        if !newer(
+            &consumed_attempts(w.conn(), &c.repo, c.pr, &c.head)?,
+            s.run_id,
+            s.run_attempt,
+        ) {
+            return Ok(false);
+        }
+        take_up(
+            w,
+            c.id,
+            &c.task,
+            &c.repo,
+            c.pr,
+            &c.head,
+            Some((s.run_id, s.run_attempt)),
+        )?;
+        Ok(true)
     })
 }
 
@@ -3127,5 +3664,66 @@ esac"#,
         )
         .unwrap();
         assert_eq!(ended, 1, "the watching row of the current head ended");
+    }
+
+    /// An attempt makibad took up is concluded on only by its own activation (Issue 427): a
+    /// take-up that ended unreadable, then a `pr pushed` of the same head whose plain watch
+    /// concluded failed with the older baseline, leaves the attempt newer.
+    #[test]
+    fn a_scouted_attempt_is_consumed_only_by_its_own_activation() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let at = json!({"repo": "o/r", "pr": 5, "head_oid": "abc"});
+        let with = |extra: Value| {
+            let mut v = at.clone();
+            for (k, x) in extra.as_object().unwrap() {
+                v[k] = x.clone();
+            }
+            v
+        };
+        let failed = |runs: Value| with(json!({"status": "failed", "run_attempts": runs}));
+        let seen = |n: i64| {
+            with(json!({"watch_id": 1, "started_at": "s", "run_id": 11, "run_attempt": n}))
+        };
+        let consumed = || consumed_attempts(w.conn(), "O/r", 5, "abc").unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            None,
+            failed(json!({"11": 1})),
+        );
+        event(&w, "ci_rerun", "makibad", None, seen(2));
+        event(&w, "ci_watch_started", "makibad", None, at.clone());
+        event(
+            &w,
+            "ci_watch_failed",
+            "makibad",
+            None,
+            with(json!({"reason": "gh_unreadable"})),
+        );
+        event(&w, "ci_watch_started", "makibad", None, at.clone());
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            None,
+            failed(json!({"11": 1})),
+        );
+        assert_eq!(consumed().get(&11), Some(&1));
+        assert!(newer(&consumed(), 11, 2));
+
+        event(&w, "ci_rerun", "makibad", None, seen(2));
+        event(&w, "ci_watch_started", "makibad", None, at.clone());
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            None,
+            with(json!({"status": "failed"})),
+        );
+        assert_eq!(consumed().get(&11), Some(&2));
+        assert!(!newer(&consumed(), 11, 2));
+        assert!(newer(&consumed(), 11, 3));
     }
 }
