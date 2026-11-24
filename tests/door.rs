@@ -147,6 +147,7 @@ impl Org {
         for d in ["home", "state", "config", "data", "run", "xdg-state"] {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
+        // not an executable: the run folder, kept to its owner
         std::fs::set_permissions(root.join("run"), std::fs::Permissions::from_mode(0o700)).unwrap();
         // What a dispatch and a launch would have written: two runs and the agents' keys.
         let w = StateWriter::open(&root.join("state/state.db")).unwrap();

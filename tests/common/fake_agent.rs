@@ -55,6 +55,22 @@ unsafe extern "C" {
     fn getsid(pid: i32) -> i32;
 }
 
+/// Append one row and its newline to the record in a single write. Other processes (detached
+/// grandchildren, other agents) append to the same file at once: a row and its newline written
+/// apart let another row land between them, and two rows meet on one line (Issue 368).
+fn append_row(record: &str, row: &str) {
+    let line = format!("{row}\n");
+    let mut f = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(record)
+        .expect("open the record file");
+    let n = f.write(line.as_bytes()).expect("write the record file");
+    // A short write would let another row in between its parts; it does not happen for a row
+    // this size on a local file, and if it did the agent fails loudly instead of merging rows.
+    assert_eq!(n, line.len(), "a short write of the record file");
+}
+
 /// Cursor home, then erase the display: what a program prints to draw a new frame.
 const ERASE: &str = "\x1b[H\x1b[2J";
 
@@ -132,12 +148,7 @@ impl Agent {
                 Input::Line(l) => format!("line {l}"),
                 Input::Key(k) => format!("key {k}"),
             };
-            let mut f = OpenOptions::new()
-                .create(true)
-                .append(true)
-                .open(&self.record)
-                .expect("open the record file");
-            writeln!(f, "{row}").expect("write the record file");
+            append_row(&self.record, &row);
             return Some(input);
         }
     }
@@ -232,12 +243,7 @@ impl Agent {
     }
 
     fn append(&self, row: &str) {
-        let mut f = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&self.record)
-            .expect("open the record file");
-        writeln!(f, "{row}").expect("write the record file");
+        append_row(&self.record, row);
     }
 
     fn step(&mut self, step: &str) {
@@ -403,12 +409,7 @@ fn orphan(record: &str, hop: &str, agent: &str, step: &str) {
         "detached ppid={ppid} sid={sid} pid={pid} agent={agent} hop={hop} {}",
         call(step)
     );
-    let mut f = OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(record)
-        .expect("open the record file");
-    writeln!(f, "{row}").expect("write the record file");
+    append_row(record, &row);
 }
 
 fn main() {

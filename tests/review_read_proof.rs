@@ -6,12 +6,13 @@
 //! `docs/design/lines.md`). The readers are stand-in scripts that print the event stream a real
 //! reader would (JSON lines); the door runs in this process, as in `tests/review_gate.rs`.
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::Role;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -75,8 +76,7 @@ fn stand_in(path: &Path, login: i32, body: &str) {
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> \"$0.args\"\npwd >> \"$0.cwd\"\nif [ \"$1\" = login ]; then exit {login}; fi\n{body}\n"
     );
-    std::fs::write(path, script).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, script);
 }
 
 struct Org {

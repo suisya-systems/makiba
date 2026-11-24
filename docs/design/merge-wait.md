@@ -288,27 +288,60 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
    without landing; keep `merged_via` keyed on `headRefOid`. No second poller.
 5. Later: cache and split `real-base` (D), after Q4.
 
-## 5. Claims to confirm (unverified)
+## 5. Claims to confirm
 
-1. Merge queue availability: answered for this repository by the owner's reading of the
-   managing-a-merge-queue page (public, organization-owned); not confirmed by fetched text.
+Each claim is **[unverified]** unless marked verified with its source. The verified marks come from
+the first two landings through the queue on this repository (observed on PR 428 and PR 429,
+2026-11-24, read by the secretary with `gh`). The protection then: a repository ruleset
+`merge_queue` with merge method SQUASH, `max_entries_to_build` 5, `min_entries_to_merge` and
+`max_entries_to_merge` 1, grouping ALLGREEN, `check_response_timeout` 60 minutes; branch protection
+requiring `tests`, `lint`, `real-base` and `acceptance`, with `strict` false.
+
+1. Merge queue availability: **verified** (observed on PR 428 and PR 429, 2026-11-24): the queue
+   is enabled on this repository and both pull requests landed through it.
 2. The queue's commit is built on `gh-readonly-queue/<base>/pr-<n>-<sha>`, fires `merge_group`, and
-   `main` is fast-forwarded to exactly that commit.
+   `main` is fast-forwarded to exactly that commit: **verified** (observed on PR 428 and PR 429,
+   2026-11-24). PR 428 was queued with head commit `2e348a0` on base commit `e534107` (then
+   `main`); CI ran on `2e348a0` for `merge_group` (branch `gh-readonly-queue/main/pr-428-e534107...`)
+   and for `push`, both succeeded; the pull request's `mergeCommit` is `2e348a0` and `main` became
+   `2e348a0`. PR 429 the same: queued as `02212db` on `2e348a0`, `mergeCommit` and `main` `02212db`.
+   The commit that lands on `main` is exactly the commit the queue's CI checked.
 3. A workflow needs `on: merge_group` to report checks for the queue; whether a `push` run on the
-   queue branch counts.
+   queue branch counts. [unverified]; observed only that this repository's workflows, which have
+   `on: merge_group`, reported the four required checks on the queue's commit and the entries
+   landed (PR 428 and PR 429, 2026-11-24).
 4. Whether different required checks can apply to the pull request and to the queue's commit; and
-   whether a job skipped by `if:` satisfies a required check in the queue. No longer needed for
-   `acceptance`, which runs and succeeds on `merge_group` (Issue 401).
+   whether a job skipped by `if:` satisfies a required check in the queue. [unverified]. No longer
+   needed for `acceptance`, which runs and succeeds on `merge_group` (Issue 401).
 5. `gh pr merge` on a branch that requires a merge queue enqueues; which flags it ignores; whether
-   `--match-head-commit` binds the entry to that head. Source: https://cli.github.com/manual/gh_pr_merge
+   `--match-head-commit` binds the entry to that head. [unverified]: not observed, the secretary's
+   command was refused by its own permission check before it ran. Source to read:
+   https://cli.github.com/manual/gh_pr_merge
 6. The queue does not change the pull request's `headRefOid`; what `mergedBy` reads after a queued
    merge; how the queue entry and its removal can be read (`gh pr view --json` field or GraphQL
    `mergeQueueEntry`). Source: https://docs.github.com/en/graphql/reference/objects#mergequeueentry
+   - `mergedBy`: **verified** (observed on PR 428 and PR 429, 2026-11-24): it reads the login of
+     the person who added the pull request to the queue (the owner, from the web UI).
+   - Reading the entry: **verified** (observed on PR 428 and PR 429, 2026-11-24): `gh pr view
+     --json isInMergeQueue` fails, gh's `--json` has no queue fields; GraphQL `isInMergeQueue`
+     (true) and `mergeQueueEntry` (state `AWAITING_CHECKS`, position 1, `headCommit`,
+     `baseCommit`) read them.
+   - The queue builds its own commit, distinct from the pull request's head (PR 428's head
+     `0f94c83`, its queue commit `2e348a0`). That `headRefOid` stays unchanged through every queue
+     state, and how a removal is read: [unverified]; no ejection was observed.
 7. The merge limits (group size) decide only how many tested entries are merged at once, each
-   entry having its own build; how a failed entry in a group is handled.
-8. Actions minutes are free on public repositories with GitHub-hosted runners.
+   entry having its own build; how a failed entry in a group is handled. [unverified] for groups
+   of more than one and for a failed entry. With `min_entries_to_merge` and `max_entries_to_merge`
+   1, one entry was built and merged at a time, each with its own build (observed on PR 428 and
+   PR 429, 2026-11-24).
+8. Actions minutes are free on public repositories with GitHub-hosted runners. [unverified]
 9. The descriptions of bors-ng (archived 2023), Mergify (pricing, app access), Kodiak, Zuul's
-   dependent pipelines and Chromium's commit queue in section 3.C.
+   dependent pipelines and Chromium's commit queue in section 3.C. [unverified]
+
+Seen on makibad's side in the same landings (observed on PR 428 and PR 429, 2026-11-24): the PR
+watch sent "merged by hand outside makiba's gate" for PR 429. For PR 428 it sent nothing, because
+an `acceptance_gate` allowance had been recorded at that head earlier (the secretary's landing
+command was then refused by its own permission check): the case of Issue 424.
 
 ## 6. Questions for the owner
 

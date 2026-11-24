@@ -1657,8 +1657,9 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
         Some(task),
         &body,
     )?;
-    if let Some(r) = &review {
-        let payload = json!({"task": task, "state": state, "review": r});
+    // Every worker report is in the history (Issue 409), its review null when there is none.
+    if role == Role::Worker {
+        let payload = json!({"task": task, "state": state, "review": review});
         w.append_event(&NewEvent {
             kind: "worker_reported",
             actor: Some(actor),

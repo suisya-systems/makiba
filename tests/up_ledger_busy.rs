@@ -11,7 +11,6 @@ mod common;
 use common::makibad;
 use rusqlite::Connection;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Output, Stdio};
 use std::time::{Duration, Instant};
@@ -115,8 +114,7 @@ impl Drop for Setup {
 }
 
 fn script(path: &Path, body: &str) {
-    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 fn text(o: &Output) -> String {

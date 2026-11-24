@@ -3,6 +3,8 @@
 //! another `herdr-core` or `hc` first (exit 3), so that an install leaves no older server to be
 //! started.
 
+mod common;
+
 use makiba::base::version as base_version;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -96,8 +98,7 @@ fn release(dir: &Path) -> String {
 fn old_program(folder: &Path, name: &str) -> PathBuf {
     fs::create_dir_all(folder).unwrap();
     let p = folder.join(name);
-    fs::write(&p, OLD).unwrap();
-    fs::set_permissions(&p, fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(&p, OLD);
     p
 }
 

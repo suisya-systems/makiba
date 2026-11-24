@@ -31,7 +31,6 @@ use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use makiba::spec::Role;
 use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -61,8 +60,7 @@ fn root() -> &'static Path {
             std::fs::create_dir_all(root.join(d)).unwrap();
         }
         let gh = root.join("gh");
-        std::fs::write(&gh, STAND_IN).unwrap();
-        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&gh, STAND_IN);
         // SAFETY: every test calls this before it starts a thread; the first sets them, once.
         unsafe {
             std::env::set_var("MAKIBA_GH", &gh);
