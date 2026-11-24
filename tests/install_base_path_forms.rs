@@ -1,9 +1,10 @@
 //! #382, beside tests/install_base_layout.rs: the check of scripts/install-base.sh also sees an
 //! `hc` found through a relative PATH entry, and an HC_BIN that is set but empty.
 
+mod common;
+
 use makiba::base::version as base_version;
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
@@ -99,8 +100,7 @@ fn an_hc_found_through_a_relative_path_entry_is_named() {
     let (dir, url) = release("relative");
     fs::create_dir_all(dir.join("old")).unwrap();
     let old = dir.join("old/hc");
-    fs::write(&old, "#!/bin/sh\necho old\n").unwrap();
-    fs::set_permissions(&old, fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(&old, "#!/bin/sh\necho old\n");
     let path = format!("./old:{}:{}", dir.join("prefix/bin").display(), own_path());
     let out = install(&dir, &url, &path, None);
     let err = String::from_utf8_lossy(&out.stderr);

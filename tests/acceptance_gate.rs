@@ -16,6 +16,8 @@
 //! makibad's environment, so the cases of each mode run in a child process of this test binary.
 //! The tests that start the door's Unix socket need a host that lets them create one.
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::channel::Hub;
 use makiba::daemon::door::{self, Door, issue_key};
@@ -73,8 +75,7 @@ fn init() -> PathBuf {
     INIT.call_once(|| {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let script = home.path().join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         std::fs::create_dir_all(home.path().join("repos")).unwrap();
         // SAFETY: set once, before this file's tests read the environment.
         unsafe {

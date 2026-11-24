@@ -8,13 +8,14 @@
 //! stream-json` does. The project `p` is a git repository whose `main` is at a local bare origin;
 //! each test has its own run, worktree and state folder.
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::daemon::door::{Door, Response, issue_key};
 use makiba::db::writer::{RunUpsert, StateWriter};
 use makiba::spec::{ErrorKind, Role};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, OnceLock};
@@ -90,8 +91,7 @@ fn stand_in(path: &Path, login: i32, body: &str) {
     let script = format!(
         "#!/bin/sh\nprintf '%s\\n' \"$@\" -- >> \"$0.args\"\npwd >> \"$0.cwd\"\nif [ \"$1\" = login ]; then exit {login}; fi\n{body}\n"
     );
-    std::fs::write(path, script).unwrap();
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, script);
 }
 
 /// The calls a stand-in received: each its list of arguments.
