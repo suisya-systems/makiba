@@ -16,6 +16,7 @@ pub mod exe;
 pub mod gate;
 mod gh;
 pub mod inbox;
+pub mod landing;
 pub mod language;
 pub mod launch;
 mod monitor;
@@ -360,6 +361,7 @@ fn serve_until(
     let mut verify = verify::Verify::new(verify::timeout_from_env());
     let mut prwatch = prwatch::PrWatch::from_env();
     let mut belt = belt::Belt::from_env(Places::from_env(dir).repos);
+    let mut landing = landing::Landing::from_env(Places::from_env(dir).repos);
     let mut triage =
         triage::Triage::from_env(Places::from_env(dir).repos, dispatch::capacity_from_env());
     let mut projects = project::Projects::from_env(Places::from_env(dir).repos);
@@ -424,6 +426,9 @@ fn serve_until(
             // Before the dispatch pass: a task the belt puts in is taken on the same tick.
             if let Err(e) = belt.pass(&w) {
                 eprintln!("makibad: belt: {e}");
+            }
+            if let Err(e) = landing.pass(&w) {
+                eprintln!("makibad: landing: {e}");
             }
             if let Err(e) = dispatch.pass(&w) {
                 eprintln!("makibad: dispatch: {e}");
@@ -494,6 +499,7 @@ fn serve_until(
     drop(prwatch);
     drop(triage);
     drop(belt);
+    drop(landing);
     drop(projects);
     event(&w, "dispatcher_stopped", &info.name, &info.version).map_err(|e| e.to_string())?;
     w.conn()
