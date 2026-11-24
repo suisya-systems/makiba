@@ -2043,7 +2043,7 @@ fn gh_json(gh: &str, args: &[&str], cancel: &AtomicBool) -> std::result::Result<
     let text = run_gh(gh, args, cancel).map_err(|e| match e {
         GhError::Missing => format!("{gh} not found"),
         GhError::Cancelled => "cancelled".into(),
-        GhError::Failed(m) => m,
+        GhError::Failed(f) => f.message,
     })?;
     serde_json::from_str(&text).map_err(|_| format!("gh {} {} wrote no JSON", args[0], args[1]))
 }

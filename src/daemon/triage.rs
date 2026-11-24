@@ -195,7 +195,7 @@ impl GhFetch {
         let text = run_gh(&self.gh, &args, &self.cancel).map_err(|e| match e {
             GhError::Missing => format!("{} not found", self.gh),
             GhError::Cancelled => "cancelled".into(),
-            GhError::Failed(m) => m,
+            GhError::Failed(f) => f.message,
         })?;
         match serde_json::from_str(&text) {
             Ok(Value::Array(rows)) => Ok(rows),
