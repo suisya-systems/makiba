@@ -9,6 +9,9 @@
 //! starts: a base that was not running had its programs stopped, so the runs at work are suspended
 //! first (`down::suspend`); then every `suspended` run gets a new launch (`resume`) that the
 //! daemon's passes take on.
+//!
+//! A core that answers with another version than the pinned one stops `up` at once, before the
+//! ledger is opened and before `hc` is run, naming what to run (Issue 418): `up` never stops a core.
 
 use crate::agents::version;
 use crate::base::{self, BaseError};
@@ -234,6 +237,33 @@ fn start_daemon(dir: &Path, secretary: bool) -> Result<(), Failure> {
     ))
 }
 
+/// The refusal of a core of session `session` that runs `found`, not the pinned release
+/// (docs/design/base-upgrade.md section 4). An older core names `base upgrade` by the path of
+/// this binary, so that the right build is named even when `PATH` finds another.
+fn other_version(session: &str, found: &str) -> Failure {
+    use std::cmp::Ordering;
+    let pinned = base::version::PINNED;
+    let head = format!("the base of session {session} runs {found}");
+    let text = match base::version::compare_with_pinned(found) {
+        Some(Ordering::Less) => {
+            let exe = std::env::current_exe()
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|_| "makiba".into());
+            format!(
+                "{head}, this makiba pins {pinned}. To take {pinned}: `{exe} base upgrade` (it asks \
+                 before ending the base's terminals; until that verb exists, the steps of \
+                 docs/upgrading-the-base.md)"
+            )
+        }
+        Some(Ordering::Greater) => format!(
+            "{head}, this makiba pins {pinned}: this makiba is older than the base. Run the makiba \
+             that pins {found} by its path"
+        ),
+        _ => format!("{head}, which this makiba cannot compare with {pinned}"),
+    };
+    (ErrorKind::Unavailable, text)
+}
+
 fn run(secretary: bool) -> Result<(), Failure> {
     if let Some(v) = agent_variable() {
         return Err((
@@ -246,19 +276,23 @@ fn run(secretary: bool) -> Result<(), Failure> {
     }
     check_claude()?;
     check_git()?;
+    let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
+    let the_base = base::connect_session_for_start(&session, Duration::from_secs(10));
+    // With the stand-in (`MAKIBA_BASE=stub`, the switch makibad reads) the base makibad uses is not
+    // the one probed here, and the stand-in never stops: no probe.
+    let probe = (std::env::var("MAKIBA_BASE").as_deref() != Ok("stub")).then(|| the_base.hello());
+    // A core of another version is refused before anything is started or the ledger is opened.
+    if let Some(Err(BaseError::UnsupportedVersion { found, .. })) = &probe {
+        return Err(other_version(&session, found));
+    }
+    // Nothing listening at the base's socket: the base is stopped, and its programs with it.
+    let stopped = matches!(&probe, Some(Err(BaseError::Unavailable(d))) if d.kind == "connect");
     let dir = daemon::state_dir();
     std::fs::create_dir_all(&dir).map_err(unavailable("cannot create the state folder"))?;
     // The key file is written under the ledger's lock; a try that waited finds it there and keeps it.
     with_ledger(&dir, |w| {
         person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
     })?;
-    let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
-    let the_base = base::connect_session_for_start(&session, Duration::from_secs(10));
-    // Nothing listening at the base's socket: the base is stopped, and its programs with it.
-    // With the stand-in (`MAKIBA_BASE=stub`, the switch makibad reads) the base makibad uses is not
-    // the one probed here, and the stand-in never stops.
-    let stopped = std::env::var("MAKIBA_BASE").as_deref() != Ok("stub")
-        && matches!(the_base.hello(), Err(BaseError::Unavailable(d)) if d.kind == "connect");
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
