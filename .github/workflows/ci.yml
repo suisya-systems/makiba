@@ -1,10 +1,30 @@
 name: CI
-on: [push, pull_request, merge_group]
+on:
+  push:
+    branches: [main]
+  pull_request:
+  merge_group:
+# One group per pull request: a newer head cancels the older head's run. A push to main and a
+# merge queue commit each get a group of their own (ref and sha), so they are never cancelled,
+# not even while pending (#471).
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.sha) }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
   tests:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The Rust build cache, one per job (#471).
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.job }}-
       # rustup installs the toolchain of rust-toolchain.toml on the first cargo call.
       - run: cargo test --locked
       - uses: actions/setup-python@v5
@@ -22,6 +42,16 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # The Rust build cache, one per job (#471).
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Install the pinned herdr-core
         run: bash scripts/install-base.sh "$HOME/.makiba-base"
       - name: Suite on the real base

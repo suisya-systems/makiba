@@ -154,7 +154,7 @@ def _replace_once(text, old, new):
 
 
 def _drop_merge_group(text):
-    return _replace_once(text, "on: [push, pull_request, merge_group]", "on: [push, pull_request]")
+    return _replace_once(text, "  pull_request:\n  merge_group:\n", "  pull_request:\n")
 
 
 def _acceptance_pr_only(text):
