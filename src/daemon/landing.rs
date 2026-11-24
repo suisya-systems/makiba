@@ -298,7 +298,15 @@ fn candidates(w: &StateWriter, project: i64, task: &str) -> Result<Vec<Candidate
 
 /// The scan on its thread; `None`: nothing to write yet (tried again later).
 fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
-    let tip = in_clone(clone, &d.branch, &d.merge, cancel)?;
+    // P's merge in the fetched tip. Once P was recorded longer ago than `MERGE_WAIT` and is still
+    // not there (a merge into another branch), the scan goes on from the tip as fetched (the
+    // tracking ref is its own ancestor), so the merges it does hold are not held back by P.
+    let tracking = format!("refs/remotes/origin/{}", d.branch);
+    let tip = in_clone(clone, &d.branch, &d.merge, cancel).or_else(|| {
+        (!d.waiting.contains(&d.merge))
+            .then(|| in_clone(clone, &d.branch, &tracking, cancel))
+            .flatten()
+    })?;
     let dir = clone.display().to_string();
     let git = |args: &[&str]| {
         let mut all = vec!["-C", dir.as_str(), "-c", super::run_repo::HOOKS_OFF];
@@ -332,7 +340,9 @@ fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
         .clone()
         .filter(in_tip)
         .or_else(common)
-        .or_else(|| parent(&d.merge))?;
+        .or_else(|| parent(&d.merge).filter(in_tip))
+        // Nothing not scanned is in the tip (only P, which never landed there): nothing changed.
+        .unwrap_or_else(|| tip.clone());
     // Paths git quotes (a tab, a newline, any byte past ASCII, so also one that is no UTF-8) come
     // C-quoted and ASCII: the output is always text, and each path is unquoted to be matched.
     let changed = git(&[
@@ -686,6 +696,34 @@ mod tests {
         let s = scan(&clone, &d, &never).expect("the tip has both");
         assert_eq!(s.tip, later);
         assert_eq!(s.matched, vec!["tools/new.py".to_string()]);
+    }
+
+    /// The newest merge recorded went into another branch and never reaches the tip: while it is
+    /// recent it holds the scan; once older than `MERGE_WAIT` the scan reads the landings the tip
+    /// does hold, and with none of them, writes that nothing changed.
+    #[test]
+    fn a_newest_merge_that_never_lands_holds_the_scan_only_while_it_is_recent() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, m) = world(dir.path(), &[b"tools/x.py"]);
+        let work = dir.path().join("work");
+        g(&work, &["checkout", "-q", "-b", "other", "main"]);
+        g(
+            &work,
+            &["commit", "-q", "--allow-empty", "-m", "into another branch"],
+        );
+        let elsewhere = g(&work, &["rev-parse", "HEAD"]);
+        g(&work, &["checkout", "-q", "main"]);
+        let never = AtomicBool::new(false);
+        let mut d = due_of(&elsewhere, &[&m[0], &elsewhere]);
+        d.waiting = vec![elsewhere.clone()];
+        assert!(scan(&clone, &d, &never).is_none(), "recent: held");
+        d.waiting.clear();
+        let s = scan(&clone, &d, &never).expect("expired: the tip is read as fetched");
+        assert_eq!(s.tip, m[0]);
+        assert_eq!(s.matched, vec!["tools/x.py".to_string()]);
+        let alone = scan(&clone, &due_of(&elsewhere, &[&elsewhere]), &never).expect("written");
+        assert_eq!(alone.from, alone.tip);
+        assert!(alone.matched.is_empty(), "{:?}", alone.matched);
     }
 
     /// A path git quotes (past ASCII, or no UTF-8 at all, inside or outside the watched folders)
