@@ -148,6 +148,39 @@ impl Herdr {
     }
 }
 
+impl Herdr {
+    /// The items of a `terminal.list` reply: the reply itself, or under `terminals`.
+    fn list_items(&self, params: Value) -> Result<Vec<Value>, BaseError> {
+        let result = self.call("terminal.list", params)?;
+        result
+            .as_array()
+            .or_else(|| result.get("terminals").and_then(Value::as_array))
+            .cloned()
+            .ok_or_else(|| other("reply", "terminal.list answered without a list"))
+    }
+}
+
+/// A terminal's labels, where `terminal_of` reads them, are absent, null or an object of strings.
+fn check_labels(item: &Value) -> Result<(), BaseError> {
+    let v = item
+        .get("terminal")
+        .filter(|t| t.is_object())
+        .unwrap_or(item);
+    let readable = match v.get("labels") {
+        None | Some(Value::Null) => true,
+        Some(Value::Object(o)) => o.values().all(Value::is_string),
+        Some(_) => false,
+    };
+    if readable {
+        Ok(())
+    } else {
+        Err(other(
+            "reply",
+            "terminal.list answered a terminal whose labels cannot be read",
+        ))
+    }
+}
+
 fn other(kind: &str, message: &str) -> BaseError {
     BaseError::Other(Detail {
         kind: kind.into(),
@@ -315,23 +348,32 @@ impl Base for Herdr {
 
     fn list(&self) -> Result<Vec<Terminal>, BaseError> {
         let org = self.org()?;
-        let result = self.call(
-            "terminal.list",
-            json!({"labels": {TAG_ORG: org}, "all": true}),
-        )?;
-        let items = result
-            .as_array()
-            .or_else(|| result.get("terminals").and_then(Value::as_array))
-            .ok_or_else(|| other("reply", "terminal.list answered without a list"))?;
+        let items = self.list_items(json!({"labels": {TAG_ORG: org}, "all": true}))?;
         // The base is asked to filter, and the answer is checked: only this organization's.
         let mut mine = Vec::new();
-        for item in items {
+        for item in &items {
             let t = terminal_of(item)?;
             if t.tags.get(TAG_ORG).map(String::as_str) == Some(org) {
                 mine.push(t);
             }
         }
         Ok(mine)
+    }
+
+    /// `terminal.list` without labels: every terminal of the session, the live ones kept. A
+    /// terminal whose labels cannot be read refuses the whole list, so that an unreadable
+    /// organization's tag is never taken for "no tag".
+    fn list_session(&self) -> Result<Vec<Terminal>, BaseError> {
+        let items = self.list_items(json!({"all": true}))?;
+        let mut live = Vec::new();
+        for item in &items {
+            check_labels(item)?;
+            let t = terminal_of(item)?;
+            if t.alive {
+                live.push(t);
+            }
+        }
+        Ok(live)
     }
 
     fn get(&self, t: &TerminalRef) -> Result<Terminal, BaseError> {
