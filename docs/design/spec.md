@@ -848,6 +848,10 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `runs[].stage` | `run_launch.stage` of the run's newest launch, null without one |
 | `runs[].waiting` | null unless the run has an `escalated` pending entry or waits for a landing; then an object of `for` (`person`), `pending` (the ids of those entries) and `why` (the first line of the newest one's question), or, for a design-only run that reported its design (Issue 284), of `for` (`landing`), `issues` (what it waits for) and `why` |
 | `runs[].unparked` | null unless the run is not `parked` and was woken from parking; then an object of `reason`, `detail` and `at` of its newest `run_unparked` |
+| `runs[].title` | `runs.title` |
+| `runs[].since` | `runs.dispatched_at`: when the run was dispatched, as `ranges[].items[].since` of an item in work (Issue 407) |
+| `runs[].issue` | the number `N` of the first entry `<project>#<N>` of `runs.issue_refs` that names the run's own project; null when none, or when `issue_refs` is not a JSON array |
+| `runs[].range_id` | `runs.range_id`: the range the run was dispatched for, null for a one-off task |
 | `terminals[].role` | `run_launch.role` of the newest launch of each role and run whose key (`agents.spawn_id`) is not revoked and whose newest `terminal_status` or `terminal_gone` is not a `terminal_gone` |
 | `terminals[].name` | `secretary`, `curator` or `w-<task_id>` |
 | `terminals[].state` | `state` of its newest `terminal_status`, null before the first |
