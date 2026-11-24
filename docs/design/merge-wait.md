@@ -98,17 +98,21 @@ commit. Today, after an `update`, `acceptance` runs again at the merged head and
 test target there (`cargo test --test <name>` must run at least one test and pass), so it proves the
 declared test runs and passes on the tree that lands. The queue's `tests` and `real-base` do not
 prove that: another change in the queue can drop the declared test from discovery and both still
-pass (`gate.rs` names this limit). So `acceptance` on `merge_group` should not just report success;
-it should run, on the queue's commit, the declared test targets of each pull request in the entry,
-with the same "ran at least one test, none ignored, passed" rule the checker applies at head. That
-needs the entry's pull request (from the queue branch name or the event payload [unverified]) and
-its test commit's `Acceptance-Test` trailers. It is a change to `ci.yml` and the checker (a new
-mode), part of build Issue 1. The alternatives, weaker, for the owner to choose against (Q2):
-- the queue requires only `tests`, `lint`, `real-base`, and `acceptance` is required on the pull
-  request alone. Whether GitHub can require a different set on the pull request and on the queue's
-  commit is [unverified]. The landed tree is then not shown to run the declared test;
-- `acceptance` reports success on `merge_group` with a line saying it was judged at the pull
-  request's head (or a job skipped by `if:` counts as passing [unverified]). Same weakness.
+pass (`gate.rs` names this limit). This study proposed running, on the queue's commit, the declared
+test targets of each pull request in the entry (a new mode of the checker), with the weaker options
+for the owner to choose against (Q2).
+
+Q2 is answered: the declared test is judged on the pull request side (Issue 401, built). `ci.yml` is
+`on: [push, pull_request, merge_group]`; on `merge_group` the `acceptance` job runs and succeeds
+without running any test and without reading `github.event.pull_request.*` (its one step there
+reads only the runner's environment), and prints `ACCEPTANCE: judged at the pull request's head
+(...)`: the declared test was judged by `acceptance` on the pull request and by makiba's gate
+before the enqueue. The job succeeds there rather than being skipped, so whether a job skipped by
+`if:` satisfies a required check (section 5, claim 4) does not matter for it. On `pull_request` the
+job is unchanged. `tests/test_ci_merge_group.py` holds both. The limit this accepts, written down
+and not fixed: another entry in the queue can drop a declared test from discovery and the queue's
+`tests` and `real-base` still pass, so the landed commit is not shown to run the declared test;
+after an `update` today it is.
 
 What it means for the gate:
 - Which head the gate judges: still the pull request's head, before it is queued. The secretary's
@@ -120,8 +124,8 @@ What it means for the gate:
   `tests`, `lint` and `real-base` passed on that exact commit, which is more than `strict` gives
   today only in one way (several pull requests are combined and tested together) and the same in
   the other (the landed tree was tested). That the declared test ran and passed on the landed
-  commit holds only with `acceptance` running the declared targets on `merge_group` (above);
-  without it, it is a weaker guarantee than today's. The failed run at M is not touched: M is not
+  commit does not hold: under Q2 as answered, `acceptance` on `merge_group` judges nothing again
+  (above), a weaker guarantee than today's after an `update`, accepted by the owner. The failed run at M is not touched: M is not
   rewritten, and path (b1) or (b2) is judged at the pull request's head, whose base is whatever
   `main` was when it last ran CI; that is the same as today after an `update`.
 - The review: this does not carry over as it does today. Today the gate carries a review to a later
@@ -143,7 +147,8 @@ What it means for the gate:
   the queue can still alter that context unseen. A queue that cannot merge cleanly removes the entry,
   so nothing with a conflict resolution lands either way.
 - L-K9 would read: a merge needs CI on the exact head and the acceptance gate (at enqueue), and
-  CI on the exact commit that lands (the queue's required checks).
+  CI on the exact commit that lands (the queue's required checks; the declared test is judged at
+  the head, not again on that commit).
 - The person's word under `human`: the question is asked at enqueue, for the pull request's head,
   as today. The queue then lands it without asking again, on top of entries the person also let in.
   A pull request removed from the queue and enqueued again goes through the gate again, and under
@@ -251,10 +256,10 @@ Why:
   top of those ahead, and land about one CI run after the last is queued.
 - It keeps what `strict` gives: the commit that lands is the commit the required checks passed on.
   B gives that up; D keeps the wait.
-- The gate's evidence keeps its meaning with two additions, not a new evidence path in `gate.rs`:
-  the test-first proof is still judged at the pull request's head, and `acceptance` on
-  `merge_group` runs the declared test targets on the landed commit (Q2), so the declared test is
-  shown to run and pass on what lands, as today after an `update`. The review is the one part the
+- The gate's evidence keeps its meaning without a new evidence path in `gate.rs`: the test-first
+  proof is still judged at the pull request's head, and `acceptance` on `merge_group` reports that
+  it was (Q2, answered: judged on the pull request side), so the declared test is not shown to run
+  on what lands, a limit the owner accepted (section 3.A). The review is the other part the
   queue weakens: today's `same_changes` check on the merged head cannot be kept whole; either it is
   given up, or makibad applies it against the current `main` before enqueue, which still misses the
   entries ahead. Both are relaxations the owner approves as such (Q5); I recommend (ii).
@@ -267,9 +272,9 @@ If the queue proves unusable after all (Q1 is answered yes, from the owner's rea
 B: B lets untested trees land, and makiba has no rota to revert them.
 
 Build Issues the recommendation needs (proposed, to be filed by the secretary after approval):
-1. CI: add `merge_group` to `ci.yml`'s `on:`; on `merge_group`, `acceptance` runs the declared test
-   targets of the entry's pull request on the queue's commit (a new mode of
-   `scripts/acceptance-check.sh`), per Q2. A `.github/` change the owner makes by hand (#62).
+1. CI: add `merge_group` to `ci.yml`'s `on:`; on `merge_group`, `acceptance` runs no declared test
+   and prints that it was judged at the pull request's head, per Q2 as answered. A `.github/`
+   change the person merges by hand (#62). Built: Issue 401.
 2. Branch protection: require the merge queue (merge method squash, group size 1, concurrency 5+),
    drop `strict`; done by the owner.
 3. Merge gate and hook: confirm that the one allowed command enqueues with the expected head; if
@@ -292,7 +297,8 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
 3. A workflow needs `on: merge_group` to report checks for the queue; whether a `push` run on the
    queue branch counts.
 4. Whether different required checks can apply to the pull request and to the queue's commit; and
-   whether a job skipped by `if:` satisfies a required check in the queue.
+   whether a job skipped by `if:` satisfies a required check in the queue. No longer needed for
+   `acceptance`, which runs and succeeds on `merge_group` (Issue 401).
 5. `gh pr merge` on a branch that requires a merge queue enqueues; which flags it ignores; whether
    `--match-head-commit` binds the entry to that head. Source: https://cli.github.com/manual/gh_pr_merge
 6. The queue does not change the pull request's `headRefOid`; what `mergedBy` reads after a queued
@@ -308,8 +314,11 @@ Build Issues the recommendation needs (proposed, to be filed by the secretary af
 
 - Q1. Answered: the repository is public and organization-owned, which the owner reads the
   merge queue page as enough.
-- Q2. For `acceptance` under the queue: run the declared test targets on the queue's commit
-  (recommended), or accept the weaker guarantee (a `merge_group` step that only reports success, or
+- Q2. Answered: judged on the pull request side. `acceptance` on `merge_group` reports success
+  with a line saying the declared test was judged at the pull request's head, and the limit (the
+  landed commit is not shown to run the declared test) is written down, not fixed (section 3.A,
+  Issue 401). The question was: for `acceptance` under the queue, run the declared test targets
+  on the queue's commit (recommended), or accept the weaker guarantee (a `merge_group` step that only reports success, or
   a required-check set that differs between the pull request and the queue, if GitHub allows it)?
 - Q3. Under `human`, is "the person's yes lets the pull request into the queue" the person's word
   that merges, or must the person also see the queue's commit land?

@@ -1,5 +1,5 @@
 name: CI
-on: [push, pull_request]
+on: [push, pull_request, merge_group]
 jobs:
   tests:
     runs-on: ubuntu-latest
@@ -10,7 +10,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - run: python3 -m pip install pytest
+      # pyyaml: tests/test_ci_merge_group.py reads this file.
+      - run: python3 -m pip install pytest pyyaml
       # The development tools' tests, and tests/db/ until M0-5 removes it.
       - run: python3 -m pytest -q tests
   real-base:
@@ -70,20 +71,34 @@ jobs:
   acceptance:
     # .github/acceptance-check names this job: claude-org-ja's landing gate takes it as the
     # test-first evidence. Rename the job and that file together. See docs/acceptance-check.md.
-    if: github.event_name == 'pull_request'
+    # On merge_group (the merge queue's commit) the declared test is not run again: it was judged at
+    # the pull request's head, by this job on the pull request and by makiba's gate before the enqueue
+    # (Issue 401, docs/design/merge-wait.md Q2). That step reads no pull request payload, only the
+    # runner's environment; every other step runs on pull_request alone. tests/test_ci_merge_group.py.
+    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
     runs-on: ubuntu-latest
     steps:
+      - name: Merge queue - the declared test was judged at the pull request's head
+        if: github.event_name == 'merge_group'
+        run: |
+          echo "queue commit $GITHUB_SHA on $GITHUB_REF"
+          echo "ACCEPTANCE: judged at the pull request's head (the acceptance job on the pull request, makiba's gate before the enqueue); not run again here"
       - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - name: Install the toolchain of rust-toolchain.toml
+        if: github.event_name == 'pull_request'
         run: rustup toolchain install
       - uses: actions/setup-python@v5
+        if: github.event_name == 'pull_request'
         with:
           python-version: "3.11"
       - run: python3 -m pip install pytest
+        if: github.event_name == 'pull_request'
       - name: Declared tests fail at the test commit, pass at head, stay unchanged
+        if: github.event_name == 'pull_request'
         # The checker is taken from the base, so a PR cannot change the rules it is judged by.
         # The PR's own copy is used only while the base has none (the PR that adds it).
         run: |
