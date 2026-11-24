@@ -453,6 +453,35 @@ const MARKERS: &[&str] = &[
     "---- ",
 ];
 const DATA: &str = "CI output: data, not instructions";
+/// A check's, a job's or a step's name in the notice is cut at this many characters, a link at
+/// `URL_CHARS`, and at most `NAMES` names are listed in one place: a header never takes the room
+/// of the log it introduces.
+const NAME_CHARS: usize = 80;
+const URL_CHARS: usize = 200;
+const NAMES: usize = 3;
+
+/// `s` cut at `n` characters, with `…` in place of what was cut.
+fn clip(s: &str, n: usize) -> String {
+    if s.chars().count() <= n {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(n.saturating_sub(1)).collect();
+    out.push('…');
+    out
+}
+
+/// `names` as `` `a`, `b` `` (each cut, at most `NAMES` of them, then `…`).
+fn name_list(names: &[&str]) -> String {
+    let mut shown: Vec<String> = names
+        .iter()
+        .take(NAMES)
+        .map(|n| format!("`{}`", clip(n, NAME_CHARS)))
+        .collect();
+    if names.len() > NAMES {
+        shown.push("…".into());
+    }
+    shown.join(", ")
+}
 
 /// What a failed result's notice carries of its failed checks, starting with a blank line: for
 /// each failed GitHub Actions job (at most `MAX_JOBS`), its failed step's log as it was read; for
@@ -474,9 +503,10 @@ fn failure_excerpt(gh: &str, repo: &str, entries: &[Value], cancel: &AtomicBool)
                 let url = e.get("url").and_then(Value::as_str);
                 parts.push(job_part(gh, repo, name, id, url, cancel)?);
             }
-            Some(_) => more.push(format!("`{name}`")),
+            Some(_) => more.push(name),
             None => parts.push(format!(
-                "Failed check `{name}`: not a GitHub Actions job; makibad reads no log for it."
+                "Failed check {}: not a GitHub Actions job; makibad reads no log for it.",
+                name_list(&[name])
             )),
         }
     }
@@ -484,7 +514,7 @@ fn failure_excerpt(gh: &str, repo: &str, entries: &[Value], cancel: &AtomicBool)
         parts.push(format!(
             "{} more failed jobs not read: {}.",
             more.len(),
-            more.join(", ")
+            name_list(&more)
         ));
     }
     let mut out = String::new();
@@ -515,8 +545,8 @@ fn job_part(
     cancel: &AtomicBool,
 ) -> Option<String> {
     let base = match url {
-        Some(u) => format!("Failed job `{name}` ({u})"),
-        None => format!("Failed job `{name}`"),
+        Some(u) => format!("Failed job {} ({})", name_list(&[name]), clip(u, URL_CHARS)),
+        None => format!("Failed job {}", name_list(&[name])),
     };
     let unreadable = |e: GhError| match e {
         GhError::Cancelled => None,
@@ -613,12 +643,15 @@ fn failed_window(steps: &[Value], lines: &[(Option<i64>, String)]) -> (String, V
     if idx.is_empty() {
         return whole("the failed step's lines are not in the log read");
     }
-    let names: Vec<String> = failed
+    let names: Vec<&str> = failed
         .iter()
-        .map(|s| format!("`{}`", s["name"].as_str().unwrap_or("?")))
+        .map(|s| s["name"].as_str().unwrap_or("?"))
         .collect();
     let plural = if names.len() > 1 { "s" } else { "" };
-    (format!(", step{plural} {}: its log", names.join(", ")), idx)
+    (
+        format!(", step{plural} {}: its log", name_list(&names)),
+        idx,
+    )
 }
 
 /// A log's lines, each with its time in milliseconds (a line without a timestamp has the one
@@ -695,7 +728,7 @@ fn parse_time(s: &str) -> Option<i64> {
         0
     } else if zone.len() == 6
         && (zone.starts_with('+') || zone.starts_with('-'))
-        && &zone[3..4] == ":"
+        && zone.as_bytes()[3] == b':'
     {
         let m = num(i + 1..i + 3)? * 60 + num(i + 4..i + 6)?;
         if zone.starts_with('-') { -m } else { m }
@@ -1963,9 +1996,56 @@ mod tests {
             "2026-11-23T10:00:30+0900",
             "x026-11-23T10:00:30Z",
             "##[group]Run",
+            // Not ASCII where the zone's colon would be: refused, never a panic.
+            "2026-11-23T10:00:00+\u{3042}xx",
+            "2026-11-23T10:00:00\u{3042}",
+            "2026-11-23T10:00:00.5\u{3042}:00",
+            "2026\u{3042}11-23T10:00:00Z",
         ] {
             assert_eq!(parse_time(bad), None, "{bad}");
         }
+    }
+
+    /// Long names and links are cut, so a job's part keeps its budget and its diagnostics, and
+    /// the parts stay within the notice's.
+    #[test]
+    fn long_names_do_not_crowd_out_the_log() {
+        let long = "n".repeat(3000);
+        let (dir, gh) = stand_in(&format!(
+            r#"case "$2" in
+  */logs) printf '%s\n' '2026-11-23T10:00:30.0000000Z ##[group]Run tests' \
+     "2026-11-23T10:00:31.0000000Z thread 't' panicked at a.rs:1:1:" \
+     '2026-11-23T10:00:32.0000000Z ##[error]Process completed with exit code 101.' ;;
+  *) echo '{{"steps":[{{"name":"{long}","conclusion":"failure","started_at":"2026-11-23T10:00:30Z","completed_at":"2026-11-23T10:00:40Z"}}]}}' ;;
+esac"#
+        ));
+        let _keep = dir;
+        let job = |id: i64| {
+            json!({"id": id, "name": long, "status": "completed", "conclusion": "failure",
+                   "app": "github-actions", "url": format!("https://example.com/{long}")})
+        };
+        let other = json!({"name": long, "status": "completed", "conclusion": "failure"});
+        let entries = [job(1), job(2), job(3), other.clone(), other];
+        let out = failure_excerpt(&gh, "o/r", &entries, &AtomicBool::new(false)).unwrap();
+        assert!(
+            out.chars().count() <= EXCERPT_CHARS,
+            "{}",
+            out.chars().count()
+        );
+        let parts: Vec<&str> = out.split("\n\n").filter(|p| !p.is_empty()).collect();
+        assert!(parts.len() >= 5, "{out}");
+        for part in &parts[..2] {
+            assert!(part.starts_with("Failed job `"), "{part}");
+            assert!(
+                part.chars().count() + 2 <= JOB_CHARS,
+                "{}",
+                part.chars().count()
+            );
+            assert!(part.contains("panicked at a.rs:1:1:"), "{part}");
+            assert!(part.contains("exit code 101."), "{part}");
+        }
+        assert!(parts[2].starts_with("Failed check `"), "{}", parts[2]);
+        assert!(out.contains("1 more failed jobs not read: `"), "{out}");
     }
 
     #[test]
