@@ -1,6 +1,6 @@
 # The screen: where the person puts work in, watches it and answers
 
-Status: design note for Issue 169, 2026-11-22; redrawn twice on 2026-11-23 after the owner's readings (what each place does when it is full, 2.1; the language and light or dark, 2.2; what is always seen and what is behind a tab, 2; the centre as a judgement of the present, 2.3; the words on the screen, 2.4; who is handling what went wrong and what can be done, 4.1). Nothing is built. The drawing is [screen-draft.html](screen-draft.html): a static page with sample data, no script and no request; open it in a browser 1440 px wide or wider. It holds a quiet day with no tab open, a full day (two projects, fourteen candidates, a range of twenty, six things gone wrong, a long question) with the tab "One-off tasks" open, the same full day dark with the tab "Range" open, and eight panels: the other tabs open, and the other states. The owner agrees to the drawing before any code (the Issue). Read beside [belt.md](belt.md) (sections 1 and 7), [spec.md](spec.md) (section 12, the read surface) and the runbook [herdr-app.md](../runbooks/herdr-app.md). A design review (one round) was folded in: the repository in every match and request (3.1, 4), the brief head in the approval (3.1), a failed run told from a suspended one (3.3), concluded pull request watches (3.3), approving the read that was shown (4), the language (2) and the truncated scan (3.1).
+Status: design note for Issue 169, 2026-11-22; redrawn twice on 2026-11-23 after the owner's readings (what each place does when it is full, 2.1; the language and light or dark, 2.2; what is always seen and what is behind a tab, 2; the centre as a judgement of the present, 2.3; the words on the screen, 2.4; who is handling what went wrong and what can be done, 4.1). Refined on 2026-11-24 for Issue 394 against what the read surface gives today: a visual system (2.5), an inventory of every part against `makiba status --json` and `makiba events --json` (3.5), a fixture of the read surface ([screen-fixture/](screen-fixture/)), the drawing redrawn from that fixture only, the gaps of section 6 brought up to date, and the questions left to the owner (section 9). Nothing is built. The drawing is [screen-draft.html](screen-draft.html): a static page with no script, no request and no font fetched, every value read off the fixture, a missing field drawn as a dashed box that names it; open it in a browser 1440 px wide or wider. Redrawn three times the same day (rounds 2, 3 and 4, section 2) after the owner's readings. It holds the fixture's day with four repositories: light at 1440 × 900 with all repositories shown, dark with the repository loom selected (the screen filtered to it), the narrow width (1024 × 720), eight panels (the views "Pull requests" and "Failures" over every repository, "Issues to start" filtered to loom, a proposal to approve, "One-off tasks", "Task history", the third question, and the empty, loading, error and stale states), and the visual system in both themes. The owner agrees to the drawing before any code (the Issue). Read beside [belt.md](belt.md) (sections 1 and 7), [spec.md](spec.md) (section 12, the read surface) and the runbook [herdr-app.md](../runbooks/herdr-app.md). A design review (one round) was folded in: the repository in every match and request (3.1, 4), the brief head in the approval (3.1), a failed run told from a suspended one (3.3), concluded pull request watches (3.3), approving the read that was shown (4), the language (2) and the truncated scan (3.1).
 
 Two things are not decided here and stop the code: the drawing needs the owner's agreement, and where the screen runs needs a measurement on the owner's machine (section 5). A third is a boundary: the screen acting with the person key (section 4).
 
@@ -22,6 +22,35 @@ Taken from the Issue's comments; they replace the first list in its body.
 ## 2. The layout
 
 One screen, but not everything on it at once (the owner, 2026-11-23): what changes little or need not always be seen is one step in, behind tabs. A top line and three columns.
+
+**Round 2 of the layout (Issue 394, the owner's reading of 2026-11-24).** The first drawing of Issue 394 was read and sent back: the black terminal box took the best place while showing nothing; there was so much red that what is really urgent could not be told; the shelf "More" was a pile of buttons in which a switch could not be told from a state; the text was small and cut in many places, and the three columns had one density, so nothing led; boxes inside boxes, rounded badges and coloured tags made it look dated. The owner asked for structure shown by whitespace and the weight of the type, in the direction of today's issue trackers and code hosts (a direction, not a copy). Where this paragraph and the tables below differ, this paragraph holds; the regions themselves (2.3) and what they read (section 3) do not change.
+
+- **Left: a sidebar that only navigates** (248 px, on `bg`). Under "Approved work", one entry per range of `ranges[]` (the selected one first, then those with something waiting or failed); under "Views", the former tabs: Failures, Issues to start, One-off tasks, Pull requests, Task history. Every entry has one look: its name, its count on the right in plain figures, and, only when there is something, a second line of words in the state's colour ("3 unattended", "1 needs you · 1 did not start"). The selected entry is a white strip. A switch is therefore always a name in the sidebar, and a state always a sentence under it. "All approved items" and "Instructions" are no longer tabs: selecting a range shows its items, and its instructions are a link in its heading.
+- **Centre: what leads.** At the top, what waits for the person: the question itself as the largest text on the screen (20 px), the kind and the task over it in one quiet line, if yes and if no side by side, the recommended one marked by a green rule and the word "recommended", the buttons under them. Under it, the view the sidebar selected, by default the selected range: its heading, its progress as a thin bar of twelve cells with its budget in words beside it, and its items grouped by what they need (needs you, did not start, in review, being worked on), each group a small heading with its count; the finished groups (merged, closed, not started, skipped) are folded into one line of links. This replaces the band and "Active now" of the right column, and the shelf: a view is one step in, as a tab was, but it opens where there is room to read it.
+- **The conversation, folded.** One line at the foot of the centre: the secretary's state and age, how many questions are still with it, and "Open the conversation". The read surface holds no conversation, so the place shows nothing until the screen runs beside the secretary's terminal (section 5); there, opening it gives the terminal the lower half of the centre. This changes the judgement of 2.3 only in size: the conversation stays in the centre, folded until it can show something.
+- **Right: watch, narrow** (360 px). "Failures" by degree (4.1 and 2.5): the rows that stopped with nobody on them first, at most two, then a fold line that says what the rest are ("1 waits for your answer · 1 probably ended"); then "Ready to start", three Issues with "Ask to start", and a fold line.
+- **Top line.** Plain words with the number in the state's colour and the mark before it ("2 need you", "4 failed · 3 unattended"), no pills; the display switches are words, the chosen one in bold.
+- **Narrow (1024 px).** The right column goes; "Failures" and "Issues to start" are reached from the sidebar, whose entries keep their counts and their red or amber words, and the top line keeps both counts.
+
+The question Q4 of section 9 (room for an open tab) is answered by this layout: a view opens in the centre, not under the candidates.
+
+**Round 3 of the layout (Issue 394, the owner's reading of 2026-11-24, entry 38): several repositories at once.** A project has at most one active range (belt.md), so with several projects registered several ranges run at the same time, and Issue and pull-request numbers repeat across repositories. The fixture now holds four projects (three with a range in progress, one with a proposal) and two collisions on purpose (`loom#56` and `quill#56`; the pull requests `loom#127` and `harbor#127`). What changes:
+
+- **References: always `project#N`.** Every Issue and pull request on the screen is written with its project's slug: `loom#56`, `harbor#127`, `atlas#7`, in mono, the slug in ink and the number in grey, whatever the number of projects and whatever the filter. The slug is the name the person gave the project with `makiba project`; it is unique in the organization, short, and exists for a project with no repository recorded too, so one form covers every case (the form `<project>#N` of 3.1 becomes the only form). `OWNER/NAME` is shown in the heading of a repository's view and on hover; a line to type and a message to the secretary still carry `OWNER/NAME#N` (section 4), since GitHub knows no slug. This replaces the rule of 2.1 (`#N` with one project, `OWNER/NAME#N` on a line of its own with more) and withdraws the recommendation of Q2.
+- **The sidebar lists repositories first.** "All repositories", then one entry per project in a fixed order by name (an order that never moves under the hand), each with its range's number and status, its tasks used of its budget, and, only when there is something, a line of words: "1 needs you · 3 failed", "needs your approval". Under it, "Views", whose counts are those of the selected repository.
+- **Choosing a repository filters the screen.** Its range is the centre's view, and every list (failures, ready to start, the views of the sidebar) shows that repository only; the region's heading says so ("3 in loom") and one click goes back to all. The top line never filters.
+- **"All repositories" is the default view.** One block per repository, in the sidebar's order: its slug, its range's status and progress, at most the two rows that need a look (needs you, did not start, an error), and one quiet line for the rest with "Open". A proposal is a block whose row is "Review the proposal".
+- **The top line names where.** The totals stay, followed by where they are: "3 need you in atlas, loom, quill", "6 failed · loom 3 · harbor 2 · atlas 1 · 5 unattended"; each name filters to that repository. The display switches fold into "Display: English · Light" to leave the line its room (2.1).
+- **A failure row has one coloured line.** The kind and who is on it are one sentence: "Did not start · no sign that anyone is on it", in red; the detail and the actions under it are grey or links ("Abandon and close…" is no longer red: the confirmation says what it does).
+
+**Round 4 (the owner's reading of 2026-11-24, entry 39): no word alone on a line.** The round-3 drawing broke text in odd places: titles in the right column dropped only their last word to a second line ("Keep the last five / releases"), the state lines of the sidebar broke inside a phrase ("1 needs / you"), and the last row of the centre went under the secretary's line. What changes:
+
+- **In the right column the reference is a line of its own** (`harbor#15`, mono), and the title is the next line, whole, at the column's full width; the title, the coloured line and the meta are set with the browser's balanced wrapping (`text-wrap: balance` for titles, `pretty` for running text), so a short last line is avoided where a line must break. The column keeps its 360 px: the centre leads, and the titles of the fixture fit on one line at that width once the reference is off it.
+- **A state line under a sidebar entry wraps only between its phrases** ("needs your approval", "1 needs you", "1 failed" are each kept whole; the separator goes with the phrase after it, never at the end of a line).
+- **The centre draws only whole rows, above the secretary's line, never under it.** A row or a repository's block that does not fit whole is not drawn in part: the list ends with a fixed strip that names what is below with its state ("Below: quill 1 needs you"; in a repository's view, its groups as links: "In review 3 · Being worked on 1 · Merged 2 …"). The right column does the same: a failure or a candidate that does not fit whole goes into the fold line under it. Nothing is hidden without being named (2.1).
+- **A fold line and a coloured line wrap only between phrases** ("1 stopped (loom, 17 h)", "1 waits for you", "1 probably ended"; "Its terminal is gone", "no sign that anyone is on it"), the separator going with the phrase after it.
+- **A reference and the word before it stay together** where a sentence ends on one ("pull request loom#131", "Depends on #<n>").
+- **Checked on the rendered page, not by eye.** A check run over the drawing as Chromium lays it out finds, for every block of text, its lines from the position of each word, and reports any block of two lines or more with a line that holds a single word. Run on the round-3 drawing it reports 21 such lines, the two titles the owner named among them; on this drawing, over 678 blocks (every value of the fixture that is drawn, in all three pictures and every panel), it reports none. The same run also reports any row, block heading, summary or fold line that crosses the bottom of its list or of the right column, or is drawn under the strip: none. The check is a script run on a copy of the page; the drawing itself still has no script.
 
 **Always seen**
 
@@ -86,7 +115,7 @@ The owner drew the first draft with larger counts and it broke (2026-11-23): wit
 Widths follow the same rule: nothing is cut without a mark, and nothing wraps over its neighbour.
 
 - A reference is never wrapped and never given a fixed width: its cell is as wide as its text. A title beside it keeps at least sixteen characters before it is cut with an ellipsis, and a cut title shows whole on hover.
-- With one project registered a reference is `#N`, in a cell before the title. With more than one it is `OWNER/NAME#N`, too long to sit before a title in a column of this width: it goes on a line of its own under the title, whole, in every list; one longer than the row is cut at its start, never its end, so the number always stays, and shows whole on hover. The form is chosen by the number of projects, not row by row, so the rows of one list have one shape.
+- Superseded by round 3 (section 2): every reference is `project#N`, in its own column before the title. What follows was the rule before it. With one project registered a reference is `#N`, in a cell before the title. With more than one it is `OWNER/NAME#N`, too long to sit before a title in a column of this width: it goes on a line of its own under the title, whole, in every list; one longer than the row is cut at its start, never its end, so the number always stays, and shows whole on hover. The form is chosen by the number of projects, not row by row, so the rows of one list have one shape.
 - A state at the right of a row ("needs you · 6 min") is never cut; the title gives way first.
 - A label longer than the drawing's English (another language) wraps inside its own cell or is cut with an ellipsis; no layout depends on a label's length. The section headings, the buttons and the top line are one line each and cut the least important part first (the explanation after a heading, then the organization's name).
 
@@ -94,7 +123,7 @@ Widths follow the same rule: nothing is cut without a mark, and nothing wraps ov
 
 - **Language.** The screen's wording switches with the display-language setting, from the top line. All wording is kept in one place: one table per language, keyed by what is said (a place, a stage, a reason, an event kind, a button, a heading), as `roles/locale/` does for the sentences of spec section 13; no view holds a sentence of its own, so a language is added by adding a table and the layout is tested with the longest of them. A key with no wording in the chosen language is shown in English, and one with none at all by its record name, never dropped. What comes from the records is shown as written: titles, questions, reasons, the secretary's terminal. The setting starts from `conversation_language` (spec section 13); neither output prints the language in force (the setting, or `makibad`'s environment when unset), which is missing (section 6), so until then it starts from the environment of the screen's own process, read as spec section 13 reads it. The choice is the screen's own and changes nothing in the organization. The drawing is in English only: the repository's language check allows no other text under `docs/`, and the owner checks a long Japanese wording against the layout on their side.
 - **Light or dark.** Three choices in the top line: follow the system (the default), light, dark. Every colour is a named value with one light and one dark figure; no part has a colour of its own. The meanings do not change: amber waits for the person, red went wrong, green moves or landed. The conversation is dark in both.
-- Both switches are drawn in the drawing and not wired, as the tabs are: it carries no script. The dark variant is its third picture.
+- Both switches are drawn in the drawing and not wired, as the tabs are: it carries no script. The dark variant is its second picture, and the visual system is drawn in both themes at its end.
 
 ### 2.3 The centre is a judgement of the present
 
@@ -124,7 +153,7 @@ The table is the English column of the wording table of 2.2: one key per thing s
 | `top.display` | Display | The language and light-or-dark switches, folded into one control when the line is short | Top line | |
 | `col.hand_over` | Hand over work | The role "put in" | Left column | |
 | `col.progress` | Progress | The role "watch" | Right column | |
-| `col.more` | More | The shelf of tabs | Lower left | |
+| `col.more` | Views | The sidebar's list of views (formerly the shelf of tabs, section 2, round 2) | Sidebar | |
 | `range.title` | Approved work #N | A range (`ranges[].id`) | Range card, band, tabs | |
 | `range.in_progress` | in progress | `ranges[].status` `active` | Range card | |
 | `range.proposed` | needs your approval | `ranges[].status` `proposed` | Range card | |
@@ -161,8 +190,8 @@ The table is the English column of the wording table of 2.2: one key per thing s
 | `tab.prs` | Pull requests | Pull requests of runs not closed | Shelf | |
 | `tab.history` | Task history | The events of one task | Shelf | |
 | `tab.instructions` | Instructions | `ranges[].brief_head` | Shelf | |
-| `tab.mark_failed` | N failed | Failed rows behind the tab | Tab heading | |
-| `tab.mark_needs_you` | N need you | Rows behind the tab that wait for the person | Tab heading | |
+| `tab.mark_failed` | N failed | Failed rows behind the view | Sidebar entry, second line | |
+| `tab.mark_needs_you` | N need you | Rows behind the view that wait for the person | Sidebar entry, second line | |
 | `answer.title` | Needs your answer | An escalated entry of `pending[]` | Answer card, "Failures" | |
 | `answer.kind_decision` | A decision | A stop of kind `design`, `scope`, `order`, `naming`, `other` | Answer card heading | |
 | `answer.kind_question` | A question | An entry outside a range | Answer card heading | |
@@ -203,7 +232,13 @@ The table is the English column of the wording table of 2.2: one key per thing s
 | `place.working` | being worked on / working | Place `in_work` | Band, lists | |
 | `place.not_started` | not started | Place `not_in` | Band, lists | |
 | `place.skipped` | skipped | Place `skipped` | Band, lists | |
-| `stage.checks_running` | checks running | Stage `ci` | Lists, pull requests | |
+| `stage.checks_running` | checks running | Stage `ci` and a watch `watching` of the task in `pr_watches[]`. Stage `ci` alone is not enough: the range's read gives it to every head whose newest watch is not a passed one, a failed CI and an ended watch included (3.5) | Lists, pull requests | |
+| `stage.checks_failed` | checks failed | Stage `ci`, no watch `watching`, and the newest `ci_completed` of the task's head `failed` | Lists, pull requests | |
+| `pr.closed_outside` | closed outside makiba | `pr_closed` (Issue 388) newer than the task's newest `pr_reopened` | Lists, pull requests, trail | |
+| `pr.reopened` | reopened · checks not watched | `pr_reopened` with no `ci_watch_started` of the pull request after it | Lists, pull requests, trail | |
+| `pr.merged_gate` | through the gate | `pr_merged.merged_via` `gate` | Pull requests, trail | |
+| `pr.merged_hand` | by hand, outside the gate | `pr_merged.merged_via` `hand`, with `merged_by` | Pull requests, trail | |
+| `gap.missing` | missing: FIELD | A field the read surface does not give (section 6); drawn as the gap of 2.5, never filled | Any part | |
 | `stage.ready_to_merge` | checks passed · ready to merge | Stage `to_land` | Lists | |
 | `stage.no_pr` | no pull request yet | Stage `no_pr` | Lists | |
 | `stage.free_place` | waits for a free place | `why` `no_slot` | Lists | |
@@ -223,6 +258,61 @@ The table is the English column of the wording table of 2.2: one key per thing s
 | `hist.checks` | Checks passed / failed | `ci_completed` | Tab "Task history" | |
 | `hist.merged` | Merged | `pr_merged` | Tab "Task history" | |
 | `hist.closed` | Closed / Abandoned | `run_closed` | Tab "Task history" | |
+
+### 2.5 The visual system
+
+The owner asked (Issue 394) for a screen on a level with today's developer tools: the polish of current issue trackers, CI dashboards and deploy consoles. That is taken as a quality bar, not as something to copy: no other product's name, logo, colours or distinctive layout. The system below is small on purpose; every part of the drawing uses it and nothing else. Its values are the custom properties at the top of the drawing's style, and the drawing's last two panels show it whole. Round 2 (the owner's reading of 2026-11-24, section 2) changed its tone: structure comes from whitespace, rules and the weight of the type, not from boxes.
+
+**Principles.** One surface per column, no card inside a card: a list is rows divided by hairlines, a section is a heading and whitespace. No pills and no coloured tags: a state is a mark and a word; a size or a goal clause is a word in the meta line ("G2 · size M, estimated"). Colour is spent where it carries meaning, and red least of all. One region leads (the centre, with the largest type); the sidebar and the right column are quieter and smaller.
+
+**Type.** System fonts only; nothing is fetched when the screen is viewed. Sans: `system-ui, -apple-system, "Segoe UI", "Noto Sans", "Hiragino Sans", "Noto Sans JP", "Liberation Sans", sans-serif` (the Japanese faces are there for the display language of 2.2). Mono, for references, task ids, heads and lines to type: `ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace`. Numbers are tabular everywhere, so counts and ages do not jitter. The body is 14 px (it was 13): the owner found the text small.
+
+| Step | Size / weight | Used for |
+| --- | --- | --- |
+| xl | 20 / 650 | The question waiting for the person: the largest text on the screen |
+| lg | 16 / 650 | The heading of the view (the selected range, "Pull requests") |
+| md | 14 / 400 (500 to 650 for titles) | Body: rows, the sidebar's names, the region headings of the right column |
+| sm | 13 / 400 | Meta: ages, reasons, the second line of a row, links and buttons |
+| xs | 12 / 600 | Group headings in a list, the sidebar's section names, the state line under a sidebar entry |
+
+Line height 1.5. A title is not cut where the column is wide enough to hold it (the centre); where it is cut, it keeps 16 characters and shows whole on hover.
+
+**Colour.** One token per role, each with a light and a dark value; no part has a colour of its own (2.2). Neutrals: `bg` (the sidebar, the top line, the folded conversation), `surface` (the centre and the right column), `surface-2`, `border`, `border-strong`, `text`, `text-2`, `text-3`, and `accent` (links and focus only). Four state families, each with a word colour and a mark colour: `ok` (green: work that moves or landed), `wait` (amber: waits for the person, nothing else), `fail` (red: went wrong, nothing else), `info` (blue: in review and pull requests in flight); `idle-mark` (grey) for not started, skipped, closed, and a failure that probably ended. The state tints and row tints of round 1 are kept as tokens (the stale band uses the red solid) but no longer fill badges or rows. The primary button is ink (`primary`, the text colour), so that green means only "moves or landed".
+
+| Token | Light | Dark |
+| --- | --- | --- |
+| `bg` / `surface` / `surface-2` | `#f4f5f7` / `#ffffff` / `#f0f2f5` | `#0e1013` / `#15181d` / `#1b1f26` |
+| `text` / `text-2` / `text-3` | `#16191d` / `#434a55` / `#5d6572` | `#e7eaef` / `#b8bfca` / `#959eac` |
+| `accent` | `#2754c5` | `#86a6ff` |
+| `ok` word / mark | `#18703a` / `#24944b` | `#5fca83` / `#4fb873` |
+| `wait` word / mark | `#8a4b00` / `#b26a00` | `#f1b650` / `#e0a33a` |
+| `fail` word / mark | `#b3241b` / `#d0291d` | `#ff887c` / `#f2695d` |
+| `info` word / mark | `#2c52a3` / `#3b66c4` | `#95b3ff` / `#7f9ff0` |
+
+Contrast was computed for every pair the drawing uses, from the drawing's own values (the WCAG 2 relative-luminance formula): each text colour, state word and link on `bg`, `surface` and `surface-2`; white or ink on each solid and on the primary button; the gap's text; and the pairs round 1 used, which are kept as tokens. Every text pair passes AA (4.5:1); the lowest is `text-3` on `surface-2`, 5.25 in light and 6.11 in dark. Marks and the focus ring are non-text and need 3:1; the lowest is the green mark, 3.88 on `surface` (light). No text is faded with opacity: a greyed region takes `text-3`.
+
+**Red by degree.** Red is for what went wrong, and within that, for what is stopped with nobody on it. A failure row has one of three degrees, taken from its kind and from who is on it (4.1): *stopped, nobody on it* (did not start, terminal gone, error, silent, with no sign of handling): the red mark, the title in bold, and one red line "No sign that anyone is on it"; *waits for you* (an escalated question of its task): the amber mark and one amber line; *probably ended or handled* (finished without a report, or with the secretary): the grey mark, the title in regular weight, the handling in grey. The kind and who is on it are one sentence in one line, the only coloured line of the row ("Did not start · no sign that anyone is on it"). Rows are ordered by degree, then newest first. The right column shows the first degree only, at most three rows, and a fold line that names what the others are. Nothing else on the screen is red: not the card, not the border, not the row's background, not the column's heading; the sidebar says "3 unattended" in red words, and the top line colours only the figure.
+
+**State is never colour alone.** Each place has a mark of its own shape, a word, and a colour: merged (a filled circle with a check, green), closed, not merged (a square outline, grey), needs you (a filled circle with a question mark, amber), in review (a filled diamond, blue), being worked on (a ring with a centre, green), not started (a dashed ring, grey), skipped (a ring struck through, grey), did not start or failed (a triangle with an exclamation mark: red when stopped with nobody on it, grey when it probably ended). Two pull-request states have their own: reopened (a diamond outline, blue) and merged by hand (a diamond outline with an exclamation mark, amber). The shapes differ in silhouette, so they read in grey too and with any colour vision. The marks are inline SVG; none is an emoji or a font glyph.
+
+**Spacing and density.** A 4 px grid: 4, 8, 12, 16, 24, 32, 40. The centre is padded 32 at the sides and leads; the right column 24; the sidebar 12. Sections are separated by 24 to 32 of whitespace and, between the answer and the view, by one hairline. Controls are 32 px high (28 when small) with a 6 px radius. A row is 40 px for one line and grows by a line for its explanation. Action links in a row are text, not buttons; only the answer, "Ask to start" and the approval have buttons.
+
+**References.** `project#N` everywhere (section 2, round 3): mono 13 px, the project's slug in ink and semibold, `#N` in `text-3`, so the repository is read first and down a column. Never `#N` alone; `OWNER/NAME` only in a repository's heading and on hover.
+
+**Rows.** A row is a grid: the mark (18 px), the reference (`project#N`, mono, in a column of 104 px so that the projects line up), the title with its explanation on a second line in `text-3`, and the state with its age at the right (never cut; the state word takes the state's colour only for "needs you" and "did not start"). Rows are divided by hairlines, never boxed; a group of rows has a 12 px heading with its count. A capped list ends with a fold line: the link names how many more, the words after it say what they are.
+
+**Missing fields.** A field the read surface does not give is drawn as a gap: a dashed, hatched box in mono that names the field ("missing: runs[].title"), never an invented value and never an empty space. A null the record holds on purpose is not a gap: it is said in words ("The secretary wrote no if yes"). The conversation, which the read surface leaves out by design, is folded to its one line (section 2) instead of being drawn as an empty box.
+
+**Empty, loading, error and stale.** Every region has the four, in the same form (the drawing's panel of the states):
+
+- Empty: a sentence that says why it is empty and what will change it ("No Issue is ready to start. The check of 09:41 found none. The next check runs after a task closes."), with the not-started mark. Never a blank area.
+- Loading: the region's heading with "Reading…" and grey bars the shape of its rows, so the layout does not move when the rows arrive. No spinner alone.
+- Error: a red rule at the left of the region's top, with the error as recorded, whole, and what is still shown under it (the last good list with its age).
+- Stale: when the heartbeat is old, a red band across the top of the screen ("makiba has not responded for 4 min", with the line `makiba up`) and every region greyed: its marks lose their colour and its text takes `text-3`, so it stays readable at AA (2, rules of the look).
+
+**Focus and keys.** Every control is reachable by the keyboard. The focus ring is 2 px of `accent` with a 2 px gap, in both themes, and is never removed. Tab moves within a region in reading order; F6 moves to the next region, in the order of what calls for the person first: the top line, the answer, the view, "Failures", "Ready to start", the sidebar, the conversation line (Shift+F6 goes back). The two counts of the top line are links to their regions. In the sidebar the arrow keys move between entries and Enter selects one; Escape in a view goes back to the selected range. No single-letter shortcut: the conversation, once open, is a terminal that takes every key. Each region is a landmark with its name ("Needs your answer", "Failures", "Approved work 3"), so a screen reader can jump to it.
+
+**Widths.** 1440 px is the size the screen is designed at (248, the rest, 360); the top line never widens the grid, it gives way in the order of 2.1. The narrow width is 1024 px (the drawing's third picture, 1024 × 720): the sidebar (216) and the centre; the right column's two regions are views of the sidebar there (section 2). Below 1024 px nothing is designed (section 8).
 
 ## 3. Each part and its read field
 
@@ -274,7 +364,7 @@ One entry is shown large. Several are a list, oldest first, and the one opened i
 | Skipped, and why | `ranges[].skipped[]` | Today |
 | An ended range | `ranges[].status`, `.ended_reason`; its list stays while it is the project's newest (belt.md 7.1) | Today |
 | Failures: an open anomaly | `anomalies[]`: `task_id`, `rule`, `since` | Today |
-| Failures: a failed launch | A run whose `runs[].status` is `failed` **and** whose `runs[].stage` (its newest launch) is `failed`: the launch never reached `verified`. Neither alone says it. The status alone does not: the anomaly `gone` also sets a run `failed` when a worker that had launched well loses its terminal; its newest launch is then `verified`, and the run is shown once, as that anomaly, never also as "launch failed". The stage alone does not: `makiba down` sets a launch's stage to `failed` while it suspends the run, and writes no `worker_spawn_failed`; a run `suspended` is shown as "suspended" under the runs, not as gone wrong. The reason is shown only from a `worker_spawn_failed` event whose `spawn_id` is the run's newest launch; an older launch's failure is never attached | The status and the stage today. The reason is missing: `runs[]` does not print the newest launch's `spawn_id` or its reason (section 6); until then the row says "launch failed" with no reason |
+| Failures: a failed launch | A run whose `runs[].status` is `failed` **and** whose `runs[].stage` (its newest launch) is `failed`: the launch never reached `verified`. Neither alone says it. The status alone does not: the anomaly `gone` also sets a run `failed` when a worker that had launched well loses its terminal; its newest launch is then `verified`, and the run is shown once, as that anomaly, never also as "launch failed". The stage alone does not: `makiba down` sets a launch's stage to `failed` while it suspends the run, and writes no `worker_spawn_failed`; a run `suspended` is shown as "suspended" under the runs, not as gone wrong. The reason is shown only from a `worker_spawn_failed` event whose `spawn_id` is the run's newest launch; an older launch's failure is never attached | The status and the stage today. The reason is derivable from the events (3.5): `worker_spawn_failed` carries the task (through its run) and the `spawn_id`, and the newest launch's `spawn_id` is that of the task's newest `run_taken` or `worker_spawned`. A launch that wrote neither cannot be tied, and the row then says "launch failed" with no reason; `runs[].launch_failed_reason` (section 6) would make it sure |
 | Failures: the dispatcher is silent | `makibad.running`, `.heartbeat_at` | Today |
 | Failures: the last scan failed | `next_work.status` `error`, `.error` | Today |
 | Runs outside a range, stopped first | `runs[]`: `task_id`, `kind`, `project`, `status`, `stage`; the worker's state and age from `terminals[]` by the name `w-<task_id>` | Today, without a title and without "since" for the run itself: missing |
@@ -291,6 +381,106 @@ The trail names each event in the person's words (`belt_dispatched`: "Dispatched
 In herdr-app the centre is the secretary's terminal itself, which the app already shows by its labels (probe P12). The screen adds nothing to it and reads nothing from it. Its state and age in the bar over it come from `terminals[]` (`role` `secretary`: `state`, `since`).
 
 In a page on 127.0.0.1 there is no terminal: the read surface shows no message body, by design. What a page could hold instead is in section 5.
+
+### 3.5 The inventory: every part against the read surface of 2026-11-24
+
+Read against the code at the base of Issue 394 (`src/status_local.rs`, `src/daemon/belt.rs` `read_ranges`, `src/daemon/triage.rs`, `src/daemon/prwatch.rs`) and spec sections 10 and 12. **Given**: a field prints it as the part shows it. **Derivable**: the screen computes it from given fields, by the rule written. **Missing**: neither output carries it; the letter names the addition proposed in section 6 (each its own Issue), or the Issue that already holds it. The fixture of [screen-fixture/](screen-fixture/) has every given field, and the drawing shows every missing one as a gap.
+
+The fixture: `status.json` is one object of `makiba status --json` and `events.json` one page of `makiba events --json`, with the field names and the nesting the code prints, in its order. Every value is invented: the projects `loom` (repository `example-org/loom`) and `atlas` (no repository recorded), the account `example-maintainer`, the titles, the heads and the times. It was written from the code and the spec, not exported from a running organization: the sandbox of this task cannot open a `state.db`. It is read as at 2026-11-24T10:00:00Z; every age in the drawing is counted from that time. What it holds (round 3): four projects, `atlas` (no repository recorded), `harbor`, `loom` and `quill` (`example-org/...`); range 3 of `loom` active with twelve items in all seven places (a launch failed, a merge through the gate, a merge by hand, a pull request closed and reopened outside makiba, one under watch, one passed), range 5 of `quill` and range 6 of `harbor` active (a launch failed and an error in harbor, a question in quill), range 4 of `atlas` proposed with its read, range 2 of `loom` ended and replaced with one run left whose terminal is gone; three one-off runs, four pending entries (three escalated, one permission prompt still with the secretary), four open anomalies, one watch, a scan with nine candidates over three repositories and five left out, and sixty-eight events, among them the whole trail of one task. Numbers collide across repositories on purpose: `loom#56` and `quill#56`, and the pull requests `loom#127` and `harbor#127`.
+
+**Top line**
+
+| Part | Field | State |
+| --- | --- | --- |
+| The organization's name | none | Missing (E). Drawn as a gap |
+| "Needs you N" | `pending[]` with `status` `escalated` | Given (a count) |
+| "Failed N" | `anomalies[]`, plus each run with `status` `failed` and `stage` `failed`, plus `next_work.status` `error`, plus `makibad.running` false | Derivable (3.3: a run `failed` whose newest launch is `verified` is its anomaly, counted once) |
+| "unattended N" | The handling state of 4.1 | Derivable only in part: whether a notice was delivered and whether the secretary looked are missing (D), so every row with no other sign counts here, 3 of 4 in the fixture (question 6) |
+| "Running · updated N s ago" | `makibad.running`, `.heartbeat_at`; the age of the screen's own read | Given |
+
+**Hand over work**
+
+| Part | Field | State |
+| --- | --- | --- |
+| The selected range: id, project, status, terms | `ranges[].id`, `.project`, `.status`, `.issues`, `.takes`, `.at_once`, `.budget.fixes` | Given |
+| Tasks and hours used | `ranges[].used.tasks` of `.budget.tasks`; `.used.hours` of `.budget.hours` (null: no hour budget, the meter is not drawn) | Given |
+| Approved when, by whom, merges approved by whom, new Issues let in or asked | `ranges[].approved_at`, `.approved_by`, `.approval_mode`, `.follow_ups` | Given |
+| Which range is selected | `ranges[].status`, `.places`, the runs of its items | Derivable (2.1) |
+| The other ranges' lines | `ranges[]` other than the selected one: id, project, status, `ended_reason`; "1 task left" is its items with a `task_id` whose run is in `runs[]` | Derivable |
+| A proposal: what it may let in, the read, the brief | `ranges[].issues`, `.takes`, `.candidates[]` (`issue`, `title`, `admitted`, `left_out_why`, `design_only_waits`), `.read_id`, `.read_at`, `.read_complete`, `.brief_head` | Given |
+| A reference of a project with no repository | `projects[].repo` null: `<project>#N` | Derivable; the repository the belt resolved is missing (H) |
+| Ready to start | `next_work.candidates[]`: `repo`, `issue`, `title`, `clause_id`, `clause_heading`, `size`, `size_estimated`, `why`, `recommended`; `.scanned_at` | Given |
+| Ready, minus what a range already holds | A candidate whose `repo` and `issue` match an item of an active or proposed range is shown there only (#60 in the fixture) | Derivable (3.1) |
+| Not ready yet: the reason | `next_work.left_out[]` with an `issue`: `kind`, `reason` | Given |
+| Not ready yet: the title | none | Missing (B). Drawn as a gap |
+| Projects not ranked | `next_work.left_out[]` with a null `issue` | Given |
+| Why the list is empty, the scan cut short | `next_work` null, `.status`, `.error`, `.input_truncated`, `.candidates_not_recorded`, `.left_out_not_recorded` | Given |
+
+**Answer**
+
+| Part | Field | State |
+| --- | --- | --- |
+| The entry: id, task, age, question whole | `pending[].id`, `.task_id`, `.created_at`, `.question` (only its first line for a permission prompt) | Given |
+| The kind in the heading | `ranges[].stops[].kind` by the entry's id ("A decision on design"); "A question" otherwise; `pending[].kind` `prompt` | Given |
+| The title in the heading | A range's task: `ranges[].items[].title` by `task_id`. A one-off task: none | Given for a range; missing for a one-off task (A), drawn as a gap |
+| Background, if yes, if no, recommendation, why | `pending[].context.*`; a null part is said in words, it is not a gap | Given |
+| Which answer is recommended | `ranges[].stops[].recommend_answer` | Given for a range's stop; for another entry only `context.recommend`, as text |
+| "1 more question is with the secretary" | `pending[]` with `status` `open` | Given |
+
+**The conversation**
+
+| Part | Field | State |
+| --- | --- | --- |
+| The bar: state and age | `terminals[]` with `role` `secretary`: `state`, `since` | Given |
+| What is said | none, by design | Not on the read surface; in herdr-app the terminal itself (3.4). Drawn as one gap |
+
+**Progress**
+
+| Part | Field | State |
+| --- | --- | --- |
+| A failure: an anomaly | `anomalies[]`: `task_id`, `rule`, `since` | Given |
+| A failure: a launch that failed | `runs[].status` `failed` and `.stage` `failed` | Given |
+| Its reason | The newest `worker_spawn_failed` of the task whose `spawn_id` is that of the task's newest `run_taken` or `worker_spawned` | Derivable from the events ("no first turn within 120 s" in the fixture); sure only with G |
+| Its title | A range's task: `ranges[].items[].title`. A one-off task: none | Missing for a one-off task (A) |
+| Who is on it: needs your answer | An escalated `pending[]` of the row's task | Given |
+| Who is on it: nobody (the two anomalies of the secretary) | `anomalies[]` `secretary_gone`, `secretary_still` | Given |
+| Who is on it: with the secretary, told N min ago | The delivery of the row's notice | Missing (D) |
+| Who is on it: looking | The secretary's last act on the task | Missing (D); today only from the secretary's events with that task id |
+| The band and its counts | `ranges[].places`, `.items[].place` | Given |
+| "(1 did not start)" in the band | An item `in_work` whose run is `failed` with `stage` `failed` | Derivable (3.3) |
+| Active now: place, stage, reason | `ranges[].items[]`: `place`, `stage`, `why`, `task_id`, `issue`, `title` | Given |
+| Active now: how long in review | `items[].since` of a review item is its dispatch, not when it went into review | Missing (J); the drawing shows the age of the newest pull-request event instead, from the events |
+| "checks running", "checks failed", "reopened · checks not watched" | Stage `ci` covers all three: the read gives `ci` to every head whose newest watch has not passed (running, failed, or ended because the pull request closed). Told apart by `pr_watches[]` (watching), the newest `ci_completed` (failed) and `pr_closed` / `pr_reopened` / `ci_watch_failed` (closed, reopened) | Derivable from the events; a field per pull request is missing (C). The wording of 2.4 was corrected: `ci` alone is not "checks running" |
+| "checks passed · ready to merge" | Stage `to_land` | Given |
+| Merged, through the gate or by hand | `pr_merged`: `merged_via` (`gate` or `hand`), `merged_by`, `head_oid`, `merge_commit` (Issue 388); a merge recorded before Issue 388 has none of the first three | Given, in the events only; on `status` only `items[].pr` and `.pr_title` |
+| A pull request closed outside makiba, reopened | `pr_closed` (`repo`, `pr`, `title`, `task_id`), `pr_reopened` (`repo`, `pr`, `task_id`) (Issue 388) | Given, in the events only |
+| The secretary was told of a hand merge, a close, a reopen | A `message_sent` of `makibad` with the task, right after; the body is not on the read surface | Derivable that a notice was written; whether it was delivered is missing (D) |
+| The merge state: mergeable, behind, in conflict | none (Issue 387 reads `mergeable` and `mergeStateStatus` in the same state read; not yet merged) | Missing (Issue 387, then C). Drawn as a gap on each open pull request |
+
+**Several repositories (round 3)**
+
+| Part | Field | State |
+| --- | --- | --- |
+| The project of a row | A range's item: `ranges[].project`. A run: `runs[].project`. A failure: the project of its run (`anomalies[].task_id`, or the failed run). A question: `pending[].task_id` to `runs[].project`. A candidate or a left-out Issue: `next_work.candidates[].repo` to the project whose `projects[].repo` it is (`left_out[]` also carries `project`). A pull request: `repo` of its event, to its project | Derivable for every row; given for ranges, runs and left-out entries |
+| `project#N` | The slug (`projects[].slug`) and the number | Derivable; the slug is unique in the organization |
+| The per-repository counts of the top line and the sidebar | The same rows as the totals, grouped by their project | Derivable |
+| A row of a closed run (a pull request merged today) | `repo` of `pr_merged` to its project; the run itself is no longer in `runs[]` | Derivable from the events |
+
+**Behind the tabs**
+
+| Part | Field | State |
+| --- | --- | --- |
+| All approved items | `ranges[].items[]` in its order | Given |
+| One-off tasks: id, kind, project, status, the terminal's state and age | `runs[]` with no range item naming its `task_id`; `terminals[]` by `w-<task_id>` | Derivable (no `range_id` on a run: a run is a range's when an item of a range names it) |
+| One-off tasks: title, start, Issue, range | none | Missing (A). Drawn as a gap |
+| One-off tasks: waiting for you, woken | `runs[].waiting`, `.unparked` | Given |
+| Pull requests: the open ones of runs not closed | The `pr_opened` and `fix_pushed` of tasks in `runs[]`, with what the events say of each head (above) | Derivable from the events; missing as a field (C) |
+| Pull requests: the title | Only `pr_merged` and `pr_closed` carry one; for a range's task the item's title stands in | Missing for an open pull request of a one-off task (C). Drawn as a gap |
+| Pull requests: merged today | `pr_merged` since local midnight | Derivable from the events |
+| Task history | Every event with that `task_id`, oldest first; the review rounds (`codex_round_started`), the report (`worker_reported`, written only when a review answered), the gate (`acceptance_gate`) | Given in the events; a filter by task is missing (I) |
+| Instructions | `ranges[].brief_head` | Given |
+
+What the inventory changed in this note: the launch-failure reason moves from missing to derivable (3.3); the wording `stage.checks_running` was wrong for stage `ci` and is corrected (2.4); a review item's age is not its time in review (J); the organization's name has no field (E); the merge state is Issue 387's.
 
 ## 4. Acting from the screen
 
@@ -369,21 +559,23 @@ Either way the parts and their read fields (section 3) are the same, so the mode
 
 ## 6. What the read surface lacks
 
-Each is a small addition to `status --json` with a row in the table `Status field` and in `tests/read_surface.rs`; each would be its own Issue, before or with the code of the screen. None blocks the drawing.
+Each is a small addition to `status --json` (or `events`) with a row in the table `Status field` and in `tests/read_surface.rs`; each would be its own Issue, before or with the code of the screen. None blocks the drawing, which draws each as a gap. The letters are those of the inventory (3.5); brought up to date on 2026-11-24 (Issue 394): E, J and the merge state are new, G is now a convenience (the reason is derivable), and C takes in what Issue 388 added to the events.
 
-| Field | For | Without it |
-| --- | --- | --- |
-| `runs[].title`, `runs[].since`, `runs[].issue`, `runs[].range_id` | "One-off tasks" and the trail's heading | A run outside a range is shown by its task id only, with its terminal's age. |
-| `next_work.left_out[].title` | "Not ready yet" | The row shows the number and the reason. |
-| `pending[].stop_line`, `.to`, and the `belt[]` rows (belt.md section 7, step 5) | The entry's range; what stopped and why, per task | Read from `ranges[].stops[]` and `ranges[].items[]`, which cover a first version. |
-| `pull_requests[]`: every pull request of a run not closed, with `repo`, `pr`, `head_oid`, `task_id`, `ci` (`running`, or the newest conclusion at that head) | Pull requests | `pr_watches[]` drops a watch when CI concludes, so the conclusion is folded from `pr`, `ci_completed` and `pr_merged` events by the screen. |
-| `runs[].launch_failed_reason` (the newest launch's `failed_reason`) | Failures | The row says "launch failed" with no reason: without the newest launch's `spawn_id` an event cannot be tied to it. |
-| `runs[].secretary_acted_at`: when the secretary last acted on the task through the door, whatever the verb (`pending add`, `escalate`, `peek`, `send`, `answer`, `close`), and by which verb; or a `task_id` on `command_received` | "Failures": "With the secretary, looking" (4.1) | "Looking" is read from the secretary's task-linked events only; a secretary working through a pending question reads "No sign that anyone is on it". |
-| `anomalies[].notice` and the same for a failed launch: to whom the row was told and whether that notice is `queued` or `delivered`, with the time | "Failures": who is handling a row (4.1) | A row with no other sign is shown as "No sign that anyone is on it". |
-| `ranges[].repo`: the repository the belt resolved for the range (it reads the clone's origin when `origin_url` is not recorded, and `projects[].repo` is then null) | The match of a range's items with `next_work`, and `OWNER/NAME#N` | With a null repository the screen matches by the project's slug and the number, and writes the reference as `<project>#N`. |
-| `conversation_language`, as resolved | Where the display language starts (2.2) | It starts from the environment of the screen's own process; the switch in the top line overrides it. |
-| `events --task <task_id>` | The trail of an old run | The screen keeps what it has read; a run older than its memory is read again from event 0. |
-| `closed_today[]`, or runs closed since a time | "Closed today" | Folded from `run_closed`. |
+| | Field | For | Without it |
+| --- | --- | --- | --- |
+| A | `runs[].title`, `runs[].since`, `runs[].issue`, `runs[].range_id` | "One-off tasks", the heading of a one-off task's question or failure, the trail's heading | A run outside a range is shown by its task id only, with its terminal's age, and its title is a gap. Whether a run is a range's is read from the ranges' items. |
+| B | `next_work.left_out[].title` | "Not ready yet" | The row shows the number and the reason; the title is a gap. |
+| C | `pull_requests[]`: every pull request of a run not closed, with `repo`, `pr`, `title`, `head_oid`, `task_id`, `ci` (`running`, or the newest conclusion at that head, or `not_watched` after a reopen), `state` (`open`, `closed`, `merged`, with `merged_via` and `merged_by`), and the merge state once Issue 387 reads it | Pull requests; telling "checks running" from "checks failed" and "reopened" in "Active now" | `pr_watches[]` lists only watches under way and `items[].stage` `ci` covers three states, so the screen folds `pr_opened`, `fix_pushed`, `ci_watch_started`, `ci_completed`, `ci_watch_failed`, `pr_closed`, `pr_reopened` and `pr_merged` itself. An open pull request of a one-off task has no title. |
+| Issue 387 | The merge state of a pull request (`mergeable`, `mergeStateStatus`: in conflict, behind the base, blocked), read in the same `gh pr view` as Issue 388's state | Pull requests: whether a passed one can be merged as it is | Not shown; a gap on each open pull request. |
+| D | `anomalies[].notice` and the same for a failed launch: to whom the row was told and whether that notice is `queued` or `delivered`, with the time; `runs[].secretary_acted_at`: when the secretary last acted on the task through the door, and by which verb (or a `task_id` on `command_received`) | "Failures": who is handling a row (4.1); the top line's "unattended N" | A row with no other sign is "No sign that anyone is on it", and counted as unattended. |
+| E | The organization's name (the base's session, or a name the person sets) | The top line | A gap; the screen could name itself after the one project when there is one. |
+| F | `conversation_language`, as resolved | Where the display language starts (2.2) | It starts from the environment of the screen's own process; the switch in the top line overrides it. |
+| G | `runs[].launch_failed_reason` (the newest launch's `failed_reason`) | Failures | Derived from the events (3.3); a launch that wrote neither `run_taken` nor `worker_spawned` has no reason. |
+| H | `ranges[].repo`: the repository the belt resolved for the range | The match of a range's items with `next_work`, and `OWNER/NAME#N` | With a null repository the screen matches by the project's slug and the number, and writes `<project>#N`. |
+| I | `events --task <task_id>` | The trail of an old run | The screen keeps what it has read; a run older than its memory is read again from event 0. |
+| J | `ranges[].items[].since` of a review item as the time it went into review (today it is the dispatch) | "Active now": how long a task has been in review | The age of the task's newest pull-request event, from the events. |
+| - | `pending[].stop_line`, `.to`, and the `belt[]` rows (belt.md section 7, step 5) | The entry's range; what stopped and why, per task | Read from `ranges[].stops[]` and `ranges[].items[]`, which cover a first version. |
+| - | `closed_today[]`, or runs closed since a time | "Closed today", "Merged today" | Folded from `run_closed` and `pr_merged`. |
 
 The rule behind the list: the screen states nothing `makibad` could state. Folding events in the screen is accepted for the trail, which is the events, and is a stopgap everywhere else.
 
@@ -402,3 +594,19 @@ Nothing starts before the owner agrees to the drawing.
 ## 8. Not in the first version
 
 A notification that calls the person (Issue 272). The organization's own state: capacity, the base, the versions (the owner, 2026-11-22). The screens of workers (the person is never called to a terminal; `peek` stays the secretary's). Several organizations or several people on one screen (belt.md section 10: the fields allow it, the layout does not try). A phone-sized layout.
+
+## 9. Questions for the owner (Issue 394)
+
+Each with a recommendation; the drawing follows the recommendation where it had to choose. The owner's answer (2026-11-24, through the secretary): Q1 to Q9 as recommended, and a redraw before any commit, which became round 2 of the layout (section 2) and of the visual system (2.5). Q4 is answered by that layout (a view opens in the centre); Q7's order of regions follows the new layout (2.5). Q9: the Issues to propose now are A, C and D of section 6. The owner's reading of round 2 (entry 38) withdrew the answer to Q2: with ranges running in several repositories at once, `#N` alone collides; round 3 writes every reference `project#N` (section 2).
+
+| # | Question | Recommendation |
+| --- | --- | --- |
+| Q1 | Running and landed share green (2.2), told apart by the mark (a ring with a centre, a check); in review is blue. Keep one green for both? | Keep. A second hue for "running" would be a fifth state colour; the marks already part them, in grey too. |
+| Q2 (withdrawn, round 3) | With two projects registered, every reference is `OWNER/NAME#N` on a line of its own (2.1). Inside a region tied to one range (its card, its band, "Active now", "All approved items") the drawing writes `#N` and names the project once in the heading. Allow that exception? | Allow it. A range has one project, so `#N` cannot be misread there, and it saves a line on every row. Lists that mix projects (ready, pull requests, failures) keep the long form. |
+| Q3 | The narrow width is 1024 × 720: two columns, with "Progress" and "Hand over work" behind a switch whose labels carry their counts (2.5). Agreed as the one narrow layout, with nothing designed below it? | Agree. It is the width of herdr-app beside another window; below it the conversation becomes too narrow to use. |
+| Q4 | With a tab open, the left column leaves the tab about two rows at 900 px (the first picture). Should "Ready to start" fold to its one-line count while a tab is open, instead of keeping one row? | Fold it. The tab was opened to be read, and the count with its fold line still says what is there. |
+| Q5 | The primary button is ink, not green (2.5). Agreed? | Agree. Green then means only "moves or landed", as 2.2 says of every colour. |
+| Q6 | Until the delivery of a notice and the secretary's acts are on the read surface (D), every failure with no other sign counts as "unattended" in the top line: 3 of 4 in the fixture. Count them, or show them apart ("no sign 3")? | Count them as unattended. The wording "No sign that anyone is on it" in the row already says it is the screen that sees no sign; under-alarming is the worse error. Revisit when D lands. |
+| Q7 | Keys: Tab within a region, F6 between regions in the order of what calls for the person, arrows in the shelf, Escape to close a tab; no single-letter shortcut (2.5). Agreed? | Agree. The terminal in the centre takes every key, so a letter shortcut would type into it. |
+| Q8 | The fixture in `screen-fixture/` becomes the recorded status and events of the model's test in step 1 of section 7. Keep it as that? | Keep it, and grow it there; a change to the read surface then shows up as a change to one fixture. |
+| Q9 | Which of the missing fields A to J of section 6 become Issues now, before the code of the screen? | A, C and D now: they are where the drawing shows the most gaps and where the screen would otherwise fold the most events (one-off tasks, pull requests, who is handling a failure). B, E, H and J are small and can go with the code; F, G and I can wait. |

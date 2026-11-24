@@ -1,0 +1,993 @@
+{
+  "events": [
+    {
+      "id": 900,
+      "occurred_at": "2026-11-24T07:29:58.000Z",
+      "actor": "makibad",
+      "kind": "range_read",
+      "task_id": null,
+      "payload": {
+        "range_id": 3,
+        "complete": true,
+        "through": 899,
+        "activation": 1,
+        "repo": "example-org/loom",
+        "candidate_refs": "example-org/loom#41,example-org/loom#42,example-org/loom#44",
+        "error": null
+      }
+    },
+    {
+      "id": 901,
+      "occurred_at": "2026-11-24T07:31:12.000Z",
+      "actor": "person",
+      "kind": "range_approved",
+      "task_id": null,
+      "payload": {
+        "range_id": 3,
+        "approved_by": "person",
+        "approval_mode": "human",
+        "read_id": 900,
+        "shown": [
+          {
+            "issue": 41,
+            "title": "Parse the config file once at start",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 42,
+            "title": "Accept a trailing comma in lists",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 44,
+            "title": "Rename the cache folder",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 47,
+            "title": "Cache parsed files between runs",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 48,
+            "title": "Show the line of a parse error",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 51,
+            "title": "Warn on an unknown key",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 53,
+            "title": "Read the config from stdin",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 55,
+            "title": "Split the parser into two passes",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 56,
+            "title": "A benchmark for large files",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 58,
+            "title": "Cache parsed files on disk",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 60,
+            "title": "Document the config keys",
+            "admitted": true,
+            "left_out_why": null
+          },
+          {
+            "issue": 61,
+            "title": "Parse included files lazily",
+            "admitted": true,
+            "left_out_why": null
+          }
+        ]
+      }
+    },
+    {
+      "id": 902,
+      "occurred_at": "2026-11-24T07:31:40.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r3-41",
+      "payload": {
+        "range_id": 3,
+        "issue": 41,
+        "task_id": "r3-41",
+        "design_only": false
+      }
+    },
+    {
+      "id": 903,
+      "occurred_at": "2026-11-24T07:31:52.000Z",
+      "actor": "makibad",
+      "kind": "run_taken",
+      "task_id": "r3-41",
+      "payload": {
+        "task_id": "r3-41",
+        "spawn_id": "s-7a1"
+      }
+    },
+    {
+      "id": 904,
+      "occurred_at": "2026-11-24T07:32:55.000Z",
+      "actor": "makibad",
+      "kind": "worker_spawned",
+      "task_id": "r3-41",
+      "payload": {
+        "task_id": "r3-41",
+        "spawn_id": "s-7a1"
+      }
+    },
+    {
+      "id": 905,
+      "occurred_at": "2026-11-24T07:33:19.000Z",
+      "actor": "makibad",
+      "kind": "terminal_status",
+      "task_id": "r3-41",
+      "payload": {
+        "task_id": "r3-41",
+        "role": "worker",
+        "spawn_id": "s-7a1",
+        "state": "working",
+        "kind": null,
+        "msg": null
+      }
+    },
+    {
+      "id": 906,
+      "occurred_at": "2026-11-24T07:33:20.000Z",
+      "actor": "makibad",
+      "kind": "worker_spawn_verified",
+      "task_id": "r3-41",
+      "payload": {
+        "task_id": "r3-41",
+        "spawn_id": "s-7a1",
+        "event_id": 905
+      }
+    },
+    {
+      "id": 907,
+      "occurred_at": "2026-11-24T07:49:55.000Z",
+      "actor": "makibad",
+      "kind": "range_read",
+      "task_id": null,
+      "payload": {
+        "range_id": 5,
+        "complete": true,
+        "through": 906,
+        "activation": 1,
+        "repo": "example-org/quill",
+        "candidate_refs": "example-org/quill#12,example-org/quill#18,example-org/quill#21,example-org/quill#23,example-org/quill#56",
+        "error": null
+      }
+    },
+    {
+      "id": 908,
+      "occurred_at": "2026-11-24T07:50:31.000Z",
+      "actor": "person",
+      "kind": "range_approved",
+      "task_id": null,
+      "payload": {
+        "range_id": 5,
+        "approved_by": "person",
+        "approval_mode": "human",
+        "read_id": 907,
+        "shown": []
+      }
+    },
+    {
+      "id": 909,
+      "occurred_at": "2026-11-24T07:58:40.000Z",
+      "actor": "w-r3-41",
+      "kind": "codex_round_started",
+      "task_id": "r3-41",
+      "payload": {
+        "task": "r3-41",
+        "mode": "diff",
+        "allowed": 3,
+        "base": "7d0c2e1",
+        "head": "a41f0e9",
+        "round": 1
+      }
+    },
+    {
+      "id": 910,
+      "occurred_at": "2026-11-24T08:01:30.000Z",
+      "actor": "makibad",
+      "kind": "range_read",
+      "task_id": null,
+      "payload": {
+        "range_id": 6,
+        "complete": true,
+        "through": 909,
+        "activation": 1,
+        "repo": "example-org/harbor",
+        "candidate_refs": "example-org/harbor#9,example-org/harbor#14,example-org/harbor#15,example-org/harbor#20",
+        "error": null
+      }
+    },
+    {
+      "id": 911,
+      "occurred_at": "2026-11-24T08:02:10.000Z",
+      "actor": "person",
+      "kind": "range_approved",
+      "task_id": null,
+      "payload": {
+        "range_id": 6,
+        "approved_by": "person",
+        "approval_mode": "human",
+        "read_id": 910,
+        "shown": []
+      }
+    },
+    {
+      "id": 912,
+      "occurred_at": "2026-11-24T08:02:31.000Z",
+      "actor": "w-r3-41",
+      "kind": "worker_reported",
+      "task_id": "r3-41",
+      "payload": {
+        "task": "r3-41",
+        "state": "done",
+        "review": {
+          "verdict": "passed",
+          "round": 1,
+          "findings": {
+            "blocker": 0,
+            "major": 0,
+            "minor": 1
+          }
+        }
+      }
+    },
+    {
+      "id": 913,
+      "occurred_at": "2026-11-24T08:03:11.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "r3-41",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 118,
+        "head_oid": "a41f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a39"
+      }
+    },
+    {
+      "id": 914,
+      "occurred_at": "2026-11-24T08:03:12.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "r3-41",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 118,
+        "head_oid": "a41f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a39"
+      }
+    },
+    {
+      "id": 915,
+      "occurred_at": "2026-11-24T08:05:44.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r6-9",
+      "payload": {
+        "range_id": 6,
+        "issue": 9,
+        "task_id": "r6-9",
+        "design_only": false
+      }
+    },
+    {
+      "id": 916,
+      "occurred_at": "2026-11-24T08:12:00.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r5-56",
+      "payload": {
+        "range_id": 5,
+        "issue": 56,
+        "task_id": "r5-56",
+        "design_only": false
+      }
+    },
+    {
+      "id": 917,
+      "occurred_at": "2026-11-24T08:12:40.000Z",
+      "actor": "makibad",
+      "kind": "ci_completed",
+      "task_id": "r3-41",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 118,
+        "head_oid": "a41f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a39",
+        "status": "passed",
+        "fail_count": 0,
+        "pending_count": 0,
+        "total_checks": 9,
+        "probe_attempts": 4
+      }
+    },
+    {
+      "id": 918,
+      "occurred_at": "2026-11-24T08:20:02.000Z",
+      "actor": "secretary",
+      "kind": "acceptance_gate",
+      "task_id": "r3-41",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 118,
+        "base": "7d0c2e1",
+        "head": "a41f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a39",
+        "result": "passed",
+        "reason": "",
+        "mode": "human",
+        "allow": true,
+        "task": "r3-41",
+        "range_id": 3,
+        "range_mode": "human"
+      }
+    },
+    {
+      "id": 919,
+      "occurred_at": "2026-11-24T08:21:40.000Z",
+      "actor": "makibad",
+      "kind": "pr_merged",
+      "task_id": "r3-41",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 118,
+        "title": "Parse the config file once at start",
+        "merged_at": "2026-11-24T08:21:31Z",
+        "merge_commit": "0f41aa20b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6",
+        "task_id": "r3-41",
+        "merged_by": "example-maintainer",
+        "head_oid": "a41f0e9d8c7b6a5f4e3d2c1b0a9f8e7d6c5b4a39",
+        "merged_via": "gate"
+      }
+    },
+    {
+      "id": 920,
+      "occurred_at": "2026-11-24T08:22:02.000Z",
+      "actor": "secretary",
+      "kind": "run_closed",
+      "task_id": "r3-41",
+      "payload": {
+        "task_id": "r3-41"
+      }
+    },
+    {
+      "id": 921,
+      "occurred_at": "2026-11-24T08:30:12.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "r3-42",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 121,
+        "head_oid": "c42b7e1d0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b51"
+      }
+    },
+    {
+      "id": 922,
+      "occurred_at": "2026-11-24T08:30:40.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "r5-12",
+      "payload": {
+        "repo": "example-org/quill",
+        "pr": 40,
+        "head_oid": "40aa1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2"
+      }
+    },
+    {
+      "id": 923,
+      "occurred_at": "2026-11-24T08:31:05.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "r3-53",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 125,
+        "head_oid": "553a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2"
+      }
+    },
+    {
+      "id": 924,
+      "occurred_at": "2026-11-24T08:31:06.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "r3-53",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 125,
+        "head_oid": "553a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2"
+      }
+    },
+    {
+      "id": 925,
+      "occurred_at": "2026-11-24T08:46:58.000Z",
+      "actor": "makibad",
+      "kind": "pr_merged",
+      "task_id": "r5-12",
+      "payload": {
+        "repo": "example-org/quill",
+        "pr": 40,
+        "title": "Export to plain text",
+        "merged_at": "2026-11-24T08:46:50Z",
+        "merge_commit": "4012cd34ef56a7b8c9d0e1f2a3b4c5d6e7f80912",
+        "task_id": "r5-12",
+        "merged_by": "example-maintainer",
+        "head_oid": "40aa1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2",
+        "merged_via": "gate"
+      }
+    },
+    {
+      "id": 926,
+      "occurred_at": "2026-11-24T08:47:10.000Z",
+      "actor": "secretary",
+      "kind": "run_closed",
+      "task_id": "r5-12",
+      "payload": {
+        "task_id": "r5-12"
+      }
+    },
+    {
+      "id": 927,
+      "occurred_at": "2026-11-24T08:52:13.000Z",
+      "actor": "makibad",
+      "kind": "pr_merged",
+      "task_id": "r3-42",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 121,
+        "title": "Accept a trailing comma in lists",
+        "merged_at": "2026-11-24T08:52:01Z",
+        "merge_commit": "1e42bb31c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
+        "task_id": "r3-42",
+        "merged_by": "example-maintainer",
+        "head_oid": "c42b7e1d0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b51",
+        "merged_via": "hand"
+      }
+    },
+    {
+      "id": 928,
+      "occurred_at": "2026-11-24T08:52:14.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_failed",
+      "task_id": "r3-42",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 121,
+        "head_oid": "c42b7e1d0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b51",
+        "reason": "merged"
+      }
+    },
+    {
+      "id": 929,
+      "occurred_at": "2026-11-24T08:58:30.000Z",
+      "actor": "secretary",
+      "kind": "run_closed",
+      "task_id": "r3-42",
+      "payload": {
+        "task_id": "r3-42"
+      }
+    },
+    {
+      "id": 930,
+      "occurred_at": "2026-11-24T09:01:39.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r6-15",
+      "payload": {
+        "range_id": 6,
+        "issue": 15,
+        "task_id": "r6-15",
+        "design_only": false
+      }
+    },
+    {
+      "id": 931,
+      "occurred_at": "2026-11-24T09:02:55.000Z",
+      "actor": "secretary",
+      "kind": "run_closed",
+      "task_id": "r3-44",
+      "payload": {
+        "task_id": "r3-44"
+      }
+    },
+    {
+      "id": 932,
+      "occurred_at": "2026-11-24T09:05:47.000Z",
+      "actor": "makibad",
+      "kind": "pr_closed",
+      "task_id": "r3-53",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 125,
+        "title": "Read the config from stdin",
+        "task_id": "r3-53"
+      }
+    },
+    {
+      "id": 933,
+      "occurred_at": "2026-11-24T09:05:48.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_failed",
+      "task_id": "r3-53",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 125,
+        "head_oid": "553a1b2c3d4e5f60718293a4b5c6d7e8f9a0b1c2",
+        "reason": "closed"
+      }
+    },
+    {
+      "id": 934,
+      "occurred_at": "2026-11-24T09:08:15.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "r5-56",
+      "payload": {
+        "repo": "example-org/quill",
+        "pr": 57,
+        "head_oid": "57bb2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3"
+      }
+    },
+    {
+      "id": 935,
+      "occurred_at": "2026-11-24T09:08:16.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "r5-56",
+      "payload": {
+        "repo": "example-org/quill",
+        "pr": 57,
+        "head_oid": "57bb2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3"
+      }
+    },
+    {
+      "id": 936,
+      "occurred_at": "2026-11-24T09:18:40.000Z",
+      "actor": "makibad",
+      "kind": "ci_completed",
+      "task_id": "r5-56",
+      "payload": {
+        "repo": "example-org/quill",
+        "pr": 57,
+        "head_oid": "57bb2c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3",
+        "status": "passed",
+        "fail_count": 0,
+        "pending_count": 0,
+        "total_checks": 5,
+        "probe_attempts": 3
+      }
+    },
+    {
+      "id": 937,
+      "occurred_at": "2026-11-24T09:20:05.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r5-21",
+      "payload": {
+        "range_id": 5,
+        "issue": 21,
+        "task_id": "r5-21",
+        "design_only": false
+      }
+    },
+    {
+      "id": 938,
+      "occurred_at": "2026-11-24T09:20:40.000Z",
+      "actor": "secretary",
+      "kind": "fix_pushed",
+      "task_id": "r3-48",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 124,
+        "head_oid": "e48d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d"
+      }
+    },
+    {
+      "id": 939,
+      "occurred_at": "2026-11-24T09:20:41.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "r3-48",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 124,
+        "head_oid": "e48d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d"
+      }
+    },
+    {
+      "id": 940,
+      "occurred_at": "2026-11-24T09:22:30.000Z",
+      "actor": "makibad",
+      "kind": "pr_reopened",
+      "task_id": "r3-53",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 125,
+        "task_id": "r3-53"
+      }
+    },
+    {
+      "id": 941,
+      "occurred_at": "2026-11-24T09:26:30.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "r6-9",
+      "payload": {
+        "repo": "example-org/harbor",
+        "pr": 127,
+        "head_oid": "127c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4"
+      }
+    },
+    {
+      "id": 942,
+      "occurred_at": "2026-11-24T09:26:31.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "r6-9",
+      "payload": {
+        "repo": "example-org/harbor",
+        "pr": 127,
+        "head_oid": "127c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4"
+      }
+    },
+    {
+      "id": 943,
+      "occurred_at": "2026-11-24T09:29:13.000Z",
+      "actor": "makibad",
+      "kind": "ci_completed",
+      "task_id": "r3-48",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 124,
+        "head_oid": "e48d2c1b0a9f8e7d6c5b4a3f2e1d0c9b8a7f6e5d",
+        "status": "passed",
+        "fail_count": 0,
+        "pending_count": 0,
+        "total_checks": 9,
+        "probe_attempts": 5
+      }
+    },
+    {
+      "id": 944,
+      "occurred_at": "2026-11-24T09:30:02.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "loom-ci-fix",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 131,
+        "head_oid": "9131e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091"
+      }
+    },
+    {
+      "id": 945,
+      "occurred_at": "2026-11-24T09:30:03.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "loom-ci-fix",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 131,
+        "head_oid": "9131e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091"
+      }
+    },
+    {
+      "id": 946,
+      "occurred_at": "2026-11-24T09:30:12.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r6-14",
+      "payload": {
+        "range_id": 6,
+        "issue": 14,
+        "task_id": "r6-14",
+        "design_only": false
+      }
+    },
+    {
+      "id": 947,
+      "occurred_at": "2026-11-24T09:30:20.000Z",
+      "actor": "makibad",
+      "kind": "run_taken",
+      "task_id": "r6-14",
+      "payload": {
+        "task_id": "r6-14",
+        "spawn_id": "s-b20"
+      }
+    },
+    {
+      "id": 948,
+      "occurred_at": "2026-11-24T09:31:02.000Z",
+      "actor": "makibad",
+      "kind": "worker_spawned",
+      "task_id": "r6-14",
+      "payload": {
+        "task_id": "r6-14",
+        "spawn_id": "s-b20"
+      }
+    },
+    {
+      "id": 949,
+      "occurred_at": "2026-11-24T09:31:44.000Z",
+      "actor": "secretary",
+      "kind": "fix_pushed",
+      "task_id": "r3-51",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 127,
+        "head_oid": "4be1c0d9a7f3e2b1c6d5a4f3e2d1c0b9a8f7e6d5"
+      }
+    },
+    {
+      "id": 950,
+      "occurred_at": "2026-11-24T09:31:45.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "r3-51",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 127,
+        "head_oid": "4be1c0d9a7f3e2b1c6d5a4f3e2d1c0b9a8f7e6d5"
+      }
+    },
+    {
+      "id": 951,
+      "occurred_at": "2026-11-24T09:33:02.000Z",
+      "actor": "makibad",
+      "kind": "worker_spawn_failed",
+      "task_id": "r6-14",
+      "payload": {
+        "spawn_id": "s-b20",
+        "stage": "dialog_passed",
+        "reason": "no first turn within 120 s",
+        "screen": "<screen>",
+        "seen": "idle",
+        "dialog": null,
+        "terminals": []
+      }
+    },
+    {
+      "id": 952,
+      "occurred_at": "2026-11-24T09:35:58.000Z",
+      "actor": "makibad",
+      "kind": "ci_completed",
+      "task_id": "r6-9",
+      "payload": {
+        "repo": "example-org/harbor",
+        "pr": 127,
+        "head_oid": "127c3d4e5f60718293a4b5c6d7e8f9a0b1c2d3e4",
+        "status": "failed",
+        "fail_count": 1,
+        "pending_count": 0,
+        "total_checks": 6,
+        "probe_attempts": 4
+      }
+    },
+    {
+      "id": 953,
+      "occurred_at": "2026-11-24T09:37:20.000Z",
+      "actor": "makibad",
+      "kind": "belt_dispatched",
+      "task_id": "r3-56",
+      "payload": {
+        "range_id": 3,
+        "issue": 56,
+        "task_id": "r3-56",
+        "design_only": false
+      }
+    },
+    {
+      "id": 954,
+      "occurred_at": "2026-11-24T09:37:31.000Z",
+      "actor": "makibad",
+      "kind": "run_taken",
+      "task_id": "r3-56",
+      "payload": {
+        "task_id": "r3-56",
+        "spawn_id": "s-9c4"
+      }
+    },
+    {
+      "id": 955,
+      "occurred_at": "2026-11-24T09:37:58.000Z",
+      "actor": "makibad",
+      "kind": "worker_spawned",
+      "task_id": "r3-56",
+      "payload": {
+        "task_id": "r3-56",
+        "spawn_id": "s-9c4"
+      }
+    },
+    {
+      "id": 956,
+      "occurred_at": "2026-11-24T09:39:58.000Z",
+      "actor": "makibad",
+      "kind": "worker_spawn_failed",
+      "task_id": "r3-56",
+      "payload": {
+        "spawn_id": "s-9c4",
+        "stage": "dialog_passed",
+        "reason": "no first turn within 120 s",
+        "screen": "<screen>",
+        "seen": "idle",
+        "dialog": null,
+        "terminals": []
+      }
+    },
+    {
+      "id": 957,
+      "occurred_at": "2026-11-24T09:40:03.000Z",
+      "actor": "makibad",
+      "kind": "range_read",
+      "task_id": null,
+      "payload": {
+        "range_id": 3,
+        "complete": true,
+        "through": 956,
+        "activation": 2,
+        "repo": "example-org/loom",
+        "candidate_refs": "example-org/loom#60,example-org/loom#61",
+        "error": null
+      }
+    },
+    {
+      "id": 958,
+      "occurred_at": "2026-11-24T09:41:12.000Z",
+      "actor": "makibad",
+      "kind": "work_discovery_scanned",
+      "task_id": null,
+      "payload": {
+        "trigger": "close",
+        "status": "candidates_found",
+        "through_close_id": 931,
+        "candidate_refs": "example-org/loom#60,example-org/loom#64,example-org/loom#67,example-org/loom#68,example-org/loom#71,example-org/loom#73",
+        "diagnostics": "norepo:atlas",
+        "candidate_count": 3,
+        "truncated_count": 3,
+        "free_workers": 1,
+        "repos": 1,
+        "notified": true,
+        "error": null
+      }
+    },
+    {
+      "id": 959,
+      "occurred_at": "2026-11-24T09:42:50.000Z",
+      "actor": "makibad",
+      "kind": "ci_completed",
+      "task_id": "loom-ci-fix",
+      "payload": {
+        "repo": "example-org/loom",
+        "pr": 131,
+        "head_oid": "9131e0f1a2b3c4d5e6f708192a3b4c5d6e7f8091",
+        "status": "failed",
+        "fail_count": 2,
+        "pending_count": 0,
+        "total_checks": 9,
+        "probe_attempts": 6
+      }
+    },
+    {
+      "id": 960,
+      "occurred_at": "2026-11-24T09:45:03.000Z",
+      "actor": "makibad",
+      "kind": "anomaly_raised",
+      "task_id": "r6-15",
+      "payload": {
+        "task_id": "r6-15",
+        "rule": "error"
+      }
+    },
+    {
+      "id": 961,
+      "occurred_at": "2026-11-24T09:47:31.000Z",
+      "actor": "secretary",
+      "kind": "command_received",
+      "task_id": null,
+      "payload": {
+        "command_id": 5120
+      }
+    },
+    {
+      "id": 962,
+      "occurred_at": "2026-11-24T09:48:02.000Z",
+      "actor": "makibad",
+      "kind": "belt_stopped",
+      "task_id": "r3-47",
+      "payload": {
+        "range_id": 3,
+        "task_id": "r3-47",
+        "line": "decision",
+        "reason": "Should the cache key include the locale?",
+        "pending_id": 27
+      }
+    },
+    {
+      "id": 963,
+      "occurred_at": "2026-11-24T09:48:21.000Z",
+      "actor": "makibad",
+      "kind": "anomaly_raised",
+      "task_id": "loom-bench",
+      "payload": {
+        "task_id": "loom-bench",
+        "rule": "done_no_report"
+      }
+    },
+    {
+      "id": 964,
+      "occurred_at": "2026-11-24T09:51:30.000Z",
+      "actor": "makibad",
+      "kind": "belt_stopped",
+      "task_id": "r5-18",
+      "payload": {
+        "range_id": 5,
+        "task_id": "r5-18",
+        "line": "decision",
+        "reason": "May the exporter drop empty sections?",
+        "pending_id": 33
+      }
+    },
+    {
+      "id": 965,
+      "occurred_at": "2026-11-24T09:52:30.000Z",
+      "actor": "makibad",
+      "kind": "range_read",
+      "task_id": null,
+      "payload": {
+        "range_id": 4,
+        "complete": true,
+        "through": 964,
+        "activation": 1,
+        "repo": null,
+        "candidate_refs": "atlas#7,atlas#9,atlas#12",
+        "error": null
+      }
+    },
+    {
+      "id": 966,
+      "occurred_at": "2026-11-24T09:55:12.000Z",
+      "actor": "makibad",
+      "kind": "anomaly_raised",
+      "task_id": "atlas-notes",
+      "payload": {
+        "task_id": "atlas-notes",
+        "rule": "blocked_auth"
+      }
+    },
+    {
+      "id": 967,
+      "occurred_at": "2026-11-24T09:56:01.000Z",
+      "actor": "secretary",
+      "kind": "command_received",
+      "task_id": null,
+      "payload": {
+        "command_id": 5131
+      }
+    }
+  ]
+}

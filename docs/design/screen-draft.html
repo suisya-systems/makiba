@@ -2,640 +2,604 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<title>makiba: the screen for the person (draft, Issue 169)</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
+<title>makiba screen draft</title>
 <!--
-  A drawn draft, not the screen: no script, no request, sample data only.
-  It goes with docs/design/screen.md, which names the read field behind every part,
-  says what is always seen and what is behind a tab (section 2) and what each place does when it is full (2.1).
-  Open it in a browser at 1440 px or wider. The switches and the tabs are drawn, not wired:
-  each picture shows one state, and the tabs not opened in a picture are drawn open in the panels at the end.
-  Each region carries data-region: the parts are built apart so that moving one stays cheap (section 2.3).
+  A drawn draft, not the screen: no script, no request, no font fetched. Every value is read off
+  docs/design/screen-fixture/ (status.json and events.json, read as at 2026-11-24T10:00:00Z); a
+  field the read surface does not give is drawn as a dashed gap that names it, never filled.
+  It goes with docs/design/screen.md: the visual system is section 2.5, the inventory section 3.5.
+  Open it at 1440 px or wider. Each region carries data-region (section 2.3).
 -->
 <style>
-  :root, .light {
-    --paper: #f4f1e8; --panel: #fffdf7; --soft: #fbf8ef; --field: #ffffff;
-    --ink: #22261f; --ink2: #3d4138; --muted: #6c7064; --faint: #9a9d90;
-    --line: #e0dacb; --line2: #ece7da; --frame: #bdb8a8;
-    --grass: #3c7a4b; --grass-bg: #e6f0e3; --grass-soft: #f1f6ee; --work: #86b58f; --go: #3c7a4b; --go-ink: #ffffff;
-    --amber: #a9690c; --amber-bg: #fcefd2; --amber-line: #e9c47a; --wait-row: #fdf6e3;
-    --red: #ac3b2a; --red-bg: #f9e4df; --red-line: #e6b3a9; --red-line2: #f1d5cf; --alarm: #ac3b2a;
-    --slate: #46647f; --slate-bg: #e3ebf2; --idle: #d5d0c1; --thumb: #cfc9b8; --on-mark: #ffffff;
-    --term: #1c201b; --term-bar: #262b24; --term-ink: #d6dbcd; --term-dim: #8b9383; --term-line: #4a5145;
-  }
-  .dark {
-    --paper: #161915; --panel: #1e221d; --soft: #232822; --field: #161915;
-    --ink: #e5e8dd; --ink2: #c9cdbf; --muted: #9ba191; --faint: #70766a;
-    --line: #353b31; --line2: #2a2f27; --frame: #0b0d0a;
-    --grass: #86c692; --grass-bg: #213529; --grass-soft: #1d2b21; --work: #5c8f67; --go: #3f8250; --go-ink: #ffffff;
-    --amber: #e3ac52; --amber-bg: #3a2e14; --amber-line: #6d5521; --wait-row: #2c2616;
-    --red: #ea8a79; --red-bg: #3a1f1b; --red-line: #6a322a; --red-line2: #4a2620; --alarm: #9c3324;
-    --slate: #93b4d2; --slate-bg: #21303d; --idle: #454b40; --thumb: #4a5145; --on-mark: #10130f;
-    --term: #0e110d; --term-bar: #1a1e19; --term-ink: #d6dbcd; --term-dim: #8b9383; --term-line: #3d4439;
-  }
-  :root {
-    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
-    --sans: system-ui, -apple-system, "Segoe UI", "Hiragino Sans", "Noto Sans JP", sans-serif;
-  }
-  * { box-sizing: border-box; }
-  body { margin: 0; background: #d9d5c8; color: #22261f; font: 13px/1.45 var(--sans); }
-  h1, h2, h3, h4, p, ul, ol { margin: 0; padding: 0; }
-  ul, ol { list-style: none; }
-  .note { max-width: 1440px; margin: 22px auto 8px; padding: 0 4px; color: #4d5046; font-size: 12.5px; }
-  .note b { color: #22261f; }
+/* ===== The visual system (screen.md section 2.5). Every colour is a token; no part has a colour of its own. ===== */
+.theme-light {
+  --bg: #f4f5f7; --surface: #ffffff; --surface-2: #f0f2f5; --border: #e1e4e9; --border-strong: #c8cdd5;
+  --text: #16191d; --text-2: #434a55; --text-3: #5d6572; --accent: #2754c5;
+  --primary: #16191d; --on-primary: #ffffff; --on-solid: #ffffff;
+  --ok: #18703a; --ok-bg: #e5f3e9; --ok-mark: #24944b; --ok-solid: #18703a; --ok-row: #f4faf6;
+  --wait: #8a4b00; --wait-bg: #fcf0d6; --wait-mark: #b26a00; --wait-solid: #8a4b00; --wait-row: #fff9ee;
+  --fail: #b3241b; --fail-bg: #fcebe9; --fail-mark: #d0291d; --fail-solid: #b3241b; --fail-row: #fff5f4;
+  --info: #2c52a3; --info-bg: #e8eefb; --info-mark: #3b66c4; --info-solid: #2c52a3; --info-row: #f5f8fe;
+  --idle-mark: #7a8290;
+  --term: #0f1216; --term-2: #181c22; --term-line: #2a3039; --term-text: #d7dce3; --term-dim: #9aa3b0;
+  --gap-text: #5d6572; --gap-bg: #f6f7f9; --gap-line: #a9b0bb;
+  --shadow: 0 1px 2px rgba(16, 24, 40, .05), 0 1px 3px rgba(16, 24, 40, .04);
+  --page: #e9ebef; --page-text: #3b424c;
+}
+.theme-dark {
+  --bg: #0e1013; --surface: #15181d; --surface-2: #1b1f26; --border: #272d36; --border-strong: #3a424e;
+  --text: #e7eaef; --text-2: #b8bfca; --text-3: #959eac; --accent: #86a6ff;
+  --primary: #e7eaef; --on-primary: #0e1013; --on-solid: #0e1013;
+  --ok: #5fca83; --ok-bg: #10271a; --ok-mark: #4fb873; --ok-solid: #5fca83; --ok-row: #111c16;
+  --wait: #f1b650; --wait-bg: #2c220f; --wait-mark: #e0a33a; --wait-solid: #f1b650; --wait-row: #1d1912;
+  --fail: #ff887c; --fail-bg: #32161a; --fail-mark: #f2695d; --fail-solid: #ff887c; --fail-row: #1f1517;
+  --info: #95b3ff; --info-bg: #17213b; --info-mark: #7f9ff0; --info-solid: #95b3ff; --info-row: #141a26;
+  --idle-mark: #8a93a1;
+  --term: #0a0c0f; --term-2: #12151a; --term-line: #262c35; --term-text: #d7dce3; --term-dim: #9aa3b0;
+  --gap-text: #a3acb9; --gap-bg: #1a1e24; --gap-line: #4a5260;
+  --shadow: 0 1px 2px rgba(0, 0, 0, .3);
+  --page: #08090b; --page-text: #b8bfca;
+}
+:root {
+  --sans: system-ui, -apple-system, "Segoe UI", "Noto Sans", "Hiragino Sans", "Noto Sans JP", "Liberation Sans", sans-serif;
+  --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "DejaVu Sans Mono", "Liberation Mono", monospace;
+  --fs-xs: 12px; --fs-sm: 13px; --fs-md: 14px; --fs-lg: 16px; --fs-xl: 20px;
+  --s1: 4px; --s2: 8px; --s3: 12px; --s4: 16px; --s5: 24px; --s6: 32px; --s7: 40px;
+  --r: 6px;
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: #e9ebef; }
+body { font: 400 var(--fs-md)/1.5 var(--sans); color: #16191d; font-variant-numeric: tabular-nums; -webkit-font-smoothing: antialiased; }
+h1, h2, h3, h4, p, ul, ol, dl, dd { margin: 0; padding: 0; }
+ul, ol { list-style: none; }
+svg.i { width: 14px; height: 14px; flex: none; vertical-align: -2px; }
+svg.i.sm { width: 12px; height: 12px; vertical-align: -1px; }
 
-  /* ---------- the screen: a fixed frame; nothing inside it is cut without a mark ---------- */
-  .screen { width: 1440px; height: 900px; margin: 0 auto; background: var(--paper); color: var(--ink);
-            display: grid; grid-template-rows: 44px minmax(0, 1fr); border: 1px solid var(--frame); overflow: hidden; }
-  .top { display: flex; align-items: center; gap: 12px; padding: 0 16px; background: var(--panel);
-         border-bottom: 1px solid var(--line); white-space: nowrap; }
-  .brand { font-weight: 700; letter-spacing: .02em; font-size: 15px; }
-  .brand i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--grass);
-             margin-right: 7px; vertical-align: 1px; }
-  .top .org { color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
-  .sp { flex: 1; }
-  .chip { display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
-          font-size: 12px; font-weight: 600; border: 1px solid transparent; white-space: nowrap; }
-  .chip.wait { background: var(--amber-bg); color: var(--amber); border-color: var(--amber-line); }
-  .chip.bad { background: var(--red-bg); color: var(--red); border-color: var(--red-line); }
-  .chip.ok { background: var(--grass-bg); color: var(--grass); }
-  .chip.quiet { color: var(--muted); border-color: var(--line); font-weight: 500; }
-  .set { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; font-size: 12px; }
-  .set span { padding: 3px 8px; color: var(--muted); border-left: 1px solid var(--line); }
-  .set span:first-child { border-left: 0; }
-  .set .on { background: var(--line2); color: var(--ink); font-weight: 600; }
-  .cols { display: grid; grid-template-columns: 348px minmax(0, 1fr) 432px; min-height: 0; }
-  .col { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
-  .col.left { border-right: 1px solid var(--line); }
-  .col.right { border-left: 1px solid var(--line); }
-  .role { flex: none; display: flex; align-items: baseline; gap: 8px; padding: 12px 16px 8px; }
-  .role h2 { font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; white-space: nowrap; }
-  .role span { color: var(--faint); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .sect { flex: none; padding: 0 16px 12px; min-width: 0; }
-  .sect.grow { flex: 1 1 auto; min-height: 132px; display: flex; flex-direction: column; }
-  .sect > h3 { flex: none; font-size: 13px; font-weight: 650; margin: 2px 0 8px; display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
-  .sect > h3 small { font-weight: 400; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-  .sect > h3 .more { margin-left: auto; font-weight: 500; font-size: 12px; color: var(--slate); }
-  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-width: 0; }
-  /* a list that may be longer than its place scrolls inside itself, with a bar that is drawn whenever it is longer than its place */
-  .scroll { overflow-y: auto; scrollbar-gutter: stable; min-height: 0; scrollbar-width: thin; scrollbar-color: var(--thumb) transparent; }
-  .scroll::-webkit-scrollbar { width: 9px; }
-  .scroll::-webkit-scrollbar-thumb { background: var(--thumb); border-radius: 5px; border: 2px solid var(--panel); }
-  .scroll::-webkit-scrollbar-track { background: transparent; }
-  .sect.grow > .card { flex: 0 1 auto; }
-  /* a list that is capped ends with the line that says how many it does not show */
-  .fold { display: flex; gap: 8px; padding: 6px 12px; border-top: 1px solid var(--line2); color: var(--slate); font-size: 12px; font-weight: 600; white-space: nowrap; }
-  .fold span { color: var(--muted); font-weight: 400; margin-left: auto; overflow: hidden; text-overflow: ellipsis; }
-  .mono { font-family: var(--mono); font-size: 12px; }
-  .muted { color: var(--muted); }
-  .btn { display: inline-block; padding: 5px 12px; border-radius: 6px; border: 1px solid var(--line); white-space: nowrap;
-         background: var(--panel); color: var(--ink); font: 600 12.5px var(--sans); }
-  .btn.primary { background: var(--go); border-color: var(--go); color: var(--go-ink); }
-  .btn.small { padding: 2px 9px; font-size: 12px; font-weight: 550; }
-  .btn.ghost { color: var(--muted); font-weight: 500; }
+/* ---------- the page around the drawings ---------- */
+.doc { width: 1440px; margin: 0 auto; padding: 32px 0 8px; color: #3b424c; }
+.doc h1 { font-size: var(--fs-xl); font-weight: 650; color: #16191d; letter-spacing: -.015em; }
+.doc p { max-width: 1080px; margin-top: 6px; font-size: var(--fs-sm); }
+.cap { width: 1440px; margin: 32px auto 12px; font-size: var(--fs-sm); color: #3b424c; }
+.cap b { display: block; color: #16191d; font-size: var(--fs-md); font-weight: 650; margin-bottom: 2px; }
+.cap.narrow { width: 1024px; }
 
-  /* ---------- put in ---------- */
-  .range { padding: 12px 14px; }
-  .range .head { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
-  .range .head b { font-size: 14px; }
-  .range .terms { color: var(--muted); margin-top: 3px; }
-  .bar { height: 6px; border-radius: 3px; background: var(--line2); margin: 10px 0 4px; overflow: hidden; }
-  .bar i { display: block; height: 100%; background: var(--grass); border-radius: 3px; }
-  .range .foot { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
-  .cand { padding: 8px 12px; border-top: 1px solid var(--line2); min-width: 0; }
-  .cand:first-child { border-top: 0; }
-  .cand .t, .out .t { display: flex; gap: 8px; align-items: baseline; min-width: 0; }
-  /* the reference: as wide as its text, never wrapped; the title keeps 16 characters before it is cut */
-  .ref { font-family: var(--mono); font-size: 12px; color: var(--muted); white-space: nowrap; flex: none; min-width: 4.2ch; }
-  .cand .ti { font-weight: 550; flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  /* a reference longer than its row is cut at its start, so the number always stays; whole on hover */
-  .refline { display: block; font-family: var(--mono); font-size: 11.5px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; direction: rtl; text-align: left; }
-  .cand .m { display: flex; gap: 6px; align-items: center; margin-top: 4px; color: var(--muted); font-size: 12px; min-width: 0; }
-  .cand .m .why { flex: 1 1 0; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .tag { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; background: var(--line2); color: var(--ink2); flex: none; white-space: nowrap; }
-  .tag.first { background: var(--grass-bg); color: var(--grass); }
-  .tag.none { background: var(--amber-bg); color: var(--amber); }
-  .out { padding: 6px 12px; border-top: 1px solid var(--line2); min-width: 0; }
-  .out:first-child { border-top: 0; }
-  .out .ti { color: var(--ink2); flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .out .why { display: block; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .out .why b { font-weight: 600; color: var(--ink2); }
+/* ---------- the frame ---------- */
+.screen { width: 1440px; height: 900px; margin: 0 auto; background: var(--surface); color: var(--text); display: grid;
+          grid-template-rows: 52px minmax(0, 1fr); border-radius: 12px; overflow: hidden;
+          box-shadow: 0 0 0 1px rgba(16, 24, 40, .10), 0 16px 40px rgba(16, 24, 40, .10); }
+.screen.narrow { width: 1024px; height: 720px; }
 
-  /* ---------- centre: answer, then the conversation ---------- */
-  .centre { padding: 12px 16px 16px; gap: 12px; }
-  /* the card always leaves the conversation more than half of the column; its middle scrolls, the heading and the buttons stay */
-  .ask { background: var(--panel); border: 1px solid var(--amber-line); border-left: 5px solid var(--amber);
-         border-radius: 8px; flex: 0 1 auto; max-height: 45%; min-height: 0; display: flex; flex-direction: column; }
-  .ask .hd { flex: none; padding: 11px 16px 0 14px; }
-  .ask .over { display: flex; gap: 10px; align-items: baseline; font-size: 12px; color: var(--amber); font-weight: 650;
-               letter-spacing: .04em; text-transform: uppercase; white-space: nowrap; }
-  .ask .over span { color: var(--muted); font-weight: 400; letter-spacing: 0; text-transform: none; overflow: hidden; text-overflow: ellipsis; }
-  .ask .over .nav { margin-left: auto; color: var(--slate); font-weight: 600; flex: none; }
-  /* the heading is one line; the question is written once, whole, in the part that scrolls */
-  .ask .sum { font-size: 14px; font-weight: 650; margin: 3px 0 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .ask .q { font-size: 15px; line-height: 1.35; font-weight: 650; margin: 0 0 6px; max-width: 86ch; }
-  .ask .fbg { color: var(--slate); font-weight: 600; font-size: 12.5px; margin: 0 0 2px; }
-  .ask .fbg span { color: var(--muted); font-weight: 400; }
-  .ask .bd { flex: 1 1 auto; padding: 0 8px 6px 14px; margin-right: 4px; }
-  .ask .bd.plain { overflow-y: auto; min-height: 0; }
-  .ask .bg { color: var(--ink2); max-width: 86ch; }
-  .ask .bg + .bg { margin-top: 6px; }
-  .ask .whole { color: var(--ink2); border-left: 2px solid var(--line); padding-left: 10px; margin-bottom: 8px; max-width: 86ch; }
-  .ask .whole b { display: block; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-  .ask .ifs { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin: 10px 0; }
-  .ask .if { border: 1px solid var(--line); border-radius: 6px; padding: 8px 10px; background: var(--soft); min-width: 0; }
-  .ask .if h4 { margin: 0 0 2px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
-  .ask .if.rec { border-color: var(--grass); background: var(--grass-soft); }
-  .ask .if.rec h4 { color: var(--grass); }
-  .ask .rec-why { color: var(--ink2); }
-  .ask .rec-why b { color: var(--grass); }
-  .ask .act { flex: none; display: flex; align-items: center; gap: 8px; padding: 9px 16px 11px 14px; border-top: 1px solid var(--line2); }
-  .ask .act .field { flex: 1 1 0; min-width: 0; border: 1px solid var(--line); border-radius: 6px; padding: 5px 10px; color: var(--faint);
-                     background: var(--field); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .term { flex: 1 1 0; min-height: 150px; background: var(--term); border-radius: 8px; color: var(--term-ink);
-          font: 12.5px/1.55 var(--mono); display: flex; flex-direction: column; overflow: hidden; }
-  .term .bar2 { flex: none; display: flex; align-items: center; gap: 10px; padding: 7px 12px; background: var(--term-bar); color: var(--term-dim);
-                font: 12px var(--sans); white-space: nowrap; }
-  .term .bar2 b { color: #e8ecdf; font-weight: 600; }
-  .term .bar2 .dot { width: 7px; height: 7px; border-radius: 50%; background: #7fbf7a; }
-  .term .body { padding: 12px 14px; flex: 1; min-height: 0; overflow: hidden; display: flex; flex-direction: column; justify-content: flex-end; }
-  .term .you { color: #f0f3e8; margin-top: 10px; }
-  .term .you::before { content: "> "; color: var(--term-dim); }
-  .term .sec { margin-top: 6px; white-space: pre-wrap; }
-  .term .dim { color: var(--term-dim); }
-  .term .prompt { margin-top: 12px; border: 1px solid var(--term-line); border-radius: 6px; padding: 7px 10px; color: #f0f3e8; }
-  .term .prompt::before { content: "> "; color: var(--term-dim); }
-  .term .cursor { display: inline-block; width: 7px; height: 14px; background: #d6dbcd; vertical-align: -2px; }
+/* top line: plain words, no pills */
+.top { display: flex; align-items: center; gap: var(--s5); padding: 0 var(--s5) 0 var(--s4); border-bottom: 1px solid var(--border);
+       background: var(--bg); white-space: nowrap; font-size: var(--fs-sm); }
+.brand { display: inline-flex; align-items: center; gap: 10px; font-weight: 650; font-size: var(--fs-md); width: 216px; }
+.brand .logo { width: 20px; height: 20px; border-radius: 5px; background: var(--primary); position: relative; flex: none; }
+.brand .logo::after { content: ""; position: absolute; left: 5px; right: 5px; bottom: 5px; height: 4px; border-radius: 2px; background: var(--bg); }
+.brand .org { font-weight: 400; color: var(--text-3); }
+.flex { flex: 1; }
+.tc { display: inline-flex; align-items: center; gap: 6px; color: var(--text-2); }
+.tc b { color: var(--text); font-weight: 650; }
+.tc.wait b { color: var(--wait); } .tc.fail b { color: var(--fail); }
+.tc .q { color: var(--text-3); }
+.live { display: inline-flex; align-items: center; gap: 7px; color: var(--text-3); }
+.live .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--ok-mark); }
+.disp { color: var(--text-2); display: inline-flex; gap: 14px; }
+.disp span.on { color: var(--text); font-weight: 600; }
+.disp .sl { color: var(--border-strong); }
 
-  /* ---------- watch ---------- */
-  .belt { flex: none; display: flex; gap: 3px; margin: 2px 0 6px; }
-  .belt i { flex: 1; height: 10px; border-radius: 2px; background: var(--line); }
-  .belt .landed, .nums .landed { background: var(--grass); } .belt .review, .nums .review { background: var(--slate); }
-  .belt .in_work, .nums .in_work { background: var(--work); } .belt .waiting_person, .nums .waiting_person { background: var(--amber); }
-  .belt .failed, .nums .failed { background: var(--red); }
-  .belt .closed, .nums .closed { background: var(--muted); }
-  .item.closed .g { color: var(--muted); }
-  .counts .bad { color: var(--red); }
-  .belt .not_in, .nums .not_in { background: var(--idle); }
-  .belt .skipped, .nums .skipped { background: repeating-linear-gradient(135deg, var(--idle) 0 3px, var(--paper) 3px 6px); }
-  /* many items: one piece per place, as wide as its share, with its number written in it */
-  .nums { flex: none; display: flex; gap: 2px; margin: 2px 0 6px; height: 18px; }
-  .nums i { min-width: 20px; border-radius: 3px; font: 700 11px/18px var(--mono); font-style: normal; text-align: center; color: var(--on-mark); }
-  .nums .not_in, .nums .skipped { color: var(--ink); }
-  .counts { flex: none; display: flex; flex-wrap: wrap; gap: 3px 12px; color: var(--muted); font-size: 12px; margin-bottom: 8px; }
-  .counts b { color: var(--ink); font-weight: 650; }
-  .item { display: flex; flex-wrap: wrap; gap: 0 7px; align-items: baseline; padding: 6px 12px; border-top: 1px solid var(--line2); min-width: 0; }
-  .item:first-child { border-top: 0; }
-  .item .g { flex: none; width: 14px; font-size: 12px; text-align: center; }
-  .item .ti { flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .item .s { flex: none; font-size: 12px; color: var(--muted); white-space: nowrap; margin-left: auto; }
-  .item .d { flex: 0 0 100%; min-width: 0; padding-left: 21px; font-size: 12px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .item .d .mono { font-size: 11.5px; }
-  .item.landed .g { color: var(--grass); } .item.review .g { color: var(--slate); }
-  .item.in_work .g { color: var(--work); } .item.waiting_person .g, .item.waiting_person .s { color: var(--amber); font-weight: 600; }
-  .item.failed .g, .item.failed .s { color: var(--red); }
-  .item.waiting_person { background: var(--wait-row); }
-  .item.not_in .ti, .item.skipped .ti { color: var(--muted); } .item.not_in .g, .item.skipped .g { color: var(--faint); }
-  .wrong { border-color: var(--red-line); }
-  .wrong .fold { border-top-color: var(--red-line2); }
-  /* who is handling a row, and what can be done about it, in the row */
-  .w .h { flex: 0 0 100%; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; margin-top: 5px; }
-  .who { font-size: 11.5px; font-weight: 600; padding: 2px 7px; border-radius: 4px; }
-  .who.none { background: var(--alarm); color: #fff; font-weight: 700; }
-  .who.sec { border: 1px solid var(--line); color: var(--ink2); font-weight: 500; }
-  .who.you { background: var(--amber-bg); color: var(--amber); border: 1px solid var(--amber-line); }
-  .w .cmd { flex: 0 0 100%; margin-top: 6px; font: 11.5px/1.45 var(--mono); background: var(--soft); border: 1px solid var(--line); border-radius: 5px;
-            padding: 4px 8px; color: var(--ink2); overflow-wrap: anywhere; }
-  .w .cmd b { font-family: var(--sans); font-weight: 600; color: var(--muted); display: block; }
-  .fold .bad { color: var(--red); font-weight: 700; }
-  .wrong.tight .w .d { -webkit-line-clamp: 1; }
-  .w { padding: 7px 12px; border-top: 1px solid var(--red-line2); display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; min-width: 0; }
-  .w:first-child { border-top: 0; }
-  .w b { color: var(--red); font-weight: 650; flex: 1 1 16ch; min-width: 16ch; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-  .w .s { color: var(--muted); font-size: 12px; flex: none; white-space: nowrap; }
-  .w .d { flex: 0 0 100%; color: var(--ink2); font-size: 12px; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-  .inner { flex: none; display: flex; gap: 6px; padding: 2px 16px 14px; margin-top: auto; }
-  .inner .btn { flex: 1 1 0; min-width: 0; text-align: center; font-weight: 550; overflow: hidden; text-overflow: ellipsis; }
-  .inner .btn small { display: block; font-weight: 400; color: var(--muted); font-size: 11.5px; }
+/* three columns: a quiet sidebar, the centre that leads, a narrow watch column */
+.cols { display: grid; grid-template-columns: 248px minmax(0, 1fr) 360px; min-height: 0; }
+.narrow .cols { grid-template-columns: 216px minmax(0, 1fr); }
+.side { background: var(--bg); border-right: 1px solid var(--border); padding: var(--s4) var(--s3); display: flex; flex-direction: column; gap: var(--s5); min-height: 0; }
+.main { min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.watch { border-left: 1px solid var(--border); padding: var(--s5) var(--s5) 0; display: flex; flex-direction: column; gap: var(--s6); min-height: 0; min-width: 0; }
 
-  /* ---------- the other states ---------- */
-  .states { width: 1440px; margin: 14px auto 40px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; color: var(--ink); }
-  .state { background: var(--paper); border: 1px solid var(--frame); padding: 12px 14px 14px; min-width: 0; }
-  .state > h2 { font-size: 11px; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); margin-bottom: 4px; }
-  .state > p.what { color: var(--ink2); font-size: 12px; margin-bottom: 10px; min-height: 34px; }
-  .state .item .n { flex: none; font-family: var(--mono); font-size: 12px; color: var(--muted); }
-  .row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 0 8px; padding: 8px 12px; border-top: 1px solid var(--line2); }
-  .row:first-child { border-top: 0; }
-  .row .q { font-weight: 600; } .row .s { color: var(--muted); font-size: 12px; white-space: nowrap; }
-  .row .d { grid-column: 1 / 3; color: var(--muted); font-size: 12px; }
-  .row.sel { background: var(--wait-row); box-shadow: inset 3px 0 0 var(--amber); }
-  .trail { padding: 10px 12px; }
-  .trail li { display: grid; grid-template-columns: 42px 12px 1fr; gap: 0 8px; position: relative; padding-bottom: 9px; }
-  .trail li .tm { font: 11.5px var(--mono); color: var(--faint); text-align: right; padding-top: 1px; }
-  .trail li .pt { width: 9px; height: 9px; border-radius: 50%; border: 2px solid var(--grass); background: var(--panel); margin-top: 4px; z-index: 1; }
-  .trail li::before { content: ""; position: absolute; left: 54px; top: 8px; bottom: -4px; width: 1px; background: var(--line); }
-  .trail li:last-child::before { display: none; }
-  .trail li.stop .pt { border-color: var(--amber); background: var(--amber); }
-  .trail li.bad .pt { border-color: var(--red); background: var(--red); }
-  .trail li .k { font-weight: 600; } .trail li .p { display: block; color: var(--muted); font-size: 12px; }
-  .banner { background: var(--alarm); color: #fff; padding: 9px 12px; border-radius: 8px; margin-bottom: 8px; }
-  .banner b { display: block; font-size: 14px; } .banner code { white-space: nowrap; font-family: var(--mono); background: rgba(255,255,255,.18); padding: 0 5px; border-radius: 3px; }
-  .ci { font: 600 11px var(--mono); padding: 1px 6px; border-radius: 4px; white-space: nowrap; }
-  .ci.passed { background: var(--grass-bg); color: var(--grass); } .ci.failed { background: var(--red-bg); color: var(--red); }
-  .ci.run { background: var(--slate-bg); color: var(--slate); }
-  .brief { border: 1px solid var(--line); border-radius: 6px; background: var(--soft); padding: 6px 8px; margin-top: 3px; max-height: 92px; white-space: pre-wrap; }
+/* sidebar: navigation, one look for every item; a state is a line of words under it */
+.nh { padding: 0 var(--s2) 6px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-3); }
+.nav a { display: grid; grid-template-columns: 16px minmax(0, 1fr) auto; gap: 0 10px; align-items: center; padding: 6px var(--s2);
+         border-radius: var(--r); color: var(--text-2); text-decoration: none; font-size: var(--fs-md); }
+.nav a .l { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.nav a .c { font-size: var(--fs-sm); color: var(--text-3); }
+.nav a .s { grid-column: 2 / 4; font-size: var(--fs-xs); line-height: 1.4; color: var(--text-3); }
+.cf { color: var(--fail); } .cw { color: var(--wait); }
+.nav a.on { background: var(--surface); color: var(--text); font-weight: 600; box-shadow: 0 0 0 1px var(--border); }
+.nav a.on .c { color: var(--text-2); font-weight: 400; }
+.nav a .ic { color: var(--text-3); display: flex; }
+.side .foot { margin-top: auto; padding: 0 var(--s2); font-size: var(--fs-xs); color: var(--text-3); }
 
-  /* ---------- the shelf: what need not always be seen, behind tabs ---------- */
-  .shelf { flex: 1 1 auto; min-height: 0; display: flex; flex-direction: column; padding: 0 16px 14px; }
-  .shelf > h3 { flex: none; font-size: 11px; letter-spacing: .12em; text-transform: uppercase; color: var(--muted); font-weight: 700; margin: 4px 0 7px; }
-  .tabs { flex: none; display: flex; flex-wrap: wrap; gap: 5px; }
-  .tab { display: inline-flex; align-items: baseline; gap: 5px; padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px;
-         font-size: 12px; color: var(--ink2); background: var(--panel); white-space: nowrap; }
-  .tab b { font-weight: 650; color: var(--ink); }
-  .tab .mk { font-weight: 600; font-size: 11.5px; margin-left: 2px; }
-  .tab.amber { color: var(--amber); border-color: var(--amber-line); background: var(--amber-bg); }
-  .tab.amber b, .tab.amber .mk { color: var(--amber); }
-  .tab.red { color: var(--red); border-color: var(--red-line); background: var(--red-bg); }
-  .tab.red b, .tab.red .mk { color: var(--red); }
-  .tab .mk.q { color: var(--amber); }
-  .tab.on { box-shadow: inset 0 -3px 0 currentColor; font-weight: 650; }
-  .pane { flex: 0 1 auto; min-height: 0; margin-top: 8px; display: flex; flex-direction: column; }
-  .pane > .ph { flex: none; display: flex; align-items: baseline; gap: 8px; padding: 7px 12px; border-bottom: 1px solid var(--line2); font-weight: 650; white-space: nowrap; }
-  .pane > .ph small { font-weight: 400; color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; }
-  .pane > .ph .x { margin-left: auto; color: var(--muted); font-weight: 500; font-size: 12px; }
-  .pane > .pb { flex: 1 1 auto; }
-  .shut { flex: none; margin-top: 8px; color: var(--faint); font-size: 12px; }
-  .sub { padding: 6px 12px 4px; font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); font-weight: 700;
-         border-top: 1px solid var(--line2); background: var(--soft); }
-  .sub:first-child { border-top: 0; }
-  .sect.grow.work { min-height: 150px; }
-  .states { grid-template-columns: repeat(4, 1fr); }
-  .state .pane { margin-top: 0; }
+/* the answer: the first thing in the centre, no box around it */
+.answer { flex: none; padding: var(--s5) var(--s6) var(--s5); border-bottom: 1px solid var(--border); }
+.eyebrow { display: flex; align-items: center; gap: 10px; font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; }
+.eyebrow .k { color: var(--wait); font-weight: 650; display: inline-flex; gap: 6px; align-items: center; }
+.eyebrow .nav2 { margin-left: auto; display: inline-flex; gap: 14px; color: var(--text-2); }
+.answer h2 { margin-top: 10px; font-size: var(--fs-xl); line-height: 1.35; font-weight: 650; letter-spacing: -.015em; max-width: 64ch; }
+.answer .q2 { margin-top: 4px; color: var(--text-2); max-width: 72ch; }
+.answer .ctx { margin-top: 6px; font-size: var(--fs-sm); color: var(--text-3); }
+.answer .ctx a { color: var(--accent); text-decoration: none; }
+.choices { display: grid; grid-template-columns: 1fr 1fr; gap: var(--s5); margin-top: var(--s4); max-width: 880px; }
+.choice h4 { font-size: var(--fs-sm); font-weight: 650; display: flex; gap: 8px; align-items: center; }
+.choice h4 .rec { font-weight: 500; color: var(--ok); display: inline-flex; gap: 4px; align-items: center; }
+.choice p { margin-top: 2px; color: var(--text-2); font-size: var(--fs-sm); }
+.choice.r { padding-left: 12px; border-left: 2px solid var(--ok-mark); }
+.choice:not(.r) { padding-left: 12px; border-left: 2px solid var(--border); }
+.answer .why { margin-top: var(--s3); font-size: var(--fs-sm); color: var(--text-2); max-width: 880px; }
+.answer .why b { color: var(--text); font-weight: 600; }
+.acts { display: flex; align-items: center; gap: var(--s2); margin-top: var(--s4); }
+.btn { display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 14px; border-radius: var(--r); border: 1px solid var(--border-strong);
+       background: var(--surface); color: var(--text); font-size: var(--fs-sm); font-weight: 550; white-space: nowrap; }
+.btn.primary { background: var(--primary); border-color: var(--primary); color: var(--on-primary); }
+.btn.sm { height: 28px; padding: 0 10px; }
+.link { color: var(--accent); font-size: var(--fs-sm); font-weight: 500; white-space: nowrap; }
+.link.quiet { color: var(--text-2); }
+.link.danger { color: var(--fail); }
+.note { flex: 1 1 0; max-width: 360px; height: 32px; display: flex; align-items: center; padding: 0 12px; border-radius: var(--r);
+        border: 1px solid var(--border); color: var(--text-3); font-size: var(--fs-sm); background: var(--bg); }
+.focus { outline: 2px solid var(--accent); outline-offset: 2px; }
+.kbd { font: 500 var(--fs-xs) var(--mono); padding: 0 5px; border: 1px solid var(--border-strong); border-bottom-width: 2px; border-radius: 4px; color: var(--text-2); }
+
+/* the view the sidebar selects */
+.view { flex: 1 1 auto; min-height: 0; overflow: hidden; padding: var(--s5) var(--s6) 0; display: flex; flex-direction: column; }
+.vh { display: flex; align-items: baseline; gap: var(--s3); flex-wrap: wrap; }
+.vh h3 { font-size: var(--fs-lg); font-weight: 650; letter-spacing: -.01em; }
+.vh .m { font-size: var(--fs-sm); color: var(--text-3); }
+.vh .acts2 { margin-left: auto; display: flex; gap: var(--s4); }
+.progress { margin-top: var(--s3); display: flex; align-items: center; gap: var(--s4); }
+.seg { display: flex; gap: 2px; height: 6px; width: 240px; flex: none; }
+.seg i { flex: 1; border-radius: 1px; background: var(--surface-2); }
+.seg .landed { background: var(--ok-mark); } .seg .wait { background: var(--wait-mark); } .seg .review { background: var(--info-mark); }
+.seg .work { background: color-mix(in srgb, var(--ok-mark) 45%, var(--surface)); } .seg .failstart { background: var(--fail-mark); }
+.seg .closed { background: var(--idle-mark); } .seg .notin { background: var(--border-strong); }
+.seg .skip { background: repeating-linear-gradient(135deg, var(--idle-mark) 0 1.5px, transparent 1.5px 4px); }
+.legend { display: flex; flex-wrap: wrap; gap: 4px 16px; font-size: var(--fs-sm); color: var(--text-3); }
+.legend b { color: var(--text); font-weight: 600; }
+.legend .bad { color: var(--fail); }
+.list { margin-top: var(--s4); min-height: 0; overflow: hidden; }
+.gh { display: flex; align-items: baseline; gap: 8px; padding: 14px 0 6px; font-size: var(--fs-xs); font-weight: 600; color: var(--text-3); border-bottom: 1px solid var(--border); }
+.gh .n { font-weight: 400; }
+.row { display: grid; grid-template-columns: 18px minmax(44px, max-content) minmax(0, 1fr) auto; gap: 0 10px; align-items: baseline; padding: 9px 0; border-bottom: 1px solid var(--border); }
+.row > svg.i { align-self: center; }
+.row .ref { font: 500 var(--fs-sm) var(--mono); color: var(--text-3); }
+.row .t { font-weight: 500; min-width: 0; }
+.row .t small { display: block; font-size: var(--fs-sm); font-weight: 400; color: var(--text-3); margin-top: 1px; }
+.row .st { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; text-align: right; }
+.row .st b { font-weight: 500; color: var(--text-2); }
+.row .st b.cf { color: var(--fail); font-weight: 600; } .row .st b.cw { color: var(--wait); font-weight: 600; }
+.row.dim .t { color: var(--text-2); font-weight: 400; }
+.fold { padding: 10px 0; font-size: var(--fs-sm); color: var(--text-3); }
+.fold .link { margin-right: 6px; }
+
+/* the conversation, folded until it can show something */
+.conv { flex: none; display: flex; align-items: center; gap: var(--s3); height: 44px; padding: 0 var(--s6); border-top: 1px solid var(--border);
+        background: var(--bg); font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; }
+.conv b { color: var(--text); font-weight: 600; }
+.conv .ring { width: 8px; height: 8px; border-radius: 50%; border: 2px solid var(--idle-mark); }
+
+/* watch column: graded, separated by whitespace */
+.sh { display: flex; align-items: baseline; gap: 8px; margin-bottom: var(--s2); }
+.sh h3 { font-size: var(--fs-md); font-weight: 650; }
+.sh .m { font-size: var(--fs-sm); color: var(--text-3); }
+.sh .link { margin-left: auto; }
+.fr { display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; gap: 2px 10px; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.fr:first-of-type { border-top: 1px solid var(--border); }
+.fr > svg.i { margin-top: 3px; }
+.fr .t { font-weight: 600; min-width: 0; }
+.fr .t .ref { font: 500 var(--fs-sm) var(--mono); color: var(--text-3); margin-right: 6px; }
+.fr .ago { font-size: var(--fs-sm); color: var(--text-3); }
+.fr .d { grid-column: 2 / 4; font-size: var(--fs-sm); color: var(--text-2); }
+.fr .who { grid-column: 2 / 4; font-size: var(--fs-sm); color: var(--text-3); }
+.fr .who.none { color: var(--fail); font-weight: 550; }
+.fr .who.you { color: var(--wait); font-weight: 550; }
+.fr .a { grid-column: 2 / 4; display: flex; flex-wrap: wrap; gap: 4px 16px; margin-top: 4px; }
+.fr.low .t { font-weight: 500; }
+.line { grid-column: 2 / 4; margin-top: 6px; padding: 6px 10px; border-radius: var(--r); background: var(--bg); font: var(--fs-xs)/1.5 var(--mono); color: var(--text-2); overflow-wrap: anywhere; }
+.line b { display: block; font: 600 var(--fs-xs) var(--sans); color: var(--text-3); }
+.c2 { padding: 10px 0; border-bottom: 1px solid var(--border); display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 2px 12px; align-items: center; }
+.c2:first-of-type { border-top: 1px solid var(--border); }
+.c2 .t { font-weight: 500; }
+.c2 .m { grid-column: 1; font-size: var(--fs-sm); color: var(--text-3); }
+.c2 .m .ref { font-family: var(--mono); }
+.c2 .btn { grid-row: 1 / 3; grid-column: 2; }
+
+/* a missing field */
+.gap { display: inline-flex; align-items: center; gap: 6px; padding: 0 6px; height: 20px; border: 1px dashed var(--gap-line); border-radius: 4px;
+       background: var(--gap-bg); color: var(--gap-text); font: 500 var(--fs-xs) var(--mono); white-space: nowrap; vertical-align: 1px; font-weight: 500; }
+.gap::before { content: ""; width: 8px; height: 8px; border-radius: 2px; background: repeating-linear-gradient(135deg, var(--gap-line) 0 2px, transparent 2px 4px); }
+
+/* history */
+.trail { margin-top: var(--s4); }
+.trail li { display: grid; grid-template-columns: 52px 18px minmax(0, 1fr); gap: 0 12px; padding-bottom: 14px; position: relative; }
+.trail li::before { content: ""; position: absolute; left: 72px; top: 20px; bottom: 0; width: 1px; background: var(--border); }
+.trail li:last-child::before { display: none; }
+.trail .tm { font: 500 var(--fs-sm)/22px var(--mono); color: var(--text-3); text-align: right; }
+.trail .pt { height: 22px; display: flex; align-items: center; justify-content: center; }
+.trail .k { font-weight: 550; line-height: 22px; } .trail .p { display: block; font-size: var(--fs-sm); color: var(--text-3); }
+
+/* states and panels */
+.panels { width: 1440px; margin: 0 auto 56px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 20px; align-items: start; }
+.panel { background: var(--surface); color: var(--text); border-radius: 12px; padding: var(--s5); box-shadow: 0 0 0 1px rgba(16, 24, 40, .10); min-width: 0; }
+.panel > h2 { font-size: var(--fs-md); font-weight: 650; }
+.panel > p.what { font-size: var(--fs-sm); color: var(--text-3); margin: 4px 0 var(--s4); }
+.panel.wide { grid-column: 1 / 4; }
+.kv { display: grid; grid-template-columns: 132px minmax(0, 1fr); gap: 6px 16px; font-size: var(--fs-sm); margin-top: var(--s3); }
+.kv dt { color: var(--text-3); } .kv dd { color: var(--text); }
+.brief { margin-top: var(--s2); padding: 10px 12px; border-radius: var(--r); background: var(--bg); white-space: pre-line; font-size: var(--fs-sm); color: var(--text-2); }
+code, .code { font: 500 var(--fs-xs) var(--mono); background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: 0 4px; }
+.empty { display: grid; grid-template-columns: 18px 1fr; gap: 2px 10px; padding: 14px 0; border-top: 1px solid var(--border); font-size: var(--fs-sm); color: var(--text-3); }
+.empty b { font-size: var(--fs-md); font-weight: 600; color: var(--text); }
+.empty > span:last-child { grid-column: 2; }
+.skel { display: grid; grid-template-columns: 18px 44px 1fr 72px; gap: 10px; align-items: center; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.skel i { height: 10px; border-radius: 5px; background: var(--surface-2); }
+.err { display: grid; grid-template-columns: 18px 1fr; gap: 2px 10px; padding: 12px 0 12px 12px; border-left: 2px solid var(--fail-mark); font-size: var(--fs-sm); color: var(--text-2); }
+.err b { color: var(--fail); font-weight: 650; }
+.stale { display: flex; gap: 10px; align-items: center; padding: 10px 14px; background: var(--fail-solid); color: var(--on-solid); font-size: var(--fs-sm); border-radius: var(--r); }
+.stale b { font-weight: 700; }
+.greyed { filter: grayscale(1); }
+.greyed .t, .greyed .st, .greyed .ref { color: var(--text-3) !important; }
+.sheet { display: grid; grid-template-columns: 1.1fr 1.3fr 1fr; gap: var(--s6); }
+.sheet h4 { font-size: var(--fs-xs); font-weight: 600; color: var(--text-3); margin-bottom: 10px; }
+.scale div { display: flex; align-items: baseline; gap: 14px; padding: 3px 0; }
+.scale .l { width: 96px; flex: none; font: 500 var(--fs-xs) var(--mono); color: var(--text-3); }
+.sw { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; }
+.sw div { font: 500 var(--fs-xs) var(--mono); color: var(--text-3); }
+.sw div i { display: block; height: 28px; border-radius: var(--r); box-shadow: inset 0 0 0 1px var(--border); margin-bottom: 3px; }
+.marks { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 16px; font-size: var(--fs-sm); }
+.marks div { display: flex; gap: 8px; align-items: center; }
+.m-ok { color: var(--ok-mark); } .m-wait { color: var(--wait-mark); } .m-fail { color: var(--fail-mark); } .m-info { color: var(--info-mark); } .m-idle { color: var(--idle-mark); }
+.subh { font-size: var(--fs-xs); font-weight: 600; color: var(--text-3); padding: 14px 0 6px; border-bottom: 1px solid var(--border); }
+/* ---------- round 3: several repositories at once ---------- */
+/* a reference is always "project#N": the project in ink, the number in grey, both mono */
+.rk { font: 500 var(--fs-sm) var(--mono); white-space: nowrap; }
+.rk .p { color: var(--text); font-weight: 600; }
+.rk .n { color: var(--text-3); }
+.row { grid-template-columns: 18px 104px minmax(0, 1fr) auto; }
+.row .ref { font: inherit; }
+.fr .t .rk { margin-right: 8px; }
+
+/* top line: the totals, then where they are */
+.tc .where { color: var(--text-2); font-weight: 400; }
+.tc .where u { text-decoration: none; border-bottom: 1px solid var(--border-strong); }
+.top { gap: var(--s4); }
+
+/* sidebar: repositories as the first list, each with its range */
+.nav a .rp { font-family: var(--mono); font-size: var(--fs-sm); font-weight: 600; color: var(--text); }
+.nav a.on .rp { color: var(--text); }
+.nav a .rg { font-size: var(--fs-xs); color: var(--text-3); font-weight: 400; margin-left: 6px; font-family: var(--sans); }
+
+/* filter: which repository a view shows, said in its heading */
+.filter { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px; border-radius: var(--r); background: var(--bg);
+          box-shadow: inset 0 0 0 1px var(--border); font-size: var(--fs-sm); color: var(--text-2); white-space: nowrap; }
+.filter b { font: 600 var(--fs-sm) var(--mono); color: var(--text); }
+.filter .x { color: var(--text-3); display: inline-flex; }
+
+/* overview: one block per repository, in a stable order */
+.repo { padding: 16px 0 14px; border-bottom: 1px solid var(--border); }
+.repo:first-of-type { padding-top: 6px; }
+.repo .hd { display: flex; align-items: baseline; gap: 12px; }
+.repo .hd .name { font: 650 var(--fs-lg) var(--mono); letter-spacing: -.01em; }
+.repo .hd .rg { font-size: var(--fs-sm); color: var(--text-2); }
+.repo .hd .seg { margin-left: auto; align-self: center; width: 140px; }
+.repo .hd .of { font-size: var(--fs-sm); color: var(--text-3); white-space: nowrap; width: 84px; text-align: right; }
+.repo .att { margin-top: 6px; }
+.repo .att .row { border-bottom: 0; padding: 5px 0; grid-template-columns: 18px 104px minmax(0, 1fr) auto; }
+.repo .sum { margin-top: 4px; padding-left: 28px; font-size: var(--fs-sm); color: var(--text-3); }
+.repo .sum .link { margin-left: 8px; }
+.view.ov { padding-top: 20px; }
+.ovh { display: flex; align-items: baseline; gap: 12px; padding-bottom: 6px; }
+.ovh h3 { font-size: var(--fs-lg); font-weight: 650; }
+.ovh .m { font-size: var(--fs-sm); color: var(--text-3); }
+
+/* a failure row: one coloured line, the kind and who is on it together */
+.fr .who { grid-column: 2 / 4; font-size: var(--fs-sm); color: var(--text-3); }
+.fr .d { color: var(--text-3); }
+.link.danger { color: var(--text-2); }
+
+.screen { grid-template-columns: minmax(0, 1fr); }
+.top { min-width: 0; overflow: hidden; }
+.fr .who { white-space: normal; }
+.panel.w2 { grid-column: span 2; }
+/* ---------- round 4: no word alone on a line ---------- */
+/* every wrapping text avoids a short last line (orphan); the browser balances where it can */
+p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .eyebrow span, .choice p { text-wrap: pretty; }
+/* a state line under a sidebar entry wraps only between its phrases */
+.nav a .s span, .nav a .s { overflow-wrap: normal; }
+.nav a .s span { white-space: nowrap; }
+.nav a .rg { white-space: nowrap; }
+
+/* the right column: the reference on its own line, the title under it, whole */
+.watch { padding: var(--s5) var(--s5) var(--s5); overflow: hidden; }
+.fr .t .rk, .c2 .t .rk { display: block; margin-bottom: 1px; }
+.fr .t, .c2 .t { text-wrap: balance; }
+.c2 .t { font-weight: 550; }
+.c2 .m { text-wrap: pretty; }
+
+/* the centre: the list scrolls above the secretary's line, never under it; what is below is said */
+.view { padding-bottom: 0; }
+.list { position: relative; padding-bottom: 0; }
+.below { position: sticky; bottom: 0; display: flex; align-items: center; gap: 8px; height: 36px; margin-top: 0;
+         background: var(--surface); border-top: 1px solid var(--border);
+         font-size: var(--fs-sm); color: var(--text-3); padding-top: 0; }
+.below .link { margin-right: 4px; }
+.view .list { flex: 1 1 auto; min-height: 0; }
+.nav a .s span + span::before { content: "· "; color: var(--text-3); }
+.repo { padding: 12px 0 10px; }
+.repo .att .row { padding: 4px 0; }
+.ovh { padding-bottom: 2px; }
+.view.ov { padding-top: 16px; }
+.side .foot span { white-space: nowrap; }
+.kv dd, .scale span { text-wrap: pretty; }
+.scale .l { width: 112px; }
+.answer { padding: 20px var(--s6) 20px; }
+.choices { margin-top: 12px; }
+.acts { margin-top: 12px; }
+.answer .why { margin-top: 10px; }
+.view.ov { padding-top: 12px; }
+.repo { padding: 10px 0 8px; }
+.fr .who { text-wrap: balance; }
+.fold .ph, .below .ph { white-space: nowrap; }
+.fold .ph + .ph::before, .below .ph + .ph::before { content: "· "; }
+.below { height: auto; min-height: 36px; flex-wrap: wrap; gap: 0 8px; padding: 6px 0; }
+.below .ph:first-of-type { color: var(--text-2); font-weight: 600; }
+.fold { display: flex; flex-wrap: wrap; gap: 0 8px; align-items: baseline; }
+.below .ph:first-of-type + .ph::before { content: none; }
+.fr .who .ph { white-space: nowrap; }
+.fr .who .ph + .ph::before { content: "· "; }
+
 </style>
 </head>
 <body>
-
-<p class="note"><b>Draft for Issue 169, sample data. 1. A quiet day, nothing open.</b> Always seen: the counts and whether makiba is running in the top line, the question that needs your answer, the failures, the conversation in the centre, the approved work with what is active now, and the first Issues ready to start. Everything else is under "More", behind tabs at the lower left; each tab carries its count. The words on the screen are the person's; screen.md (section 2.4) maps each to the record it shows.</p>
-
-<div class="screen light">
-  <header class="top" data-region="top-line">
-    <span class="brand"><i></i>makiba</span>
-    <span class="org">suisya-systems/makiba</span>
-    <span class="sp"></span>
-    <span class="chip wait">Needs you 1</span>
-    <span class="chip bad">Failed 1</span>
-    <span class="chip quiet">Running · updated 3 s ago</span>
-    <span class="set"><span class="on">English</span><span>Japanese</span></span>
-    <span class="set"><span>Auto</span><span class="on">Light</span><span>Dark</span></span>
-  </header>
-  <div class="cols">
-
-    <section class="col left">
-      <div class="role"><h2>Hand over work</h2><span>what the organization may start</span></div>
-      <div class="sect" data-region="range">
-        <div class="card range">
-          <div class="head"><b>Approved work #2</b><span class="chip ok">in progress</span><span class="sp"></span><span class="muted">makiba</span></div>
-          <div class="terms">Issues 169, 270 and 5 more · 2 at a time</div>
-          <div class="bar"><i style="width:25%"></i></div>
-          <div class="muted" style="font-size:12px"><b style="color:var(--ink)">5</b> of 20 tasks started · approved today 09:12</div>
-          <div class="foot"><span class="btn small">Hold new tasks</span><span class="btn small ghost">End after running tasks</span><span class="sp"></span></div>
-        </div>
-      </div>
-      <div class="sect" data-region="candidates">
-        <h3>Ready to start <small>4 Issues, not yet approved</small></h3>
-        <div class="card"><div class="cand"><div class="t"><span class="ref">#283</span><span class="ti" title="The gate reports edited tests">The gate reports edited tests</span></div><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">suggested first · follows #257</span><span class="btn small">Ask to start</span></div></div><div class="cand"><div class="t"><span class="ref">#276</span><span class="ti" title="Stops written by code (belt step 2)">Stops written by code (belt step 2)</span></div><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">nothing blocks it</span><span class="btn small">Ask to start</span></div></div><div class="cand"><div class="t"><span class="ref">#262</span><span class="ti" title="Status text lists the ranges">Status text lists the ranges</span></div><div class="m"><span class="tag none">no goal</span><span class="tag">S~</span><span class="why">names no goal, so last</span><span class="btn small">Ask to start</span></div></div><div class="fold">and 1 more<span>and 3 not ready yet: see "Issues to start"</span></div></div>
-      </div>
-      <div class="shelf" data-region="shelf"><h3>More</h3><div class="tabs"><span class="tab red">Failures <b>1</b></span><span class="tab red">All approved items <b>7</b><span class="mk">1 failed</span><span class="mk q">1 needs you</span></span><span class="tab">Issues to start <b>4</b> · not ready <b>3</b> · 1 project unchecked</span><span class="tab">One-off tasks <b>1</b></span><span class="tab">Pull requests <b>2</b></span><span class="tab">Task history</span><span class="tab">Instructions</span></div><p class="shut">Nothing is open. A heading turns amber when something behind it needs you, red when something behind it failed.</p></div>
-    </section>
-
-    <section class="col centre">
-      <div class="ask" data-region="answer">
-        <div class="hd">
-          <div class="over">Needs your answer <span>question 14 · task r2-169 · approved work #2 · asked 6 min ago by the secretary</span></div>
-          <p class="sum" title="A decision · A screen for the person">A decision · A screen for the person</p></p>
-        </div>
-        <div class="bd plain">
-          <p class="q">Is the drawing of the screen agreed, so that the measurement on your machine comes next?</p>
-          <p class="fbg">▸ Show the background <span>1 paragraph</span></p>
-          <div class="ifs">
-            <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
-            <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
-          </div>
-          <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and the design review passed with its findings folded in.</p>
-        </div>
-        <div class="act"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="field">a note to go with the answer (optional)</span><span class="btn ghost">Discuss it first</span></div>
-      </div>
-      <div class="term" data-region="conversation">
-        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span class="sp"></span><span>the secretary's own terminal</span></div>
-        <div class="body"><div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
-          <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
-Left out: 279 (waits for #62), 251 (needs a host).
-<span class="dim">Approve it on the left, or tell me what to change.</span></div>
-          <div class="you">Approved. Keep going.</div>
-          <div class="sec">Range 2 is running. 270 landed as pull request 297.
-One question from r2-169 needs you; it is shown above with my recommendation (yes).
-<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div><div class="prompt"><span class="cursor"></span></div></div>
-      </div>
-    </section>
-
-    <section class="col right">
-      <div class="role"><h2>Progress</h2><span>what you handed over is moving</span></div>
-      <div class="sect" data-region="went-wrong"><h3>Failures <small>1</small></h3><div class="card wrong"><div class="w"><b title="r2-274 · did not start">r2-274 · did not start</b><span class="s">11 min ago</span><span class="h"><span class="who sec">With the secretary · told 11 min ago</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span><span class="btn small">Abandon and close…</span></span></div></div></div>
-      <div class="sect" data-region="range-band">
-        <h3>Approved work #2 <small>7 Issues</small><span class="more">each one: "All approved items"</span></h3>
-        <div class="belt" aria-hidden="true"><i class="landed"></i><i class="waiting_person"></i><i class="in_work"></i><i class="review"></i><i class="failed"></i><i class="not_in"></i><i class="skipped"></i></div><div class="counts"><span><b>1</b> merged</span><span><b>1</b> needs you</span><span><b>1</b> in review</span><span><b>2</b> being worked on <span class="bad">(1 did not start)</span></span><span><b>1</b> not started</span><span><b>1</b> skipped</span></div>
-      </div>
-      <div class="sect grow work" data-region="in-work">
-        <h3>Active now <small>4, stuck ones first</small></h3>
-        <div class="card scroll"><div class="item failed"><span class="g">!</span><span class="ref">#274</span><span class="ti" title="A defense report">A defense report</span><span class="s">did not start · 11 min</span></div><div class="item waiting_person"><span class="g">?</span><span class="ref">#169</span><span class="ti" title="A screen for the person">A screen for the person</span><span class="s">needs you · 6 min</span><span class="d">a decision: is the drawing agreed</span></div><div class="item in_work"><span class="g">●</span><span class="ref">#272</span><span class="ti" title="Attention notifications">Attention notifications</span><span class="s">working · 14 min</span></div><div class="item review"><span class="g">◆</span><span class="ref">#273</span><span class="ti" title="A metrics report over the events">A metrics report over the events</span><span class="s">in review · checks running</span></div></div>
-      </div>
-    </section>
-  </div>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+<symbol id="landed" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M4.8 8.2l2.1 2.1 4.3-4.4" fill="none" stroke="var(--surface)" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="closed" viewBox="0 0 16 16"><rect x="2.5" y="2.5" width="11" height="11" rx="2" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+<symbol id="wait" viewBox="0 0 16 16"><circle cx="8" cy="8" r="7" fill="currentColor"/><path d="M6.1 6.2a2 2 0 1 1 2.7 1.9c-.5.2-.8.6-.8 1.1v.4" fill="none" stroke="var(--surface)" stroke-width="1.7" stroke-linecap="round"/><circle cx="8" cy="11.8" r="1" fill="var(--surface)"/></symbol>
+<symbol id="work" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="8" cy="8" r="3" fill="currentColor"/></symbol>
+<symbol id="review" viewBox="0 0 16 16"><path d="M8 1.5L14.5 8 8 14.5 1.5 8z" fill="currentColor"/></symbol>
+<symbol id="notin" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.6" stroke-dasharray="2.4 2"/></symbol>
+<symbol id="skip" viewBox="0 0 16 16"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4 12L12 4" stroke="currentColor" stroke-width="1.8"/></symbol>
+<symbol id="fail" viewBox="0 0 16 16"><path d="M8 1.2l7.2 12.9H.8z" fill="currentColor"/><path d="M8 5.6v4" stroke="var(--surface)" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="12" r="1" fill="var(--surface)"/></symbol>
+<symbol id="dot" viewBox="0 0 16 16"><circle cx="8" cy="8" r="4" fill="currentColor"/></symbol>
+<symbol id="chev" viewBox="0 0 16 16"><path d="M6 3.5L10.5 8 6 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="chevl" viewBox="0 0 16 16"><path d="M10 3.5L5.5 8 10 12.5" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></symbol>
+<symbol id="x" viewBox="0 0 16 16"><path d="M4 4l8 8M12 4l-8 8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></symbol>
+<symbol id="person" viewBox="0 0 16 16"><circle cx="8" cy="5.2" r="2.8" fill="currentColor"/><path d="M2.5 14c.6-3 2.8-4.6 5.5-4.6s4.9 1.6 5.5 4.6z" fill="currentColor"/></symbol>
+<symbol id="hand" viewBox="0 0 16 16"><path d="M8 1.5L14.5 8 8 14.5 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M8 5v3.6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="8" cy="11" r="1" fill="currentColor"/></symbol>
+<symbol id="reopen" viewBox="0 0 16 16"><path d="M8 1.5L14.5 8 8 14.5 1.5 8z" fill="none" stroke="currentColor" stroke-width="2"/></symbol>
+</svg>
+<div class="doc">
+  <h1>The person's screen · draft 6 (Issue 394, round 4)</h1>
+  <p>Drawn from <code>docs/design/screen-fixture/</code> only, read as at 10:00 on the fixture's day: four projects at once, three with approved work in progress (harbor #6, loom #3, quill #5) and one with a proposal (atlas #4, no repository recorded); three questions for you, six failures, six open pull requests. Numbers collide on purpose: loom#56 and quill#56, loom#127 and harbor#127. A dashed box such as <span class="gap" title="x is not on the read surface (screen.md section 6)">missing: runs[].title</span> is a field the read surface does not give today (screen.md section 6).</p>
 </div>
 
-<p class="note"><b>2. A full day, the tab "One-off tasks" open.</b> Two projects, so every reference is written <span style="font-family:var(--mono)">OWNER/NAME#N</span> on a line of its own (a long one is cut at its start, so the number stays). Fourteen Issues ready, three shown when no tab is open and one beside an open tab; twenty approved Issues, eight of them active; six failures, three shown, each saying who is on it (nobody, the secretary, or you) with what you can do in the row; the first row shows the line to type for "Ask the secretary to look", as the read-only screen does. "Told N min ago" is drawn as it will read once the records say whether a failure was told (screen.md, section 6). "3 more" leads to the tab "Failures", drawn open among the panels at the end. The tabs "Failures", "All approved items", "One-off tasks" and "Pull requests" are red because something behind each failed; a tab with only something that needs you would be amber.</p>
-
-<div class="screen light">
-  <header class="top" data-region="top-line">
-    <span class="brand"><i></i>makiba</span>
-    <span class="org">suisya-systems · 2 projects</span>
-    <span class="sp"></span>
-    <span class="chip wait">Needs you 3</span>
-    <span class="chip bad">Failed 6 · unattended 1</span>
-    <span class="chip quiet">Running · updated 3 s ago</span>
-    <span class="set"><span class="on">English</span><span>Japanese</span></span>
-    <span class="set"><span>Auto</span><span class="on">Light</span><span>Dark</span></span>
-  </header>
-  <div class="cols">
-
-    <section class="col left">
-      <div class="role"><h2>Hand over work</h2><span>what the organization may start</span></div>
-      <div class="sect" data-region="range">
-        <div class="card range">
-          <div class="head"><b>Approved work #2</b><span class="chip ok">in progress</span><span class="sp"></span><span class="muted">makiba</span></div>
-          <div class="terms">Issues 169, 270 and any open Issue without the label backlog · 3 at a time</div>
-          <div class="bar"><i style="width:56%"></i></div>
-          <div class="muted" style="font-size:12px"><b style="color:var(--ink)">17</b> of 30 tasks started · approved today 09:12</div>
-          <div class="foot"><span class="btn small">Hold new tasks</span><span class="btn small ghost">End after running tasks</span><span class="sp"></span></div>
-        </div>
-      </div>
-      <div class="sect" data-region="candidates">
-        <h3>Ready to start <small>14 Issues, not yet approved</small></h3>
-        <div class="card"><div class="cand"><div class="t"><span class="ti" title="The gate reports edited tests">The gate reports edited tests</span></div><span class="refline" title="suisya-systems/makiba#283"><bdo dir="ltr">suisya-systems/makiba#283</bdo></span><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">suggested first · follows #257</span><span class="btn small">Ask to start</span></div></div><div class="fold">and 13 more<span>and 5 not ready yet: see "Issues to start"</span></div></div>
-      </div>
-      <div class="shelf" data-region="shelf"><h3>More</h3><div class="tabs"><span class="tab red">Failures <b>6</b><span class="mk">unattended 1</span></span><span class="tab red">All approved items <b>20</b><span class="mk">1 failed</span><span class="mk q">2 need you</span></span><span class="tab">Issues to start <b>14</b> · not ready <b>5</b></span><span class="tab red on">One-off tasks <b>5</b><span class="mk">1 failed</span><span class="mk q">1 needs you</span></span><span class="tab red">Pull requests <b>5</b><span class="mk">1 failed</span></span><span class="tab">Task history</span><span class="tab">Instructions</span></div><div class="card pane"><div class="ph">One-off tasks <small>5 started outside the approved work, stuck ones first</small><span class="x">close</span></div><div class="pb scroll"><div class="item failed"><span class="g">!</span><span class="ti"><span class="mono">libretto-58</span> <span class="muted">· code · did not start</span></span><span class="s">52 min</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti"><span class="mono">docs-goals</span> <span class="muted">· document · needs you</span></span><span class="s">1 min</span></div><div class="item in_work"><span class="g">●</span><span class="ti"><span class="mono">libretto-44</span> <span class="muted">· code · working</span></span><span class="s">47 min</span></div><div class="item in_work"><span class="g">●</span><span class="ti"><span class="mono">libretto-61</span> <span class="muted">· code · working</span></span><span class="s">20 min</span></div><div class="item review"><span class="g">◆</span><span class="ti"><span class="mono">docs-runbook</span> <span class="muted">· document · in review, no pull request</span></span><span class="s">8 min</span></div></div></div></div>
-    </section>
-
-    <section class="col centre">
-      <div class="ask" data-region="answer">
-        <div class="hd">
-          <div class="over">Needs your answer <span>question 14 · task r2-169 · approved work #2 · asked 6 min ago by the secretary</span><span class="nav">1 of 3 · next ›</span></div>
-          <p class="sum" title="A decision · A screen for the person">A decision · A screen for the person</p></p>
-        </div>
-        <div class="bd scroll">
-          <p class="q">Is the drawing of the screen agreed, with what need not always be seen moved behind tabs, the full day and the dark variant drawn, and every list either scrolling in its own place or ending in a line that counts what it does not show, so that the four checks on the machine where the app runs come next?</p>
-          <p class="fbg">▸ Show the background <span>3 paragraphs</span></p>
-          <div class="ifs">
-            <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
-            <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
-          </div>
-          <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and the reviews passed with their findings folded in.</p>
-        </div>
-        <div class="act"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="field">a note to go with the answer (optional)</span><span class="btn ghost">Discuss it first</span></div>
-      </div>
-      <div class="term" data-region="conversation">
-        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span class="sp"></span><span>the secretary's own terminal</span></div>
-        <div class="body"><div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
-          <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
-Left out: 279 (waits for #62), 251 (needs a host).
-<span class="dim">Approve it on the left, or tell me what to change.</span></div>
-          <div class="you">Approved. Keep going.</div>
-          <div class="sec">Range 2 is running. 270 landed as pull request 297.
-One question from r2-169 needs you; it is shown above with my recommendation (yes).
-<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div><div class="prompt"><span class="cursor"></span></div></div>
-      </div>
-    </section>
-
-    <section class="col right">
-      <div class="role"><h2>Progress</h2><span>what you handed over is moving</span></div>
-      <div class="sect" data-region="went-wrong"><h3>Failures <small>6</small></h3><div class="card wrong"><div class="w"><b title="makiba · r2-301 · did not start">makiba · r2-301 · did not start</b><span class="s">11 min ago</span><span class="h"><span class="who none">Nobody is on it</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span><span class="btn small">Abandon and close…</span></span><span class="cmd"><b>In your shell:</b> makiba send secretary 'Please look at launch_failed on task r2-301.'</span></div><div class="w"><b title="docs-goals · stopped at a login">docs-goals · stopped at a login</b><span class="s">1 min ago</span><span class="h"><span class="who you">Needs your answer</span><span class="btn small">Show the question</span></span></div><div class="w"><b title="makiba · r2-243 · silent since it started">makiba · r2-243 · silent since it started</b><span class="s">2 min ago</span><span class="h"><span class="who sec">With the secretary · told 2 min ago, looking</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span></span></div><div class="fold">3 more in "Failures"<span>all with the secretary · oldest 52 min</span></div></div></div>
-      <div class="sect" data-region="range-band">
-        <h3>Approved work #2 <small>20 Issues</small><span class="more">each one: "All approved items"</span></h3>
-        <div class="nums" aria-hidden="true"><i class="landed" style="flex:6 1 0">6</i><i class="closed" style="flex:1 1 0">1</i><i class="waiting_person" style="flex:2 1 0">2</i><i class="review" style="flex:3 1 0">3</i><i class="in_work" style="flex:2 1 0">2</i><i class="failed" style="flex:1 1 0">1</i><i class="not_in" style="flex:3 1 0">3</i><i class="skipped" style="flex:2 1 0">2</i></div><div class="counts"><span><b>6</b> merged</span><span><b>1</b> closed, not merged</span><span><b>2</b> need you</span><span><b>3</b> in review</span><span><b>3</b> being worked on <span class="bad">(1 did not start)</span></span><span><b>3</b> not started</span><span><b>2</b> skipped</span></div>
-      </div>
-      <div class="sect grow work" data-region="in-work">
-        <h3>Active now <small>8, stuck ones first</small></h3>
-        <div class="card scroll"><div class="item failed"><span class="g">!</span><span class="ti" title="The network allow-list reports the refused host">The network allow-list reports the refused host</span><span class="s">did not start · 11 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#301"><bdo dir="ltr" class="mono">suisya-systems/makiba#301</bdo></span></div><div class="item waiting_person"><span class="g">?</span><span class="ti" title="A screen for the person that shows the whole organization">A screen for the person that shows the whole organization</span><span class="s">needs you · 6 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#169"><bdo dir="ltr" class="mono">suisya-systems/makiba#169</bdo></span><span class="d">a decision: is the drawing agreed</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti" title="Attention notifications that call the person back">Attention notifications that call the person back</span><span class="s">needs you · 2 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#272"><bdo dir="ltr" class="mono">suisya-systems/makiba#272</bdo></span><span class="d">a decision: may it add a dependency</span></div><div class="item in_work"><span class="g">●</span><span class="ti" title="A temporary folder per launch">A temporary folder per launch</span><span class="s">working · 14 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#243"><bdo dir="ltr" class="mono">suisya-systems/makiba#243</bdo></span></div><div class="item in_work"><span class="g">●</span><span class="ti" title="A strict network allow-list, hosts per project">A strict network allow-list, hosts per project</span><span class="s">working · 38 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#244"><bdo dir="ltr" class="mono">suisya-systems/makiba#244</bdo></span></div><div class="item review"><span class="g">◆</span><span class="ti" title="A metrics report over the events">A metrics report over the events</span><span class="s">in review · 9 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#273"><bdo dir="ltr" class="mono">suisya-systems/makiba#273</bdo></span><span class="d">checks running</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="A defense report with a count per line">A defense report with a count per line</span><span class="s">in review · 21 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#274"><bdo dir="ltr" class="mono">suisya-systems/makiba#274</bdo></span><span class="d">checks passed · ready to merge</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="The acceptance checker prints the folder of each build">The acceptance checker prints the folder of each build</span><span class="s">in review · 4 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#232"><bdo dir="ltr" class="mono">suisya-systems/makiba#232</bdo></span><span class="d">no pull request yet</span></div></div>
-      </div>
-    </section>
+<p class="cap"><b>1 · Light, 1440 × 900: all repositories</b>The sidebar lists the repositories first, in a fixed order by name, each with its approved work and what is stuck in it; the top line keeps the totals and names where they are. The centre shows one block per repository with only what needs a look; every reference carries its project.</p>
+<div class="screen theme-light"><header class="top" data-region="top-line">
+  <span class="brand"><span class="logo"></span>makiba</span><span class="org"><span class="gap" title="organization name is not on the read surface (screen.md section 6)">organization name: no field</span></span><span class="flex"></span>
+  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>3</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
+  <span class="tc fail"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><b>6</b> failed <span class="where">· <u>loom</u> 3 · <u>harbor</u> 2 · <u>atlas</u> 1</span> <span class="q">· 5 unattended</span></span>
+  <span class="live"><span class="dot"></span>Running · 3 s ago</span>
+  <span class="disp"><span>Display: <b style="color:var(--text);font-weight:600">English · Light</b></span></span>
+</header><div class="cols"><nav class="side" aria-label="Repositories and views">
+  <div><div class="nh">Repositories</div><div class="nav">
+    <a class="on"><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">All repositories</span><span class="c">4</span></a>
+    <a class=""><span class="ic"><svg class="i sm m-wait" aria-hidden="true"><use href="#wait"/></svg></span><span class="l"><span class="rp">atlas</span><span class="rg">#4 proposed</span></span><span class="c"></span><span class="s"><span class="cw">needs your approval</span> <span class="cw">1 needs you</span> <span class="cf">1 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">harbor</span><span class="rg">#6</span></span><span class="c">3 / 6</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">loom</span><span class="rg">#3</span></span><span class="c">9 / 16</span><span class="s"><span class="cw">1 needs you</span> <span class="cf">3 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 8</span><span class="s"><span class="cw">1 needs you</span></span></a>
+  </div></div>
+  <div><div class="nh">Views</div><div class="nav">
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#fail"/></svg></span><span class="l">Failures</span><span class="c">6</span><span class="s"><span class="cf">5 unattended</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">Issues to start</span><span class="c">8</span><span class="s"><span>4 not ready</span> <span>1 project unchecked</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">3</span><span class="s"><span class="cf">3 failed</span> <span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#review"/></svg></span><span class="l">Pull requests</span><span class="c">6</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">Task history</span><span class="c"></span></a>
+  </div></div>
+  <div class="foot"><span>Checked GitHub 09:41</span> · <span>read 10:00</span></div>
+</nav><main class="main"><section class="answer" data-region="answer" aria-label="Needs your answer">
+  <div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span> Cache parsed files between runs · a decision on design · 12 min ago</span>
+    <span class="nav2"><span>1 of 3</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
+  <h2>Should the cache key include the locale?</h2>
+  <p class="q2">The parsed form differs only in the error messages, which are translated.</p>
+  <p class="ctx"><a>Show the background</a> · 1 paragraph · question 27, task r3-47</p>
+  <div class="choices">
+    <div class="choice r"><h4>If yes <span class="rec"><svg class="i sm m-ok" aria-hidden="true"><use href="#landed"/></svg>recommended</span></h4><p>The key gains the locale. A machine that switches locale parses once more per locale; nothing else changes.</p></div>
+    <div class="choice"><h4>If no</h4><p>Messages are translated when shown instead of at parse time: a larger change, about two more days of work in the parser.</p></div>
   </div>
-</div>
-
-<p class="note"><b>3. The same full day, dark, the tab "All approved items" open.</b> Every approved Issue in the order it started, scrolling in the tab.</p>
-
-<div class="screen dark">
-  <header class="top" data-region="top-line">
-    <span class="brand"><i></i>makiba</span>
-    <span class="org">suisya-systems · 2 projects</span>
-    <span class="sp"></span>
-    <span class="chip wait">Needs you 3</span>
-    <span class="chip bad">Failed 6 · unattended 1</span>
-    <span class="chip quiet">Running · updated 3 s ago</span>
-    <span class="set"><span class="on">English</span><span>Japanese</span></span>
-    <span class="set"><span>Auto</span><span>Light</span><span class="on">Dark</span></span>
-  </header>
-  <div class="cols">
-
-    <section class="col left">
-      <div class="role"><h2>Hand over work</h2><span>what the organization may start</span></div>
-      <div class="sect" data-region="range">
-        <div class="card range">
-          <div class="head"><b>Approved work #2</b><span class="chip ok">in progress</span><span class="sp"></span><span class="muted">makiba</span></div>
-          <div class="terms">Issues 169, 270 and any open Issue without the label backlog · 3 at a time</div>
-          <div class="bar"><i style="width:56%"></i></div>
-          <div class="muted" style="font-size:12px"><b style="color:var(--ink)">17</b> of 30 tasks started · approved today 09:12</div>
-          <div class="foot"><span class="btn small">Hold new tasks</span><span class="btn small ghost">End after running tasks</span><span class="sp"></span></div>
-        </div>
-      </div>
-      <div class="sect" data-region="candidates">
-        <h3>Ready to start <small>14 Issues, not yet approved</small></h3>
-        <div class="card"><div class="cand"><div class="t"><span class="ti" title="The gate reports edited tests">The gate reports edited tests</span></div><span class="refline" title="suisya-systems/makiba#283"><bdo dir="ltr">suisya-systems/makiba#283</bdo></span><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">suggested first · follows #257</span><span class="btn small">Ask to start</span></div></div><div class="fold">and 13 more<span>and 5 not ready yet: see "Issues to start"</span></div></div>
-      </div>
-      <div class="shelf" data-region="shelf"><h3>More</h3><div class="tabs"><span class="tab red">Failures <b>6</b><span class="mk">unattended 1</span></span><span class="tab red on">All approved items <b>20</b><span class="mk">1 failed</span><span class="mk q">2 need you</span></span><span class="tab">Issues to start <b>14</b> · not ready <b>5</b></span><span class="tab red">One-off tasks <b>5</b><span class="mk">1 failed</span><span class="mk q">1 needs you</span></span><span class="tab red">Pull requests <b>5</b><span class="mk">1 failed</span></span><span class="tab">Task history</span><span class="tab">Instructions</span></div><div class="card pane"><div class="ph">Approved work #2, every Issue <small>20, in the order they started</small><span class="x">close</span></div><div class="pb scroll"><div class="item landed"><span class="g">✓</span><span class="ti" title="The secretary&#x27;s first-range line">The secretary&#x27;s first-range line</span><span class="s">merged · 3 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#270"><bdo dir="ltr" class="mono">suisya-systems/makiba#270</bdo></span><span class="d">pull request 297 merged</span></div><div class="item closed"><span class="g">□</span><span class="ti" title="The checks before the first range, as one line">The checks before the first range, as one line</span><span class="s">closed, not merged · 3 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#291"><bdo dir="ltr" class="mono">suisya-systems/makiba#291</bdo></span><span class="d">its pull request is not seen merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti" title="A role&#x27;s settings allow its own door tools">A role&#x27;s settings allow its own door tools</span><span class="s">merged · 2 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#292"><bdo dir="ltr" class="mono">suisya-systems/makiba#292</bdo></span><span class="d">pull request 293 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti" title="The landing gate names a head with no passed review">The landing gate names a head with no passed review</span><span class="s">merged · 2 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#263"><bdo dir="ltr" class="mono">suisya-systems/makiba#263</bdo></span><span class="d">pull request 281 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti" title="A review passes only when the reader read the change">A review passes only when the reader read the change</span><span class="s">merged · 2 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#280"><bdo dir="ltr" class="mono">suisya-systems/makiba#280</bdo></span><span class="d">pull request 290 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti" title="The switch stage of the self-hosting runbook">The switch stage of the self-hosting runbook</span><span class="s">merged · 1 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#294"><bdo dir="ltr" class="mono">suisya-systems/makiba#294</bdo></span><span class="d">pull request 294 merged</span></div><div class="item landed"><span class="g">✓</span><span class="ti" title="What was not moved from the predecessor: thirty entries">What was not moved from the predecessor: thirty entries</span><span class="s">merged · 1 h</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#267"><bdo dir="ltr" class="mono">suisya-systems/makiba#267</bdo></span><span class="d">pull request 267 merged</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti" title="A screen for the person that shows the whole organization">A screen for the person that shows the whole organization</span><span class="s">needs you · 6 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#169"><bdo dir="ltr" class="mono">suisya-systems/makiba#169</bdo></span><span class="d">a decision: is the drawing agreed</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti" title="Attention notifications that call the person back">Attention notifications that call the person back</span><span class="s">needs you · 2 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#272"><bdo dir="ltr" class="mono">suisya-systems/makiba#272</bdo></span><span class="d">a decision: may it add a dependency</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="A metrics report over the events">A metrics report over the events</span><span class="s">in review · 9 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#273"><bdo dir="ltr" class="mono">suisya-systems/makiba#273</bdo></span><span class="d">checks running</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="A defense report with a count per line">A defense report with a count per line</span><span class="s">in review · 21 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#274"><bdo dir="ltr" class="mono">suisya-systems/makiba#274</bdo></span><span class="d">checks passed · ready to merge</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="The acceptance checker prints the folder of each build">The acceptance checker prints the folder of each build</span><span class="s">in review · 4 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#232"><bdo dir="ltr" class="mono">suisya-systems/makiba#232</bdo></span><span class="d">no pull request yet</span></div><div class="item in_work"><span class="g">●</span><span class="ti" title="A temporary folder per launch">A temporary folder per launch</span><span class="s">working · 14 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#243"><bdo dir="ltr" class="mono">suisya-systems/makiba#243</bdo></span></div><div class="item failed"><span class="g">!</span><span class="ti" title="The network allow-list reports the refused host">The network allow-list reports the refused host</span><span class="s">did not start · 11 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#301"><bdo dir="ltr" class="mono">suisya-systems/makiba#301</bdo></span></div><div class="item in_work"><span class="g">●</span><span class="ti" title="A strict network allow-list, hosts per project">A strict network allow-list, hosts per project</span><span class="s">working · 38 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#244"><bdo dir="ltr" class="mono">suisya-systems/makiba#244</bdo></span></div><div class="item not_in"><span class="g">○</span><span class="ti" title="A server installation">A server installation</span><span class="s">not started</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#279"><bdo dir="ltr" class="mono">suisya-systems/makiba#279</bdo></span><span class="d">waits for #62</span></div><div class="item not_in"><span class="g">○</span><span class="ti" title="Docker distribution">Docker distribution</span><span class="s">not started</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#278"><bdo dir="ltr" class="mono">suisya-systems/makiba#278</bdo></span><span class="d">waits for #279</span></div><div class="item not_in"><span class="g">○</span><span class="ti" title="More than one machine">More than one machine</span><span class="s">not started</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#302"><bdo dir="ltr" class="mono">suisya-systems/makiba#302</bdo></span><span class="d">waits for a free place</span></div><div class="item skipped"><span class="g">–</span><span class="ti" title="Host record of the app check">Host record of the app check</span><span class="s">skipped</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#251"><bdo dir="ltr" class="mono">suisya-systems/makiba#251</bdo></span><span class="d">needs a host</span></div><div class="item skipped"><span class="g">–</span><span class="ti" title="A second base">A second base</span><span class="s">skipped</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#295"><bdo dir="ltr" class="mono">suisya-systems/makiba#295</bdo></span><span class="d">put aside by you</span></div></div></div></div>
-    </section>
-
-    <section class="col centre">
-      <div class="ask" data-region="answer">
-        <div class="hd">
-          <div class="over">Needs your answer <span>question 14 · task r2-169 · approved work #2 · asked 6 min ago by the secretary</span><span class="nav">1 of 3 · next ›</span></div>
-          <p class="sum" title="A decision · A screen for the person">A decision · A screen for the person</p></p>
-        </div>
-        <div class="bd scroll">
-          <p class="q">Is the drawing of the screen agreed, with what need not always be seen moved behind tabs, the full day and the dark variant drawn, and every list either scrolling in its own place or ending in a line that counts what it does not show, so that the four checks on the machine where the app runs come next?</p>
-          <p class="fbg">▸ Show the background <span>3 paragraphs</span></p>
-          <div class="ifs">
-            <div class="if rec"><h4>If yes · recommended</h4>The task closes as a design. I put the four checks to you as one list; the code of the screen becomes its own Issue, held until they are recorded.</div>
-            <div class="if"><h4>If no</h4>The worker redraws with your note, and the entry comes back with the new drawing. Its slot stays taken meanwhile.</div>
-          </div>
-          <p class="rec-why"><b>Why yes:</b> every part of the drawing has its read field today or a named gap, and the reviews passed with their findings folded in.</p>
-        </div>
-        <div class="act"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="field">a note to go with the answer (optional)</span><span class="btn ghost">Discuss it first</span></div>
-      </div>
-      <div class="term" data-region="conversation">
-        <div class="bar2"><span class="dot"></span><b>Secretary</b><span>waiting for you · 6 min</span><span class="sp"></span><span>the secretary's own terminal</span></div>
-        <div class="body"><div class="you">Propose the first range for makiba: the Issues 169,270, 2 at once, 20 tasks in all.</div>
-          <div class="sec">Recorded as range 2 (proposed). It admits 169 and 270 now and would admit 272, 273 and 274 as slots free up.
-Left out: 279 (waits for #62), 251 (needs a host).
-<span class="dim">Approve it on the left, or tell me what to change.</span></div>
-          <div class="you">Approved. Keep going.</div>
-          <div class="sec">Range 2 is running. 270 landed as pull request 297.
-One question from r2-169 needs you; it is shown above with my recommendation (yes).
-<span class="dim">The other tasks go on meanwhile: 272 is at work, 273 is in review.</span></div><div class="prompt"><span class="cursor"></span></div></div>
-      </div>
-    </section>
-
-    <section class="col right">
-      <div class="role"><h2>Progress</h2><span>what you handed over is moving</span></div>
-      <div class="sect" data-region="went-wrong"><h3>Failures <small>6</small></h3><div class="card wrong"><div class="w"><b title="makiba · r2-301 · did not start">makiba · r2-301 · did not start</b><span class="s">11 min ago</span><span class="h"><span class="who none">Nobody is on it</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span><span class="btn small">Abandon and close…</span></span><span class="cmd"><b>In your shell:</b> makiba send secretary 'Please look at launch_failed on task r2-301.'</span></div><div class="w"><b title="docs-goals · stopped at a login">docs-goals · stopped at a login</b><span class="s">1 min ago</span><span class="h"><span class="who you">Needs your answer</span><span class="btn small">Show the question</span></span></div><div class="w"><b title="makiba · r2-243 · silent since it started">makiba · r2-243 · silent since it started</b><span class="s">2 min ago</span><span class="h"><span class="who sec">With the secretary · told 2 min ago, looking</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span></span></div><div class="fold">3 more in "Failures"<span>all with the secretary · oldest 52 min</span></div></div></div>
-      <div class="sect" data-region="range-band">
-        <h3>Approved work #2 <small>20 Issues</small><span class="more">each one: "All approved items"</span></h3>
-        <div class="nums" aria-hidden="true"><i class="landed" style="flex:6 1 0">6</i><i class="closed" style="flex:1 1 0">1</i><i class="waiting_person" style="flex:2 1 0">2</i><i class="review" style="flex:3 1 0">3</i><i class="in_work" style="flex:2 1 0">2</i><i class="failed" style="flex:1 1 0">1</i><i class="not_in" style="flex:3 1 0">3</i><i class="skipped" style="flex:2 1 0">2</i></div><div class="counts"><span><b>6</b> merged</span><span><b>1</b> closed, not merged</span><span><b>2</b> need you</span><span><b>3</b> in review</span><span><b>3</b> being worked on <span class="bad">(1 did not start)</span></span><span><b>3</b> not started</span><span><b>2</b> skipped</span></div>
-      </div>
-      <div class="sect grow work" data-region="in-work">
-        <h3>Active now <small>8, stuck ones first</small></h3>
-        <div class="card scroll"><div class="item failed"><span class="g">!</span><span class="ti" title="The network allow-list reports the refused host">The network allow-list reports the refused host</span><span class="s">did not start · 11 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#301"><bdo dir="ltr" class="mono">suisya-systems/makiba#301</bdo></span></div><div class="item waiting_person"><span class="g">?</span><span class="ti" title="A screen for the person that shows the whole organization">A screen for the person that shows the whole organization</span><span class="s">needs you · 6 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#169"><bdo dir="ltr" class="mono">suisya-systems/makiba#169</bdo></span><span class="d">a decision: is the drawing agreed</span></div><div class="item waiting_person"><span class="g">?</span><span class="ti" title="Attention notifications that call the person back">Attention notifications that call the person back</span><span class="s">needs you · 2 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#272"><bdo dir="ltr" class="mono">suisya-systems/makiba#272</bdo></span><span class="d">a decision: may it add a dependency</span></div><div class="item in_work"><span class="g">●</span><span class="ti" title="A temporary folder per launch">A temporary folder per launch</span><span class="s">working · 14 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#243"><bdo dir="ltr" class="mono">suisya-systems/makiba#243</bdo></span></div><div class="item in_work"><span class="g">●</span><span class="ti" title="A strict network allow-list, hosts per project">A strict network allow-list, hosts per project</span><span class="s">working · 38 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#244"><bdo dir="ltr" class="mono">suisya-systems/makiba#244</bdo></span></div><div class="item review"><span class="g">◆</span><span class="ti" title="A metrics report over the events">A metrics report over the events</span><span class="s">in review · 9 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#273"><bdo dir="ltr" class="mono">suisya-systems/makiba#273</bdo></span><span class="d">checks running</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="A defense report with a count per line">A defense report with a count per line</span><span class="s">in review · 21 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#274"><bdo dir="ltr" class="mono">suisya-systems/makiba#274</bdo></span><span class="d">checks passed · ready to merge</span></div><div class="item review"><span class="g">◆</span><span class="ti" title="The acceptance checker prints the folder of each build">The acceptance checker prints the folder of each build</span><span class="s">in review · 4 min</span><span class="d" style="direction:rtl;text-align:left" title="suisya-systems/makiba#232"><bdo dir="ltr" class="mono">suisya-systems/makiba#232</bdo></span><span class="d">no pull request yet</span></div></div>
-      </div>
-    </section>
+  <p class="why"><b>Why yes:</b> It is the smaller change and keeps the parser as it is; the extra parse per locale is rare.</p>
+  <div class="acts"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="note">A note to go with the answer (optional)</span><span class="link quiet">Discuss it first</span></div>
+</section><section class="view ov" data-region="repositories" aria-label="All repositories">
+  <div class="ovh"><h3>All repositories</h3><span class="m">4 projects · one approved work each · in a fixed order, by name</span></div>
+  <div class="list scroll" style="margin-top:0">
+  <div class="repo"><div class="hd"><span class="name">atlas</span><span class="rg">Approved work #4 · <span class="cw">needs your approval</span> · repository not recorded</span><span class="seg" aria-hidden="true"><i class="notin"></i><i class="notin"></i><i class="notin"></i></span><span class="of">3 Issues</span></div>
+  <div class="att"><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span></span></span><span class="t">Approve exactly this, or ask to change it<small>read 09:52 · it would start atlas#7, then atlas#9</small></span><span class="st"><span class="link">Review the proposal</span></span></div><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span></span></span><span class="t"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span><small>one-off task atlas-notes · stopped at a login</small></span><span class="st"><b class="cw">needs you</b> · 4 min</span></div></div><div class="sum"></div></div>
+  <div class="repo"><div class="hd"><span class="name">harbor</span><span class="rg">Approved work #6 · in progress · 2 at a time</span><span class="seg" aria-hidden="true"><i class="review"></i><i class="failstart"></i><i class="work"></i><i class="notin"></i></span><span class="of">3 of 6 tasks</span></div>
+  <div class="att"><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#15</span></span></span><span class="t">Keep the last five releases</span><span class="st"><b class="cf">reports an error</b> · 15 min</span></div><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#14</span></span></span><span class="t">Sign each release archive</span><span class="st"><b class="cf">did not start</b> · 27 min</span></div></div><div class="sum">1 in review, its checks failed (harbor#127) · 1 not started<span class="link">Open harbor</span></div></div>
+  <div class="repo"><div class="hd"><span class="name">loom</span><span class="rg">Approved work #3 · in progress · 3 at a time</span><span class="seg" aria-hidden="true"><i class="landed"></i><i class="landed"></i><i class="closed"></i><i class="wait"></i><i class="failstart"></i><i class="review"></i><i class="review"></i><i class="review"></i><i class="work"></i><i class="skip"></i><i class="notin"></i><i class="notin"></i></span><span class="of">9 of 16 tasks</span></div>
+  <div class="att"><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span></span><span class="t">Cache parsed files between runs</span><span class="st"><b class="cw">needs you</b> · 12 min</span></div><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#56</span></span></span><span class="t">A benchmark for large files</span><span class="st"><b class="cf">did not start</b> · 23 min</span></div></div><div class="sum">3 in review · 1 working · 2 merged · 1 closed · 2 not started · 1 skipped · #2 ended with 1 task left<span class="link">Open loom</span></div></div>
+  <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><b style="color:var(--text-2);font-weight:600">quill</b> 1 needs you</span></div>
   </div>
-</div>
+</section><div class="conv" data-region="conversation"><span class="ring"></span><b>Secretary</b><span>idle · 1 min</span>
+  <span>· 1 question is with it, not yet passed to you</span><span class="flex"></span><span class="link">Open the conversation</span></div></main><aside class="watch" aria-label="Progress">
+  <section data-region="failures"><div class="sh"><h3>Failures</h3><span class="m">6 · 5 unattended</span><span class="link">All</span></div>
+    <div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#15</span></span>Keep the last five releases</span><span class="ago">15 min</span>
+  <span class="who none"><span class="ph">Reports an error</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #6 · task r6-15</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span></span></div><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#56</span></span>A benchmark for large files</span><span class="ago">20 min</span>
+  <span class="who none"><span class="ph">Did not start</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #3 · "no first turn within 120 s"</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span></div><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#14</span></span>Sign each release archive</span><span class="ago">27 min</span>
+  <span class="who none"><span class="ph">Did not start</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #6 · "no first turn within 120 s"</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span></div><div class="fold"><span class="link">3 more</span><span class="ph">1 stopped (loom, 17 h)</span><span class="ph">1 waits for you</span><span class="ph">1 probably ended</span></div></section>
+  <section data-region="candidates"><div class="sh"><h3>Ready to start</h3><span class="m">8 not yet approved</span></div>
+    <div class="c2"><span class="t"><span class="rk" title="quill"><span class="p">quill</span><span class="n">#30</span></span>Footnotes in the exporter</span><span class="btn sm">Ask to start</span><span class="m">G1 · size M, estimated · suggested first</span></div><div class="c2"><span class="t"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#31</span></span>Publish a checksum file</span><span class="btn sm">Ask to start</span><span class="m">G2 · size S</span></div><div class="fold"><span class="link">6 more</span><span class="ph">4 not ready</span><span class="ph">1 project unchecked</span></div></section>
+</aside></div></div>
 
-<p class="note"><b>4. The other tabs, open, and the states the pictures above do not show.</b> The last panel is the top line when the screen is narrow.</p>
-<div class="states light">
-
-  <div class="state">
-    <h2>Answer: several entries</h2>
-    <p class="what">With more than one question the place over the conversation is a list, oldest first; opening one shows it whole, as above.</p>
-    <div class="card">
-      <div class="row sel"><span class="q">Is the drawing of the screen agreed?</span><span class="s">6 min</span>
-        <span class="d">#14 · r2-169 · recommended: yes</span></div>
-      <div class="row"><span class="q">May #272 add a dependency for desktop notices?</span><span class="s">2 min</span>
-        <span class="d">#15 · r2-272 · recommended: no</span></div>
-      <div class="row"><span class="q">Allow Bash: cargo install cargo-deny</span><span class="s">1 min</span>
-        <span class="d">#16 · r2-273 · a permission request · no background recorded</span></div>
-    </div>
+<p class="cap"><b>2 · Dark, 1440 × 900: loom selected</b>Choosing a repository filters every list on the screen to it: its approved work in the centre, its failures and its next Issues on the right; the views in the sidebar count within it. The top line still counts everything.</p>
+<div class="screen theme-dark"><header class="top" data-region="top-line">
+  <span class="brand"><span class="logo"></span>makiba</span><span class="org"><span class="gap" title="organization name is not on the read surface (screen.md section 6)">organization name: no field</span></span><span class="flex"></span>
+  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>3</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
+  <span class="tc fail"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><b>6</b> failed <span class="where">· <u>loom</u> 3 · <u>harbor</u> 2 · <u>atlas</u> 1</span> <span class="q">· 5 unattended</span></span>
+  <span class="live"><span class="dot"></span>Running · 3 s ago</span>
+  <span class="disp"><span>Display: <b style="color:var(--text);font-weight:600">English · Dark</b></span></span>
+</header><div class="cols"><nav class="side" aria-label="Repositories and views">
+  <div><div class="nh">Repositories</div><div class="nav">
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">All repositories</span><span class="c">4</span></a>
+    <a class=""><span class="ic"><svg class="i sm m-wait" aria-hidden="true"><use href="#wait"/></svg></span><span class="l"><span class="rp">atlas</span><span class="rg">#4 proposed</span></span><span class="c"></span><span class="s"><span class="cw">needs your approval</span> <span class="cw">1 needs you</span> <span class="cf">1 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">harbor</span><span class="rg">#6</span></span><span class="c">3 / 6</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class="on"><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">loom</span><span class="rg">#3</span></span><span class="c">9 / 16</span><span class="s"><span class="cw">1 needs you</span> <span class="cf">3 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 8</span><span class="s"><span class="cw">1 needs you</span></span></a>
+  </div></div>
+  <div><div class="nh">Views · in loom</div><div class="nav">
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#fail"/></svg></span><span class="l">Failures</span><span class="c">3</span><span class="s"><span class="cf">3 unattended</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">Issues to start</span><span class="c">5</span><span class="s"><span>3 not ready</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">2</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#review"/></svg></span><span class="l">Pull requests</span><span class="c">4</span><span class="s"><span class="cf">1 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">Task history</span><span class="c"></span></a>
+  </div></div>
+  <div class="foot"><span>Checked GitHub 09:41</span> · <span>read 10:00</span></div>
+</nav><main class="main"><section class="answer" data-region="answer" aria-label="Needs your answer">
+  <div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span> Cache parsed files between runs · a decision on design · 12 min ago</span>
+    <span class="nav2"><span>1 of 3</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
+  <h2>Should the cache key include the locale?</h2>
+  <p class="q2">The parsed form differs only in the error messages, which are translated.</p>
+  <p class="ctx"><a>Show the background</a> · 1 paragraph · question 27, task r3-47</p>
+  <div class="choices">
+    <div class="choice r"><h4>If yes <span class="rec"><svg class="i sm m-ok" aria-hidden="true"><use href="#landed"/></svg>recommended</span></h4><p>The key gains the locale. A machine that switches locale parses once more per locale; nothing else changes.</p></div>
+    <div class="choice"><h4>If no</h4><p>Messages are translated when shown instead of at parse time: a larger change, about two more days of work in the parser.</p></div>
   </div>
+  <p class="why"><b>Why yes:</b> It is the smaller change and keeps the parser as it is; the extra parse per locale is rare.</p>
+  <div class="acts"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="note">A note to go with the answer (optional)</span><span class="link quiet">Discuss it first</span></div>
+</section><section class="view" data-region="approved-work" aria-label="loom, approved work 3">
+  <div class="vh"><h3>loom · Approved work #3</h3><span class="m">example-org/loom · in progress · 3 at a time</span>
+    <span class="acts2"><span class="link quiet">Instructions</span><span class="link quiet">Hold new tasks</span><span class="link quiet">End after running tasks</span></span></div>
+  <div class="progress"><span class="seg" aria-hidden="true"><i class="landed"></i><i class="landed"></i><i class="closed"></i><i class="wait"></i><i class="failstart"></i><i class="review"></i><i class="review"></i><i class="review"></i><i class="work"></i><i class="skip"></i><i class="notin"></i><i class="notin"></i></span>
+    <span class="legend"><span><b>9</b> of 16 tasks started</span><span><b>2.5</b> of 12 hours</span><span>up to 2 fixes per task</span><span>approved 07:31 by you</span></span></div>
+  <div class="list scroll"><div class="gh">Needs you <span class="n">1</span></div><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span></span><span class="t">Cache parsed files between runs<small>decision: Should the cache key include the locale?</small></span><span class="st"><b class="cw">needs you</b> · 12 min</span></div><div class="gh">Did not start <span class="n">1</span></div><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#56</span></span></span><span class="t">A benchmark for large files<small>"no first turn within 120 s" · no sign that anyone is on it</small></span><span class="st"><b class="cf">did not start</b> · 23 min</span></div>
+    <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><span class="link">In review 3</span></span><span class="ph"><span class="link">Being worked on 1</span></span><span class="ph"><span class="link">Merged 2</span></span><span class="ph"><span class="link">Closed 1</span></span><span class="ph"><span class="link">Not started 2</span></span><span class="ph"><span class="link">Skipped 1</span></span><span class="ph"><span class="link">#2 ended, 1 left</span></span></div></div>
+</section><div class="conv" data-region="conversation"><span class="ring"></span><b>Secretary</b><span>idle · 1 min</span>
+  <span>· 1 question is with it, not yet passed to you</span><span class="flex"></span><span class="link">Open the conversation</span></div></main><aside class="watch" aria-label="Progress">
+  <section data-region="failures"><div class="sh"><h3>Failures</h3><span class="m">3 in loom · 3 unattended</span><span class="link">All</span></div>
+    <div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#56</span></span>A benchmark for large files</span><span class="ago">20 min</span>
+  <span class="who none"><span class="ph">Did not start</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #3 · "no first turn within 120 s"</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span></div><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#33</span></span>Convert old files in place</span><span class="ago">17 h</span>
+  <span class="who none"><span class="ph">Its terminal is gone</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #2, ended</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span></div><div class="fold"><span class="link">1 more</span>probably ended: loom-bench</div></section>
+  <section data-region="candidates"><div class="sh"><h3>Ready to start</h3><span class="m">5 in loom</span></div>
+    <div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#64</span></span>Report the time spent per file</span><span class="btn sm">Ask to start</span><span class="m">G2 · size M, estimated</span></div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#67</span></span>Colour the output when it is a terminal</span><span class="btn sm">Ask to start</span><span class="m">G4 · size S, estimated</span></div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#68</span></span>A flag to print the parsed tree</span><span class="btn sm">Ask to start</span><span class="m">G4 · size M</span></div><div class="fold"><span class="link">2 more</span><span class="ph">3 not ready in loom</span></div></section>
+</aside></div></div>
 
-  <div class="state">
-    <h2>Tab "Task history"</h2>
-    <p class="what">Opened by "Show its history" on any row; the tab keeps the last one. r2-169 from its start to now.</p>
-    <div class="card">
-      <ol class="trail">
-        <li><span class="tm">09:14</span><span class="pt"></span><span><span class="k">Started by makiba</span><span class="p">approved work #2 · Issue 169</span></span></li>
-        <li><span class="tm">09:15</span><span class="pt"></span><span><span class="k">Began working</span><span class="p">first turn seen after 41 s</span></span></li>
-        <li><span class="tm">09:16</span><span class="pt"></span><span><span class="k">Reported its plan</span></span></li>
-        <li><span class="tm">10:02</span><span class="pt"></span><span><span class="k">Design review passed</span><span class="p">round 1 · 0 blockers, 1 major</span></span></li>
-        <li class="stop"><span class="tm">10:35</span><span class="pt"></span><span><span class="k">Stopped to ask you</span><span class="p">question 14 · a decision</span></span></li>
-      </ol>
-    </div>
+<p class="cap narrow"><b>3 · Narrow, 1024 × 720: all repositories</b>The right column goes; failures and the next Issues are views of the sidebar, and the top line names where they are.</p>
+<div class="screen narrow theme-light"><header class="top" data-region="top-line">
+  <span class="brand"><span class="logo"></span>makiba</span><span class="flex"></span>
+  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>3</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
+  <span class="tc fail"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><b>6</b> failed <span class="where">· <u>loom</u> 3 · <u>harbor</u> 2 · <u>atlas</u> 1</span> <span class="q">· 5 unattended</span></span>
+  <span class="live"><span class="dot"></span>Running · 3 s</span>
+  <span class="disp"><span>Display</span></span>
+</header><div class="cols"><nav class="side" aria-label="Repositories and views">
+  <div><div class="nh">Repositories</div><div class="nav">
+    <a class="on"><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">All repositories</span><span class="c">4</span></a>
+    <a class=""><span class="ic"><svg class="i sm m-wait" aria-hidden="true"><use href="#wait"/></svg></span><span class="l"><span class="rp">atlas</span><span class="rg">#4 proposed</span></span><span class="c"></span><span class="s"><span class="cw">needs your approval</span> <span class="cw">1 needs you</span> <span class="cf">1 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">harbor</span><span class="rg">#6</span></span><span class="c">3 / 6</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">loom</span><span class="rg">#3</span></span><span class="c">9 / 16</span><span class="s"><span class="cw">1 needs you</span> <span class="cf">3 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 8</span><span class="s"><span class="cw">1 needs you</span></span></a>
+  </div></div>
+  <div><div class="nh">Views</div><div class="nav">
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#fail"/></svg></span><span class="l">Failures</span><span class="c">6</span><span class="s"><span class="cf">5 unattended</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">Issues to start</span><span class="c">8</span><span class="s"><span>4 not ready</span> <span>1 project unchecked</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">3</span><span class="s"><span class="cf">3 failed</span> <span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#review"/></svg></span><span class="l">Pull requests</span><span class="c">6</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">Task history</span><span class="c"></span></a>
+  </div></div>
+  <div class="foot"><span>Checked GitHub 09:41</span> · <span>read 10:00</span></div>
+</nav><main class="main"><section class="answer" data-region="answer" aria-label="Needs your answer">
+  <div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span> Cache parsed files between runs · a decision on design · 12 min ago</span>
+    <span class="nav2"><span>1 of 3</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
+  <h2>Should the cache key include the locale?</h2>
+  <p class="q2">The parsed form differs only in the error messages, which are translated.</p>
+  <p class="ctx"><a>Show the background</a> · 1 paragraph · question 27, task r3-47</p>
+  <div class="choices">
+    <div class="choice r"><h4>If yes <span class="rec"><svg class="i sm m-ok" aria-hidden="true"><use href="#landed"/></svg>recommended</span></h4><p>The key gains the locale. A machine that switches locale parses once more per locale; nothing else changes.</p></div>
+    <div class="choice"><h4>If no</h4><p>Messages are translated when shown instead of at parse time: a larger change, about two more days of work in the parser.</p></div>
   </div>
-
-  <div class="state">
-    <h2>Tab "Pull requests"</h2>
-    <p class="what">Every pull request of a task still open, failed ones first. Its heading is red while the checks of one of them failed.</p>
-    <div class="card">
-      <div class="row"><span class="q">#298 <span class="muted" style="font-weight:400">A metrics report over the events</span></span><span class="s"><span class="ci run">checks running</span></span>
-        <span class="d">r2-273 · head <span class="mono">4be19c7</span> · watched 9 min</span></div>
-      <div class="row"><span class="q">#299 <span class="muted" style="font-weight:400">Goals: wording of G7</span></span><span class="s"><span class="ci failed">1 of 6 checks failed</span></span>
-        <span class="d">docs-goals · head <span class="mono">a03f5d1</span> · watched 27 min</span></div>
-      <div class="row"><span class="q">#297 <span class="muted" style="font-weight:400">The secretary's first-range line</span></span><span class="s"><span class="ci passed">merged</span></span>
-        <span class="d">r2-270 · landed 1 h ago</span></div>
-    </div>
+  <p class="why"><b>Why yes:</b> It is the smaller change and keeps the parser as it is; the extra parse per locale is rare.</p>
+  <div class="acts"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="note">A note to go with the answer (optional)</span><span class="link quiet">Discuss it first</span></div>
+</section><section class="view ov" data-region="repositories" aria-label="All repositories">
+  <div class="ovh"><h3>All repositories</h3><span class="m">4 projects · one approved work each · in a fixed order, by name</span></div>
+  <div class="list scroll" style="margin-top:0">
+  <div class="repo"><div class="hd"><span class="name">atlas</span><span class="rg">Approved work #4 · <span class="cw">needs your approval</span> · repository not recorded</span><span class="seg" aria-hidden="true"><i class="notin"></i><i class="notin"></i><i class="notin"></i></span><span class="of">3 Issues</span></div>
+  <div class="att"><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span></span></span><span class="t">Approve exactly this, or ask to change it<small>read 09:52 · it would start atlas#7, then atlas#9</small></span><span class="st"><span class="link">Review the proposal</span></span></div><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span></span></span><span class="t"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span><small>one-off task atlas-notes · stopped at a login</small></span><span class="st"><b class="cw">needs you</b> · 4 min</span></div></div><div class="sum"></div></div>
+  <div class="repo"><div class="hd"><span class="name">harbor</span><span class="rg">Approved work #6 · in progress · 2 at a time</span><span class="seg" aria-hidden="true"><i class="review"></i><i class="failstart"></i><i class="work"></i><i class="notin"></i></span><span class="of">3 of 6 tasks</span></div>
+  <div class="att"><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#15</span></span></span><span class="t">Keep the last five releases</span><span class="st"><b class="cf">reports an error</b> · 15 min</span></div></div><div class="sum"></div></div>
+  
+  <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><b style="color:var(--text-2);font-weight:600">harbor</b> 1 more row</span><span class="ph"><b style="color:var(--text-2);font-weight:600">loom</b> 1 needs you, 1 did not start</span><span class="ph"><b style="color:var(--text-2);font-weight:600">quill</b> 1 needs you</span></div>
   </div>
+</section><div class="conv" data-region="conversation"><span class="ring"></span><b>Secretary</b><span>idle · 1 min</span>
+  <span>· 1 question is with it, not yet passed to you</span><span class="flex"></span><span class="link">Open the conversation</span></div></main></div></div>
 
-  <div class="state">
-    <h2>Failures: makiba itself stopped</h2>
-    <p class="what">When makiba has not responded for a while, the screen says so before anything else; what it shows under it is what it last knew, marked old.</p>
-    <div class="banner"><b>makiba has not responded for 4 min</b>Nothing is being started, delivered or checked. In your shell: <code>makiba up</code></div>
-    <div class="card" style="opacity:.5">
-      <div class="item in_work"><span class="g">●</span><span class="n">#272</span><span class="ti" title="Attention notifications">Attention notifications</span><span class="s">as of 10:44</span></div>
-      <div class="item review"><span class="g">◆</span><span class="n">#273</span><span class="ti" title="A metrics report">A metrics report</span><span class="s">as of 10:44</span></div>
-    </div>
-  </div>
-
-  <div class="state">
-    <h2>Hand over work: a proposal to approve</h2>
-    <p class="what">What the secretary proposed. The screen shows its list and condition whole, what it would start now and the instructions every task gets; approving approves exactly what is shown.</p>
-    <div class="card range">
-      <div class="head"><b>Approved work #3</b><span class="chip wait">needs your approval</span></div>
-      <div class="terms">makiba · replaces #2 · 3 at a time · up to 30 tasks · asks you before each merge</div>
-      <div style="margin-top:6px"><b>It names the Issues</b> <span class="mono">283, 276, 277, 51</span></div>
-      <div><b>and any open Issue that matches</b> <span class="mono">no-label:backlog clause:&lt;=G9</span>, now and later</div>
-      <div class="muted" style="font-size:12px; margin-top:8px">Checked 10:52. It would start, in this order:</div>
-      <div style="margin:4px 0 0"><span class="mono">#283</span> The gate reports edited tests</div>
-      <div><span class="mono">#276</span> Stops written by code</div>
-      <div class="muted"><span class="mono">#277</span> not now · waits for #276</div>
-      <div class="muted"><span class="mono">#51</span>&nbsp; not now · label on-hold</div>
-      <div class="muted" style="font-size:12px; margin-top:8px">Instructions every task gets, whole; they scroll in their box:</div>
-      <div class="mono brief scroll">You work on one Issue of suisya-systems/makiba in your own worktree. Read the Issue and the documents it names before you change anything. Keep the change to what the Issue asks; anything else goes into your done report as a proposed follow-up, not into the diff. Follow the repository's conventions and run its checks before you report. Never push; the secretary has the branch pushed.</div>
-      <div class="foot"><span class="btn primary small">Approve exactly this</span><span class="btn small ghost">Ask to change it</span></div>
-    </div>
-  </div>
-
-  <div class="state">
-    <h2>Hand over work: nothing is ready</h2>
-    <p class="what">The list is never just empty: it says whether nothing was found, the check of GitHub failed, or none was made yet.</p>
-    <div class="card" style="padding:12px 14px">
-      <b>No Issue is ready to start</b>
-      <div class="muted" style="margin-top:2px">Checked 10:41, after r2-270 was closed.</div>
-      <div style="margin-top:8px">6 wait for another Issue, 2 are set aside by a label. They are listed in "Issues to start".</div>
-    </div>
-    <div class="card wrong" style="padding:10px 14px; margin-top:8px">
-      <b style="color:var(--red)">The last check of GitHub failed</b> <span class="muted">· 10:58</span>
-      <div class="muted">The repository could not be reached. Nothing is listed until a check succeeds.</div>
-    </div>
-  </div>
-
-
-  <div class="state">
-    <h2>Tab "Issues to start"</h2>
-    <p class="what">Every Issue that is ready, best first, then every one that is not, with why. One scroll, two headings.</p>
-    <div class="card pane" style="max-height:300px"><div class="ph">Issues to start <small>14 ready, 5 not yet</small><span class="x">close</span></div>
-      <div class="pb scroll">
-        <div class="sub">Ready to start · 14</div>
-        <div class="cand"><div class="t"><span class="ti" title="The gate reports edited tests">The gate reports edited tests</span></div><span class="refline" title="suisya-systems/makiba#283"><bdo dir="ltr">suisya-systems/makiba#283</bdo></span><div class="m"><span class="tag first">G5</span><span class="tag">M</span><span class="why">suggested first · follows #257</span><span class="btn small">Ask to start</span></div></div><div class="cand"><div class="t"><span class="ti" title="Stops written by code (belt step 2)">Stops written by code (belt step 2)</span></div><span class="refline" title="suisya-systems/makiba#276"><bdo dir="ltr">suisya-systems/makiba#276</bdo></span><div class="m"><span class="tag">G9</span><span class="tag">L</span><span class="why">nothing blocks it</span><span class="btn small">Ask to start</span></div></div>
-        <div class="fold" style="font-weight:400"><span style="margin-left:0">… the other twelve, as far as the scroll goes …</span></div>
-        <div class="sub">Not ready yet · 5</div>
-        <div class="out"><div class="t"><span class="ti" title="Parking terminals">Parking terminals</span></div><span class="refline" title="suisya-systems/makiba#277"><bdo dir="ltr">suisya-systems/makiba#277</bdo></span><span class="why"><b>Waits for another Issue</b> · waits for #276</span></div>
-        <div class="out"><div class="t"><span class="ti" title="A second agent program">A second agent program</span></div><span class="refline" title="suisya-systems/makiba#296"><bdo dir="ltr">suisya-systems/makiba#296</bdo></span><span class="why"><b>Waits for another Issue</b> · waits for #62</span></div>
-        <div class="out"><div class="t"><span class="ti" title="Thirty merged pull requests">Thirty merged pull requests</span></div><span class="refline" title="suisya-systems/makiba#51"><bdo dir="ltr">suisya-systems/makiba#51</bdo></span><span class="why"><b>Set aside by a label</b> · label on-hold, set by you</span></div>
-        <div class="out"><div class="t"><span class="ti" title="Picking requests up from mail">Picking requests up from mail</span></div><span class="refline" title="suisya-systems/libretto-mail-and-chat-entrance#58"><bdo dir="ltr">suisya-systems/libretto-mail-and-chat-entrance#58</bdo></span><span class="why"><b>Waits for another Issue</b> · waits for #40</span></div>
-        <div class="out"><div class="t"><span class="ti" title="Chat entry">Chat entry</span></div><span class="refline" title="suisya-systems/libretto-mail-and-chat-entrance#61"><bdo dir="ltr">suisya-systems/libretto-mail-and-chat-entrance#61</bdo></span><span class="why"><b>Set aside by a label</b> · label blocked</span></div>
-      </div>
-    </div>
-  </div>
-
-  <div class="state">
-    <h2>Tab "Instructions"</h2>
-    <p class="what">The instructions every task of the approved work gets, as you approved them. They scroll; nothing is cut.</p>
-    <div class="card pane" style="max-height:300px"><div class="ph">Instructions of approved work #2 <small>approved today 09:12</small><span class="x">close</span></div>
-      <div class="pb scroll mono" style="padding:8px 12px; white-space:pre-wrap">You work on one Issue of suisya-systems/makiba in your own worktree. Read the Issue and the documents it names before you change anything. Keep the change to what the Issue asks; anything else goes into your done report as a proposed follow-up, not into the diff. Follow the repository's conventions and run its checks before you report. Have the design reviewed once before code and the diff reviewed after your last commit. Never push; the secretary has the branch pushed. Stop and ask when the change touches a trust boundary, when the Issue's text and the code disagree, or when the work needs a host you cannot reach.</div>
-    </div>
-  </div>
-
-  <div class="state">
-    <h2>Tab "Failures"</h2>
-    <p class="what">Where "3 more" leads: all six, the unattended one first, then the newest, each saying who is on it and what you can do. A failure with no task is here as any other.</p>
-    <div class="card pane wrong" style="max-height:330px"><div class="ph">Failures <small>6 · unattended 1</small><span class="x">close</span></div>
-      <div class="pb scroll"><div class="w"><b title="makiba · r2-301 · did not start">makiba · r2-301 · did not start</b><span class="s">11 min ago</span><span class="h"><span class="who none">Nobody is on it</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span><span class="btn small">Abandon and close…</span></span></div><div class="w"><b title="docs-goals · stopped at a login">docs-goals · stopped at a login</b><span class="s">1 min ago</span><span class="h"><span class="who you">Needs your answer</span><span class="btn small">Show the question</span></span></div><div class="w"><b title="makiba · r2-243 · silent since it started">makiba · r2-243 · silent since it started</b><span class="s">2 min ago</span><span class="h"><span class="who sec">With the secretary · told 2 min ago, looking</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span></span></div><div class="w"><b title="The last check of GitHub failed">The last check of GitHub failed</b><span class="s">3 min ago</span><span class="h"><span class="who sec">With the secretary · told 3 min ago</span><span class="btn small">Ask the secretary to look</span></span></div><div class="w"><b title="makiba · r2-244 · reports an error">makiba · r2-244 · reports an error</b><span class="s">9 min ago</span><span class="h"><span class="who sec">With the secretary · told 9 min ago</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span></span></div><div class="w"><b title="libretto-58 · did not start">libretto-58 · did not start</b><span class="s">52 min ago</span><span class="h"><span class="who sec">With the secretary · looking, last act 4 min ago</span><span class="btn small">Ask the secretary to look</span><span class="btn small">Show its history</span><span class="btn small">Abandon and close…</span></span></div></div>
-    </div>
-  </div>
-
-  <div class="state" style="grid-column: span 2">
-    <h2>The top line when it does not fit</h2>
-    <p class="what">The two counts are never shortened and never leave the first line. What gives way, in order: the name of the organization, the two switches (one control, "Display"), the words after "Running"; then the name "makiba"; then the line wraps under the counts.</p>
-    <div class="card" style="padding:8px 10px; display:flex; gap:8px; align-items:center; width:600px; white-space:nowrap"><span class="brand"><i></i>makiba</span><span class="sp"></span><span class="chip wait">Needs you 3</span><span class="chip bad">Failed 6 · unattended 1</span><span class="chip quiet">Running · 3 s</span><span class="set"><span>Display</span></span></div>
-    <div class="card" style="padding:8px 10px; margin-top:8px; width:310px"><div style="display:flex; gap:8px; white-space:nowrap"><span class="chip wait">Needs you 3</span><span class="chip bad">Failed 6 · unattended 1</span></div><div style="display:flex; gap:8px; margin-top:6px; white-space:nowrap"><span class="chip quiet">Running · 3 s</span><span class="set"><span>Display</span></span></div></div>
-  </div>
+<p class="cap"><b>4 · The other views and states</b>Same fixture, light; then the visual system in both themes.</p>
+<div class="panels">
+<div class="panel theme-light w2"><h2>View "Pull requests", every repository</h2><p class="what">Six open, failed first, then what merged today. Two of them are numbered 127, in loom and in harbor: written loom#127 and harbor#127, they cannot be taken for each other.</p><div class="sh"><span class="filter">Repository <b>all</b></span></div>
+<div class="gh">Open <span class="n">6 · failed first</span></div>
+<div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#127</span></span></span><span class="t">Retry a failed upload<small>r6-9 · head 127c3d4 · <span class="gap" title="merge state is not on the read surface (screen.md section 6)">merge state: Issue 387</span></small></span><span class="st"><b class="cf">1 of 6 failed</b> · 24 min</span></div>
+<div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#131</span></span></span><span class="t"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span><small>one-off loom-ci-fix · head 9131e0f</small></span><span class="st"><b class="cf">2 of 9 failed</b> · 17 min</span></div>
+<div class="row "><svg class="i m-info" aria-hidden="true"><use href="#reopen"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#125</span></span></span><span class="t">Read the config from stdin<small>r3-53 · closed outside makiba 09:05, reopened 09:22</small></span><span class="st"><b>reopened, not watched</b></span></div>
+<div class="row "><svg class="i m-info" aria-hidden="true"><use href="#review"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#127</span></span></span><span class="t">Warn on an unknown key<small>r3-51 · head 4be1c0d</small></span><span class="st"><b>checks running</b> · 28 min</span></div>
+<div class="row "><svg class="i m-info" aria-hidden="true"><use href="#review"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#124</span></span></span><span class="t">Show the line of a parse error<small>r3-48 · head e48d2c1</small></span><span class="st"><b>9 of 9 passed</b></span></div>
+<div class="row "><svg class="i m-info" aria-hidden="true"><use href="#review"/></svg><span class="ref"><span class="rk" title="quill"><span class="p">quill</span><span class="n">#57</span></span></span><span class="t">Spell-check the headings<small>r5-56 · head 57bb2c3</small></span><span class="st"><b>5 of 5 passed</b></span></div>
+<div class="gh">Merged today <span class="n">3</span></div>
+<div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#hand"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#121</span></span></span><span class="t">Accept a trailing comma in lists<small>r3-42 · by example-maintainer at 08:52 · the secretary was told</small></span><span class="st"><b class="cw">by hand, outside the gate</b></span></div>
+<div class="row "><svg class="i m-ok" aria-hidden="true"><use href="#landed"/></svg><span class="ref"><span class="rk" title="quill"><span class="p">quill</span><span class="n">#40</span></span></span><span class="t">Export to plain text<small>r5-12 · by example-maintainer at 08:46</small></span><span class="st"><b>through the gate</b></span></div>
+<div class="row "><svg class="i m-ok" aria-hidden="true"><use href="#landed"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#118</span></span></span><span class="t">Parse the config file once at start<small>r3-41 · by example-maintainer at 08:21</small></span><span class="st"><b>through the gate</b></span></div></div><div class="panel theme-light "><h2>View "Failures", every repository</h2><p class="what">All six, by degree, then newest first: stopped with nobody on it (red mark), waits for you (amber), probably ended (grey). One coloured line per row: what happened and who is on it.</p><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#15</span></span>Keep the last five releases</span><span class="ago">15 min</span>
+  <span class="who none"><span class="ph">Reports an error</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #6 · task r6-15</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span></span></div><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#56</span></span>A benchmark for large files</span><span class="ago">20 min</span>
+  <span class="who none"><span class="ph">Did not start</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #3 · "no first turn within 120 s"</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span><div class="line"><b>In your shell</b>makiba send secretary 'Please look at launch_failed on task r3-56.'</div></div><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#14</span></span>Sign each release archive</span><span class="ago">27 min</span>
+  <span class="who none"><span class="ph">Did not start</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #6 · "no first turn within 120 s"</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span></div><div class="fr "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#33</span></span>Convert old files in place</span><span class="ago">17 h</span>
+  <span class="who none"><span class="ph">Its terminal is gone</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">Approved work #2, ended</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span><span class="link danger">Abandon and close…</span></span></div><div class="fr low"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="t"><span class="rk" title="atlas"><span class="p">atlas</span></span><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span></span><span class="ago">5 min</span>
+  <span class="who you"><span class="ph">Stopped at a login</span> <span class="ph">waits for your answer</span></span><span class="d">one-off task atlas-notes · question 30</span><span class="a"><span class="link">Show the question</span><span class="link quiet">History</span></span></div><div class="fr low"><svg class="i m-idle" aria-hidden="true"><use href="#fail"/></svg><span class="t"><span class="rk" title="loom"><span class="p">loom</span></span><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span></span><span class="ago">12 min</span>
+  <span class="who "><span class="ph">Finished without a report</span> <span class="ph">no sign that anyone is on it</span></span><span class="d">one-off task loom-bench · its terminal says done</span><span class="a"><span class="link">Ask the secretary to look</span><span class="link quiet">History</span></span></div><div class="fold"><span class="gap" title="anomalies[].notice is not on the read surface (screen.md section 6)">told to whom, delivered when: missing</span> <span class="gap" title="runs[].secretary_acted_at is not on the read surface (screen.md section 6)">the secretary looking: missing</span></div></div>
+<div class="panel theme-light "><h2>View "Issues to start", filtered to loom</h2><p class="what">The filter is the repository chosen in the sidebar, said in the heading and cleared with one click. loom#60 is in loom's approved work and shown there only. A held Issue has no title on the read surface.</p><div class="sh"><span class="filter">Repository <b>loom</b> <span class="x"><svg class="i sm" aria-hidden="true"><use href="#x"/></svg></span></span><span class="m">5 of 8 ready · 3 of 4 not ready</span></div>
+<div class="subh">Ready · 5 not yet approved</div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#64</span></span>Report the time spent per file</span><span class="btn sm">Ask to start</span><span class="m">G2 · size M, estimated</span></div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#67</span></span>Colour the output when it is a terminal</span><span class="btn sm">Ask to start</span><span class="m">G4 · size S, estimated</span></div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#68</span></span>A flag to print the parsed tree</span><span class="btn sm">Ask to start</span><span class="m">G4 · size M</span></div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#71</span></span>Accept tabs in indentation</span><span class="btn sm">Ask to start</span><span class="m">G6 · size S, estimated</span></div><div class="c2"><span class="t"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#73</span></span>Tidy the examples folder</span><span class="btn sm">Ask to start</span><span class="m">no goal, so last · size S, estimated</span></div>
+<div class="subh">Not ready yet · 3</div>
+<div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#63</span></span></span><span class="t"><span class="gap" title="next_work.left_out[].title is not on the read surface (screen.md section 6)">title: missing</span></span><span class="st">waits for #55</span></div>
+<div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#skip"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#66</span></span></span><span class="t"><span class="gap" title="next_work.left_out[].title is not on the read surface (screen.md section 6)">title: missing</span><small>remove the label to bring it back</small></span><span class="st">set aside by a label</span></div>
+<div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#70</span></span></span><span class="t"><span class="gap" title="next_work.left_out[].title is not on the read surface (screen.md section 6)">title: missing</span><small>"after the parser work": write it as Depends&nbsp;on&nbsp;#&lt;n&gt;</small></span><span class="st">dependency unread</span></div>
+<div class="fold">Not in this filter: quill 2, harbor 1 ready; harbor 1 not ready; atlas not ranked (no repository).</div></div><div class="panel theme-light "><h2>atlas · Approved work #4, proposed</h2><p class="what">Selected in the sidebar. Its repository is not recorded, so references are written by the project alone: atlas#7.</p><div class="vh"><h3>atlas · Approved work #4</h3><span class="m" style="color:var(--wait);font-weight:600">needs your approval</span></div>
+<dl class="kv"><dt>It may let in</dt><dd>atlas#7, atlas#9, atlas#12, and any open Issue with <code>label:ready</code></dd><dt>Pace</dt><dd>1 at a time · 3 tasks in all · up to 2 fixes per&nbsp;task</dd><dt>Merges</dt><dd>you approve each</dd><dt>New Issues</dt><dd>let in without asking</dd></dl>
+<div class="subh">It would start, in this order · read 09:52</div>
+<div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span><span class="n">#7</span></span></span><span class="t">Import the survey sheets</span><span class="st">1st</span></div><div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span><span class="n">#9</span></span></span><span class="t">Tag each sheet by region</span><span class="st">2nd</span></div><div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#skip"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span><span class="n">#12</span></span></span><span class="t">A summary table per region</span><span class="st">not now: held by #9</span></div>
+<div class="subh">Every task starts from</div><div class="brief">Document task in the atlas notes.
+Write in plain sentences; cite the sheet each figure comes from.</div>
+<div class="acts"><span class="btn primary">Approve exactly this</span><span class="btn">Ask to change it</span></div></div><div class="panel theme-light "><h2>View "One-off tasks"</h2><p class="what">Started outside any approved work, stuck ones first, each under its project. A run has no title and no start time on the read surface; its age is its terminal's.</p><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span></span></span><span class="t"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span><small>loom-ci-fix · code · pull&nbsp;request&nbsp;loom#131</small></span><span class="st"><b class="cf">checks failed</b> · 17 min</span></div>
+<div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="atlas"><span class="p">atlas</span></span></span><span class="t"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span><small>atlas-notes · document · stopped at a login</small></span><span class="st"><b class="cw">needs you</b> · 4 min</span></div>
+<div class="row "><svg class="i m-idle" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span></span></span><span class="t"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span><small>loom-bench · code · terminal done since 09:44</small></span><span class="st"><b>no report</b> · 12 min</span></div></div>
+<div class="panel theme-light "><h2>View "Task history" · r3-41</h2><p class="what">loom#41 Parse the config file once at start, from its start to its close, from the events.</p><ol class="trail"><li><span class="tm">07:31</span><span class="pt"><svg class="i sm m-ok" aria-hidden="true"><use href="#dot"/></svg></span><span><span class="k">Started by makiba</span><span class="p">loom, Approved work #3, loom#41</span></span></li><li><span class="tm">07:32</span><span class="pt"><svg class="i sm m-idle" aria-hidden="true"><use href="#dot"/></svg></span><span><span class="k">Terminal opened</span><span class="p">launch s-7a1</span></span></li><li><span class="tm">07:33</span><span class="pt"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span><span class="k">Began working</span><span class="p">first turn seen</span></span></li><li><span class="tm">07:58</span><span class="pt"><svg class="i sm m-info" aria-hidden="true"><use href="#review"/></svg></span><span><span class="k">Review, round 1 of 3</span><span class="p">7d0c2e1..a41f0e9</span></span></li><li><span class="tm">08:02</span><span class="pt"><svg class="i sm m-ok" aria-hidden="true"><use href="#dot"/></svg></span><span><span class="k">Reported done</span><span class="p">review passed · 0 blocker, 0 major, 1 minor</span></span></li><li><span class="tm">08:03</span><span class="pt"><svg class="i sm m-info" aria-hidden="true"><use href="#review"/></svg></span><span><span class="k">Pull request loom#118 opened</span><span class="p">head a41f0e9</span></span></li><li><span class="tm">08:12</span><span class="pt"><svg class="i sm m-ok" aria-hidden="true"><use href="#landed"/></svg></span><span><span class="k">Checks passed</span><span class="p">9 of 9</span></span></li><li><span class="tm">08:20</span><span class="pt"><svg class="i sm m-ok" aria-hidden="true"><use href="#dot"/></svg></span><span><span class="k">The gate allowed the merge</span><span class="p">you approve each merge</span></span></li><li><span class="tm">08:21</span><span class="pt"><svg class="i sm m-ok" aria-hidden="true"><use href="#landed"/></svg></span><span><span class="k">Merged through the gate</span><span class="p">by example-maintainer · 0f41aa2</span></span></li><li><span class="tm">08:22</span><span class="pt"><svg class="i sm m-idle" aria-hidden="true"><use href="#closed"/></svg></span><span><span class="k">Closed by the secretary</span><span class="p"></span></span></li></ol></div><div class="panel theme-light "><h2>The third question</h2><p class="what">Question 30 of the one-off task atlas-notes: no title for its heading (a gap), and no "if yes", "if no" or recommendation from the secretary, which is said in words.</p><div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="atlas"><span class="p">atlas</span></span> a question · atlas-notes · 4 min ago</span></div>
+<p style="margin-top:6px"><span class="gap" title="runs[].title is not on the read surface (screen.md section 6)">title: missing</span></p>
+<h2 style="margin-top:8px;font-size:var(--fs-xl);font-weight:650;line-height:1.35;letter-spacing:-.015em">The worker stopped at a login to the notes host. May it wait until you log in?</h2>
+<p style="margin-top:6px;font-size:var(--fs-sm);color:var(--text-3)"><span class="link">Show the background</span> · 1 paragraph</p>
+<p style="margin-top:10px;font-size:var(--fs-sm);color:var(--text-3)">The secretary wrote no "if yes", no "if no" and no recommendation.</p>
+<div class="acts"><span class="btn primary">Answer yes</span><span class="btn">Answer no</span><span class="link quiet">Discuss it first</span></div></div><div class="panel theme-light "><h2>Empty, loading, error, stale</h2><p class="what">The four states every region has. Specimens of the system: no record value is drawn here.</p><div class="empty"><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg><b>No Issue is ready to start in quill</b><span>The check of 09:41 found none there. The next check runs after a task closes.</span></div>
+<div class="sh" style="margin-top:12px"><h3>Pull requests</h3><span class="m">Reading…</span></div><div class="skel"><i></i><i></i><i></i><i></i></div><div class="skel"><i></i><i></i><i style="width:70%"></i><i></i></div>
+<div class="err" style="margin-top:16px"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span><b>The last check of GitHub failed</b><br>Its error, as recorded, whole. The list under it is the last check that worked, with its age.</span></div>
+<div class="stale" style="margin-top:16px"><svg class="i sm" aria-hidden="true"><use href="#fail"/></svg><span><b>makiba has not responded for 4 min.</b> What you see is its last state. Run <code style="background:transparent;border-color:rgba(255,255,255,.55);color:inherit">makiba up</code> in your shell.</span></div>
+<div class="greyed"><div class="row "><svg class="i m-ok" aria-hidden="true"><use href="#work"/></svg><span class="ref"><span class="rk" title="loom"><span class="p">loom</span><span class="n">#55</span></span></span><span class="t">A row read before the silence</span><span class="st">4 min old</span></div></div></div>
+<div class="panel theme-light wide"><h2>The visual system · light</h2><p class="what">Type, colour, marks, references and focus as screen.md section 2.5 sets them. Every text pair passes WCAG AA (4.5:1); marks and the focus ring pass 3:1.</p><div class="sheet"><div><h4>Type · system fonts, nothing fetched</h4><div class="scale">
+<div><span class="l">20 / 650</span><span style="font-size:20px;font-weight:650;letter-spacing:-.015em">Should the cache key include the locale?</span></div>
+<div><span class="l">16 / 650</span><span style="font-size:16px;font-weight:650">loom · Approved work #3</span></div>
+<div><span class="l">14 / 400 body</span><span>Cache parsed files between runs</span></div>
+<div><span class="l">13 / 400 meta</span><span style="font-size:13px;color:var(--text-3)">r3-47 · 12 min · checked 09:41</span></div>
+<div><span class="l">12 / 600 label</span><span style="font-size:12px;font-weight:600;color:var(--text-3)">Needs you 1</span></div>
+<div><span class="l">13 mono ref</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#127</span></span> &nbsp; <span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#127</span></span> &nbsp; <span class="rk" title="atlas"><span class="p">atlas</span><span class="n">#7</span></span></span></div></div>
+<h4 style="margin-top:18px">Focus and keys</h4><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span class="btn primary focus">Answer yes</span><span class="btn sm focus">Ask to start</span>
+<span style="font-size:13px;color:var(--text-3)"><span class="kbd">Tab</span> within · <span class="kbd">F6</span> next region · <span class="kbd">Esc</span> back</span></div></div>
+<div><h4>Colour tokens</h4><div class="sw"><div><i style="background:var(--bg)"></i>bg</div><div><i style="background:var(--surface)"></i>surface</div><div><i style="background:var(--surface-2)"></i>surface-2</div><div><i style="background:var(--border)"></i>border</div><div><i style="background:var(--text)"></i>text</div><div><i style="background:var(--text-2)"></i>text-2</div><div><i style="background:var(--text-3)"></i>text-3</div><div><i style="background:var(--accent)"></i>accent</div><div><i style="background:var(--ok-mark)"></i>ok-mark</div><div><i style="background:var(--wait-mark)"></i>wait-mark</div><div><i style="background:var(--fail-mark)"></i>fail-mark</div><div><i style="background:var(--info-mark)"></i>info-mark</div></div><h4 style="margin-top:18px">A missing field</h4><span class="gap" title="x is not on the read surface (screen.md section 6)">missing: runs[].title</span></div>
+<div><h4>Marks · a shape, a word, a colour</h4><div class="marks">
+<div><svg class="i m-ok" aria-hidden="true"><use href="#landed"/></svg>merged</div><div><svg class="i m-idle" aria-hidden="true"><use href="#closed"/></svg>closed, not merged</div><div><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>needs you</div><div><svg class="i m-info" aria-hidden="true"><use href="#review"/></svg>in review</div>
+<div><svg class="i m-ok" aria-hidden="true"><use href="#work"/></svg>being worked on</div><div><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg>not started</div><div><svg class="i m-idle" aria-hidden="true"><use href="#skip"/></svg>skipped</div><div><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg>stopped, nobody on it</div>
+<div><svg class="i m-idle" aria-hidden="true"><use href="#fail"/></svg>failed, probably ended</div><div><svg class="i m-info" aria-hidden="true"><use href="#reopen"/></svg>reopened</div><div><svg class="i m-wait" aria-hidden="true"><use href="#hand"/></svg>merged by hand</div></div></div></div></div>
+<div class="panel theme-dark wide"><h2>The visual system · dark</h2><p class="what">Type, colour, marks, references and focus as screen.md section 2.5 sets them. Every text pair passes WCAG AA (4.5:1); marks and the focus ring pass 3:1.</p><div class="sheet"><div><h4>Type · system fonts, nothing fetched</h4><div class="scale">
+<div><span class="l">20 / 650</span><span style="font-size:20px;font-weight:650;letter-spacing:-.015em">Should the cache key include the locale?</span></div>
+<div><span class="l">16 / 650</span><span style="font-size:16px;font-weight:650">loom · Approved work #3</span></div>
+<div><span class="l">14 / 400 body</span><span>Cache parsed files between runs</span></div>
+<div><span class="l">13 / 400 meta</span><span style="font-size:13px;color:var(--text-3)">r3-47 · 12 min · checked 09:41</span></div>
+<div><span class="l">12 / 600 label</span><span style="font-size:12px;font-weight:600;color:var(--text-3)">Needs you 1</span></div>
+<div><span class="l">13 mono ref</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#127</span></span> &nbsp; <span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#127</span></span> &nbsp; <span class="rk" title="atlas"><span class="p">atlas</span><span class="n">#7</span></span></span></div></div>
+<h4 style="margin-top:18px">Focus and keys</h4><div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap"><span class="btn primary focus">Answer yes</span><span class="btn sm focus">Ask to start</span>
+<span style="font-size:13px;color:var(--text-3)"><span class="kbd">Tab</span> within · <span class="kbd">F6</span> next region · <span class="kbd">Esc</span> back</span></div></div>
+<div><h4>Colour tokens</h4><div class="sw"><div><i style="background:var(--bg)"></i>bg</div><div><i style="background:var(--surface)"></i>surface</div><div><i style="background:var(--surface-2)"></i>surface-2</div><div><i style="background:var(--border)"></i>border</div><div><i style="background:var(--text)"></i>text</div><div><i style="background:var(--text-2)"></i>text-2</div><div><i style="background:var(--text-3)"></i>text-3</div><div><i style="background:var(--accent)"></i>accent</div><div><i style="background:var(--ok-mark)"></i>ok-mark</div><div><i style="background:var(--wait-mark)"></i>wait-mark</div><div><i style="background:var(--fail-mark)"></i>fail-mark</div><div><i style="background:var(--info-mark)"></i>info-mark</div></div><h4 style="margin-top:18px">A missing field</h4><span class="gap" title="x is not on the read surface (screen.md section 6)">missing: runs[].title</span></div>
+<div><h4>Marks · a shape, a word, a colour</h4><div class="marks">
+<div><svg class="i m-ok" aria-hidden="true"><use href="#landed"/></svg>merged</div><div><svg class="i m-idle" aria-hidden="true"><use href="#closed"/></svg>closed, not merged</div><div><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>needs you</div><div><svg class="i m-info" aria-hidden="true"><use href="#review"/></svg>in review</div>
+<div><svg class="i m-ok" aria-hidden="true"><use href="#work"/></svg>being worked on</div><div><svg class="i m-idle" aria-hidden="true"><use href="#notin"/></svg>not started</div><div><svg class="i m-idle" aria-hidden="true"><use href="#skip"/></svg>skipped</div><div><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg>stopped, nobody on it</div>
+<div><svg class="i m-idle" aria-hidden="true"><use href="#fail"/></svg>failed, probably ended</div><div><svg class="i m-info" aria-hidden="true"><use href="#reopen"/></svg>reopened</div><div><svg class="i m-wait" aria-hidden="true"><use href="#hand"/></svg>merged by hand</div></div></div></div></div>
 </div>
 </body>
 </html>
