@@ -204,11 +204,20 @@ fn release(name: &str, entries: &[&str], sha: Option<&str>) -> (String, PathBuf)
 
 const FULL: [&str; 3] = ["herdr-core", "LICENSE", "THIRD-PARTY-NOTICES"];
 
+/// PREFIX/bin comes first on PATH and HC_BIN is removed, so that an hc of the machine running the
+/// test is not found ahead of the one installed (the script exits 3 then: #382).
 fn install(url: &str, prefix: &Path) -> std::process::Output {
+    let path = format!(
+        "{}:{}",
+        prefix.join("bin").display(),
+        std::env::var("PATH").unwrap_or_default()
+    );
     Command::new("bash")
         .arg(root().join("scripts/install-base.sh"))
         .arg(prefix)
         .env("HERDR_RELEASES_URL", url)
+        .env("PATH", path)
+        .env_remove("HC_BIN")
         .output()
         .expect("bash runs")
 }

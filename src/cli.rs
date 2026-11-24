@@ -725,10 +725,14 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
             "no"
         }
     );
-    println!(
-        "Merge approval mode (this shell's; makibad records its own): {}",
-        status["merge_approval_mode"].as_str().unwrap_or("-")
-    );
+    // Issue 383: makibad's mode, the one the gate reads; this shell's only beside it.
+    let mode = status["merge_approval_mode"].as_str().unwrap_or("unknown");
+    let here = status["merge_approval_mode_here"].as_str().unwrap_or("-");
+    if mode == here {
+        println!("Merge approval mode: {mode} (makibad's)");
+    } else {
+        println!("Merge approval mode: {mode} (makibad's); this shell says {here}");
+    }
     println!("Brief head:\n{}", text("brief_head"));
     println!(
         "Read at {} - in the order they would go in:",
