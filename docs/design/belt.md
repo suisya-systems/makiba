@@ -267,7 +267,7 @@ A screen shows every item of the range, not only the tasks on the belt (the owne
 | `not_in` | `range_candidates` of the newest read, with no run of the range and not skipped | `why`: `no_slot` or `budget` when admitted; otherwise its left-out reason, such as `waits_for #<n>` (an open dependency, or a task waiting for the person, 4.2) or an open pull request. |
 | `in_work` | runs with the range's `range_id`, `queued`, `in_use`, `suspended` or `failed` | `stage`: `launching`, `at_work`, `design_only` (4.3), `launch_failed`. |
 | `waiting_person` | the run's open entry with `stop_line` (`belt_stopped`) | `why`: the line and the reason's first line; `since`: the stop. |
-| `review` | runs at `review` or `parked` with no open stop, with their pull request watch | `stage`: `no_pr`, `ci`, `to_land` (CI passed, merge under the mode), `waits_landing #<n>` (a parked design-ahead run, 4.3). |
+| `review` | runs at `review` or `parked` with no open stop, with their pull request watch | `stage`: `no_pr`, `ci`, `to_land` (CI passed, merge under the mode), `waits_landing #<n>` (a parked design-ahead run, 4.3). `since`: when it went into review (the done report that moved it, or its newest design report). |
 | `landed` | runs `completed` with the range's `range_id` and a `pr_merged` event: their pull request recorded with `pr`, read merged by `makibad` | `pr`, `pr_title`, `since` (the close): what landed, not a tick only. |
 | `closed` | runs `completed` with no merge recorded (no pull request recorded, or not read merged yet) | `why`: `no merge recorded`. A close says the secretary closed it, not that it landed (finding 5). |
 | `skipped` | `belt_skipped` events of the range; runs `abandoned` | `why`: the recorded reason. |

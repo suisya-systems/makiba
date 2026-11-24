@@ -1,8 +1,10 @@
 //! Issue 388: a pull request merged or closed outside makiba is read by makibad's PR watch.
 //!
-//! - A merge is recorded (`pr_merged` with who merged it, the head it merged and how: `gate`
-//!   when the gate allowed that head, else `hand`), the watches of the pull request end
-//!   (`ci_watch_failed`, reason `merged`) and a hand merge is told to the secretary.
+//! - A merge is recorded (`pr_merged` with who merged it, the head it merged and how), the
+//!   watches of the pull request end (`ci_watch_failed`, reason `merged`) and every merge is told
+//!   to the secretary (Issue 424). An allowance of the gate at that head with no record that its
+//!   command ran is no proof of the gate's merge: the merge is `hand`, and the notice names the
+//!   allowance.
 //! - A watch started after the merge is ended too.
 //! - A close outside makiba is recorded, ends the watches and is told; a reopen is recorded and
 //!   told.
@@ -143,6 +145,14 @@ fn count_calls(home: &Path, repo: &str, what: &str) -> usize {
 fn hand_notice(repo: &str, pr: i64, task: &str, merge: &str) -> String {
     format!(
         "Pull request {repo}#{pr} of task {task} was merged by hand outside makiba's gate (by owner, at {MERGED_AT}, merge commit {}): run the retro and close the task.",
+        &merge[..7]
+    )
+}
+
+/// The notice of a merge at a head the gate allowed, with no record that its command ran.
+fn allowed_notice(repo: &str, pr: i64, task: &str, merge: &str) -> String {
+    format!(
+        "Pull request {repo}#{pr} of task {task} was merged by hand (by owner, at {MERGED_AT}, merge commit {}); the gate allowed that head, but makiba saw no gated merge command run: run the retro and close the task.",
         &merge[..7]
     )
 }
@@ -395,10 +405,12 @@ fn a_watch_started_after_the_merge_is_ended_too() {
     );
 }
 
-/// The gate allowed the very head that was merged (its repository spelled in another case): the
-/// merge is the gate's, and the secretary is not told.
+/// The gate allowed the very head that was merged (its repository spelled in another case), and
+/// nothing records that the allowed command ran (Issue 424, as with Issue 392's merge in the web
+/// UI): the merge is not the gate's but `hand`, and the secretary is told once, naming the
+/// allowance.
 #[test]
-fn a_merge_the_gate_allowed_at_that_head_is_the_gates_and_is_not_told() {
+fn a_merge_at_a_head_the_gate_allowed_with_no_record_of_its_command_is_hand_and_told() {
     let home = init();
     let mut org = Org::new();
     let (repo, head, merge) = ("o/h3", "3".repeat(40), "d".repeat(40));
@@ -408,8 +420,11 @@ fn a_merge_the_gate_allowed_at_that_head_is_the_gates_and_is_not_told() {
     org.gate("t3", "O/H3", 9, &head, true);
 
     org.pass_until("the merge", |o| !o.events("pr_merged", "t3").is_empty());
-    let m = &org.events("pr_merged", "t3")[0];
-    assert_eq!(m["merged_via"], "gate");
+    let all = org.events("pr_merged", "t3");
+    assert_eq!(all.len(), 1, "{all:?}");
+    let m = &all[0];
+    assert_eq!(m["merged_via"], "hand");
+    assert_ne!(m["merged_via"], "gate");
     assert_eq!(m["merged_by"], "owner");
     assert_eq!(m["head_oid"], json!(head));
     assert_eq!(org.watch_status(repo, 9, &head), "failed");
@@ -418,8 +433,9 @@ fn a_merge_the_gate_allowed_at_that_head_is_the_gates_and_is_not_told() {
         vec![json!({"repo": repo, "pr": 9, "head_oid": head, "reason": "merged"})]
     );
     org.pass_for(Duration::from_millis(300));
-    assert!(
-        org.notices_naming("o/h3#9").is_empty(),
+    assert_eq!(
+        org.notices_naming("o/h3#9"),
+        vec![allowed_notice(repo, 9, "t3", &merge)],
         "{:?}",
         org.notices()
     );

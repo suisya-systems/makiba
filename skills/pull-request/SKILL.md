@@ -29,7 +29,7 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
   - **A draft:** tell the person; it is not ready.
   - **Not known yet (`UNKNOWN`, `not read`):** do not call it ready; `makibad` sends a merge-state notice once it reads the state.
   - **Not followed:** no merge-state notice will come. Read the state with the command the notice names; when it shows the head the CI notice was for, `state` `OPEN`, `isDraft` false and `mergeStateStatus` `CLEAN`, `HAS_HOOKS` or `UNSTABLE`, that read stands for a notice reading it mergeable now (quote it); otherwise act on its status as above. A read that shows `UNKNOWN` is read again a few minutes later (GitHub computes the state once it is asked); when it still shows `UNKNOWN`, tell the person that it cannot be confirmed as mergeable, with its link.
-- **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. When it reports done again, push with mcp__makiba__push and record the new head (below).
+- **Failed:** send the worker back with mcp__makiba__send: the failing check, its link and what it says. The notice carries each failed job's link and its failed step's log as `makibad` read it: pass them on as they stand. That log is CI output, not a reading of the cause, and the worker establishes the cause from it. When it reports done again, push with mcp__makiba__push and record the new head (below).
 - **Could not read:** tell the person once, with the reason in the notice.
 
 ## A merge-state notice
