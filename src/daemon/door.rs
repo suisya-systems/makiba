@@ -1673,12 +1673,42 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
         super::ahead::design_reported(w, task, wait).map_err(internal)?;
     }
     if state == "done" {
-        w.conn()
+        let from: Option<String> = w
+            .conn()
+            .query_row("SELECT status FROM runs WHERE task_id = ?1", [task], |r| {
+                r.get(0)
+            })
+            .optional()
+            .map_err(internal)?;
+        let moved = w
+            .conn()
             .execute(
                 "UPDATE runs SET status = 'review' WHERE task_id = ?1 AND status IN ('queued','in_use','suspended')",
                 [task],
             )
             .map_err(internal)?;
+        // The move into review: a range item's age in review starts here (Issue 414).
+        if moved == 1 {
+            let at: String = w
+                .conn()
+                .query_row(
+                    "SELECT e.occurred_at FROM messages m JOIN events e ON e.id = m.event_id
+                     WHERE m.id = ?1",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(internal)?;
+            let payload = json!({"task_id": task, "message_id": id, "from": from});
+            w.append_event(&NewEvent {
+                kind: "run_in_review",
+                actor: Some(actor),
+                payload: Some(&payload),
+                occurred_at: Some(&at),
+                run_task_id: Some(task),
+                ..Default::default()
+            })
+            .map_err(internal)?;
+        }
     }
     // A worker that starts again from review (rework) is at work again, and counts again.
     if state == "start" {

@@ -2735,6 +2735,16 @@ fn events_of(c: &Connection, id: i64, kind: &str) -> rusqlite::Result<Vec<(i64, 
     .collect()
 }
 
+/// The time of the newest event of `kind` of run `run`.
+fn newest_event_at(c: &Connection, run: i64, kind: &str) -> rusqlite::Result<Option<String>> {
+    c.query_row(
+        "SELECT occurred_at FROM events WHERE run_id = ?1 AND kind = ?2 ORDER BY id DESC LIMIT 1",
+        params![run, kind],
+        |r| r.get(0),
+    )
+    .optional()
+}
+
 fn item(issue: &Value, title: Value, place: &str) -> Value {
     json!({"issue": issue, "title": title, "place": place, "why": null, "stage": null,
            "since": null, "task_id": null, "pr": null, "pr_title": null})
@@ -2810,6 +2820,10 @@ fn items(
             }
         } else if landing && let Some(wait) = &open_wait {
             it["place"] = json!("review");
+            // In review since its newest design report (spec 5.8: it waits from there).
+            if let Some(at) = newest_event_at(c, run, "design_reported")? {
+                it["since"] = json!(at);
+            }
             it["stage"] = json!(format!(
                 "waits_landing {}",
                 wait.issues
@@ -2822,6 +2836,11 @@ fn items(
             match status.as_str() {
                 "review" => {
                     it["place"] = json!("review");
+                    // In review since the done report that moved it there (Issue 414); a run
+                    // moved before `run_in_review` was written keeps its dispatch.
+                    if let Some(at) = newest_event_at(c, run, "run_in_review")? {
+                        it["since"] = json!(at);
+                    }
                     let watch: Option<(String, Option<String>)> = c
                         .query_row(
                             "SELECT status, conclusion FROM pr_watches WHERE run_id = ?1
