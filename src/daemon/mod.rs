@@ -73,6 +73,12 @@ pub fn state_dir() -> PathBuf {
     base.join("makiba")
 }
 
+/// The base session this process connects to (`MAKIBA_BASE_SESSION`, default `makiba`): the
+/// organization's name in `makiba status` (Issue 411).
+pub fn base_session() -> String {
+    std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into())
+}
+
 /// The base this process uses: the stand-in when `MAKIBA_BASE=stub` (tests; its first `Resync`
 /// comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`), otherwise the real one, scoped to this state
 /// folder so two organizations on one base do not adopt each other's terminals.
@@ -84,7 +90,7 @@ pub(crate) fn connect_base(state: &Path) -> Box<dyn Base> {
             .unwrap_or(0);
         return Box::new(Stub::new().with_subscribe_delay(Duration::from_millis(ms)));
     }
-    let session = std::env::var("MAKIBA_BASE_SESSION").unwrap_or_else(|_| "makiba".into());
+    let session = base_session();
     let org = std::fs::canonicalize(state).unwrap_or_else(|_| state.to_path_buf());
     crate::base::connect_session_as(&session, Duration::from_secs(10), &org.to_string_lossy())
 }
@@ -170,9 +176,10 @@ fn beat(w: &StateWriter) -> Result<(), String> {
 fn event(w: &StateWriter, kind: &str, base: &str, version: &str) -> crate::db::Result<()> {
     // The mode the gate reads (Issue 383): makibad's environment is fixed at exec and makibad never
     // sets the variable, so the value at start is the one of this process's life; the person's
-    // `status` reads it from here.
+    // `status` reads it from here. So is the base session, the organization's name (Issue 411).
     let payload = json!({"pid": std::process::id(), "base": base, "base_version": version,
-                         "merge_approval_mode": gate::merge_approval_mode()});
+                         "merge_approval_mode": gate::merge_approval_mode(),
+                         "base_session": base_session()});
     w.append_event(&NewEvent {
         kind,
         actor: Some("makibad"),

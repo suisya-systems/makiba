@@ -569,14 +569,18 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
         })
         .collect();
     let mut left_out = Vec::new();
-    let mut leave = |repo: &Value, issue: Value, kind: &str, reason: String| {
+    // `title` is the Issue's as the scan read it, null for a reason of the whole repository.
+    let mut leave = |repo: &Value, issue: Value, title: Value, kind: &str, reason: String| {
         let slugs: Vec<&String> = o
             .projects
             .iter()
             .filter(|(_, r)| repo.as_str().is_some_and(|x| x.eq_ignore_ascii_case(r)))
             .map(|(p, _)| p)
             .collect();
-        let entry = |p: Value| json!({"project": p, "repo": repo, "issue": issue, "kind": kind, "reason": reason});
+        let entry = |p: Value| {
+            json!({"project": p, "repo": repo, "issue": issue, "title": title, "kind": kind,
+                   "reason": reason})
+        };
         if slugs.is_empty() {
             left_out.push(entry(Value::Null));
         }
@@ -590,23 +594,36 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
             goals.display(),
             s(&u["repo"])
         );
-        leave(&u["repo"], Value::Null, "no_goal_ledger", reason);
+        leave(
+            &u["repo"],
+            Value::Null,
+            Value::Null,
+            "no_goal_ledger",
+            reason,
+        );
     }
     for e in arr(&gr["goal_errors"]) {
         let reason = format!(
             "the goal ledger cannot be used: {}; fix it with the skill makiba:goal-setup",
             s(&e["error"])
         );
-        leave(&e["repo"], Value::Null, "goal_ledger_error", reason);
+        leave(
+            &e["repo"],
+            Value::Null,
+            Value::Null,
+            "goal_ledger_error",
+            reason,
+        );
     }
     for b in arr(&scan["excluded_blocked"]) {
+        let (issue, title) = (b["issue"].clone(), b["title"].clone());
         if arr(&b["blocking_refs"]).is_empty() {
             let reason =
                 "put aside by a blocked or on-hold label; remove the label to bring it back";
-            leave(&b["repo"], b["issue"].clone(), "put_aside", reason.into());
+            leave(&b["repo"], issue, title, "put_aside", reason.into());
         } else {
             let reason = format!("held by {}", s(&b["note"]));
-            leave(&b["repo"], b["issue"].clone(), "blocked", reason);
+            leave(&b["repo"], issue, title, "blocked", reason);
         }
     }
     for d in arr(&scan["excluded_dependency_unreadable"]) {
@@ -617,13 +634,14 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
         leave(
             &d["repo"],
             d["issue"].clone(),
+            d["title"].clone(),
             "dependency_unreadable",
             reason,
         );
     }
     for slug in &o.norepo {
         left_out.push(
-            json!({"project": slug, "repo": null, "issue": null, "kind": "no_repository",
+            json!({"project": slug, "repo": null, "issue": null, "title": null, "kind": "no_repository",
             "reason": "no GitHub repository: register it with makiba project <slug> <OWNER/NAME>"}),
         );
     }
