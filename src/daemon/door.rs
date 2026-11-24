@@ -814,7 +814,7 @@ fn events(w: &StateWriter, args: &Value) -> Response {
                 .ok_or_else(|| usage("limit is a count"))?,
         ),
     };
-    crate::status_local::events(&db_file(w)?, after, limit).map_err(internal)
+    crate::status_local::events(&db_file(w)?, after, limit, None).map_err(internal)
 }
 
 /// The path of the door's own database file.
