@@ -525,7 +525,7 @@
       },
       "follow_ups": "ask",
       "design_ahead": false,
-      "read_id": 957,
+      "read_id": 958,
       "read_at": "2026-11-24T09:40:03.000Z",
       "read_complete": true,
       "skipped": [
@@ -752,7 +752,7 @@
       },
       "follow_ups": "inside",
       "design_ahead": false,
-      "read_id": 965,
+      "read_id": 966,
       "read_at": "2026-11-24T09:52:30.000Z",
       "read_complete": true,
       "skipped": [],
@@ -1008,17 +1008,6 @@
           "pr_title": null
         },
         {
-          "issue": 14,
-          "title": "Sign each release archive",
-          "place": "in_work",
-          "why": null,
-          "stage": "launch_failed",
-          "since": "2026-11-24T09:30:12.000Z",
-          "task_id": "r6-14",
-          "pr": null,
-          "pr_title": null
-        },
-        {
           "issue": 15,
           "title": "Keep the last five releases",
           "place": "in_work",
@@ -1026,6 +1015,17 @@
           "stage": "at_work",
           "since": "2026-11-24T09:01:39.000Z",
           "task_id": "r6-15",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 14,
+          "title": "Sign each release archive",
+          "place": "in_work",
+          "why": null,
+          "stage": "launch_failed",
+          "since": "2026-11-24T09:30:12.000Z",
+          "task_id": "r6-14",
           "pr": null,
           "pr_title": null
         },
@@ -1052,10 +1052,112 @@
       },
       "stops": [],
       "stops_taken": {}
+    },
+    {
+      "id": 7,
+      "project": "harbor",
+      "status": "proposed",
+      "ended_reason": null,
+      "issues": [
+        20,
+        22,
+        24
+      ],
+      "takes": "",
+      "brief_head": "Work in the harbor repository on publishing releases.\nNever publish to the real registry from a test.\nKeep the dry-run flag the default in every example.",
+      "at_once": 2,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 5,
+        "hours": 8.0,
+        "fixes": 2
+      },
+      "approved_by": null,
+      "approved_at": null,
+      "approved_read_at": null,
+      "used": {
+        "tasks": 0,
+        "hours": null
+      },
+      "follow_ups": "ask",
+      "design_ahead": false,
+      "read_id": 968,
+      "read_at": "2026-11-24T09:54:05.000Z",
+      "read_complete": true,
+      "skipped": [],
+      "candidates": [
+        {
+          "issue": 20,
+          "title": "A dry-run flag for publish",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 22,
+          "title": "Publish to a second registry",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 24,
+          "title": "A changelog per release",
+          "admitted": false,
+          "left_out_why": "held by #22",
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 20,
+          "title": "A dry-run flag for publish",
+          "place": "not_in",
+          "why": "range proposed",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 22,
+          "title": "Publish to a second registry",
+          "place": "not_in",
+          "why": "range proposed",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 24,
+          "title": "A changelog per release",
+          "place": "not_in",
+          "why": "held by #22",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 0,
+        "closed": 0,
+        "waiting_person": 0,
+        "review": 0,
+        "in_work": 0,
+        "not_in": 3,
+        "skipped": 0
+      },
+      "stops": [],
+      "stops_taken": {}
     }
   ],
   "next_work": {
-    "scan_id": 958,
+    "scan_id": 959,
     "scanned_at": "2026-11-24T09:41:12.000Z",
     "candidate_count": 9,
     "trigger": "close",

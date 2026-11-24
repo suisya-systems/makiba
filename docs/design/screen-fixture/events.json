@@ -471,6 +471,16 @@
     },
     {
       "id": 928,
+      "occurred_at": "2026-11-24T08:52:13.000Z",
+      "actor": "makibad",
+      "kind": "message_sent",
+      "task_id": "r3-42",
+      "payload": {
+        "message_id": 611
+      }
+    },
+    {
+      "id": 929,
       "occurred_at": "2026-11-24T08:52:14.000Z",
       "actor": "makibad",
       "kind": "ci_watch_failed",
@@ -483,7 +493,7 @@
       }
     },
     {
-      "id": 929,
+      "id": 930,
       "occurred_at": "2026-11-24T08:58:30.000Z",
       "actor": "secretary",
       "kind": "run_closed",
@@ -493,7 +503,7 @@
       }
     },
     {
-      "id": 930,
+      "id": 931,
       "occurred_at": "2026-11-24T09:01:39.000Z",
       "actor": "makibad",
       "kind": "belt_dispatched",
@@ -506,7 +516,7 @@
       }
     },
     {
-      "id": 931,
+      "id": 932,
       "occurred_at": "2026-11-24T09:02:55.000Z",
       "actor": "secretary",
       "kind": "run_closed",
@@ -516,7 +526,7 @@
       }
     },
     {
-      "id": 932,
+      "id": 933,
       "occurred_at": "2026-11-24T09:05:47.000Z",
       "actor": "makibad",
       "kind": "pr_closed",
@@ -529,7 +539,7 @@
       }
     },
     {
-      "id": 933,
+      "id": 934,
       "occurred_at": "2026-11-24T09:05:48.000Z",
       "actor": "makibad",
       "kind": "ci_watch_failed",
@@ -542,7 +552,7 @@
       }
     },
     {
-      "id": 934,
+      "id": 935,
       "occurred_at": "2026-11-24T09:08:15.000Z",
       "actor": "secretary",
       "kind": "pr_opened",
@@ -554,7 +564,7 @@
       }
     },
     {
-      "id": 935,
+      "id": 936,
       "occurred_at": "2026-11-24T09:08:16.000Z",
       "actor": "makibad",
       "kind": "ci_watch_started",
@@ -566,7 +576,7 @@
       }
     },
     {
-      "id": 936,
+      "id": 937,
       "occurred_at": "2026-11-24T09:18:40.000Z",
       "actor": "makibad",
       "kind": "ci_completed",
@@ -583,7 +593,7 @@
       }
     },
     {
-      "id": 937,
+      "id": 938,
       "occurred_at": "2026-11-24T09:20:05.000Z",
       "actor": "makibad",
       "kind": "belt_dispatched",
@@ -596,7 +606,7 @@
       }
     },
     {
-      "id": 938,
+      "id": 939,
       "occurred_at": "2026-11-24T09:20:40.000Z",
       "actor": "secretary",
       "kind": "fix_pushed",
@@ -608,7 +618,7 @@
       }
     },
     {
-      "id": 939,
+      "id": 940,
       "occurred_at": "2026-11-24T09:20:41.000Z",
       "actor": "makibad",
       "kind": "ci_watch_started",
@@ -620,7 +630,7 @@
       }
     },
     {
-      "id": 940,
+      "id": 941,
       "occurred_at": "2026-11-24T09:22:30.000Z",
       "actor": "makibad",
       "kind": "pr_reopened",
@@ -632,7 +642,7 @@
       }
     },
     {
-      "id": 941,
+      "id": 942,
       "occurred_at": "2026-11-24T09:26:30.000Z",
       "actor": "secretary",
       "kind": "pr_opened",
@@ -644,7 +654,7 @@
       }
     },
     {
-      "id": 942,
+      "id": 943,
       "occurred_at": "2026-11-24T09:26:31.000Z",
       "actor": "makibad",
       "kind": "ci_watch_started",
@@ -656,7 +666,7 @@
       }
     },
     {
-      "id": 943,
+      "id": 944,
       "occurred_at": "2026-11-24T09:29:13.000Z",
       "actor": "makibad",
       "kind": "ci_completed",
@@ -673,7 +683,7 @@
       }
     },
     {
-      "id": 944,
+      "id": 945,
       "occurred_at": "2026-11-24T09:30:02.000Z",
       "actor": "secretary",
       "kind": "pr_opened",
@@ -685,7 +695,7 @@
       }
     },
     {
-      "id": 945,
+      "id": 946,
       "occurred_at": "2026-11-24T09:30:03.000Z",
       "actor": "makibad",
       "kind": "ci_watch_started",
@@ -697,7 +707,7 @@
       }
     },
     {
-      "id": 946,
+      "id": 947,
       "occurred_at": "2026-11-24T09:30:12.000Z",
       "actor": "makibad",
       "kind": "belt_dispatched",
@@ -710,7 +720,7 @@
       }
     },
     {
-      "id": 947,
+      "id": 948,
       "occurred_at": "2026-11-24T09:30:20.000Z",
       "actor": "makibad",
       "kind": "run_taken",
@@ -721,7 +731,7 @@
       }
     },
     {
-      "id": 948,
+      "id": 949,
       "occurred_at": "2026-11-24T09:31:02.000Z",
       "actor": "makibad",
       "kind": "worker_spawned",
@@ -732,7 +742,7 @@
       }
     },
     {
-      "id": 949,
+      "id": 950,
       "occurred_at": "2026-11-24T09:31:44.000Z",
       "actor": "secretary",
       "kind": "fix_pushed",
@@ -744,7 +754,7 @@
       }
     },
     {
-      "id": 950,
+      "id": 951,
       "occurred_at": "2026-11-24T09:31:45.000Z",
       "actor": "makibad",
       "kind": "ci_watch_started",
@@ -756,7 +766,7 @@
       }
     },
     {
-      "id": 951,
+      "id": 952,
       "occurred_at": "2026-11-24T09:33:02.000Z",
       "actor": "makibad",
       "kind": "worker_spawn_failed",
@@ -772,7 +782,7 @@
       }
     },
     {
-      "id": 952,
+      "id": 953,
       "occurred_at": "2026-11-24T09:35:58.000Z",
       "actor": "makibad",
       "kind": "ci_completed",
@@ -789,7 +799,7 @@
       }
     },
     {
-      "id": 953,
+      "id": 954,
       "occurred_at": "2026-11-24T09:37:20.000Z",
       "actor": "makibad",
       "kind": "belt_dispatched",
@@ -802,7 +812,7 @@
       }
     },
     {
-      "id": 954,
+      "id": 955,
       "occurred_at": "2026-11-24T09:37:31.000Z",
       "actor": "makibad",
       "kind": "run_taken",
@@ -813,7 +823,7 @@
       }
     },
     {
-      "id": 955,
+      "id": 956,
       "occurred_at": "2026-11-24T09:37:58.000Z",
       "actor": "makibad",
       "kind": "worker_spawned",
@@ -824,7 +834,7 @@
       }
     },
     {
-      "id": 956,
+      "id": 957,
       "occurred_at": "2026-11-24T09:39:58.000Z",
       "actor": "makibad",
       "kind": "worker_spawn_failed",
@@ -840,7 +850,7 @@
       }
     },
     {
-      "id": 957,
+      "id": 958,
       "occurred_at": "2026-11-24T09:40:03.000Z",
       "actor": "makibad",
       "kind": "range_read",
@@ -848,7 +858,7 @@
       "payload": {
         "range_id": 3,
         "complete": true,
-        "through": 956,
+        "through": 957,
         "activation": 2,
         "repo": "example-org/loom",
         "candidate_refs": "example-org/loom#60,example-org/loom#61",
@@ -856,7 +866,7 @@
       }
     },
     {
-      "id": 958,
+      "id": 959,
       "occurred_at": "2026-11-24T09:41:12.000Z",
       "actor": "makibad",
       "kind": "work_discovery_scanned",
@@ -864,7 +874,7 @@
       "payload": {
         "trigger": "close",
         "status": "candidates_found",
-        "through_close_id": 931,
+        "through_close_id": 932,
         "candidate_refs": "example-org/harbor#31,example-org/loom#60,example-org/loom#64,example-org/loom#67,example-org/loom#68,example-org/loom#71,example-org/loom#73,example-org/quill#27,example-org/quill#30",
         "diagnostics": "norepo:atlas",
         "candidate_count": 3,
@@ -1026,7 +1036,7 @@
       }
     },
     {
-      "id": 959,
+      "id": 960,
       "occurred_at": "2026-11-24T09:42:50.000Z",
       "actor": "makibad",
       "kind": "ci_completed",
@@ -1043,7 +1053,7 @@
       }
     },
     {
-      "id": 960,
+      "id": 961,
       "occurred_at": "2026-11-24T09:45:03.000Z",
       "actor": "makibad",
       "kind": "anomaly_raised",
@@ -1054,7 +1064,7 @@
       }
     },
     {
-      "id": 961,
+      "id": 962,
       "occurred_at": "2026-11-24T09:47:31.000Z",
       "actor": "secretary",
       "kind": "command_received",
@@ -1064,7 +1074,7 @@
       }
     },
     {
-      "id": 962,
+      "id": 963,
       "occurred_at": "2026-11-24T09:48:02.000Z",
       "actor": "makibad",
       "kind": "belt_stopped",
@@ -1078,7 +1088,7 @@
       }
     },
     {
-      "id": 963,
+      "id": 964,
       "occurred_at": "2026-11-24T09:48:21.000Z",
       "actor": "makibad",
       "kind": "anomaly_raised",
@@ -1089,7 +1099,7 @@
       }
     },
     {
-      "id": 964,
+      "id": 965,
       "occurred_at": "2026-11-24T09:51:30.000Z",
       "actor": "makibad",
       "kind": "belt_stopped",
@@ -1103,7 +1113,7 @@
       }
     },
     {
-      "id": 965,
+      "id": 966,
       "occurred_at": "2026-11-24T09:52:30.000Z",
       "actor": "makibad",
       "kind": "range_read",
@@ -1111,7 +1121,7 @@
       "payload": {
         "range_id": 4,
         "complete": true,
-        "through": 964,
+        "through": 965,
         "activation": 1,
         "repo": null,
         "candidate_refs": "atlas#7,atlas#9,atlas#12",
@@ -1119,7 +1129,35 @@
       }
     },
     {
-      "id": 966,
+      "id": 967,
+      "occurred_at": "2026-11-24T09:53:40.000Z",
+      "actor": "secretary",
+      "kind": "range_proposed",
+      "task_id": null,
+      "payload": {
+        "range_id": 7,
+        "project": "harbor",
+        "replaces": 6
+      }
+    },
+    {
+      "id": 968,
+      "occurred_at": "2026-11-24T09:54:05.000Z",
+      "actor": "makibad",
+      "kind": "range_read",
+      "task_id": null,
+      "payload": {
+        "range_id": 7,
+        "complete": true,
+        "through": 967,
+        "activation": 1,
+        "repo": "example-org/harbor",
+        "candidate_refs": "example-org/harbor#20,example-org/harbor#22,example-org/harbor#24",
+        "error": null
+      }
+    },
+    {
+      "id": 969,
       "occurred_at": "2026-11-24T09:55:12.000Z",
       "actor": "makibad",
       "kind": "anomaly_raised",
@@ -1130,7 +1168,7 @@
       }
     },
     {
-      "id": 967,
+      "id": 970,
       "occurred_at": "2026-11-24T09:56:01.000Z",
       "actor": "secretary",
       "kind": "command_received",
@@ -1140,7 +1178,7 @@
       }
     },
     {
-      "id": 968,
+      "id": 971,
       "occurred_at": "2026-11-24T09:58:10.000Z",
       "actor": "makibad",
       "kind": "anomaly_raised",

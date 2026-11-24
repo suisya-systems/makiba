@@ -44,6 +44,12 @@ The question Q4 of section 9 (room for an open tab) is answered by this layout: 
 - **A failure of the whole organization is never filtered out.** A row with no project (makibad silent or running an older program than the one installed, the secretary gone or still, a failed scan) is headed "Whole organization" instead of a reference, comes first in "Failures", is counted as "organization N" in the top line, and is shown under every repository's filter ("3 in loom, 1 for all").
 - **A failure row has one coloured line.** The kind and who is on it are one sentence: "Did not start · no sign that anyone is on it", in red; the detail and the actions under it are grey or links ("Abandon and close…" is no longer red: the confirmation says what it does).
 
+**After the diff review (round 2 of the review, 2026-11-24).** Three gaps in the layout of rounds 2 to 4, fixed:
+
+- **A repository with two ranges.** A project has at most one active range, but a proposed range may wait beside it, replacing it once approved (`range_proposed.replaces`; a replacing approval ends the old range). The sidebar entry stays one per repository and says so in its state line ("#7 proposed", "needs your approval"); the repository's block in "All repositories" shows the proposal as its first row with "Review the proposal" and "approving it ends #6"; selecting the repository shows the active range, with the proposal as a row above its groups. The fixture holds it: range 7 of `harbor`, proposed to replace range 6.
+- **The order things went in is kept.** "All approved items" was a tab with the range's every item in a fixed order (belt.md 7.1); rounds 2 to 4 left only the grouping by need. A range's view now has a switch, "By need · In order": "In order" lists every item in the order it went in, each row changing its mark, never its position (the drawing's panel "In order"). By need stays the default, since it is what calls for the person.
+- **What the read surface cannot say is not said.** A notice to the secretary is shown as written ("a notice was written to the secretary", from a `message_sent` of `makibad` on the task), never as told or delivered, which is D of section 6.
+
 **Round 4 (the owner's reading of 2026-11-24, entry 39): no word alone on a line.** The round-3 drawing broke text in odd places: titles in the right column dropped only their last word to a second line ("Keep the last five / releases"), the state lines of the sidebar broke inside a phrase ("1 needs / you"), and the last row of the centre went under the secretary's line. What changes:
 
 - **In the right column the reference is a line of its own** (`harbor#15`, mono), and the title is the next line, whole, at the column's full width; the title, the coloured line and the meta are set with the browser's balanced wrapping (`text-wrap: balance` for titles, `pretty` for running text), so a short last line is avoided where a line must break. The column keeps its 360 px: the centre leads, and the titles of the fixture fit on one line at that width once the reference is off it.
@@ -51,7 +57,7 @@ The question Q4 of section 9 (room for an open tab) is answered by this layout: 
 - **The centre draws only whole rows, above the secretary's line, never under it.** A row or a repository's block that does not fit whole is not drawn in part: the list ends with a fixed strip that names what is below with its state ("Below: quill 1 needs you"; in a repository's view, its groups as links: "In review 3 · Being worked on 1 · Merged 2 …"). The right column does the same: a failure or a candidate that does not fit whole goes into the fold line under it. Nothing is hidden without being named (2.1).
 - **A fold line and a coloured line wrap only between phrases** ("1 stopped (loom, 17 h)", "1 waits for you", "1 probably ended"; "Its terminal is gone", "no sign that anyone is on it"), the separator going with the phrase after it.
 - **A reference and the word before it stay together** where a sentence ends on one ("pull request loom#131", "Depends on #<n>").
-- **Checked on the rendered page, not by eye.** A check run over the drawing as Chromium lays it out finds, for every block of text, its lines from the position of each word, and reports any block of two lines or more with a line that holds a single word. Run on the round-3 drawing it reports 21 such lines, the two titles the owner named among them; on this drawing, over 677 blocks (every value of the fixture that is drawn, in all three pictures and every panel), it reports none. The same run also reports any row, block heading, summary or fold line that crosses the bottom of its list or of the right column, or is drawn under the strip: none. The check is a script run on a copy of the page; the drawing itself still has no script.
+- **Checked on the rendered page, not by eye.** A check run over the drawing as Chromium lays it out finds, for every block of text, its lines from the position of each word, and reports any block of two lines or more with a line that holds a single word. Run on the round-3 drawing it reports 21 such lines, the two titles the owner named among them; on this drawing, over 722 blocks (every value of the fixture that is drawn, in all three pictures and every panel), it reports none. The same run also reports any row, block heading, summary or fold line that crosses the bottom of its list or of the right column, or is drawn under the strip: none. The check is a script run on a copy of the page; the drawing itself still has no script.
 
 **Always seen**
 
@@ -387,7 +393,7 @@ In a page on 127.0.0.1 there is no terminal: the read surface shows no message b
 
 Read against the code at the base of Issue 394 (`src/status_local.rs`, `src/daemon/belt.rs` `read_ranges`, `src/daemon/triage.rs`, `src/daemon/prwatch.rs`) and spec sections 10 and 12. **Given**: a field prints it as the part shows it. **Derivable**: the screen computes it from given fields, by the rule written. **Missing**: neither output carries it; the letter names the addition proposed in section 6 (each its own Issue), or the Issue that already holds it. The fixture of [screen-fixture/](screen-fixture/) has every given field, and the drawing shows every missing one as a gap.
 
-The fixture: `status.json` is one object of `makiba status --json` and `events.json` one page of `makiba events --json`, with the field names and the nesting the code prints, in its order. Every value is invented: the projects `loom` (repository `example-org/loom`) and `atlas` (no repository recorded), the account `example-maintainer`, the titles, the heads and the times. It was written from the code and the spec, not exported from a running organization: the sandbox of this task cannot open a `state.db`. It is read as at 2026-11-24T10:00:00Z; every age in the drawing is counted from that time. What it holds (round 3): four projects, `atlas` (no repository recorded), `harbor`, `loom` and `quill` (`example-org/...`); range 3 of `loom` active with twelve items in all seven places (a launch failed, a merge through the gate, a merge by hand, a pull request closed and reopened outside makiba, one under watch, one passed), range 5 of `quill` and range 6 of `harbor` active (a launch failed and an error in harbor, a question in quill), range 4 of `atlas` proposed with its read, range 2 of `loom` ended and replaced with one run left whose terminal is gone; three one-off runs, four pending entries (three escalated, one permission prompt still with the secretary), five open anomalies (one of the whole organization, with no task: `binary_replaced`), one watch, a scan with nine candidates over three repositories and five left out, recorded whole in its event as `status_local::next_work` reads it back, and sixty-nine events, among them the whole trail of one task. Numbers collide across repositories on purpose: `loom#56` and `quill#56`, and the pull requests `loom#127` and `harbor#127`.
+The fixture: `status.json` is one object of `makiba status --json` and `events.json` one page of `makiba events --json`, with the field names and the nesting the code prints, in its order. Every value is invented: the projects `loom` (repository `example-org/loom`) and `atlas` (no repository recorded), the account `example-maintainer`, the titles, the heads and the times. It was written from the code and the spec, not exported from a running organization: the sandbox of this task cannot open a `state.db`. It is read as at 2026-11-24T10:00:00Z; every age in the drawing is counted from that time. What it holds (round 3): four projects, `atlas` (no repository recorded), `harbor`, `loom` and `quill` (`example-org/...`); range 3 of `loom` active with twelve items in all seven places (a launch failed, a merge through the gate, a merge by hand, a pull request closed and reopened outside makiba, one under watch, one passed), range 5 of `quill` and range 6 of `harbor` active, range 7 of `harbor` proposed to replace range 6 (a launch failed and an error in harbor, a question in quill), range 4 of `atlas` proposed with its read, range 2 of `loom` ended and replaced with one run left whose terminal is gone; three one-off runs, four pending entries (three escalated, one permission prompt still with the secretary), five open anomalies (one of the whole organization, with no task: `binary_replaced`), one watch, a scan with nine candidates over three repositories and five left out, recorded whole in its event as `status_local::next_work` reads it back, and seventy-two events (the notice written after the merge by hand among them), among them the whole trail of one task. Numbers collide across repositories on purpose: `loom#56` and `quill#56`, and the pull requests `loom#127` and `harbor#127`.
 
 **Top line**
 
@@ -612,3 +618,118 @@ Each with a recommendation; the drawing follows the recommendation where it had 
 | Q7 | Keys: Tab within a region, F6 between regions in the order of what calls for the person, arrows in the shelf, Escape to close a tab; no single-letter shortcut (2.5). Agreed? | Agree. The terminal in the centre takes every key, so a letter shortcut would type into it. |
 | Q8 | The fixture in `screen-fixture/` becomes the recorded status and events of the model's test in step 1 of section 7. Keep it as that? | Keep it, and grow it there; a change to the read surface then shows up as a change to one fixture. |
 | Q9 | Which of the missing fields A to J of section 6 become Issues now, before the code of the screen? | A, C and D now: they are where the drawing shows the most gaps and where the screen would otherwise fold the most events (one-off tasks, pull requests, who is handling a failure). B, E, H and J are small and can go with the code; F, G and I can wait. |
+
+## 10. Feasibility: what today's makiba can give each part of the drawing
+
+The owner's request (2026-11-24): for every element and every button of the drawing, whether makiba gives it today, what is missing, whether and where it can be built, and whether to keep it. Each source was checked in the code at the base of Issue 394: the read surface in `src/status_local.rs` (`read`, `events`), the ranges in `src/daemon/belt.rs` (`read_ranges`, `range`), the scan in `src/daemon/triage.rs` (`shown`), the pull requests in `src/daemon/prwatch.rs`, the verbs and roles in `src/spec.rs` (`Role::verbs`: the person may use every verb) and `src/daemon/door.rs`, the person's command in `src/cli.rs`. "Today" means the field is printed or the verb accepts the person's key now; "derived" means the screen computes it from fields printed today (3.5). The letters A to J are those of section 6.
+
+One condition holds for every button: **today the screen can only show the line to type**, since no program but the person's `makiba` holds the person key (section 4). A click that acts needs the boundary design of section 4 first. That design is the first build Issue below (P1); every button row assumes it, and is otherwise "today" when the verb exists for the person.
+
+**Top line**
+
+| Feature | Today: source | Missing | Build: where, size, why | Keep or remove |
+| --- | --- | --- | --- | --- |
+| "N need you" with the repositories | `pending[]` `escalated`; the project through `runs[].project` | - | - | Keep |
+| "N failed · organization 1 · loom 3 …" | `anomalies[]`, `runs[]` (`failed` with stage `failed`), `next_work.status`, `makibad.running` | - | - | Keep |
+| "N unattended" | derived (4.1) | Whether a notice was delivered, whether the secretary acted (D) | `status_local.rs` from `event_deliveries` and `commands`, M: two fields and their tests, read across three tables | Keep; until D it counts rows with no sign (Q6) |
+| "Running · updated 3 s ago" | `makibad.running`, `.heartbeat_at` | - | - | Keep |
+| The organization's name | none | E | `status_local.rs`, S: print the base's session name, which `makibad` holds | Keep as a gap until built, or drop the place: nothing else needs it |
+| Display: language | `makiba config get conversation_language` (verb `config`, person only; the key is in `door.rs`) | Not on `status --json` (F), but readable by the verb | none needed (S if wanted on `status`) | Keep |
+| Display: light or dark | the screen's own setting | - | - | Keep |
+
+**Sidebar: repositories and views**
+
+| Feature | Today: source | Missing | Build | Keep or remove |
+| --- | --- | --- | --- | --- |
+| One entry per repository, its range, tasks of budget | `projects[]`, `ranges[]` (`id`, `status`, `used.tasks`, `budget.tasks`) | - | - | Keep |
+| The state line ("1 needs you · 3 failed") | derived per project from the rows of the top line | - | - | Keep |
+| Filter by repository | the screen's own, over rows that all carry a project or are the whole organization's (3.5) | - | - | Keep |
+| A proposed replacement beside an active range | `ranges[]` prints both; `range_proposed.replaces` in the events | - | - (layout only) | Keep: the entry lists its ranges when it has two |
+| The views' counts | derived from the rows of each view | Pull requests as a field (C) | see C | Keep |
+| "Checked GitHub 09:41 · read 10:00" | `next_work.scanned_at`; the screen's own read | - | - | Keep |
+
+**The answer**
+
+| Feature | Today: source | Missing | Build | Keep or remove |
+| --- | --- | --- | --- | --- |
+| The question, its kind and task, its age | `pending[]` (`id`, `task_id`, `question`, `created_at`, `kind`); `ranges[].stops[].kind` | - | - | Keep |
+| The task's title in the heading | `ranges[].items[].title` for a range's task | A one-off task's title (A) | `status_local.rs` `runs`, S: `runs.title` is a column already | Keep; a gap until A |
+| Background, if yes, if no, recommended, why | `pending[].context` (five parts); `ranges[].stops[].recommend_answer` | For a question outside a range the recommendation is text only | - | Keep |
+| "1 of 3 · Next" | `pending[]` `escalated` | - | - | Keep |
+| Answer yes / no, with a note | `makiba answer <id> yes\|no --note` (verb `answer`, person) | - | P1 for a click | Keep |
+| Discuss it first | none needed: moves the focus to the conversation | The conversation inside the screen (section 5: M1 to M3 not measured) | the app of section 5; size unknown until the measurement | Keep; it degrades to "go to your terminal" |
+| "1 question is with the secretary" | `pending[]` `open` | - | - | Keep |
+
+**Centre: all repositories, a repository's approved work**
+
+| Feature | Today: source | Missing | Build | Keep or remove |
+| --- | --- | --- | --- | --- |
+| A block per repository: range status, progress cells, tasks and hours | `ranges[].status`, `.items[].place`, `.used`, `.budget` | - | - | Keep |
+| Rows that need a look (needs you, did not start, an error) | `ranges[].items[]` with `runs[]` and `anomalies[]` | - | - | Keep |
+| Groups by need; the "Below: …" strip | derived from `items[].place`, `.stage` | - | - | Keep |
+| "reopened, checks not watched", "checks running / failed / passed" | `pr_closed`, `pr_reopened`, `ci_watch_started`, `ci_completed` (events) and `pr_watches[]` | One field per pull request (C): `items[].stage` `ci` covers three states | `status_local.rs` with `prwatch.rs`, M: a new array folded from `pr_watches` and the merge events, with its tests | Keep |
+| Age in review | the newest pull-request event of the task | `items[].since` is the dispatch (J) | `belt.rs` `items`, S: the time the run moved to review | Keep |
+| Every item in the order it went in (belt.md 7.1) | `ranges[].items[]` in its order | - | - | Keep: a switch "By need · In order" in the view |
+| Instructions | `ranges[].brief_head` | - | - | Keep |
+| Hold new tasks | `makiba range pause <id> --reason` (secretary and person) | - | P1 | Keep |
+| Start new tasks again | `makiba range resume <id>` (person only, `belt.rs` `range`) | - | P1 | Keep |
+| End after running tasks | `makiba range end <id>` | - | P1 | Keep |
+| Review the proposal: its read, its brief | `ranges[]` `proposed`: `issues`, `takes`, `candidates[]`, `read_id`, `read_at`, `brief_head` | - | - | Keep |
+| Approve exactly this | the door's `range` `approve` takes `read` (`belt.rs`: `int_arg(args, "read")`) | The person's command has no `--read`: `makiba range approve <id>` shows and approves the newest read itself (`cli.rs`, `approve_preview`) | `cli.rs`, S: one argument passed through to the door | Keep; until then the line to type is `makiba range approve <id>` without `--yes` |
+| Ask to change it | `makiba send secretary` | - | P1 | Keep |
+
+**Right column**
+
+| Feature | Today: source | Missing | Build | Keep or remove |
+| --- | --- | --- | --- | --- |
+| A failure: what, where, since | `anomalies[]`, `runs[]`; the project through the run, none for the whole organization | - | - | Keep |
+| The reason a launch failed | `worker_spawn_failed.reason`, tied by `spawn_id` to the task's newest `run_taken` or `worker_spawned` | Sure only with G | `status_local.rs`, S: the newest launch's `failed_reason` | Keep |
+| Who is on it: waits for your answer | `pending[]` `escalated` of the task | - | - | Keep |
+| Who is on it: told, looking | none | D | as above, M | Keep; reads "no sign" until D |
+| Ask the secretary to look | `makiba send secretary '<fixed sentence>'` (verb `send`, person) | - | P1 | Keep |
+| History | `makiba events --json`, filtered by `task_id` in the screen | `events --task` (I) | `status_local.rs` `events` with `cli.rs`, S: one condition and one flag | Keep |
+| Abandon and close… | `makiba close <task> --abandon` (verb `close`, person) | - | P1 | Keep |
+| Show the question | the screen's own | - | - | Keep |
+| A failure of the whole organization: the lines to type | `makiba down`, then `makiba up`, from the person's login shell, never over the door (spec section 12) | - | none: a line to type by design | Keep |
+| Ready to start: Issue, goal clause, size, why, suggested first | `next_work.candidates[]` (`repo`, `issue`, `title`, `clause_id`, `size`, `size_estimated`, `why`, `recommended`) | - | - | Keep |
+| Ask to start | `makiba send secretary 'Please take up OWNER/NAME#N.'` | - | P1 | Keep |
+
+**Views behind the sidebar**
+
+| Feature | Today: source | Missing | Build | Keep or remove |
+| --- | --- | --- | --- | --- |
+| Pull requests: open, failed first, merged today, by hand or through the gate | events `pr_opened`, `fix_pushed`, `ci_watch_started`, `ci_completed`, `pr_closed`, `pr_reopened`, `pr_merged` (`merged_by`, `merged_via`) | A field (C); an open pull request's title (C) | see C | Keep |
+| Pull requests: merge state (in conflict, behind) | none | Issue 387 (`mergeable`, `mergeStateStatus`; not merged) | Issue 387, then into C | Keep as a gap |
+| "a notice was written to the secretary" (a hand merge, a close) | a `message_sent` by `makibad` with the task, right after the event | Whether it was delivered (D) | see D | Keep, worded as written, not as delivered, until D |
+| Issues to start: not ready, and why | `next_work.left_out[]` (`kind`, `reason`) | The title (B) | `triage.rs` `shown`, S: the scan reads the title already | Keep |
+| Projects not ranked | `next_work.left_out[]` with a null `issue` | - | - | Keep |
+| One-off tasks | `runs[]` not named by a range's item; `terminals[]` for the age | Title, start, Issue (A) | S, as above | Keep |
+| Task history: started, began, review rounds, pull request, checks, gate, merged, closed | events `belt_dispatched`, `worker_spawned`, `worker_spawn_verified`, `codex_round_started`, `pr_opened`, `ci_completed`, `acceptance_gate`, `pr_merged`, `run_closed` | "Reported its plan" and "Reported done" when no review answered: `worker_reported` is written only with a review (`door.rs`, `report`); otherwise only a `message_sent` whose kind is not shown | `door.rs` `report`, S: write `worker_reported` for every report, with `review` null when there is none | Keep |
+
+**The conversation, display, keys**
+
+| Feature | Today: source | Missing | Build | Keep or remove |
+| --- | --- | --- | --- | --- |
+| The secretary's line: state and age | `terminals[]` with `role` `secretary` | - | - | Keep |
+| Open the conversation | none: what is said is not on the read surface, by design | The secretary's terminal shown inside the screen | the app of section 5; size unknown until M1 to M3 are measured | Keep folded; in a plain page it says where the terminal is |
+| Empty, loading, error, stale | `next_work` null or `error`, `makibad.running` false, the screen's own read | - | - | Keep |
+| Keys, focus, filters, the narrow width | the screen's own | - | - | Keep |
+
+**Counts.** 55 rows. **33 are given or derived today** (four of them would be surer or simpler with a small field: G, I, C, F, none needed to draw them). **8 are buttons whose verb the person has today** (answer, range pause, resume and end, send for "Ask the secretary to look", "Ask to start" and "Ask to change it", close with `--abandon`): each is a line to type now and waits only for P1 to be a click. **7 need a small build (S)** before they show without a gap: the organization's name (E), a one-off task's title in the answer and in "One-off tasks" (A), the age in review (J), "Approve exactly this" on the person's command (`--read`), the title of an Issue not ready (B), and the plan and done reports in the history (`worker_reported` for every report). **4 need a medium build (M)**: "unattended", "told" and "looking", and "the notice was delivered" (D, three rows), and an open pull request's title of a one-off task (C). **1 waits for Issue 387** (the merge state). **2 wait for the measurement of section 5** ("Open the conversation", "Discuss it first" inside the screen; both degrade to the person's own terminal). **None is recommended for removal**; the organization's name is the one part that could go without loss, if E is not wanted.
+
+**Build Issues proposed for the "keep" rows**, in the order they unblock the most:
+
+1. **P1. The screen acts as the person** (section 4). **Design first; the Issue opens with the owner's decisions listed first**, each with its options, before any code:
+   - *Who holds the person key*: (a) the screen runs the person's `makiba` binary for each act, the key staying where `makiba` reads it (recommended: no new holder); (b) the screen's own process reads `person.key` and speaks to the door itself; (c) a new key of its own for the screen, with its own role and verbs.
+   - *How a page's request is told from another local program's*: (a) no page: the screen runs inside the app of section 5 and acts through its terminal only; (b) a page on 127.0.0.1 with a secret the serving process gives the page at load and checks on every request, plus an Origin check; (c) a Unix socket or a named pipe instead of TCP, readable by the person only. Every option must also hold against an agent of the organization, whose sandbox may reach the loopback.
+   - *The actor recorded*: (a) `person`, as today, the screen leaving no trace; (b) `person` with a mark that the act came through the screen (`commands.actor` or a field of the request); (c) an actor of its own, `screen`.
+   - *Which acts the screen may do at all*: all the person's verbs of section 4, or a subset (answer, range pause, resume, end and approve, send, close with `--abandon`); and whether `close --abandon` and `range approve` need a second step (a confirmation typed, not clicked).
+   - *Confirmation and undo*: which acts are confirmed (abandon, approve, end), and whether any can be undone from the screen.
+   - *Where it runs* (section 5): decided by the measurement M1 to M4, which the owner runs; P1 waits for it.
+   Then M to L.
+2. **C. `pull_requests[]` on `status --json`**: every pull request of a run not closed and those merged today, with `ci`, `state`, `merged_via`, `merged_by` and the title (and Issue 387's merge state once it lands). M.
+3. **D. Who is on a failure**: `anomalies[].notice` (to whom, queued or delivered, when) and `runs[].secretary_acted_at`. M.
+4. **A. `runs[].title`, `.since`, `.issue`, `.range_id`.** S.
+5. **`makiba range approve --read <id>`.** S.
+6. **`worker_reported` for every report**, so the history shows a plan and a done without a review. S.
+7. **B, E, G, I, J**: the left-out title, the organization's name, the launch's failure reason, `events --task`, the time an item went into review. S each; one Issue or five.
