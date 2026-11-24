@@ -121,8 +121,11 @@ rules, in order:
 
 A pull request that is not some run's current pull request (`current_pr_sql`) is refused with
 `conflict` before the gate runs (one never recorded with `pr` has no passed `ci_completed` and
-would be refused by the gate too), so the act never runs on a pull request the PR watch cannot
-follow (section 7). A call
+would be refused by the gate too), and checked again in the final transaction, before the attempt
+or the entry is written: a `pr opened` of another pull request committed while the gate ran (with
+the lock released) makes it `conflict` there, with nothing written. Together with the `pr` verb's
+refusal of a replacement while an act awaits its landing (section 7), the act never runs on a pull
+request the PR watch cannot follow. A call
 with the same `idem` is answered from `commands` as every verb is (`replay`, `door.rs:588`).
 
 ### 3.2 Answers
@@ -351,11 +354,17 @@ bound against merging around makibad stays GitHub's branch protection, set by th
   entry]. Anything else, or a timeline it cannot read, is `unknown`. The landing is never `gate` on
   the absence of an observation. The clocks compared are makibad's and GitHub's, so the boundary is
   taken a minute early; an addition by hand in that minute before the act is the known limit.
-- **Ordering with the act.** While the pull request has an open attempt (section 4.2), a `MERGED`
-  read is not written: the read is dropped and the poller reads again on its next interval. The
-  attempt gets its outcome within the call's timeout, or at a restart from the reconciliation, so
-  the wait ends. This keeps a merge makibad's own thread made from being written `hand` because
-  the watch read it first.
+- **Ordering with the act.** While the pull request has an open attempt (section 4.2), no state
+  read is written: a `MERGED`, a `CLOSED`, a reopen, and an `OPEN` read at another head or without
+  its queue entry are all dropped, and the poller (which today returns on `CLOSED`) keeps reading on
+  its interval instead of returning. The attempt gets its outcome within the call's timeout, or at
+  a restart from the reconciliation, so the wait ends; the next read is then written against the
+  attempt's outcome. This keeps a merge makibad's own thread made from being written `hand`
+  because the watch read it first, and keeps a close or a head move that came while the enqueue's
+  outcome was not yet recorded from going unseen by the queue act. The `pr` verb's `pushed` of
+  another head is not deferred; instead, the outcome writer, when it records `merge_enqueued`,
+  ends the queue act at once in the same transaction (`merge_dequeued`, `why` `head recorded`)
+  when a `pr pushed` of another head was committed after the attempt.
 - **Notices.** Issue 424's ask 1 (tell the secretary of every merge, whatever made it) is built by
   424, first and independently. On top of it, the notice names `merged_via`: for `gate`, "landed
   (makibad's merge)"; for `unknown`, "landed; makibad cannot tell whether its attempt or another
