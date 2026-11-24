@@ -33,7 +33,7 @@
 //! whose CI passed (main moved under it) is told once per change.
 
 use super::belt::{AWAITED, current_pr_sql, is_current_pr_sql, pr_closed_sql};
-use super::gh::{GhError, SLICE, run_gh};
+use super::gh::{Failure, GhError, SLICE, run_gh};
 use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use crate::spec::AGENT_SECRETARY;
@@ -138,7 +138,9 @@ pub fn run_unfinished(status: &str) -> bool {
 fn json_lines(text: &str) -> std::result::Result<Vec<Value>, GhError> {
     text.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l).map_err(|_| GhError::Failed("gh wrote no JSON".into())))
+        .map(|l| {
+            serde_json::from_str(l).map_err(|_| GhError::Failed(Failure::new("gh wrote no JSON")))
+        })
         .collect()
 }
 
@@ -300,7 +302,7 @@ fn poll_into(
         let bad = match observe(gh, repo, head, cancel) {
             Err(GhError::Missing) => return Some(Outcome::Failed("gh_missing".into())),
             Err(GhError::Cancelled) => return None,
-            Err(GhError::Failed(m)) => Some(format!("gh_unreadable: {m}")),
+            Err(GhError::Failed(f)) => Some(format!("gh_unreadable: {}", f.message)),
             Ok(entries) => {
                 let s = summarize(&entries);
                 if s.total == 0 {
@@ -371,7 +373,7 @@ fn poll_rerun(
         let unreadable = |e: GhError| match e {
             GhError::Missing => Err(Outcome::Failed("gh_missing".into())),
             GhError::Cancelled => Ok(None),
-            GhError::Failed(m) => Ok(Some(format!("gh_unreadable: {m}"))),
+            GhError::Failed(f) => Ok(Some(format!("gh_unreadable: {}", f.message))),
         };
         // `Err`: the watch ends with that outcome; `Ok(None)` with `cancel` set: cancelled.
         let step = (|| -> std::result::Result<Option<String>, Outcome> {
@@ -553,8 +555,9 @@ fn job_part(
     let unreadable = |e: GhError| match e {
         GhError::Cancelled => None,
         GhError::Missing => Some(format!("{base}: its log could not be read (gh_missing).")),
-        GhError::Failed(m) => Some(format!(
-            "{base}: its log could not be read (gh_unreadable: {m})."
+        GhError::Failed(f) => Some(format!(
+            "{base}: its log could not be read (gh_unreadable: {}).",
+            f.message
         )),
     };
     let steps = match run_gh(

@@ -643,7 +643,7 @@ pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Rejec
                 match e {
                     GhError::Missing => format!("no program {program}"),
                     GhError::Cancelled => "cancelled".into(),
-                    GhError::Failed(why) => why,
+                    GhError::Failed(f) => f.message,
                 }
             ))
         })?;
@@ -960,7 +960,7 @@ pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, St
             match e {
                 GhError::Missing => format!("no program {program}"),
                 GhError::Cancelled => "cancelled".into(),
-                GhError::Failed(why) => why,
+                GhError::Failed(f) => f.message,
             }
         ))
     })?;

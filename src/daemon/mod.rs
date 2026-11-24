@@ -14,7 +14,7 @@ pub mod dispatch;
 pub mod door;
 pub mod exe;
 pub mod gate;
-mod gh;
+pub mod gh;
 pub mod inbox;
 pub mod landing;
 pub mod language;

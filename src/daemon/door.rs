@@ -1355,7 +1355,7 @@ fn read_issue(args: &Value, origin: Option<&str>, n: i64) -> IssueRead {
     .map_err(|e| match e {
         super::gh::GhError::Missing => format!("{program} not found"),
         super::gh::GhError::Cancelled => "cancelled".into(),
-        super::gh::GhError::Failed(m) => m,
+        super::gh::GhError::Failed(f) => f.message,
     })?;
     let v: Value =
         serde_json::from_str(&text).map_err(|_| "gh issue view wrote no JSON".to_string())?;
