@@ -29,6 +29,12 @@ pub fn check(found: &str) -> Result<(), BaseError> {
     })
 }
 
+/// How `found` compares with `PINNED`, or `None` when `found` is not plain `major.minor.patch`
+/// (a pre-release or build suffix, or anything else `parse` refuses).
+pub fn compare_with_pinned(found: &str) -> Option<std::cmp::Ordering> {
+    Some(parse(found)?.cmp(&parse(PINNED)?))
+}
+
 /// Run `hello` and refuse its answer unless the version is supported. Callers use `?` on the
 /// result, so no other call is made on an unsupported base. M0-3 wires `Base::hello()` to this.
 pub fn checked_hello(
