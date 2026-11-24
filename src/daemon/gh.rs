@@ -55,6 +55,58 @@ pub(crate) fn run_bounded(
     timeout: Duration,
     name: &str,
 ) -> Result<Vec<u8>, GhError> {
+    run_kept(program, args, dir, cancel, timeout, name, None).map(|(out, _)| out)
+}
+
+/// `run_gh` that keeps only the last `keep` bytes of the output (Issue 327: a job's log can be
+/// large, and only its end is read), and whether anything before them was dropped.
+pub(crate) fn run_gh_tail(
+    gh: &str,
+    args: &[&str],
+    cancel: &AtomicBool,
+    keep: usize,
+) -> Result<(Vec<u8>, bool), GhError> {
+    run_kept(gh, args, None, cancel, GH_TIMEOUT, "gh", Some(keep))
+}
+
+/// Read `pipe` to its end, keeping all of it, or only its last `keep` bytes, so that memory
+/// holds at most twice `keep` at any time; and whether anything was dropped.
+fn read_kept(pipe: &mut impl Read, keep: Option<usize>) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let Some(keep) = keep else {
+        let _ = pipe.read_to_end(&mut out);
+        return (out, false);
+    };
+    let (mut chunk, mut dropped) = (vec![0u8; 64 * 1024], false);
+    loop {
+        match pipe.read(&mut chunk) {
+            Ok(0) => break,
+            Ok(n) => out.extend_from_slice(&chunk[..n]),
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
+        }
+        if out.len() > keep.saturating_mul(2) {
+            out.drain(..out.len() - keep);
+            dropped = true;
+        }
+    }
+    if out.len() > keep {
+        out.drain(..out.len() - keep);
+        dropped = true;
+    }
+    (out, dropped)
+}
+
+/// `run_bounded`, keeping all of the output or only its end (`read_kept`).
+fn run_kept(
+    program: &str,
+    args: &[&str],
+    dir: Option<&Path>,
+    cancel: &AtomicBool,
+    timeout: Duration,
+    name: &str,
+    keep: Option<usize>,
+) -> Result<(Vec<u8>, bool), GhError> {
     // A process group of its own, so that what the program started goes with it when it is ended.
     let mut command = Command::new(program);
     command
@@ -71,11 +123,7 @@ pub(crate) fn run_bounded(
         _ => GhError::Failed(format!("cannot run {program}: {e}")),
     })?;
     let mut pipe = child.stdout.take().expect("stdout is piped");
-    let reader = std::thread::spawn(move || {
-        let mut out = Vec::new();
-        let _ = pipe.read_to_end(&mut out);
-        out
-    });
+    let reader = std::thread::spawn(move || read_kept(&mut pipe, keep));
     let deadline = Instant::now() + timeout;
     // The deadline and the cancel flag hold until the output is collected as well: a descendant
     // may keep the pipe open after the child has gone.
@@ -141,5 +189,34 @@ mod tests {
             String::from_utf8(out).unwrap().trim_end(),
             want.to_str().unwrap()
         );
+    }
+
+    /// Issue 327: a kept read holds only the last bytes of a long output and says so; a short
+    /// output is whole.
+    #[test]
+    fn a_kept_read_holds_the_end_of_the_output() {
+        let long: Vec<u8> = (0..300_000u32).map(|i| (i % 251) as u8).collect();
+        let (out, dropped) = super::read_kept(&mut long.as_slice(), Some(1000));
+        assert!(dropped);
+        assert_eq!(out, long[long.len() - 1000..]);
+        let (out, dropped) = super::read_kept(&mut &b"short"[..], Some(1000));
+        assert!(!dropped);
+        assert_eq!(out, b"short");
+        let (out, dropped) = super::read_kept(&mut long.as_slice(), None);
+        assert!(!dropped);
+        assert_eq!(out, long);
+        let never = std::sync::atomic::AtomicBool::new(false);
+        let (out, dropped) = super::run_kept(
+            "printf",
+            &["0123456789"],
+            None,
+            &never,
+            std::time::Duration::from_secs(10),
+            "printf",
+            Some(4),
+        )
+        .unwrap_or_else(|_| panic!("printf did not run"));
+        assert!(dropped);
+        assert_eq!(out, b"6789");
     }
 }
