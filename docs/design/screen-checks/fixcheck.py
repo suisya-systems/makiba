@@ -16,15 +16,19 @@ for k in ["trigger", "status", "error", "input_truncated", "candidates", "candid
 for k, v in want.items():
     if nw.get(k) != v: bad.append(f"next_work.{k}: status {nw.get(k)!r:.60} != from the event {v!r:.60}")
 if set(want) != set(nw): bad.append(f"next_work keys differ: {sorted(set(nw) ^ set(want))}")
-opened = {}
+opened, cleared = {}, set()
 for x in ev:
     if x["kind"] in ("anomaly_raised", "anomaly_cleared"):
         key = (x["payload"]["task_id"], x["payload"]["rule"])
-        if x["kind"] == "anomaly_raised": opened[key] = x["occurred_at"]
-        else: opened.pop(key, None)
+        if x["kind"] == "anomaly_raised":
+            opened[key] = x["occurred_at"]; cleared.discard(key)
+        else:
+            opened.pop(key, None); cleared.add(key)
 have = {(a["task_id"], a["rule"]): a["since"] for a in s["anomalies"]}
 for k, v in opened.items():
     if have.get(k) != v: bad.append(f"anomaly {k} raised at {v} in the events, status has {have.get(k)}")
+for k in have:
+    if k in cleared: bad.append(f"anomaly {k} is cleared in the events, but status still lists it as open")
 for r in s["ranges"]:
     pl = {k: 0 for k in r["places"]}
     for i in r["items"]: pl[i["place"]] += 1

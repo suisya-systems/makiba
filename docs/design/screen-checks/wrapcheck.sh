@@ -24,7 +24,7 @@ page, js, out = (pathlib.Path(a) for a in sys.argv[1:])
 html = page.read_text(encoding="utf-8")
 out.write_text(html.replace("</body>", "<script>" + js.read_text(encoding="utf-8") + "</script></body>"), encoding="utf-8")
 PY
-"$browser" --no-sandbox --window-size=1480,1000 --virtual-time-budget=3000 --dump-dom "file://$work/check.html" 2>/dev/null \
+"$browser" --headless --no-sandbox --window-size=1480,1000 --virtual-time-budget=3000 --dump-dom "file://$work/check.html" 2>/dev/null \
   | python3 -c '
 import sys, re, html
 m = re.search(r"<pre id=\"wrapcheck\">(.*?)</pre>", sys.stdin.read(), re.S)
