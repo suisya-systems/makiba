@@ -105,13 +105,17 @@ Before the attempt or the entry is written, in the same transaction and after th
 again (so two calls that ran their gates at once cannot both write one), the verb applies these
 rules, in order:
 
-1. The pull request has an open attempt (a `merge_attempted` with no outcome event, section 4.2):
-   `conflict`, for every action.
+1. The pull request has an **act awaiting its landing** (section 7: an open attempt; a
+   `merge_done` or a `merge_unknown` `observed` `merged` with no `pr_merged` after it; or an open
+   queue act): `conflict`, for every action. So a pull request has at most one act that has not
+   ended, and "the newest act" of section 7 is that act; a second request after an enqueue is
+   refused until the queue act ends (landing or `merge_dequeued`).
 2. `request` that would write a pending entry, and an open merge entry exists for the same pull
-   request and head: that entry is answered again (no second entry; section 5.1).
-3. `request` and an open merge entry exists for the same pull request at another head: that entry
-   is withdrawn (its head is no longer the pull request's, which the gate just read) and the
-   request goes on.
+   request, head and `method`: that entry is answered again (no second entry; section 5.1).
+3. `request` and an open merge entry exists for the same pull request at another head or with
+   another `method`: that entry is withdrawn (its head is no longer the pull request's, which the
+   gate just read, or the secretary now asks for another method) and the request goes on; the new
+   entry names the new method, which the person sees before approving.
 4. `approve`: its own entry is consumed by a conditional update in this transaction (section 5.2);
    no other open entry can exist for the pull request, by rules 2 and 3.
 
@@ -257,16 +261,19 @@ sending: state read") is read that way.
 
 A `pending` row of a new kind, `merge` (a schema step widens the `kind` check of
 `schema_v4.sql:65`), on the task's run when the pull request has one (the newest `pr_watches` row
-names it), else with no run. `question`: "Merge <repo>#<pr> at <short head> (<title>)?".
+names it), else with no run. `question`: "Merge <repo>#<pr> at <short head> by <method>
+(<title>)?".
 `context_json`: `repo`, `pr`, `head`, `method`, `mode`, `gate_event`, the gate's `reason`, its
 `warnings` (each warn case of `door.rs:3150-3221` as its own line: review state, edited tests,
-range mode), `requested_by`, and `text_sum`, the SHA-256 of the text the CLI prints. It shows in
+range mode), `requested_by`, and `text_sum`, the SHA-256 of the text the CLI prints (which holds
+the method, so an entry whose method changed cannot be approved with an old preview). It shows in
 `makiba status` and among the pending entries as any other; the screen of 169 / 404 later shows it
 with an approve button that sends the same verb with the person key.
 
 The `answer` verb refuses an entry of kind `merge` (`forbidden`: "approve it with makiba merge
-approve <id>"), so the secretary cannot answer it. A second `request` for the same pull request and
-head while the entry is open answers that entry again (as `pending add` does, `door.rs:895-908`).
+approve <id>"), so the secretary cannot answer it. A second `request` for the same pull request,
+head and method while the entry is open answers that entry again (as `pending add` does,
+`door.rs:895-908`); one with another head or method replaces it (section 3.1, rule 3).
 
 The entry is withdrawn by makibad, with a notice, when its head stops being the pull request's: a
 `pr pushed` of another head (the door's `pr` verb), or a `pr_merged` or `pr_closed` the PR watch
@@ -275,8 +282,8 @@ writes.
 ### 5.2 Approval
 
 `makiba merge approve <id> [--yes]` in the person's shell, as `range approve`: the CLI reads the
-entry from `state.db` as `status` reads it, prints the pull request, head, title, the gate's reason
-and each warning, and makibad's `merge_approval_mode`, asks y/N unless `--yes`, and sends `merge`
+entry from `state.db` as `status` reads it, prints the pull request, head, title, the merge method
+(or, on a queue branch, that the queue's own method applies), the gate's reason and each warning, and makibad's `merge_approval_mode`, asks y/N unless `--yes`, and sends `merge`
 `approve` with `id` and `shown` (the `text_sum` it printed) over the door with the person key.
 
 The door, for the person only:
@@ -398,7 +405,11 @@ An act that ended without a landing (`merge_failed`, `merge_unknown` with `obser
 `closed`, `merged_other_head` or `unreadable`, `merge_dequeued`) adds nothing: the run is followed
 or not as before. The act needs the run's current pull request: the `merge` verb refuses
 (`conflict`) a pull request that is not some run's current one (`current_pr_sql`, as `followed`
-reads it).
+reads it). It stays the current one until its act ends: the `pr` verb refuses (`conflict`) an
+`opened` of another pull request for a run whose current pull request has an act awaiting its
+landing ("wait for its landing, or for the queue to drop it"), so `followed`, which keys on the
+current pull request, never loses an outstanding act to a replacement. A replacement opened by
+hand on GitHub and never recorded does not change the current pull request.
 
 ## 8. The hook with no allowed form, and gh's stderr
 
@@ -558,14 +569,16 @@ and each records its source in this section):
    restart reconciliation; first confirm claims 1-4 of section 10. Depends on: 5. Acceptance: a
    fake gh shows an allowed request merged at the judged head with `merge_done`, a refused one
    sending nothing, a 502 answer recorded `merge_unknown` (not `merge_failed`), and an open attempt
-   of another `boot` reconciled as `merge_unknown` `observed` `merged` and never sent again.
+   of another `boot` reconciled as `merge_unknown` `observed` `merged` and never sent again; after
+   an enqueue, a second request is refused `conflict` until the queue act ends, and `pr opened` of
+   a replacement pull request is refused while an act awaits its landing.
 2. **The person's approval of a pending merge.** What: the `pending` kind `merge` (a schema step),
    `request` under `human` writing the entry, `approve` / `refuse` / `withdraw` consuming it by a
    conditional update, `makiba merge approve <id>` with its preview, `answer` refusing the kind,
    withdrawal on a new head or a landing. Depends on: 1. Acceptance: under `human` the secretary's
    request lands nothing until the person's key approves the printed entry; a changed entry, a new
    warning, or a `refuse` committed while the approval's gate ran answers `stale` and writes no
-   attempt.
+   attempt; a request with another method replaces the entry, and the preview prints the method.
 3. **The hook with no allowed form.** What: `merge_gate.rs` refuses every merge command form, the
    `enqueuePullRequest` mutation and a write to any `pulls/<n>/merge*` path, and asks no door; the
    gate key retired (section 8). Depends on: 1 (the secretary needs the verb first). Acceptance:
@@ -575,7 +588,7 @@ and each records its source in this section):
    `merged_via` from act records (`gate`, `unknown`, `hand`) with the timeline continuity check for
    a queued landing, the wait while an attempt is open, the queue fields in the state read and in
    `MergeRead`, `apply_queue` and `merge_dequeued` with its notice, `followed` keeping a pull
-   request with an open queue act; first confirm claims 5-6. Depends on: 1, and on Issue 424 ask 1
+   request with an act awaiting its landing; first confirm claims 5-6. Depends on: 1, and on Issue 424 ask 1
    (the notice of every merge), which lands first. Acceptance: an `acceptance_gate` allow alone
    gives `hand`; a `merge_unknown` gives `unknown`; an uninterrupted queued landing (one addition
    after `merge_attempted`) gives `gate`, and one whose timeline shows a removal and a second
