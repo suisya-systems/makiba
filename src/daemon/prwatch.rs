@@ -18,10 +18,12 @@
 //! a day after its close, Issue 385) has one state poller, which reads
 //! `gh pr view` each interval and brings back a merge, or a close or a reopen it did not start
 //! with. The loop writes it (`apply_state`) only for the generation it was read for: the merge
-//! (`pr_merged`, with who merged it and whether the gate allowed that head), the close
-//! (`pr_closed`) or the reopen (`pr_reopened`), the pull request's watches ended, and the
-//! secretary told of what happened outside makiba. One `gh` call cannot carry both reads: the
-//! state call has no workflow runs and no exact head, which the CI reading relies on.
+//! (`pr_merged`, with who merged it; `merged_via` is always `hand`, Issue 424, since an allowance
+//! of the gate is no proof that its command ran), the close (`pr_closed`) or the reopen
+//! (`pr_reopened`), the pull request's watches ended, and the secretary told of each merge (its
+//! text says whether the gate allowed that head) and of what else happened outside makiba. One
+//! `gh` call cannot carry both reads: the state call has no workflow runs and no exact head,
+//! which the CI reading relies on.
 //!
 //! The merge state (Issue 387, in place of claude-org-ja's conflict announce): the same state read
 //! carries `mergeable`, `mergeStateStatus` and `isDraft`, and each open read is brought back to
@@ -1048,7 +1050,7 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
         match v["state"].as_str() {
             Some("MERGED") => {
                 let head = v["headRefOid"].as_str();
-                let gate: bool = w.conn().query_row(
+                let allowed: bool = w.conn().query_row(
                     "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'acceptance_gate'
                        AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
                        AND json_extract(payload_json, '$.pr') = ?2
@@ -1057,7 +1059,11 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
                     params![repo, pr, head],
                     |r| r.get(0),
                 )?;
-                let via = if gate { "gate" } else { "hand" };
+                // An allowance of the gate at that head is no proof that the allowed command ran
+                // (Issue 424: the secretary's own permission check can refuse it after the gate
+                // allowed it, and the owner then merge that head by hand): nothing records the
+                // run, so the merge is `hand`, and the allowance only chooses the notice's text.
+                let via = "hand";
                 event(
                     "pr_merged",
                     json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
@@ -1076,21 +1082,23 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
                     json!({"repo": repo, "pr": pr}),
                     &format!("Your pull request {repo}#{pr} landed (merged at {at})."),
                 )?;
-                if !gate {
-                    let by = v["mergedBy"]["login"]
-                        .as_str()
-                        .unwrap_or("an unknown account");
-                    let merge = v["mergeCommit"]["oid"]
-                        .as_str()
-                        .map_or("unknown", |m| &m[..m.len().min(7)]);
-                    super::verify::notify_secretary(
-                        w,
-                        Some(task),
-                        &format!(
-                            "Pull request {repo}#{pr} of task {task} was merged by hand outside makiba's gate (by {by}, at {at}, merge commit {merge}): run the retro and close the task."
-                        ),
-                    )?;
-                }
+                let by = v["mergedBy"]["login"]
+                    .as_str()
+                    .unwrap_or("an unknown account");
+                let merge = v["mergeCommit"]["oid"]
+                    .as_str()
+                    .map_or("unknown", |m| &m[..m.len().min(7)]);
+                // Every merge is told (Issue 424), whatever made it.
+                let notice = if allowed {
+                    format!(
+                        "Pull request {repo}#{pr} of task {task} was merged by hand (by {by}, at {at}, merge commit {merge}); the gate allowed that head, but makiba saw no gated merge command run: run the retro and close the task."
+                    )
+                } else {
+                    format!(
+                        "Pull request {repo}#{pr} of task {task} was merged by hand outside makiba's gate (by {by}, at {at}, merge commit {merge}): run the retro and close the task."
+                    )
+                };
+                super::verify::notify_secretary(w, Some(task), &notice)?;
                 Ok(true)
             }
             // A pull request closed without its merge: it will not land as it is (belt.md 4.3).
