@@ -156,9 +156,20 @@ fn two_fixtures_alive_at_once_do_not_share_a_base() {
             assert!(wait_for_line(&*a, &ta), "a's line was not read");
             assert!(wait_for_line(&*b, &tb), "b's line was not read");
         }
+        // Stopping one base leaves the other running: its place stays and its terminal still reads.
         a.end(&ta).unwrap();
+        let place_a = a.place.clone();
+        drop(a);
+        if let (Some(pa), Some(pb)) = (&place_a, &b.place) {
+            assert!(!pa.root.exists(), "{} was left", pa.root.display());
+            assert!(pb.root.exists(), "dropping a removed b's place");
+            assert!(
+                !own_lines(&*b, &tb, &mark("b")).is_empty(),
+                "b no longer shows its line after a was dropped"
+            );
+        }
         b.end(&tb).unwrap();
-        [a.place.clone(), b.place.clone()]
+        [place_a, b.place.clone()]
     };
     for place in places.into_iter().flatten() {
         assert!(!place.root.exists(), "{} was left", place.root.display());
