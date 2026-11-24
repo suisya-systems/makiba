@@ -1,0 +1,1332 @@
+{
+  "makibad": {
+    "pid": 41872,
+    "heartbeat_at": "2026-11-24T09:59:57.412Z",
+    "subscribed": true,
+    "running": true
+  },
+  "merge_approval_mode": "human",
+  "projects": [
+    {
+      "slug": "loom",
+      "repo": "example-org/loom",
+      "default_branch": "main",
+      "network_hosts": "crates.io,static.crates.io",
+      "goal_ledger": {
+        "state": "ok",
+        "clauses": 9,
+        "placed_at": "2026-11-20T11:04:09.000Z",
+        "placed_by": "person"
+      }
+    },
+    {
+      "slug": "atlas",
+      "repo": null,
+      "default_branch": "main",
+      "network_hosts": "",
+      "goal_ledger": {
+        "state": "none",
+        "clauses": null,
+        "placed_at": null,
+        "placed_by": null
+      }
+    },
+    {
+      "slug": "quill",
+      "repo": "example-org/quill",
+      "default_branch": "main",
+      "network_hosts": "",
+      "goal_ledger": {
+        "state": "ok",
+        "clauses": 6,
+        "placed_at": "2026-11-21T09:12:40.000Z",
+        "placed_by": "secretary"
+      }
+    },
+    {
+      "slug": "harbor",
+      "repo": "example-org/harbor",
+      "default_branch": "main",
+      "network_hosts": "registry.example.com",
+      "goal_ledger": {
+        "state": "ok",
+        "clauses": 7,
+        "placed_at": "2026-11-22T14:30:02.000Z",
+        "placed_by": "person"
+      }
+    }
+  ],
+  "runs": [
+    {
+      "task_id": "r2-33",
+      "kind": "code",
+      "project": "loom",
+      "status": "failed",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "loom-ci-fix",
+      "kind": "code",
+      "project": "loom",
+      "status": "review",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r3-48",
+      "kind": "code",
+      "project": "loom",
+      "status": "review",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r3-51",
+      "kind": "code",
+      "project": "loom",
+      "status": "review",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r3-53",
+      "kind": "code",
+      "project": "loom",
+      "status": "review",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "loom-bench",
+      "kind": "code",
+      "project": "loom",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r3-47",
+      "kind": "code",
+      "project": "loom",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": {
+        "for": "person",
+        "pending": [
+          27
+        ],
+        "why": "Should the cache key include the locale?"
+      },
+      "unparked": null
+    },
+    {
+      "task_id": "r3-55",
+      "kind": "code",
+      "project": "loom",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "atlas-notes",
+      "kind": "document",
+      "project": "atlas",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": {
+        "for": "person",
+        "pending": [
+          30
+        ],
+        "why": "The worker stopped at a login to the notes host. May it wait until you log in?"
+      },
+      "unparked": null
+    },
+    {
+      "task_id": "r3-56",
+      "kind": "code",
+      "project": "loom",
+      "status": "failed",
+      "stage": "failed",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r5-56",
+      "kind": "code",
+      "project": "quill",
+      "status": "review",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r5-18",
+      "kind": "code",
+      "project": "quill",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": {
+        "for": "person",
+        "pending": [
+          33
+        ],
+        "why": "May the exporter drop empty sections?"
+      },
+      "unparked": null
+    },
+    {
+      "task_id": "r5-21",
+      "kind": "code",
+      "project": "quill",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r6-9",
+      "kind": "code",
+      "project": "harbor",
+      "status": "review",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r6-15",
+      "kind": "code",
+      "project": "harbor",
+      "status": "in_use",
+      "stage": "verified",
+      "waiting": null,
+      "unparked": null
+    },
+    {
+      "task_id": "r6-14",
+      "kind": "code",
+      "project": "harbor",
+      "status": "failed",
+      "stage": "failed",
+      "waiting": null,
+      "unparked": null
+    }
+  ],
+  "terminals": [
+    {
+      "role": "secretary",
+      "name": "secretary",
+      "state": "idle",
+      "since": "2026-11-24T09:58:40.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-loom-ci-fix",
+      "state": "working",
+      "since": "2026-11-24T09:51:16.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r3-48",
+      "state": "idle",
+      "since": "2026-11-24T09:29:55.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r3-51",
+      "state": "idle",
+      "since": "2026-11-24T09:32:02.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r3-53",
+      "state": "idle",
+      "since": "2026-11-24T09:23:40.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-loom-bench",
+      "state": "done",
+      "since": "2026-11-24T09:44:20.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r3-47",
+      "state": "idle",
+      "since": "2026-11-24T09:47:50.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r3-55",
+      "state": "working",
+      "since": "2026-11-24T09:13:31.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-atlas-notes",
+      "state": "blocked",
+      "since": "2026-11-24T09:55:12.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r5-56",
+      "state": "idle",
+      "since": "2026-11-24T09:10:20.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r5-18",
+      "state": "idle",
+      "since": "2026-11-24T09:51:02.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r5-21",
+      "state": "working",
+      "since": "2026-11-24T09:21:00.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r6-9",
+      "state": "idle",
+      "since": "2026-11-24T09:36:10.000Z"
+    },
+    {
+      "role": "worker",
+      "name": "w-r6-15",
+      "state": "error",
+      "since": "2026-11-24T09:44:51.000Z"
+    }
+  ],
+  "anomalies": [
+    {
+      "task_id": "r2-33",
+      "rule": "gone",
+      "since": "2026-11-23T17:02:18.000Z"
+    },
+    {
+      "task_id": "loom-bench",
+      "rule": "done_no_report",
+      "since": "2026-11-24T09:48:21.000Z"
+    },
+    {
+      "task_id": "atlas-notes",
+      "rule": "blocked_auth",
+      "since": "2026-11-24T09:55:12.000Z"
+    },
+    {
+      "task_id": "r6-15",
+      "rule": "error",
+      "since": "2026-11-24T09:45:03.000Z"
+    },
+    {
+      "task_id": null,
+      "rule": "binary_replaced",
+      "since": "2026-11-24T09:58:10.000Z"
+    }
+  ],
+  "pending": [
+    {
+      "id": 27,
+      "task_id": "r3-47",
+      "kind": "question",
+      "question": "Should the cache key include the locale?\nThe parsed form differs only in the error messages, which are translated.",
+      "status": "escalated",
+      "created_at": "2026-11-24T09:48:02.000Z",
+      "context": {
+        "background": "The cache stores each parsed file under a key made from its path and its content hash. Error messages are translated at parse time, so a cached file parsed under one locale would show its errors in that locale under another.",
+        "if_yes": "The key gains the locale. A machine that switches locale parses once more per locale; nothing else changes.",
+        "if_no": "Messages are translated when shown instead of at parse time: a larger change, about two more days of work in the parser.",
+        "recommend": "yes",
+        "why": "It is the smaller change and keeps the parser as it is; the extra parse per locale is rare."
+      }
+    },
+    {
+      "id": 29,
+      "task_id": "loom-bench",
+      "kind": "prompt",
+      "question": "Allow Bash: cargo bench --bench large_files",
+      "status": "open",
+      "created_at": "2026-11-24T09:46:30.000Z",
+      "context": {
+        "background": null,
+        "if_yes": null,
+        "if_no": null,
+        "recommend": null,
+        "why": null
+      }
+    },
+    {
+      "id": 30,
+      "task_id": "atlas-notes",
+      "kind": "question",
+      "question": "The worker stopped at a login to the notes host. May it wait until you log in?",
+      "status": "escalated",
+      "created_at": "2026-11-24T09:56:01.000Z",
+      "context": {
+        "background": "The notes host asks for a fresh login every 24 hours; the last one was yesterday morning.",
+        "if_yes": null,
+        "if_no": null,
+        "recommend": null,
+        "why": null
+      }
+    },
+    {
+      "id": 33,
+      "task_id": "r5-18",
+      "kind": "question",
+      "question": "May the exporter drop empty sections?",
+      "status": "escalated",
+      "created_at": "2026-11-24T09:51:30.000Z",
+      "context": {
+        "background": "Two of the sample documents have headings with nothing under them; the exporter writes them as empty pages today.",
+        "if_yes": "Empty sections vanish from every export; a reader of the export cannot tell they were there.",
+        "if_no": "They stay, with a line saying the section is empty; a few more lines in the output.",
+        "recommend": "no",
+        "why": "Dropping text silently is the harder change to undo; the line costs little."
+      }
+    },
+    {
+      "id": 35,
+      "task_id": null,
+      "kind": "question",
+      "question": "Range 5 of quill reached its budget_tasks, and #23 (at least) is left inside it. Should a new range be proposed for what is left?",
+      "status": "escalated",
+      "created_at": "2026-11-24T09:20:06.000Z",
+      "context": {
+        "background": "The range's budget_tasks is spent: makibad puts nothing new in, and the range ends when its open tasks close.",
+        "if_yes": "The secretary drafts a new range for what is left (one that replaces this one while it has not ended), for you to approve.",
+        "if_no": "The Issues left stay out until you say otherwise.",
+        "recommend": "None: the budget was your bound.",
+        "why": null
+      }
+    }
+  ],
+  "pr_watches": [
+    {
+      "repo": "example-org/loom",
+      "pr": 127,
+      "head_oid": "4be1c0d9a7f3e2b1c6d5a4f3e2d1c0b9a8f7e6d5",
+      "task_id": "r3-51",
+      "started_at": "2026-11-24T09:31:44.000Z"
+    }
+  ],
+  "ranges": [
+    {
+      "id": 2,
+      "project": "loom",
+      "status": "ended",
+      "ended_reason": "replaced",
+      "issues": [
+        30,
+        33
+      ],
+      "takes": "",
+      "brief_head": "Work in the loom repository on the old format.",
+      "at_once": 2,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 4,
+        "hours": null,
+        "fixes": 2
+      },
+      "approved_by": "person",
+      "approved_at": "2026-11-23T15:02:00.000Z",
+      "approved_read_at": "2026-11-23T15:00:41.000Z",
+      "used": {
+        "tasks": 2,
+        "hours": 16.49
+      },
+      "follow_ups": "ask",
+      "design_ahead": false,
+      "read_id": 861,
+      "read_at": "2026-11-23T15:00:41.000Z",
+      "read_complete": true,
+      "skipped": [],
+      "candidates": [
+        {
+          "issue": 30,
+          "title": "A parser for the old format",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 33,
+          "title": "Convert old files in place",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 30,
+          "title": "A parser for the old format",
+          "place": "landed",
+          "why": null,
+          "stage": null,
+          "since": "2026-11-23T16:10:22.000Z",
+          "task_id": "r2-30",
+          "pr": 109,
+          "pr_title": "A parser for the old format"
+        },
+        {
+          "issue": 33,
+          "title": "Convert old files in place",
+          "place": "in_work",
+          "why": null,
+          "stage": "launch_failed",
+          "since": "2026-11-23T16:31:40.000Z",
+          "task_id": "r2-33",
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 1,
+        "closed": 0,
+        "waiting_person": 0,
+        "review": 0,
+        "in_work": 1,
+        "not_in": 0,
+        "skipped": 0
+      },
+      "stops": [],
+      "stops_taken": {}
+    },
+    {
+      "id": 3,
+      "project": "loom",
+      "status": "active",
+      "ended_reason": null,
+      "issues": [
+        41,
+        42,
+        44,
+        47,
+        48,
+        51,
+        53,
+        55,
+        56,
+        58,
+        60,
+        61
+      ],
+      "takes": "",
+      "brief_head": "Work in the loom repository on the parser and its cache.\nKeep each pull request to one Issue; write the test first.\nAsk before adding a dependency.",
+      "at_once": 3,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 16,
+        "hours": 12.0,
+        "fixes": 2
+      },
+      "approved_by": "person",
+      "approved_at": "2026-11-24T07:31:12.000Z",
+      "approved_read_at": "2026-11-24T07:29:58.000Z",
+      "used": {
+        "tasks": 9,
+        "hours": 2.481
+      },
+      "follow_ups": "ask",
+      "design_ahead": false,
+      "read_id": 960,
+      "read_at": "2026-11-24T09:40:03.000Z",
+      "read_complete": true,
+      "skipped": [
+        {
+          "issue": 58,
+          "reason": "duplicate of #47"
+        }
+      ],
+      "candidates": [
+        {
+          "issue": 60,
+          "title": "Document the config keys",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 61,
+          "title": "Parse included files lazily",
+          "admitted": false,
+          "left_out_why": "waits for #55",
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 41,
+          "title": "Parse the config file once at start",
+          "place": "landed",
+          "why": null,
+          "stage": null,
+          "since": "2026-11-24T08:22:02.000Z",
+          "task_id": "r3-41",
+          "pr": 118,
+          "pr_title": "Parse the config file once at start"
+        },
+        {
+          "issue": 42,
+          "title": "Accept a trailing comma in lists",
+          "place": "landed",
+          "why": null,
+          "stage": null,
+          "since": "2026-11-24T08:58:30.000Z",
+          "task_id": "r3-42",
+          "pr": 121,
+          "pr_title": "Accept a trailing comma in lists"
+        },
+        {
+          "issue": 44,
+          "title": "Rename the cache folder",
+          "place": "closed",
+          "why": "no merge recorded",
+          "stage": null,
+          "since": "2026-11-24T09:02:55.000Z",
+          "task_id": "r3-44",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 47,
+          "title": "Cache parsed files between runs",
+          "place": "waiting_person",
+          "why": "decision: Should the cache key include the locale?",
+          "stage": null,
+          "since": "2026-11-24T09:48:02.000Z",
+          "task_id": "r3-47",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 48,
+          "title": "Show the line of a parse error",
+          "place": "review",
+          "why": null,
+          "stage": "to_land",
+          "since": "2026-11-24T08:00:10.000Z",
+          "task_id": "r3-48",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 51,
+          "title": "Warn on an unknown key",
+          "place": "review",
+          "why": null,
+          "stage": "ci",
+          "since": "2026-11-24T08:04:31.000Z",
+          "task_id": "r3-51",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 53,
+          "title": "Read the config from stdin",
+          "place": "review",
+          "why": null,
+          "stage": "ci",
+          "since": "2026-11-24T07:58:05.000Z",
+          "task_id": "r3-53",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 55,
+          "title": "Split the parser into two passes",
+          "place": "in_work",
+          "why": null,
+          "stage": "at_work",
+          "since": "2026-11-24T09:12:47.000Z",
+          "task_id": "r3-55",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 56,
+          "title": "A benchmark for large files",
+          "place": "in_work",
+          "why": null,
+          "stage": "launch_failed",
+          "since": "2026-11-24T09:37:20.000Z",
+          "task_id": "r3-56",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 58,
+          "title": "Cache parsed files on disk",
+          "place": "skipped",
+          "why": "duplicate of #47",
+          "stage": null,
+          "since": "2026-11-24T09:39:30.000Z",
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 60,
+          "title": "Document the config keys",
+          "place": "not_in",
+          "why": "no_slot",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 61,
+          "title": "Parse included files lazily",
+          "place": "not_in",
+          "why": "waits for #55",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 2,
+        "closed": 1,
+        "waiting_person": 1,
+        "review": 3,
+        "in_work": 2,
+        "not_in": 2,
+        "skipped": 1
+      },
+      "stops": [
+        {
+          "id": 22,
+          "task_id": "r3-41",
+          "question": "Should a missing file be an error or a warning?",
+          "kind": "scope",
+          "recommend_answer": "no",
+          "answer": "no",
+          "status": "answered"
+        },
+        {
+          "id": 27,
+          "task_id": "r3-47",
+          "question": "Should the cache key include the locale?",
+          "kind": "design",
+          "recommend_answer": "yes",
+          "answer": null,
+          "status": "escalated"
+        }
+      ],
+      "stops_taken": {
+        "design": {
+          "stops": 1,
+          "as_recommended": 0
+        },
+        "scope": {
+          "stops": 1,
+          "as_recommended": 1
+        }
+      }
+    },
+    {
+      "id": 4,
+      "project": "atlas",
+      "status": "proposed",
+      "ended_reason": null,
+      "issues": [
+        7,
+        9,
+        12
+      ],
+      "takes": "label:ready",
+      "brief_head": "Document task in the atlas notes.\nWrite in plain sentences; cite the sheet each figure comes from.",
+      "at_once": 1,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 3,
+        "hours": null,
+        "fixes": 2
+      },
+      "approved_by": null,
+      "approved_at": null,
+      "approved_read_at": null,
+      "used": {
+        "tasks": 0,
+        "hours": null
+      },
+      "follow_ups": "inside",
+      "design_ahead": false,
+      "read_id": 968,
+      "read_at": "2026-11-24T09:52:30.000Z",
+      "read_complete": true,
+      "skipped": [],
+      "candidates": [
+        {
+          "issue": 7,
+          "title": "Import the survey sheets",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 9,
+          "title": "Tag each sheet by region",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 12,
+          "title": "A summary table per region",
+          "admitted": false,
+          "left_out_why": "held by #9",
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 7,
+          "title": "Import the survey sheets",
+          "place": "not_in",
+          "why": "range proposed",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 9,
+          "title": "Tag each sheet by region",
+          "place": "not_in",
+          "why": "range proposed",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 12,
+          "title": "A summary table per region",
+          "place": "not_in",
+          "why": "held by #9",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 0,
+        "closed": 0,
+        "waiting_person": 0,
+        "review": 0,
+        "in_work": 0,
+        "not_in": 3,
+        "skipped": 0
+      },
+      "stops": [],
+      "stops_taken": {}
+    },
+    {
+      "id": 5,
+      "project": "quill",
+      "status": "active",
+      "ended_reason": null,
+      "issues": [
+        12,
+        18,
+        21,
+        23,
+        56
+      ],
+      "takes": "",
+      "brief_head": "Work in the quill repository on the exporter.\nOne pull request per Issue.",
+      "at_once": 2,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 4,
+        "hours": null,
+        "fixes": 2
+      },
+      "approved_by": "person",
+      "approved_at": "2026-11-24T07:50:31.000Z",
+      "approved_read_at": "2026-11-24T07:49:55.000Z",
+      "used": {
+        "tasks": 4,
+        "hours": 2.158
+      },
+      "follow_ups": "ask",
+      "design_ahead": false,
+      "read_id": 907,
+      "read_at": "2026-11-24T07:49:55.000Z",
+      "read_complete": true,
+      "skipped": [],
+      "candidates": [
+        {
+          "issue": 23,
+          "title": "Export to a single page",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 12,
+          "title": "Export to plain text",
+          "place": "landed",
+          "why": null,
+          "stage": null,
+          "since": "2026-11-24T08:47:10.000Z",
+          "task_id": "r5-12",
+          "pr": 40,
+          "pr_title": "Export to plain text"
+        },
+        {
+          "issue": 18,
+          "title": "Drop empty sections on export",
+          "place": "waiting_person",
+          "why": "decision: May the exporter drop empty sections?",
+          "stage": null,
+          "since": "2026-11-24T09:51:30.000Z",
+          "task_id": "r5-18",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 56,
+          "title": "Spell-check the headings",
+          "place": "review",
+          "why": null,
+          "stage": "to_land",
+          "since": "2026-11-24T08:12:00.000Z",
+          "task_id": "r5-56",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 21,
+          "title": "A table of contents",
+          "place": "in_work",
+          "why": null,
+          "stage": "at_work",
+          "since": "2026-11-24T09:20:05.000Z",
+          "task_id": "r5-21",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 23,
+          "title": "Export to a single page",
+          "place": "not_in",
+          "why": "budget",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 1,
+        "closed": 0,
+        "waiting_person": 1,
+        "review": 1,
+        "in_work": 1,
+        "not_in": 1,
+        "skipped": 0
+      },
+      "stops": [
+        {
+          "id": 33,
+          "task_id": "r5-18",
+          "question": "May the exporter drop empty sections?",
+          "kind": "scope",
+          "recommend_answer": "no",
+          "answer": null,
+          "status": "escalated"
+        }
+      ],
+      "stops_taken": {
+        "scope": {
+          "stops": 1,
+          "as_recommended": 0
+        }
+      }
+    },
+    {
+      "id": 6,
+      "project": "harbor",
+      "status": "active",
+      "ended_reason": null,
+      "issues": [
+        9,
+        14,
+        15,
+        20
+      ],
+      "takes": "",
+      "brief_head": "Work in the harbor repository on publishing releases.\nNever publish to the real registry from a test.",
+      "at_once": 2,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 6,
+        "hours": 8.0,
+        "fixes": 2
+      },
+      "approved_by": "person",
+      "approved_at": "2026-11-24T08:02:10.000Z",
+      "approved_read_at": "2026-11-24T08:01:30.000Z",
+      "used": {
+        "tasks": 3,
+        "hours": 1.964
+      },
+      "follow_ups": "ask",
+      "design_ahead": false,
+      "read_id": 910,
+      "read_at": "2026-11-24T08:01:30.000Z",
+      "read_complete": true,
+      "skipped": [],
+      "candidates": [
+        {
+          "issue": 20,
+          "title": "A dry-run flag for publish",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 9,
+          "title": "Retry a failed upload",
+          "place": "review",
+          "why": null,
+          "stage": "ci",
+          "since": "2026-11-24T08:05:44.000Z",
+          "task_id": "r6-9",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 15,
+          "title": "Keep the last five releases",
+          "place": "in_work",
+          "why": null,
+          "stage": "at_work",
+          "since": "2026-11-24T09:01:39.000Z",
+          "task_id": "r6-15",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 14,
+          "title": "Sign each release archive",
+          "place": "in_work",
+          "why": null,
+          "stage": "launch_failed",
+          "since": "2026-11-24T09:30:12.000Z",
+          "task_id": "r6-14",
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 20,
+          "title": "A dry-run flag for publish",
+          "place": "not_in",
+          "why": "no_slot",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 0,
+        "closed": 0,
+        "waiting_person": 0,
+        "review": 1,
+        "in_work": 2,
+        "not_in": 1,
+        "skipped": 0
+      },
+      "stops": [],
+      "stops_taken": {}
+    },
+    {
+      "id": 7,
+      "project": "harbor",
+      "status": "proposed",
+      "ended_reason": null,
+      "issues": [
+        20,
+        22,
+        24
+      ],
+      "takes": "",
+      "brief_head": "Work in the harbor repository on publishing releases.\nNever publish to the real registry from a test.\nKeep the dry-run flag the default in every example.",
+      "at_once": 2,
+      "approval_mode": "human",
+      "budget": {
+        "tasks": 5,
+        "hours": 8.0,
+        "fixes": 2
+      },
+      "approved_by": null,
+      "approved_at": null,
+      "approved_read_at": null,
+      "used": {
+        "tasks": 0,
+        "hours": null
+      },
+      "follow_ups": "ask",
+      "design_ahead": false,
+      "read_id": 970,
+      "read_at": "2026-11-24T09:54:05.000Z",
+      "read_complete": true,
+      "skipped": [],
+      "candidates": [
+        {
+          "issue": 20,
+          "title": "A dry-run flag for publish",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 22,
+          "title": "Publish to a second registry",
+          "admitted": true,
+          "left_out_why": null,
+          "design_only_waits": null
+        },
+        {
+          "issue": 24,
+          "title": "A changelog per release",
+          "admitted": false,
+          "left_out_why": "held by #22",
+          "design_only_waits": null
+        }
+      ],
+      "items": [
+        {
+          "issue": 20,
+          "title": "A dry-run flag for publish",
+          "place": "not_in",
+          "why": "range proposed",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 22,
+          "title": "Publish to a second registry",
+          "place": "not_in",
+          "why": "range proposed",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        },
+        {
+          "issue": 24,
+          "title": "A changelog per release",
+          "place": "not_in",
+          "why": "held by #22",
+          "stage": null,
+          "since": null,
+          "task_id": null,
+          "pr": null,
+          "pr_title": null
+        }
+      ],
+      "places": {
+        "landed": 0,
+        "closed": 0,
+        "waiting_person": 0,
+        "review": 0,
+        "in_work": 0,
+        "not_in": 3,
+        "skipped": 0
+      },
+      "stops": [],
+      "stops_taken": {}
+    }
+  ],
+  "next_work": {
+    "scan_id": 961,
+    "scanned_at": "2026-11-24T09:41:12.000Z",
+    "candidate_count": 9,
+    "trigger": "close",
+    "status": "candidates_found",
+    "error": null,
+    "input_truncated": "",
+    "candidates": [
+      {
+        "repo": "example-org/quill",
+        "issue": 30,
+        "title": "Footnotes in the exporter",
+        "clause_id": "G1",
+        "clause_heading": "Every document exports",
+        "why": "priority G1; effort M",
+        "size": "M",
+        "size_estimated": true,
+        "recommended": true,
+        "forwarded": true
+      },
+      {
+        "repo": "example-org/harbor",
+        "issue": 31,
+        "title": "Publish a checksum file",
+        "clause_id": "G2",
+        "clause_heading": "Releases can be checked",
+        "why": "priority G2; effort S",
+        "size": "S",
+        "size_estimated": false,
+        "recommended": false,
+        "forwarded": true
+      },
+      {
+        "repo": "example-org/quill",
+        "issue": 27,
+        "title": "Keep the heading numbers",
+        "clause_id": "G3",
+        "clause_heading": "Exports read like the source",
+        "why": "priority G3; effort S",
+        "size": "S",
+        "size_estimated": true,
+        "recommended": false,
+        "forwarded": true
+      },
+      {
+        "repo": "example-org/loom",
+        "issue": 60,
+        "title": "Document the config keys",
+        "clause_id": "G2",
+        "clause_heading": "Every setting is documented",
+        "why": "priority G2; effort S",
+        "size": "S",
+        "size_estimated": false,
+        "recommended": false,
+        "forwarded": false
+      },
+      {
+        "repo": "example-org/loom",
+        "issue": 64,
+        "title": "Report the time spent per file",
+        "clause_id": "G2",
+        "clause_heading": "Every setting is documented",
+        "why": "priority G2; follows #55; effort M",
+        "size": "M",
+        "size_estimated": true,
+        "recommended": false,
+        "forwarded": false
+      },
+      {
+        "repo": "example-org/loom",
+        "issue": 67,
+        "title": "Colour the output when it is a terminal",
+        "clause_id": "G4",
+        "clause_heading": "Output a person can read",
+        "why": "priority G4; effort S",
+        "size": "S",
+        "size_estimated": true,
+        "recommended": false,
+        "forwarded": false
+      },
+      {
+        "repo": "example-org/loom",
+        "issue": 68,
+        "title": "A flag to print the parsed tree",
+        "clause_id": "G4",
+        "clause_heading": "Output a person can read",
+        "why": "priority G4; effort M",
+        "size": "M",
+        "size_estimated": false,
+        "recommended": false,
+        "forwarded": false
+      },
+      {
+        "repo": "example-org/loom",
+        "issue": 71,
+        "title": "Accept tabs in indentation",
+        "clause_id": "G6",
+        "clause_heading": "Inputs from other tools",
+        "why": "priority G6; effort S",
+        "size": "S",
+        "size_estimated": true,
+        "recommended": false,
+        "forwarded": false
+      },
+      {
+        "repo": "example-org/loom",
+        "issue": 73,
+        "title": "Tidy the examples folder",
+        "clause_id": null,
+        "clause_heading": null,
+        "why": "names no goal clause; effort S",
+        "size": "S",
+        "size_estimated": true,
+        "recommended": false,
+        "forwarded": false
+      }
+    ],
+    "candidates_not_recorded": 0,
+    "left_out": [
+      {
+        "project": "loom",
+        "repo": "example-org/loom",
+        "issue": 63,
+        "kind": "blocked",
+        "reason": "held by #55"
+      },
+      {
+        "project": "loom",
+        "repo": "example-org/loom",
+        "issue": 66,
+        "kind": "put_aside",
+        "reason": "put aside by a blocked or on-hold label; remove the label to bring it back"
+      },
+      {
+        "project": "loom",
+        "repo": "example-org/loom",
+        "issue": 70,
+        "kind": "dependency_unreadable",
+        "reason": "a dependency line names no Issue number: \"after the parser work\"; write it as Depends on #<n>, or remove it"
+      },
+      {
+        "project": "harbor",
+        "repo": "example-org/harbor",
+        "issue": 33,
+        "kind": "blocked",
+        "reason": "held by #14"
+      },
+      {
+        "project": "atlas",
+        "repo": null,
+        "issue": null,
+        "kind": "no_repository",
+        "reason": "no GitHub repository: register it with makiba project <slug> <OWNER/NAME>"
+      }
+    ],
+    "left_out_not_recorded": 0
+  }
+}
