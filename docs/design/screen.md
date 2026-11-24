@@ -485,7 +485,7 @@ The fixture: `status.json` is one object of `makiba status --json` and `events.j
 | Pull requests: the open ones of runs not closed | The `pr_opened` and `fix_pushed` of tasks in `runs[]`, with what the events say of each head (above) | Derivable from the events; missing as a field (C) |
 | Pull requests: the title | Only `pr_merged` and `pr_closed` carry one; for a range's task the item's title stands in | Missing for an open pull request of a one-off task (C). Drawn as a gap |
 | Pull requests: merged today | `pr_merged` since local midnight | Derivable from the events |
-| Task history | Every event with that `task_id`, oldest first; the review rounds (`codex_round_started`), the report (`worker_reported`, written only when a review answered), the gate (`acceptance_gate`) | Given in the events; a filter by task is missing (I) |
+| Task history | Every event with that `task_id`, oldest first; the review rounds (`codex_round_started`), the report (`worker_reported`, written for every worker report, its `review` null when there is none, Issue 409), the gate (`acceptance_gate`) | Given in the events; a filter by task is missing (I) |
 | Instructions | `ranges[].brief_head` | Given |
 
 What the inventory changed in this note: the launch-failure reason moves from missing to derivable (3.3); the wording `stage.checks_running` was wrong for stage `ci` and is corrected (2.4); a review item's age is not its time in review (J); the organization's name has no field (E); the merge state is Issue 387's.
