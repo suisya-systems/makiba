@@ -151,6 +151,9 @@ pub enum Command {
         after: i64,
         #[arg(long)]
         limit: Option<u32>,
+        /// Only the events of this task.
+        #[arg(long)]
+        task: Option<String>,
         #[arg(long)]
         json: bool,
     },

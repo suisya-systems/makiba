@@ -814,7 +814,7 @@ fn events(w: &StateWriter, args: &Value) -> Response {
                 .ok_or_else(|| usage("limit is a count"))?,
         ),
     };
-    crate::status_local::events(&db_file(w)?, after, limit).map_err(internal)
+    crate::status_local::events(&db_file(w)?, after, limit, None).map_err(internal)
 }
 
 /// The path of the door's own database file.
@@ -1657,8 +1657,9 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
         Some(task),
         &body,
     )?;
-    if let Some(r) = &review {
-        let payload = json!({"task": task, "state": state, "review": r});
+    // Every worker report is in the history (Issue 409), its review null when there is none.
+    if role == Role::Worker {
+        let payload = json!({"task": task, "state": state, "review": review});
         w.append_event(&NewEvent {
             kind: "worker_reported",
             actor: Some(actor),
