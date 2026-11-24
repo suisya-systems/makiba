@@ -68,7 +68,7 @@ pub fn read(path: &Path) -> Result<Value, String> {
 
 /// The same read as an object, with no age in it, so two reads of one heartbeat agree:
 /// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}, "merge_approval_mode",
-/// "merge_approval_mode_here"}`. `merge_approval_mode` is `makibad`'s mode as `reader` can know it
+/// "merge_approval_mode_here", "organization"}`. `merge_approval_mode` is `makibad`'s mode as `reader` can know it
 /// (null when the person's read finds no running `makibad` that recorded one);
 /// `merge_approval_mode_here` is this process's environment: the person's shell, or through the
 /// door `makibad`'s own.
@@ -95,6 +95,10 @@ pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
         Reader::Makibad => Some(here.to_string()),
         Reader::Person => recorded_mode(&conn, running),
     };
+    let organization = match reader {
+        Reader::Makibad => Some(crate::daemon::base_session()),
+        Reader::Person => recorded_session(&conn),
+    };
     let projects: Vec<Value> = projects(&conn)
         .into_iter()
         .map(|(slug, repo, branch)| {
@@ -107,7 +111,7 @@ pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
     let sql = |e: rusqlite::Error| format!("cannot read {}: {e}", path.display());
     let mut v = json!({"makibad": {"pid": pid, "heartbeat_at": beat, "subscribed": subscribed == 1,
                           "running": running}, "merge_approval_mode": mode,
-        "merge_approval_mode_here": here, "projects": projects,
+        "merge_approval_mode_here": here, "organization": organization, "projects": projects,
         "runs": runs(&conn).map_err(sql)?, "terminals": terminals(&conn).map_err(sql)?,
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?});
@@ -144,6 +148,26 @@ fn recorded_mode(conn: &Connection, running: bool) -> Option<String> {
         .ok()
         .flatten();
     value.filter(|m| m == "human" || m == "acceptance")
+}
+
+/// The organization's name (Issue 411): the base session the `makibad` of the `dispatcher` row
+/// recorded in its newest `dispatcher_started` at or after that row's start, whether or not it
+/// runs now, so the name stays readable when `makibad` is dead. None when it has not recorded one:
+/// a restart that has not subscribed (or failed) is not named after the start before it, and the
+/// newest start of a build before Issue 411 has no session.
+fn recorded_session(conn: &Connection) -> Option<String> {
+    conn.query_row(
+        "SELECT json_extract(e.payload_json, '$.base_session')
+         FROM events e JOIN dispatcher d ON d.id = 1
+         WHERE e.kind = 'dispatcher_started'
+           AND json_extract(e.payload_json, '$.pid') = d.pid
+           AND e.occurred_at >= d.started_at
+         ORDER BY e.id DESC LIMIT 1",
+        [],
+        |r| r.get(0),
+    )
+    .ok()
+    .flatten()
 }
 
 /// The text's line of the merge approval mode: `makibad`'s, and this shell's when it differs or
@@ -194,11 +218,14 @@ fn rows(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> rusqlite::Res
 }
 
 /// The runs not closed (Issue 168): a `failed` run stays until it is closed. A run waiting for
-/// the person carries `waiting`, and one woken from parking `unparked` (Issue 283).
+/// the person carries `waiting`, and one woken from parking `unparked` (Issue 283). Each run
+/// carries its `title`, its start (`since`, its dispatch), its `issue` and its `range_id`, null
+/// for a one-off task (Issue 407).
 fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     let mut all = rows(
         conn,
-        "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage FROM runs r
+        "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage, r.title,
+                r.dispatched_at AS since, r.range_id, r.issue_refs FROM runs r
          JOIN projects p ON p.id = r.project_id
          LEFT JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
          WHERE r.status NOT IN ('completed', 'abandoned') ORDER BY r.id",
@@ -207,6 +234,10 @@ fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     for run in &mut all {
         let task = run["task_id"].as_str().unwrap_or_default().to_string();
         let status = run["status"].as_str().unwrap_or_default().to_string();
+        let fields = run.as_object_mut().expect("a row is an object");
+        let refs = fields.remove("issue_refs").unwrap_or_default();
+        let issue = own_issue(fields["project"].as_str().unwrap_or_default(), &refs);
+        fields.insert("issue".into(), json!(issue));
         if let Value::Object(more) = crate::daemon::park::read_fields(conn, &task, &status)? {
             run.as_object_mut()
                 .expect("a row is an object")
@@ -214,6 +245,21 @@ fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         }
     }
     Ok(all)
+}
+
+/// The Issue a run works on: the number of the first `<project>#<N>` of its `issue_refs`, as
+/// `belt::issue_ref` writes it. None when the refs are not a JSON array of strings, or name no
+/// Issue of the run's own project.
+fn own_issue(project: &str, refs: &Value) -> Option<i64> {
+    let refs: Value = serde_json::from_str(refs.as_str()?).ok()?;
+    refs.as_array()?.iter().find_map(|r| {
+        let (slug, n) = r.as_str()?.rsplit_once('#')?;
+        if slug == project {
+            n.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// The live terminals: the newest launch of each role and run whose key is not revoked (a key
@@ -487,15 +533,21 @@ const EVENTS_MAX: u32 = 1000;
 
 /// The events after `after`, in order, at most `limit` (Issue 168): `{"events": [{"id",
 /// "occurred_at", "actor", "kind", "task_id", "payload"}]}`. A launch's screen is not shown.
-pub fn events(path: &Path, after: i64, limit: Option<u32>) -> Result<Value, String> {
+/// With `task`, only the events whose `task_id` is that task, the limit counting those (Issue 413).
+pub fn events(
+    path: &Path,
+    after: i64,
+    limit: Option<u32>,
+    task: Option<&str>,
+) -> Result<Value, String> {
     let conn = open(path)?;
     let limit = limit.unwrap_or(EVENTS_LIMIT).min(EVENTS_MAX);
     let mut events = rows(
         &conn,
         "SELECT e.id, e.occurred_at, e.actor, e.kind, r.task_id, e.payload_json AS payload
          FROM events e LEFT JOIN runs r ON r.id = e.run_id
-         WHERE e.id > ?1 ORDER BY e.id LIMIT ?2",
-        rusqlite::params![after, limit],
+         WHERE e.id > ?1 AND (?3 IS NULL OR r.task_id = ?3) ORDER BY e.id LIMIT ?2",
+        rusqlite::params![after, limit, task],
     )
     .map_err(|e| format!("cannot read {}: {e}", path.display()))?;
     for e in &mut events {
@@ -512,9 +564,9 @@ pub fn events(path: &Path, after: i64, limit: Option<u32>) -> Result<Value, Stri
 }
 
 /// `makiba events`: the read above, as one object (`--json`) or one line per event.
-pub fn events_main(after: i64, limit: Option<u32>, as_json: bool) -> ExitCode {
+pub fn events_main(after: i64, limit: Option<u32>, task: Option<&str>, as_json: bool) -> ExitCode {
     let path = crate::daemon::state_dir().join("state.db");
-    match events(&path, after, limit) {
+    match events(&path, after, limit, task) {
         Ok(v) if as_json => println!("{v}"),
         Ok(v) => {
             for e in v["events"].as_array().into_iter().flatten() {
