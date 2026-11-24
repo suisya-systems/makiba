@@ -2,6 +2,8 @@
 
 Decision note for Issue 391. It picks how makibad records the failed CI run at a test commit (the commit with the `Acceptance-Test:` trailer, pushed alone, M below), and what that does to the merge gate's evidence. Goal clause G2: the flow of work does not wait for the person's turn, nor for a result nobody needs.
 
+Issue 478 shortens the run at M itself (only the declared tests, in makiba's own CI): [test-commit-scoped-ci.md](test-commit-scoped-ci.md).
+
 ## 1. What is true today
 
 - **The wait.** `src/daemon/prwatch.rs` (`poll`) concludes a watch only when no check is pending: "a failed check with a sibling still running waits for the sibling" (the carried reading; spec section 5.6, the row "Checks decided"). The secretary is told, and `gate::before_ci` lets the rest of the branch go, only after that `ci_completed`. At PR 390's test commit 75e0b29, `acceptance` failed at 18:27:50 and `real-base` ended at 18:36:04: about 8 minutes of waiting. PR 389's test commit took about 11.5 minutes from push to notice.
