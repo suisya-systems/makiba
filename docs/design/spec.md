@@ -885,7 +885,7 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `pull_requests[].title` | `title` of the newest `pr_read`, `pr_closed` or `pr_merged` of the pull request, null when none |
 | `pull_requests[].head_oid` | `head_oid` of its `pr_merged` when merged and set; else of the run's newest `pr_opened` or `fix_pushed` of that pull request, else of the run's newest watch of it; null when none |
 | `pull_requests[].ci` | `running` while a `pr_watches` row of that repository, number and head is `watching`; else `status` (`passed` or `failed`) of the newest `ci_completed` of them written after the newest `pr_closed` of the pull request, or of any time when that head was recorded again (`pr_opened`, `fix_pushed`) after that close; else null |
-| `pull_requests[].state` | `merged` with a `pr_merged` of the run for it; `closed` when read closed with nothing since (`pr_closed`, section 5.8); else `open` |
+| `pull_requests[].state` | `merged` with a `pr_merged` of that pull request (repository in any case, and number), of any run; `closed` when read closed with nothing since (`pr_closed`, section 5.8); else `open` |
 | `pull_requests[].merged_via` | `merged_via` of its `pr_merged` (`gate` or `hand`), else null |
 | `pull_requests[].merged_by` | `merged_by` of its `pr_merged`, else null |
 | `pull_requests[].merge_state` | of an open pull request, `merge_state` of the newest `pr_read` of it when that read is of `head_oid`; else null (section 5.6: `ready`, `behind`, `conflict`, `blocked`, `draft`, `unknown`, or `other:<status>`) |

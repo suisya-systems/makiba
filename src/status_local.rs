@@ -402,7 +402,9 @@ fn pr_watches(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 
 /// The pull requests (Issue 405): the current one of each run not closed, in run order, then each
 /// merged today (local time) not listed yet, in the order of their merges. Folded from the
-/// ledger and `pr_watches`; see `pull_request` for the fields.
+/// ledger and `pr_watches`; see `pull_request` for the fields. A pull request's merge is read
+/// from any run's `pr_merged`, so that a run not closed which still names a pull request another
+/// run merged does not list it as open and hide the merge.
 fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     use crate::daemon::belt::{current_pr_sql, pr_closed_sql};
     let open = rows(
@@ -410,7 +412,6 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         &format!(
             "SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr, {closed} AS closed,
                     (SELECT e.payload_json FROM events e WHERE e.kind = 'pr_merged'
-                       AND e.run_id = r.id
                        AND lower(json_extract(e.payload_json, '$.repo')) = lower({repo})
                        AND json_extract(e.payload_json, '$.pr') = {pr}
                      ORDER BY e.id DESC LIMIT 1) AS merged
