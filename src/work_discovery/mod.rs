@@ -821,6 +821,7 @@ pub fn scan_repos(
             {
                 excluded_unreadable.push(json!({
                     "repo": disp_repo(repo, collapse_repo), "issue": number, "line": line,
+                    "title": issue.get("title").cloned().unwrap_or(Value::Null),
                 }));
                 continue;
             }
@@ -829,6 +830,7 @@ pub fn scan_repos(
                 excluded_blocked.push(json!({
                     "repo": disp_repo(repo, collapse_repo),
                     "issue": number,
+                    "title": issue.get("title").cloned().unwrap_or(Value::Null),
                     "blocking_refs": open_blocking.iter().map(|r| ref_to_json(r, collapse_repo)).collect::<Vec<_>>(),
                     "note": excluded_note(issue, &open_blocking, collapse_repo),
                 }));
