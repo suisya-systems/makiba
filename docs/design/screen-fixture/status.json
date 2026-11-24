@@ -393,6 +393,21 @@
         "recommend": "no",
         "why": "Dropping text silently is the harder change to undo; the line costs little."
       }
+    },
+    {
+      "id": 35,
+      "task_id": null,
+      "kind": "question",
+      "question": "Range 5 of quill reached its budget_tasks, and #23 (at least) is left inside it. Should a new range be proposed for what is left?",
+      "status": "escalated",
+      "created_at": "2026-11-24T09:20:06.000Z",
+      "context": {
+        "background": "The range's budget_tasks is spent: makibad puts nothing new in, and the range ends when its open tasks close.",
+        "if_yes": "The secretary drafts a new range for what is left (one that replaces this one while it has not ended), for you to approve.",
+        "if_no": "The Issues left stay out until you say otherwise.",
+        "recommend": "None: the budget was your bound.",
+        "why": null
+      }
     }
   ],
   "pr_watches": [
@@ -525,7 +540,7 @@
       },
       "follow_ups": "ask",
       "design_ahead": false,
-      "read_id": 958,
+      "read_id": 960,
       "read_at": "2026-11-24T09:40:03.000Z",
       "read_complete": true,
       "skipped": [
@@ -656,7 +671,7 @@
           "place": "skipped",
           "why": "duplicate of #47",
           "stage": null,
-          "since": "2026-11-24T08:15:00.000Z",
+          "since": "2026-11-24T09:39:30.000Z",
           "task_id": null,
           "pr": null,
           "pr_title": null
@@ -752,7 +767,7 @@
       },
       "follow_ups": "inside",
       "design_ahead": false,
-      "read_id": 966,
+      "read_id": 968,
       "read_at": "2026-11-24T09:52:30.000Z",
       "read_complete": true,
       "skipped": [],
@@ -843,7 +858,7 @@
       "at_once": 2,
       "approval_mode": "human",
       "budget": {
-        "tasks": 8,
+        "tasks": 4,
         "hours": null,
         "fixes": 2
       },
@@ -918,7 +933,7 @@
           "issue": 23,
           "title": "Export to a single page",
           "place": "not_in",
-          "why": "no_slot",
+          "why": "budget",
           "stage": null,
           "since": null,
           "task_id": null,
@@ -1081,7 +1096,7 @@
       },
       "follow_ups": "ask",
       "design_ahead": false,
-      "read_id": 968,
+      "read_id": 970,
       "read_at": "2026-11-24T09:54:05.000Z",
       "read_complete": true,
       "skipped": [],
@@ -1157,7 +1172,7 @@
     }
   ],
   "next_work": {
-    "scan_id": 959,
+    "scan_id": 961,
     "scanned_at": "2026-11-24T09:41:12.000Z",
     "candidate_count": 9,
     "trigger": "close",

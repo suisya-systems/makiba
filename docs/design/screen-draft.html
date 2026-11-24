@@ -371,13 +371,13 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
 </svg>
 <div class="doc">
   <h1>The person's screen · draft 6 (Issue 394, round 4)</h1>
-  <p>Drawn from <code>docs/design/screen-fixture/</code> only, read as at 10:00 on the fixture's day: four projects at once, three with approved work in progress (harbor #6, loom #3, quill #5) and one with a proposal (atlas #4, no repository recorded); three questions for you, seven failures (one of the whole organization), six open pull requests. Numbers collide on purpose: loom#56 and quill#56, loom#127 and harbor#127. A dashed box such as <span class="gap" title="x is not on the read surface (screen.md section 6)">missing: runs[].title</span> is a field the read surface does not give today (screen.md section 6).</p>
+  <p>Drawn from <code>docs/design/screen-fixture/</code> only, read as at 10:00 on the fixture's day: four projects at once, three with approved work in progress (harbor #6, loom #3, quill #5) and one with a proposal (atlas #4, no repository recorded); four questions for you (one a stop of quill's whole approved work, with no task), seven failures (one of the whole organization), six open pull requests. Numbers collide on purpose: loom#56 and quill#56, loom#127 and harbor#127. A dashed box such as <span class="gap" title="x is not on the read surface (screen.md section 6)">missing: runs[].title</span> is a field the read surface does not give today (screen.md section 6).</p>
 </div>
 
 <p class="cap"><b>1 · Light, 1440 × 900: all repositories</b>The sidebar lists the repositories first, in a fixed order by name, each with its approved work and what is stuck in it; the top line keeps the totals and names where they are. The centre shows one block per repository with only what needs a look; every reference carries its project.</p>
 <div class="screen theme-light"><header class="top" data-region="top-line">
   <span class="brand"><span class="logo"></span>makiba</span><span class="org"><span class="gap" title="organization name is not on the read surface (screen.md section 6)">organization name: no field</span></span><span class="flex"></span>
-  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>3</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
+  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>4</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
   <span class="tc fail"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><b>7</b> failed <span class="where">· <u>organization</u> 1 · <u>loom</u> 3 · <u>harbor</u> 2 · <u>atlas</u> 1</span> <span class="q">· 6 unattended</span></span>
   <span class="live"><span class="dot"></span>Running · 3 s ago</span>
   <span class="disp"><span>Display: <b style="color:var(--text);font-weight:600">English · Light</b></span></span>
@@ -387,19 +387,19 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
     <a class=""><span class="ic"><svg class="i sm m-wait" aria-hidden="true"><use href="#wait"/></svg></span><span class="l"><span class="rp">atlas</span><span class="rg">#4 proposed</span></span><span class="c"></span><span class="s"><span class="cw">needs your approval</span> <span class="cw">1 needs you</span> <span class="cf">1 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">harbor</span><span class="rg">#6</span></span><span class="c">3 / 6</span><span class="s"><span class="cw">#7 proposed</span> <span class="cw">needs your approval</span> <span class="cf">2 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">loom</span><span class="rg">#3</span></span><span class="c">9 / 16</span><span class="s"><span class="cw">1 needs you</span> <span class="cf">3 failed</span></span></a>
-    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 8</span><span class="s"><span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 4</span><span class="s"><span class="cw">2 need you</span></span></a>
   </div></div>
   <div><div class="nh">Views</div><div class="nav">
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#fail"/></svg></span><span class="l">Failures</span><span class="c">7</span><span class="s"><span class="cf">6 unattended</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">Issues to start</span><span class="c">8</span><span class="s"><span>4 not ready</span> <span>1 project unchecked</span></span></a>
-    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">3</span><span class="s"><span class="cf">3 failed</span> <span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">3</span><span class="s"><span class="cf">2 failed</span> <span class="cf">1 failed checks</span> <span class="cw">1 needs you</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#review"/></svg></span><span class="l">Pull requests</span><span class="c">6</span><span class="s"><span class="cf">2 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">Task history</span><span class="c"></span></a>
   </div></div>
   <div class="foot"><span>Checked GitHub 09:41</span> · <span>read 10:00</span></div>
 </nav><main class="main"><section class="answer" data-region="answer" aria-label="Needs your answer">
   <div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span> Cache parsed files between runs · a decision on design · 12 min ago</span>
-    <span class="nav2"><span>1 of 3</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
+    <span class="nav2"><span>1 of 4</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
   <h2>Should the cache key include the locale?</h2>
   <p class="q2">The parsed form differs only in the error messages, which are translated.</p>
   <p class="ctx"><a>Show the background</a> · 1 paragraph · question 27, task r3-47</p>
@@ -417,7 +417,7 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
   <div class="repo"><div class="hd"><span class="name">harbor</span><span class="rg">Approved work #6 · in progress · 2 at a time</span><span class="seg" aria-hidden="true"><i class="review"></i><i class="work"></i><i class="failstart"></i><i class="notin"></i></span><span class="of">3 of 6 tasks</span></div>
   <div class="att"><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span></span></span><span class="t">Approved work #7, proposed to replace #6<small>read 09:54 · it would start harbor#20, then harbor#22 · approving it ends #6</small></span><span class="st"><span class="link">Review the proposal</span></span></div><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#15</span></span></span><span class="t">Keep the last five releases</span><span class="st"><b class="cf">reports an error</b> · 15 min</span></div><div class="row "><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span><span class="n">#14</span></span></span><span class="t">Sign each release archive</span><span class="st"><b class="cf">did not start</b> · 27 min</span></div></div><div class="sum">1 in review, its checks failed (harbor#127) · 1 not started<span class="link">Open harbor</span></div></div>
   
-  <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><b style="color:var(--text-2);font-weight:600">loom</b> 1 needs you, 1 did not start</span><span class="ph"><b style="color:var(--text-2);font-weight:600">quill</b> 1 needs you</span></div>
+  <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><b style="color:var(--text-2);font-weight:600">loom</b> 1 needs you, 1 did not start</span><span class="ph"><b style="color:var(--text-2);font-weight:600">quill</b> 2 need you</span></div>
   </div>
 </section><div class="conv" data-region="conversation"><span class="ring"></span><b>Secretary</b><span>idle · 1 min</span>
   <span>· 1 question is with it, not yet passed to you</span><span class="flex"></span><span class="link">Open the conversation</span></div></main><aside class="watch" aria-label="Progress">
@@ -433,7 +433,7 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
 <p class="cap"><b>2 · Dark, 1440 × 900: loom selected</b>Choosing a repository filters every list on the screen to it: its approved work in the centre, its failures and its next Issues on the right; the views in the sidebar count within it. The top line still counts everything.</p>
 <div class="screen theme-dark"><header class="top" data-region="top-line">
   <span class="brand"><span class="logo"></span>makiba</span><span class="org"><span class="gap" title="organization name is not on the read surface (screen.md section 6)">organization name: no field</span></span><span class="flex"></span>
-  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>3</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
+  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>4</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
   <span class="tc fail"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><b>7</b> failed <span class="where">· <u>organization</u> 1 · <u>loom</u> 3 · <u>harbor</u> 2 · <u>atlas</u> 1</span> <span class="q">· 6 unattended</span></span>
   <span class="live"><span class="dot"></span>Running · 3 s ago</span>
   <span class="disp"><span>Display: <b style="color:var(--text);font-weight:600">English · Dark</b></span></span>
@@ -443,19 +443,19 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
     <a class=""><span class="ic"><svg class="i sm m-wait" aria-hidden="true"><use href="#wait"/></svg></span><span class="l"><span class="rp">atlas</span><span class="rg">#4 proposed</span></span><span class="c"></span><span class="s"><span class="cw">needs your approval</span> <span class="cw">1 needs you</span> <span class="cf">1 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">harbor</span><span class="rg">#6</span></span><span class="c">3 / 6</span><span class="s"><span class="cw">#7 proposed</span> <span class="cw">needs your approval</span> <span class="cf">2 failed</span></span></a>
     <a class="on"><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">loom</span><span class="rg">#3</span></span><span class="c">9 / 16</span><span class="s"><span class="cw">1 needs you</span> <span class="cf">3 failed</span></span></a>
-    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 8</span><span class="s"><span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 4</span><span class="s"><span class="cw">2 need you</span></span></a>
   </div></div>
   <div><div class="nh">Views · in loom</div><div class="nav">
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#fail"/></svg></span><span class="l">Failures</span><span class="c">4</span><span class="s"><span class="cf">4 unattended</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">Issues to start</span><span class="c">5</span><span class="s"><span>3 not ready</span></span></a>
-    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">2</span><span class="s"><span class="cf">2 failed</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">2</span><span class="s"><span class="cf">1 failed</span> <span class="cf">1 failed checks</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#review"/></svg></span><span class="l">Pull requests</span><span class="c">4</span><span class="s"><span class="cf">1 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">Task history</span><span class="c"></span></a>
   </div></div>
   <div class="foot"><span>Checked GitHub 09:41</span> · <span>read 10:00</span></div>
 </nav><main class="main"><section class="answer" data-region="answer" aria-label="Needs your answer">
   <div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span> Cache parsed files between runs · a decision on design · 12 min ago</span>
-    <span class="nav2"><span>1 of 3</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
+    <span class="nav2"><span>1 of 4</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
   <h2>Should the cache key include the locale?</h2>
   <p class="q2">The parsed form differs only in the error messages, which are translated.</p>
   <p class="ctx"><a>Show the background</a> · 1 paragraph · question 27, task r3-47</p>
@@ -485,7 +485,7 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
 <p class="cap narrow"><b>3 · Narrow, 1024 × 720: all repositories</b>The right column goes; failures and the next Issues are views of the sidebar, and the top line names where they are.</p>
 <div class="screen narrow theme-light"><header class="top" data-region="top-line">
   <span class="brand"><span class="logo"></span>makiba</span><span class="flex"></span>
-  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>3</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
+  <span class="tc wait"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><b>4</b> need you <span class="where">in <u>atlas</u>, <u>loom</u>, <u>quill</u></span></span>
   <span class="tc fail"><svg class="i m-fail" aria-hidden="true"><use href="#fail"/></svg><b>7</b> failed <span class="where">· <u>organization</u> 1 · <u>loom</u> 3 · <u>harbor</u> 2 · <u>atlas</u> 1</span> <span class="q">· 6 unattended</span></span>
   <span class="live"><span class="dot"></span>Running · 3 s</span>
   <span class="disp"><span>Display</span></span>
@@ -495,19 +495,19 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
     <a class=""><span class="ic"><svg class="i sm m-wait" aria-hidden="true"><use href="#wait"/></svg></span><span class="l"><span class="rp">atlas</span><span class="rg">#4 proposed</span></span><span class="c"></span><span class="s"><span class="cw">needs your approval</span> <span class="cw">1 needs you</span> <span class="cf">1 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">harbor</span><span class="rg">#6</span></span><span class="c">3 / 6</span><span class="s"><span class="cw">#7 proposed</span> <span class="cw">needs your approval</span> <span class="cf">2 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">loom</span><span class="rg">#3</span></span><span class="c">9 / 16</span><span class="s"><span class="cw">1 needs you</span> <span class="cf">3 failed</span></span></a>
-    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 8</span><span class="s"><span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-ok" aria-hidden="true"><use href="#work"/></svg></span><span class="l"><span class="rp">quill</span><span class="rg">#5</span></span><span class="c">4 / 4</span><span class="s"><span class="cw">2 need you</span></span></a>
   </div></div>
   <div><div class="nh">Views</div><div class="nav">
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#fail"/></svg></span><span class="l">Failures</span><span class="c">7</span><span class="s"><span class="cf">6 unattended</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">Issues to start</span><span class="c">8</span><span class="s"><span>4 not ready</span> <span>1 project unchecked</span></span></a>
-    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">3</span><span class="s"><span class="cf">3 failed</span> <span class="cw">1 needs you</span></span></a>
+    <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#notin"/></svg></span><span class="l">One-off tasks</span><span class="c">3</span><span class="s"><span class="cf">2 failed</span> <span class="cf">1 failed checks</span> <span class="cw">1 needs you</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#review"/></svg></span><span class="l">Pull requests</span><span class="c">6</span><span class="s"><span class="cf">2 failed</span></span></a>
     <a class=""><span class="ic"><svg class="i sm m-idle" aria-hidden="true"><use href="#chev"/></svg></span><span class="l">Task history</span><span class="c"></span></a>
   </div></div>
   <div class="foot"><span>Checked GitHub 09:41</span> · <span>read 10:00</span></div>
 </nav><main class="main"><section class="answer" data-region="answer" aria-label="Needs your answer">
   <div class="eyebrow"><span class="k"><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg>Needs your answer</span><span><span class="rk" title="loom"><span class="p">loom</span><span class="n">#47</span></span> Cache parsed files between runs · a decision on design · 12 min ago</span>
-    <span class="nav2"><span>1 of 3</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
+    <span class="nav2"><span>1 of 4</span><span class="link">Next <svg class="i sm" aria-hidden="true"><use href="#chev"/></svg></span></span></div>
   <h2>Should the cache key include the locale?</h2>
   <p class="q2">The parsed form differs only in the error messages, which are translated.</p>
   <p class="ctx"><a>Show the background</a> · 1 paragraph · question 27, task r3-47</p>
@@ -525,7 +525,7 @@ p, h2, h3, h4, .t, .d, .who, .m, .sum, small, .q2, .why, .what, .cap, .fold, .ey
   <div class="repo"><div class="hd"><span class="name">harbor</span><span class="rg">Approved work #6 · in progress · 2 at a time</span><span class="seg" aria-hidden="true"><i class="review"></i><i class="work"></i><i class="failstart"></i><i class="notin"></i></span><span class="of">3 of 6 tasks</span></div>
   <div class="att"><div class="row "><svg class="i m-wait" aria-hidden="true"><use href="#wait"/></svg><span class="ref"><span class="rk" title="harbor"><span class="p">harbor</span></span></span><span class="t">Approved work #7, proposed to replace #6<small>read 09:54 · it would start harbor#20, then harbor#22 · approving it ends #6</small></span><span class="st"><span class="link">Review the proposal</span></span></div></div><div class="sum"></div></div>
   
-  <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><b style="color:var(--text-2);font-weight:600">harbor</b> 2 failed</span><span class="ph"><b style="color:var(--text-2);font-weight:600">loom</b> 1 needs you, 1 did not start</span><span class="ph"><b style="color:var(--text-2);font-weight:600">quill</b> 1 needs you</span></div>
+  <div class="below"><svg class="i sm" aria-hidden="true"><use href="#chev"/></svg><span class="ph">Below:</span><span class="ph"><b style="color:var(--text-2);font-weight:600">harbor</b> 2 failed</span><span class="ph"><b style="color:var(--text-2);font-weight:600">loom</b> 1 needs you, 1 did not start</span><span class="ph"><b style="color:var(--text-2);font-weight:600">quill</b> 2 need you</span></div>
   </div>
 </section><div class="conv" data-region="conversation"><span class="ring"></span><b>Secretary</b><span>idle · 1 min</span>
   <span>· 1 question is with it, not yet passed to you</span><span class="flex"></span><span class="link">Open the conversation</span></div></main></div></div>
