@@ -264,10 +264,10 @@ impl Launch {
         let argv = agent.argv_with_session(
             &AgentLaunch {
                 role,
-                brief: Some(match row.resume {
-                    Some(_) if row.unpark => UNPARK_PROMPT,
-                    Some(_) => RESUME_PROMPT,
-                    None => &row.brief,
+                brief: Some(match prompt_of(row) {
+                    "unpark" => UNPARK_PROMPT,
+                    "resume" => RESUME_PROMPT,
+                    _ => &row.brief,
                 }),
                 rules_file: &rules,
                 settings_file: &settings,
@@ -493,12 +493,27 @@ fn record(w: &StateWriter, row: &Row) -> Result<bool> {
         w.append_event(&NewEvent {
             kind: "worker_spawned",
             actor: Some("makibad"),
-            payload: Some(&json!({"task_id": row.task, "spawn_id": row.spawn})),
+            payload: Some(&json!({
+                "task_id": row.task,
+                "spawn_id": row.spawn,
+                "prompt": prompt_of(row),
+            })),
             run_task_id: row.task.as_deref(),
             ..Default::default()
         })?;
         Ok(true)
     })
+}
+
+/// Which line the launch of `row` gives the agent: `unpark` (`UNPARK_PROMPT`) for a resume that
+/// wakes a parked run, `resume` (`RESUME_PROMPT`) for any other resume, `brief` for a fresh launch.
+/// The argv and the `prompt` of `worker_spawned` both come from here (Issue 426).
+fn prompt_of(row: &Row) -> &'static str {
+    match row.resume {
+        Some(_) if row.unpark => "unpark",
+        Some(_) => "resume",
+        None => "brief",
+    }
 }
 
 impl Row {
@@ -641,7 +656,7 @@ mod tests {
         assert_eq!(n, 1);
         assert_eq!(
             serde_json::from_str::<serde_json::Value>(&payload).unwrap(),
-            json!({"task_id": "t1", "spawn_id": "s1"})
+            json!({"task_id": "t1", "spawn_id": "s1", "prompt": "brief"})
         );
         assert_eq!(run, 1);
         let stage: String = w
