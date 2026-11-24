@@ -10,10 +10,12 @@
 //!   the older ones.
 //! - On a thread (one at a time, its result written by the loop's thread in one transaction):
 //!   the default branch fetched into the clone and P's merge seen in it (`belt::in_clone`, the
-//!   tip T); the paths changed from the tip scanned last (or P's first parent) to T; with one
+//!   tip T); the paths changed from the tip scanned last (with none, from the first parent of
+//!   the oldest merge not scanned yet) to T; with one
 //!   under `tools/`, `.github/` or `tests/common/`, each open run of the project other than P's,
 //!   with a current pull request, is read: its pull request fetched as the gate does
-//!   (`gate::fetch`) and its test commit found (`gate::find_manifest`).
+//!   (`gate::fetch_with`, killed at makibad's stop) and its test commit found
+//!   (`gate::find_manifest`).
 //! - `landing_scanned` is written once per P, also when nothing matched; when it names a run (or
 //!   could not read one), a notice to the secretary and one to each named run's worker, who runs
 //!   the repository's checks over its declared tests in its own sandbox before its fix. A run
@@ -62,6 +64,9 @@ struct Due {
     merge: String,
     /// `base_head` of the project's newest `landing_scanned`.
     prev: Option<String>,
+    /// The merge commit of the oldest merge not scanned yet (P's when it is the only one): with
+    /// no tip scanned before, the paths are read from its first parent.
+    first: String,
     runs: Vec<Candidate>,
 }
 
@@ -202,6 +207,7 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
                 task: r.get(4)?,
                 repo: r.get(5)?,
                 pr: r.get(6)?,
+                first: r.get(7)?,
                 merge: r.get(7)?,
                 prev: None,
                 runs: Vec::new(),
@@ -221,6 +227,24 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
             )
             .optional()?
             .flatten();
+        let first: Option<String> = c
+            .query_row(
+                "SELECT json_extract(e.payload_json, '$.merge_commit') FROM events e
+                 JOIN runs r ON r.id = e.run_id
+                 WHERE e.kind = 'pr_merged' AND r.project_id = ?1
+                   AND json_extract(e.payload_json, '$.merge_commit') IS NOT NULL
+                   AND e.id > coalesce((SELECT max(json_extract(s.payload_json, '$.landed_event'))
+                                        FROM events s JOIN runs rs ON rs.id = s.run_id
+                                        WHERE s.kind = 'landing_scanned'
+                                          AND rs.project_id = ?1), 0)
+                 ORDER BY e.id LIMIT 1",
+                [d.project],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if let Some(f) = first {
+            d.first = f;
+        }
         d.runs = candidates(w, d.project, &d.task)?;
         out.push(d);
     }
@@ -266,17 +290,21 @@ fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
         all.extend_from_slice(args);
         run_gh("git", &all, cancel).ok()
     };
+    let in_tip = |c: &String| git(&["merge-base", "--is-ancestor", c, &tip]).is_some();
+    let parent =
+        |m: &str| git(&["rev-parse", "--verify", &format!("{m}^1")]).map(|s| s.trim().to_string());
+    // The tip scanned last; with none (or one the branch no longer holds), the first parent of
+    // the oldest merge not scanned yet, so that landings before the first scan are read too.
     let from = d
         .prev
         .clone()
-        .filter(|p| git(&["merge-base", "--is-ancestor", p, &tip]).is_some())
-        .or_else(|| {
-            git(&["rev-parse", "--verify", &format!("{}^1", d.merge)]).map(|s| s.trim().to_string())
-        })?;
-    let changed = git(&["diff", "--name-only", "--no-renames", &from, &tip])?;
+        .filter(in_tip)
+        .or_else(|| parent(&d.first).filter(in_tip))
+        .or_else(|| parent(&d.merge))?;
+    // NUL-separated: a path git would quote (a tab, a newline, a non-ASCII byte) is read as it is.
+    let changed = git(&["diff", "-z", "--name-only", "--no-renames", &from, &tip])?;
     let matched: Vec<String> = changed
-        .lines()
-        .map(str::trim)
+        .split('\0')
         .filter(|p| WATCHED.iter().any(|w| p.starts_with(w)))
         .map(String::from)
         .collect();
@@ -295,7 +323,7 @@ fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
             return None;
         }
         let (_, repo, pr, head) = run;
-        let read = gate::fetch(clone, repo, *pr, &d.branch)
+        let read = gate::fetch_with(clone, repo, *pr, &d.branch, cancel)
             .and_then(|_| gate::find_manifest(clone, &tip, head));
         match read {
             Ok(Some((test_commit, declared))) => s.tasks.push(Named {
@@ -437,4 +465,145 @@ fn write(w: &StateWriter, d: &Due, s: &Scan) -> Result<()> {
         }
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::writer::RunUpsert;
+
+    fn git(at: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args([
+                "-c",
+                "init.defaultBranch=main",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(at)
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "git {args:?}");
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A commit on `main` of the work tree `at` adding `path`, merged with `--no-ff` from a side
+    /// branch as a pull request lands; the merge commit.
+    fn land(at: &Path, branch: &str, path: &str) -> String {
+        git(at, &["checkout", "-q", "-b", branch, "main"]);
+        let dest = at.join(path);
+        std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
+        std::fs::write(&dest, "x\n").unwrap();
+        git(at, &["add", path]);
+        git(at, &["commit", "-q", "-m", branch]);
+        git(at, &["checkout", "-q", "main"]);
+        git(at, &["merge", "-q", "--no-ff", "-m", "merge", branch]);
+        git(at, &["rev-parse", "HEAD"])
+    }
+
+    /// Before the first scan, two landings are read together from the oldest one's first parent:
+    /// a `tools/` change in the older one is not lost behind a newer one that changes only
+    /// `README.md`. A path git would quote (non-ASCII) is read as it is.
+    #[test]
+    fn the_first_scan_reads_every_landing_not_scanned_and_paths_as_they_are() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let work = root.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        git(&work, &["commit", "-q", "--allow-empty", "-m", "base"]);
+        let origin = root.join("origin.git");
+        git(root, &["init", "-q", "--bare", &origin.to_string_lossy()]);
+        git(
+            &work,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        let l1 = land(&work, "one", "tools/\u{65e5}\u{672c}.py");
+        let l2 = land(&work, "two", "README.md");
+        git(&work, &["push", "-q", "origin", "main"]);
+        let clone = root.join("clone");
+        git(
+            root,
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+        let due = |first: &str| Due {
+            project: 1,
+            slug: "p".into(),
+            branch: "main".into(),
+            landed_event: 2,
+            task: "t".into(),
+            repo: Some("o/p".into()),
+            pr: Some(2),
+            merge: l2.clone(),
+            prev: None,
+            first: first.into(),
+            runs: Vec::new(),
+        };
+        let never = AtomicBool::new(false);
+        let s = scan(&clone, &due(&l1), &never).expect("the merge is in the tip");
+        assert_eq!(s.tip, l2);
+        assert_eq!(s.matched, vec!["tools/\u{65e5}\u{672c}.py".to_string()]);
+        assert_eq!(s.from, git(&work, &["rev-parse", &format!("{l1}^1")]));
+        // Only the newest merge: its own change, not the older one's.
+        let only = scan(&clone, &due(&l2), &never).unwrap();
+        assert!(only.matched.is_empty(), "{:?}", only.matched);
+    }
+
+    /// `first` is the oldest merge newer than the newest scan, `merge` the newest.
+    #[test]
+    fn a_scan_due_names_the_oldest_merge_not_scanned_yet() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.ensure_project("p", None, Some("https://github.com/o/p"))
+            .unwrap();
+        for t in ["a", "b", "c", "d"] {
+            w.upsert_run(&RunUpsert {
+                task_id: t,
+                project_slug: "p",
+                status: Some("review"),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let merged = |task: &str, merge: &str| {
+            w.append_event(&NewEvent {
+                kind: "pr_merged",
+                actor: Some("makibad"),
+                payload: Some(&json!({"repo": "o/p", "pr": 1, "merge_commit": merge})),
+                run_task_id: Some(task),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let e1 = merged("a", "m1");
+        merged("b", "m2");
+        let d = due(&w).unwrap();
+        assert_eq!(d.len(), 1);
+        assert_eq!((d[0].first.as_str(), d[0].merge.as_str()), ("m1", "m2"));
+        assert_eq!(d[0].prev, None);
+        w.append_event(&NewEvent {
+            kind: "landing_scanned",
+            actor: Some("makibad"),
+            payload: Some(&json!({"landed_event": e1 + 1, "base_head": "m2"})),
+            run_task_id: Some("b"),
+            ..Default::default()
+        })
+        .unwrap();
+        assert!(due(&w).unwrap().is_empty(), "scanned");
+        merged("c", "m3");
+        merged("d", "m4");
+        let d = due(&w).unwrap();
+        assert_eq!((d[0].first.as_str(), d[0].merge.as_str()), ("m3", "m4"));
+        assert_eq!(d[0].prev.as_deref(), Some("m2"));
+        assert_eq!(d[0].task, "d");
+        let others: Vec<&str> = d[0].runs.iter().map(|r| r.0.as_str()).collect();
+        assert!(others.is_empty(), "no run has a pull request: {others:?}");
+    }
 }

@@ -27,9 +27,9 @@ Per project. A project's scan is due when its newest `pr_merged` that names a me
 Each pass of the loop, one thread at a time, its result written by the loop's thread in one transaction (as the belt's read):
 
 1. `in_clone(clone, default_branch, P.merge_commit)`: fetch, then the tip T. A fetch failure, or P's merge commit not yet in T, writes nothing; it is tried again after `MAKIBA_LANDING_RETRY_MS` (the belt's).
-2. The paths changed: `git diff --name-only <from> T`, where `<from>` is the `base_head` of the project's newest `landing_scanned` when that commit is an ancestor of T, else the first parent of P's merge commit. So two landings between scans, or a push no run follows, are seen together. `matched`: the changed paths under `tools/`, `.github/` or `tests/common/` (a fixed list in the module, as the person named it).
+2. The paths changed: `git diff --name-only <from> T`, where `<from>` is the `base_head` of the project's newest `landing_scanned` when that commit is an ancestor of T, else the first parent of the oldest `pr_merged` of the project newer than its newest scan (when that parent is an ancestor of T), else the first parent of P's merge commit. So two landings between scans, landings before the first scan, or a push no run follows, are seen together. The paths are read NUL-separated (`-z`), so a path git would quote is matched as it is. `matched`: the changed paths under `tools/`, `.github/` or `tests/common/` (a fixed list in the module, as the person named it).
 3. With `matched` empty, the scan ends there (no run is read).
-4. Otherwise, each candidate run R: open (`queued`, `in_use`, `review`, `suspended`, `parked`, the open statuses `prwatch::followed` reads), of the same project, not P's own run, with a current pull request (`belt::current_pr_sql`) and a newest recorded head H (`pr_opened` or `fix_pushed`). For each, `gate::fetch(clone, repo, pr, branch)` (the pull request's head ref, as the gate reads it) and `gate::find_manifest(clone, T, H)`. A run with a manifest M is named, with M and its declared paths. A run whose fetch or manifest read fails is named as not read, with the reason. A run without a manifest is not named.
+4. Otherwise, each candidate run R: open (`queued`, `in_use`, `review`, `suspended`, `parked`, the open statuses `prwatch::followed` reads), of the same project, not P's own run, with a current pull request (`belt::current_pr_sql`) and a newest recorded head H (`pr_opened` or `fix_pushed`). For each, `gate::fetch_with(clone, repo, pr, branch, cancel)` (the gate's `fetch`, with the scan's cancel flag so that makibad's stop kills the git child; the pull request's head ref, as the gate reads it) and `gate::find_manifest(clone, T, H)`. A run with a manifest M is named, with M and its declared paths. A run whose fetch or manifest read fails is named as not read, with the reason. A run without a manifest is not named.
 
 ### 3.4 The record and the notices
 
@@ -58,6 +58,7 @@ No state in memory beside the ledger but the running thread and its cancel flag 
 - New: `src/daemon/landing.rs`; the declared test `tests/landing_test_commits.rs`.
 - `src/daemon/mod.rs`: the module and its pass in the loop, beside the belt's read.
 - `src/daemon/belt.rs`: `in_clone` made `pub(super)`; no other change.
+- `src/daemon/gate.rs`: `fetch` becomes `fetch_with` with a cancel flag, and `fetch` calls it with one never set; no change to what the gate reads or judges (added at the diff review).
 - `docs/design/spec.md`: the landing paragraph of section 5.8 gains the scan and its notices; the sentence listing kinds kept out of the event table gains `landing_scanned`.
 - No existing test, no file under `.github/`, no script, no skill, no gate change, no schema change (events are rows of the existing table).
 
