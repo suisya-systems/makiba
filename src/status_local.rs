@@ -542,21 +542,29 @@ fn pr_watches(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 /// merged today (local time) not listed yet, in the order of their merges. Folded from the
 /// ledger and `pr_watches`; see `pull_request` for the fields. A pull request's merge is read
 /// from any run's `pr_merged`, so that a run not closed which still names a pull request another
-/// run merged does not list it as open and hide the merge.
+/// run merged does not list it as open and hide the merge; such an entry has the task of the
+/// merge's run (else the merge's `task_id`), as one listed from the merges of today has.
 fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     use crate::daemon::belt::{current_pr_sql, pr_closed_sql};
     let open = rows(
         conn,
         &format!(
-            "SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr, {closed} AS closed,
-                    (SELECT e.payload_json FROM events e WHERE e.kind = 'pr_merged'
-                       AND lower(json_extract(e.payload_json, '$.repo')) = lower({repo})
-                       AND json_extract(e.payload_json, '$.pr') = {pr}
-                     ORDER BY e.id DESC LIMIT 1) AS merged
-             FROM runs r
-             WHERE r.status NOT IN ('completed', 'abandoned')
-               AND {repo} IS NOT NULL AND {pr} IS NOT NULL
-             ORDER BY r.id",
+            "SELECT o.id,
+                    CASE WHEN m.id IS NULL THEN o.task_id
+                         ELSE coalesce(mr.task_id, json_extract(m.payload_json, '$.task_id'),
+                                       o.task_id) END AS task_id,
+                    o.repo, o.pr, o.closed, m.payload_json AS merged
+             FROM (SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr, {closed} AS closed,
+                          (SELECT e.id FROM events e WHERE e.kind = 'pr_merged'
+                             AND lower(json_extract(e.payload_json, '$.repo')) = lower({repo})
+                             AND json_extract(e.payload_json, '$.pr') = {pr}
+                           ORDER BY e.id DESC LIMIT 1) AS merged_id
+                   FROM runs r
+                   WHERE r.status NOT IN ('completed', 'abandoned')
+                     AND {repo} IS NOT NULL AND {pr} IS NOT NULL) o
+             LEFT JOIN events m ON m.id = o.merged_id
+             LEFT JOIN runs mr ON mr.id = m.run_id
+             ORDER BY o.id",
             repo = current_pr_sql("r", "repo"),
             pr = current_pr_sql("r", "pr"),
             closed = pr_closed_sql("r"),
@@ -1158,5 +1166,68 @@ mod tests {
         assert_eq!(m.text(&format!("{key}{key}")), "<key><key>");
         assert_eq!(m.text(&other), other);
         assert_eq!(m.text("x lit-key-123 y"), "x <key> y");
+    }
+
+    /// A pull request an open run still names but another run merged is listed once, with the
+    /// task of the merge's run (Issue 405, section 12: of a merge, the run of its event).
+    #[test]
+    fn a_merge_by_another_run_is_listed_with_that_run_s_task() {
+        use crate::db::writer::{NewEvent, StateWriter};
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("state.db");
+        let w = StateWriter::open(&db).unwrap();
+        let project = w
+            .ensure_project("p", None, Some("https://github.com/o/p"))
+            .unwrap();
+        for (task, status) in [("tm", "completed"), ("to", "review")] {
+            w.conn()
+                .execute(
+                    "INSERT INTO runs (task_id, project_id, pattern, title, status)
+                     VALUES (?1, ?2, 'B', ?1, ?3)",
+                    params![task, project, status],
+                )
+                .unwrap();
+        }
+        let head = "a".repeat(40);
+        let event = |kind: &str, task: &str, payload: Value| {
+            w.append_event(&NewEvent {
+                kind,
+                actor: Some("makibad"),
+                payload: Some(&payload),
+                run_task_id: Some(task),
+                ..Default::default()
+            })
+            .unwrap();
+        };
+        for task in ["tm", "to"] {
+            event(
+                "pr_opened",
+                task,
+                json!({"repo": "o/q", "pr": 9, "head_oid": head}),
+            );
+        }
+        let now: String = w
+            .conn()
+            .query_row("SELECT strftime('%Y-%m-%dT%H:%M:%SZ', 'now')", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        event(
+            "pr_merged",
+            "tm",
+            json!({"repo": "o/q", "pr": 9, "title": "T", "merged_at": now,
+                   "merge_commit": "m", "task_id": "tm", "merged_by": "owner",
+                   "head_oid": head, "merged_via": "hand"}),
+        );
+        let v = read(&db).unwrap();
+        let listed: Vec<&Value> = v["pull_requests"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|e| e["repo"] == json!("o/q") && e["pr"] == json!(9))
+            .collect();
+        assert_eq!(listed.len(), 1, "{}", v["pull_requests"]);
+        assert_eq!(listed[0]["state"], json!("merged"), "{}", listed[0]);
+        assert_eq!(listed[0]["task_id"], json!("tm"), "{}", listed[0]);
     }
 }
