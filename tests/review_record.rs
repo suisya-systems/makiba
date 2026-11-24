@@ -351,12 +351,76 @@ fn a_done_report_after_a_review_without_a_verdict_records_not_established() {
     assert!(!r["reason"].as_str().unwrap_or_default().is_empty(), "{r}");
 }
 
+/// Issue 409: a document task's done report writes `worker_reported` with a null review.
 #[test]
-fn a_document_tasks_done_report_records_no_review() {
+fn a_document_tasks_done_report_records_a_null_review() {
     let o = org("rr5", "document");
     o.done().unwrap();
-    assert!(o.events("worker_reported").is_empty());
+    let e = o.events("worker_reported");
+    assert_eq!(e.len(), 1, "{e:?}");
+    assert_eq!(e[0]["state"], "done", "{e:?}");
+    assert!(e[0].get("review").is_some_and(Value::is_null), "{e:?}");
     assert_eq!(o.told(), "all done");
+}
+
+impl Org {
+    fn report(&self, key: &str, state: &str) -> Response {
+        self.call(
+            key,
+            "report",
+            json!({"state": state, "task": self.task, "text": format!("a {state} report")}),
+        )
+    }
+}
+
+/// Issue 409: every worker report (start, blocked, done) writes `worker_reported`, its review
+/// null when there is none.
+#[test]
+fn every_worker_report_writes_worker_reported() {
+    let o = org("rr10", "document");
+    for state in ["start", "blocked", "done"] {
+        o.report(&o.worker, state).unwrap();
+    }
+    let e = o.events("worker_reported");
+    assert_eq!(e.len(), 3, "{e:?}");
+    let states: Vec<&str> = e.iter().map(|p| p["state"].as_str().unwrap()).collect();
+    assert_eq!(states, ["start", "blocked", "done"], "{e:?}");
+    for p in &e {
+        assert_eq!(p["task"], json!(o.task), "{p}");
+        assert!(p.get("review").is_some_and(Value::is_null), "{p}");
+    }
+}
+
+/// Issue 409: a code task's plan report has a null review; its done report keeps its review.
+#[test]
+fn a_code_tasks_plan_has_a_null_review_and_its_done_its_review() {
+    let o = org("rr11", "code");
+    o.report(&o.worker, "start").unwrap();
+    let head = o.commit("a.txt");
+    o.report(&o.worker, "done").unwrap();
+    let e = o.events("worker_reported");
+    assert_eq!(e.len(), 2, "{e:?}");
+    assert_eq!(e[0]["state"], "start", "{e:?}");
+    assert!(e[0].get("review").is_some_and(Value::is_null), "{e:?}");
+    assert_eq!(e[1]["state"], "done", "{e:?}");
+    assert_eq!(e[1]["review"]["state"], "none", "{e:?}");
+    assert_eq!(e[1]["review"]["head"], json!(head), "{e:?}");
+}
+
+/// Issue 409: only a worker's report is a `worker_reported`; the person's is not.
+#[test]
+fn a_persons_report_writes_no_worker_reported() {
+    let o = org("rr12", "document");
+    let person = issue_key(
+        &StateWriter::open(&o.state.join("state.db")).unwrap(),
+        Role::Person,
+        "person",
+        None,
+        None,
+    )
+    .unwrap();
+    o.report(&person, "done").unwrap();
+    assert!(o.events("worker_reported").is_empty());
 }
 
 /// Review round 1, P1: a link committed under the snapshot's file names is not written through.
