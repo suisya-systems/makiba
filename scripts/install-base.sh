@@ -1,10 +1,18 @@
 #!/usr/bin/env bash
-# Installs the pinned herdr-core release (PINNED in src/base/version.rs) into PREFIX/bin/hc.
+# Installs the pinned herdr-core release (PINNED in src/base/version.rs) into PREFIX/bin, in the
+# base's own layout: the archive's herdr-core as PREFIX/bin/herdr-core, and PREFIX/bin/hc a link to it.
 #   bash scripts/install-base.sh PREFIX
 # Reads <HERDR_RELEASES_URL or https://releases.herdr.dev>/core/<version>/manifest.json, picks this
 # machine's target, downloads its url (a tar.gz) with curl, and installs nothing unless the archive's
-# SHA-256 equals the manifest's; then installs the archive's herdr-core as PREFIX/bin/hc.
-# Exit 0 installed, 1 refused or failed, 2 usage.
+# SHA-256 equals the manifest's. A herdr-core or hc already in PREFIX/bin is replaced; one that is a
+# directory is refused before anything is replaced. An older herdr-core left beside hc or ahead on
+# PATH can be the server hc starts (#382), so after installing, the script checks what would run
+# instead: HC_BIN when set, and the herdr-core and hc that PATH finds first. One that is not the
+# installed file is named, and the script exits 3. It deletes nothing outside PREFIX, runs no
+# program it finds, and starts or stops no core.
+# Exit 0 installed; 1 refused or failed, nothing installed (except that a failure while making the
+# hc link leaves the new herdr-core beside the old hc); 2 usage; 3 installed, but HC_BIN or PATH
+# finds another herdr-core or hc first.
 set -eu
 [ $# -eq 1 ] || { echo "usage: install-base.sh PREFIX" >&2; exit 2; }
 prefix=$1
@@ -46,7 +54,49 @@ fi
 mkdir "$work/x"
 tar -xzf "$work/archive" -C "$work/x" herdr-core 2>/dev/null && [ -f "$work/x/herdr-core" ] && [ ! -L "$work/x/herdr-core" ] \
   || { echo "install-base: $url has no herdr-core executable; nothing installed" >&2; exit 1; }
-mkdir -p "$prefix/bin"
-chmod 755 "$work/x/herdr-core"
-mv -f "$work/x/herdr-core" "$prefix/bin/hc"
-echo "install-base: herdr-core $version ($target) installed at $prefix/bin/hc"
+bin=$prefix/bin
+mkdir -p "$bin" || { echo "install-base: cannot create $bin; nothing installed" >&2; exit 1; }
+for name in herdr-core hc; do
+  [ ! -d "$bin/$name" ] || { echo "install-base: $bin/$name is a directory; nothing installed" >&2; exit 1; }
+done
+# The binary: a copy at a temporary name beside it, then moved over herdr-core in one rename.
+tmp=$(mktemp "$bin/.herdr-core.XXXXXX") || { echo "install-base: cannot write in $bin; nothing installed" >&2; exit 1; }
+{ cp "$work/x/herdr-core" "$tmp" && chmod 755 "$tmp" && mv -f "$tmp" "$bin/herdr-core"; } \
+  || { rm -f "$tmp"; echo "install-base: cannot place $bin/herdr-core; nothing installed" >&2; exit 1; }
+# The link: made at a temporary name, then moved over hc, so a regular file or a link elsewhere is replaced.
+link="$bin/.hc.$$"
+rm -f "$link"
+{ ln -s herdr-core "$link" && mv -f "$link" "$bin/hc"; } \
+  || { rm -f "$link"; echo "install-base: cannot link $bin/hc to herdr-core; $bin/herdr-core is already the new one" >&2; exit 1; }
+echo "install-base: herdr-core $version ($target) installed at $bin/herdr-core, with $bin/hc linking to it"
+
+# What makiba and hc would run instead of the installed file. makiba runs $HC_BIN (a bare name is
+# looked up on PATH), else hc on PATH; hc starts its server under the name herdr-core.
+# `type -P` gives only files found on PATH (never a shell function), relative when the PATH entry
+# is; `-ef` compares a relative path from the current folder, as the lookup does.
+other=0
+if [ "${HC_BIN+set}" = set ]; then
+  case "$HC_BIN" in
+    '') named= ;;
+    */*) named=$HC_BIN ;;
+    *) named=$(type -P "$HC_BIN") || named=NOTFOUND ;;
+  esac
+  if [ -z "$named" ]; then
+    echo "install-base: installed at $bin/herdr-core, but HC_BIN is set and empty; makiba up cannot run it: point HC_BIN at $bin/hc or unset it" >&2
+    other=1
+  elif [ "$named" = NOTFOUND ]; then
+    echo "install-base: installed at $bin/herdr-core, but HC_BIN names $HC_BIN, which PATH does not find; makiba up cannot run it: point HC_BIN at $bin/hc or unset it" >&2
+    other=1
+  elif ! [ "$named" -ef "$bin/herdr-core" ]; then
+    echo "install-base: installed at $bin/herdr-core, but HC_BIN names $named; makiba up runs that one: point HC_BIN at $bin/hc or unset it" >&2
+    other=1
+  fi
+fi
+for name in herdr-core hc; do
+  found=$(type -P "$name") || continue
+  if ! [ "$found" -ef "$bin/herdr-core" ]; then
+    echo "install-base: installed at $bin/herdr-core, but PATH finds $name at $found first; hc may start that herdr-core instead: remove it or put $bin before it on PATH" >&2
+    other=1
+  fi
+done
+[ "$other" = 0 ] || exit 3

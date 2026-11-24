@@ -51,12 +51,28 @@ pub fn read_here() -> Result<Value, String> {
     read(&crate::daemon::state_dir().join("state.db"))
 }
 
-/// The same read as an object, with no age in it, so two reads of one heartbeat agree:
-/// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}, "merge_approval_mode"}`. The mode
-/// is read from this process's environment at each call, as the gate reads it (Issue 188): through
-/// the door that is `makibad`'s, which the secretary reads before every merge; run by the person,
-/// it is the person's shell's.
+/// Who reads the status, which decides where `merge_approval_mode` comes from (Issue 383).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reader {
+    /// The person's `makiba`: the mode the running `makibad` recorded (`recorded_mode`).
+    Person,
+    /// `makibad` itself, through the door: its own environment, read at each call as the gate
+    /// reads it (Issue 188), which the secretary reads before every merge.
+    Makibad,
+}
+
+/// The person's read (`Reader::Person`).
 pub fn read(path: &Path) -> Result<Value, String> {
+    read_as(path, Reader::Person)
+}
+
+/// The same read as an object, with no age in it, so two reads of one heartbeat agree:
+/// `{"makibad": {"pid", "heartbeat_at", "subscribed", "running"}, "merge_approval_mode",
+/// "merge_approval_mode_here"}`. `merge_approval_mode` is `makibad`'s mode as `reader` can know it
+/// (null when the person's read finds no running `makibad` that recorded one);
+/// `merge_approval_mode_here` is this process's environment: the person's shell, or through the
+/// door `makibad`'s own.
+pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
     let conn = open(path)?;
     let row = conn.query_row(
         "SELECT pid, subscribed, heartbeat_at,
@@ -74,9 +90,11 @@ pub fn read(path: &Path) -> Result<Value, String> {
     );
     let (pid, subscribed, beat, age) = row.unwrap_or((None, 0, None, None));
     let running = age.is_some_and(|a| a < STALE.as_secs_f64());
-    let mode =
-        crate::daemon::gate::mode_of(std::env::var(crate::daemon::gate::MODE_ENV).ok().as_deref())
-            .0;
+    let here = mode_here();
+    let mode = match reader {
+        Reader::Makibad => Some(here.to_string()),
+        Reader::Person => recorded_mode(&conn, running),
+    };
     let projects: Vec<Value> = projects(&conn)
         .into_iter()
         .map(|(slug, repo, branch)| {
@@ -88,7 +106,8 @@ pub fn read(path: &Path) -> Result<Value, String> {
         .collect();
     let sql = |e: rusqlite::Error| format!("cannot read {}: {e}", path.display());
     let mut v = json!({"makibad": {"pid": pid, "heartbeat_at": beat, "subscribed": subscribed == 1,
-                          "running": running}, "merge_approval_mode": mode, "projects": projects,
+                          "running": running}, "merge_approval_mode": mode,
+        "merge_approval_mode_here": here, "projects": projects,
         "runs": runs(&conn).map_err(sql)?, "terminals": terminals(&conn).map_err(sql)?,
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?});
@@ -96,6 +115,52 @@ pub fn read(path: &Path) -> Result<Value, String> {
     v["next_work"] = next_work(&conn).map_err(sql)?;
     Mask::new(&conn).value(&mut v);
     Ok(v)
+}
+
+/// The mode of this process's environment, as the gate reads it.
+fn mode_here() -> &'static str {
+    crate::daemon::gate::mode_of(std::env::var(crate::daemon::gate::MODE_ENV).ok().as_deref()).0
+}
+
+/// The mode the running `makibad` recorded in its `dispatcher_started` (Issue 383): the newest
+/// such event of the pid in `dispatcher`, written at or after that row's start, so a record of an
+/// earlier `makibad` (even one with the same pid) is not read. None when `makibad` is not
+/// `running`, or has not recorded one (before its first Resync, or a build before Issue 383).
+fn recorded_mode(conn: &Connection, running: bool) -> Option<String> {
+    if !running {
+        return None;
+    }
+    let value: Option<String> = conn
+        .query_row(
+            "SELECT json_extract(e.payload_json, '$.merge_approval_mode')
+             FROM events e JOIN dispatcher d ON d.id = 1
+             WHERE e.kind = 'dispatcher_started'
+               AND json_extract(e.payload_json, '$.pid') = d.pid
+               AND e.occurred_at >= d.started_at
+             ORDER BY e.id DESC LIMIT 1",
+            [],
+            |r| r.get(0),
+        )
+        .ok()
+        .flatten();
+    value.filter(|m| m == "human" || m == "acceptance")
+}
+
+/// The text's line of the merge approval mode: `makibad`'s, and this shell's when it differs or
+/// `makibad`'s is unknown.
+fn mode_line(makibad: Option<&str>, running: bool, here: &str) -> String {
+    match makibad {
+        Some(m) if m == here => format!("merge approval mode: {m} (makibad's)\n"),
+        Some(m) => format!(
+            "merge approval mode: {m} (makibad's); this shell says {here}, which the gate does not read\n"
+        ),
+        None if running => format!(
+            "merge approval mode: unknown (makibad has not recorded it); this shell says {here}, which the gate does not read\n"
+        ),
+        None => format!(
+            "merge approval mode: unknown (makibad is not running); this shell says {here}, which makiba up passes on\n"
+        ),
+    }
 }
 
 /// Open `state.db` read-only, in one read transaction, so every query of a read sees one state.
@@ -653,7 +718,8 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     let (Some(beat), Some(age)) = (beat, age) else {
         return Ok((
             format!(
-                "makibad: no heartbeat has ever been written\n{}{}{}",
+                "makibad: no heartbeat has ever been written\n{}{}{}{}",
+                mode_line(None, false, mode_here()),
                 projects_text(&conn),
                 pending_text(&conn),
                 next_text(&conn)
@@ -667,6 +733,11 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
         "makibad: pid {pid}\nheartbeat: {beat} ({age:.0} s ago)\nsubscribed: {}\n",
         if subscribed == 1 { "yes" } else { "no" }
     );
+    text.push_str(&mode_line(
+        recorded_mode(&conn, fresh).as_deref(),
+        fresh,
+        mode_here(),
+    ));
     if !fresh {
         text.push_str("makibad is not running: the heartbeat is older than 30 s\n");
     }
