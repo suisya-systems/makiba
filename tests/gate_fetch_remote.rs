@@ -11,12 +11,13 @@
 //! configuration are not read. The gate runs in the door (`Door::handle` with the merge gate's
 //! key); `gh` is a stand-in that answers `pr view` and nothing else.
 
+mod common;
+
 use makiba::base::stub::Stub;
 use makiba::daemon::door::Door;
 use makiba::daemon::gate;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once, OnceLock};
@@ -38,8 +39,7 @@ fn init() -> PathBuf {
     INIT.call_once(|| {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let script = home.path().join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         std::fs::create_dir_all(home.path().join("repos")).unwrap();
         // SAFETY: set once, before this file's tests read the environment.
         unsafe {

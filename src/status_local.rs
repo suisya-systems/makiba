@@ -194,12 +194,14 @@ fn rows(conn: &Connection, sql: &str, p: impl rusqlite::Params) -> rusqlite::Res
 }
 
 /// The runs not closed (Issue 168): a `failed` run stays until it is closed. A run waiting for
-/// the person carries `waiting`, and one woken from parking `unparked` (Issue 283).
+/// the person carries `waiting`, and one woken from parking `unparked` (Issue 283). Each run
+/// carries its `title`, its start (`since`, its dispatch), its `issue` and its `range_id`, null
+/// for a one-off task (Issue 407).
 fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     let mut all = rows(
         conn,
-        "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage, l.failed_reason
-         FROM runs r
+        "SELECT r.task_id, l.kind, p.slug AS project, r.status, l.stage, l.failed_reason,
+                r.title, r.dispatched_at AS since, r.range_id, r.issue_refs FROM runs r
          JOIN projects p ON p.id = r.project_id
          LEFT JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
          WHERE r.status NOT IN ('completed', 'abandoned') ORDER BY r.id",
@@ -208,6 +210,10 @@ fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
     for run in &mut all {
         let task = run["task_id"].as_str().unwrap_or_default().to_string();
         let status = run["status"].as_str().unwrap_or_default().to_string();
+        let fields = run.as_object_mut().expect("a row is an object");
+        let refs = fields.remove("issue_refs").unwrap_or_default();
+        let issue = own_issue(fields["project"].as_str().unwrap_or_default(), &refs);
+        fields.insert("issue".into(), json!(issue));
         if let Value::Object(more) = crate::daemon::park::read_fields(conn, &task, &status)? {
             run.as_object_mut()
                 .expect("a row is an object")
@@ -215,6 +221,21 @@ fn runs(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         }
     }
     Ok(all)
+}
+
+/// The Issue a run works on: the number of the first `<project>#<N>` of its `issue_refs`, as
+/// `belt::issue_ref` writes it. None when the refs are not a JSON array of strings, or name no
+/// Issue of the run's own project.
+fn own_issue(project: &str, refs: &Value) -> Option<i64> {
+    let refs: Value = serde_json::from_str(refs.as_str()?).ok()?;
+    refs.as_array()?.iter().find_map(|r| {
+        let (slug, n) = r.as_str()?.rsplit_once('#')?;
+        if slug == project {
+            n.parse().ok()
+        } else {
+            None
+        }
+    })
 }
 
 /// The live terminals: the newest launch of each role and run whose key is not revoked (a key

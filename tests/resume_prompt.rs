@@ -10,7 +10,6 @@ use common::makibad;
 use makiba::base::Base;
 use makiba::daemon::launch::RESUME_PROMPT;
 use makiba::db::writer::{RunUpsert, StateWriter};
-use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -69,12 +68,10 @@ fn a_resume_is_given_the_fixed_line_and_a_first_launch_its_brief() {
     let bin = root.join("bin");
     std::fs::create_dir_all(&bin).unwrap();
     let claude = bin.join("claude");
-    std::fs::write(
+    common::exe::write(
         &claude,
         "#!/bin/sh\nprintf '%s\\n' \"$@\" > args.part && /bin/mv -f args.part args\nexec sleep 30\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&claude, std::fs::Permissions::from_mode(0o755)).unwrap();
+    );
     // SAFETY: the only test of this binary, and no thread of it has started yet.
     unsafe {
         let path = std::env::var("PATH").unwrap_or_default();

@@ -31,7 +31,6 @@ use makiba::db::writer::StateWriter;
 use makiba::spec::{ErrorKind, Role};
 use rusqlite::{Connection, OpenFlags};
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -91,8 +90,7 @@ fn init() -> PathBuf {
         let home = HOME.get_or_init(|| tempfile::tempdir().unwrap());
         let root = std::fs::canonicalize(home.path()).unwrap();
         let script = root.join("gh");
-        std::fs::write(&script, STAND_IN).unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+        common::exe::write(&script, STAND_IN);
         for d in [
             "answers", "goals", "repos", "origins", "workers", "docs", "share", "config", "scratch",
         ] {

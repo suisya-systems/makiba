@@ -92,8 +92,7 @@ impl Drop for Setup {
 }
 
 fn script(path: &Path, body: &str) {
-    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
-    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+    common::exe::write(path, format!("#!/bin/sh\n{body}\n"));
 }
 
 fn mode(p: &Path) -> u32 {

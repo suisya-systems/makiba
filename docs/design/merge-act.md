@@ -540,8 +540,10 @@ state,mergedAt,mergedBy,headRefOid,mergeCommit,...` gives the fields the PR watc
 (`prwatch.rs:814-815`); makibad's gh and the secretary's find the same stored login
 (`gh.rs:17-22`, `launch.rs:296-310`).
 
-[unverified], to be read before or during the build (Issue 1 confirms 1-4, Issue 4 confirms 5-6,
-and each records its source in this section):
+[unverified] unless marked verified below, to be read before or during the build (Issue 1 confirms
+1-4, Issue 4 confirms 5-6, and each records its source in this section). The verified marks come
+from the first two landings through the queue (observed on PR 428 and PR 429, 2026-11-24;
+merge-wait.md section 5):
 
 1. `PUT /repos/{o}/{r}/pulls/{n}/merge` with `sha` refuses when the head is not `sha`, and answers
    `merged` and the merge commit's `sha`; which error statuses mean "not merged" (403, 404, 405,
@@ -554,6 +556,10 @@ and each records its source in this section):
 3. `PullRequest` has `isMergeQueueEnabled`, `isInMergeQueue` and `mergeQueueEntry`, readable in one
    query; whether `gh pr view --json` exposes any of them. Source:
    https://docs.github.com/en/graphql/reference/objects#pullrequest
+   **Verified** for `isInMergeQueue` and `mergeQueueEntry` (observed on PR 428 and PR 429,
+   2026-11-24): GraphQL read `isInMergeQueue` true and the entry's state, position, `headCommit`
+   and `baseCommit`; `gh pr view --json isInMergeQueue` fails, gh's `--json` has no queue fields.
+   `isMergeQueueEnabled` and reading all three in one query: [unverified].
 4. On a failed call, `gh api` writes the response body to stdout and an error line to stderr and
    exits non-zero, and `--include` puts the HTTP status line before the body. Source:
    https://cli.github.com/manual/gh_api (the design reader cites the CLI's own source,
@@ -562,12 +568,15 @@ and each records its source in this section):
    the pull request, with their time; whether a removal carries a reason. Source:
    https://docs.github.com/en/graphql/reference/unions#pullrequesttimelineitems
 6. Whether a pull request leaving the queue to land can be read `OPEN` with no entry for a moment.
-7. What `mergedBy` reads after a queue merge.
+7. What `mergedBy` reads after a queue merge. **Verified** (observed on PR 428 and PR 429,
+   2026-11-24): the login of the person who added the pull request to the queue (the owner, from
+   the web UI).
 8. `pulls/{n}/merge-async` exists and can merge or enqueue (the design reader's reading of
    https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request-asynchronously). The hook
    refuses it whether or not it exists, so the design does not depend on it.
 9. `gh pr merge` on a queue branch, and its `--match-head-commit` there (merge-wait.md claim 5):
-   no longer needed by this design, which does not use that command.
+   no longer needed by this design, which does not use that command. Still [unverified]: not
+   observed on PR 428 or PR 429, the secretary's command was refused before it ran.
 
 ## 11. Proposed build Issues (not filed until approved)
 

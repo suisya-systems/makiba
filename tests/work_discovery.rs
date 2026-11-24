@@ -2568,6 +2568,7 @@ mod load_goals {
         write_ledger(&goals_dir, "o/r", LEDGER);
         std::fs::set_permissions(&goals_dir, std::fs::Permissions::from_mode(0o000)).unwrap();
         let g = goals::load_goals(&goals_dir, "o/r");
+        // not an executable: the goals folder, made readable again
         std::fs::set_permissions(&goals_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
         // A process that can read a folder of mode 000 (root) sees the ledger instead.
         if std::fs::read_dir(dir.path().join("goals")).is_ok() && g.status == GoalStatus::Ok {

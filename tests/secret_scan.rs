@@ -286,7 +286,7 @@ fn a_missing_scanner_refuses_the_commit_and_names_its_path() {
     // makibad runs from a copy, which is removed once the worktree is prepared.
     let bin = org.root.join("bin/makiba");
     std::fs::create_dir_all(bin.parent().unwrap()).unwrap();
-    std::fs::copy(MAKIBA, &bin).unwrap();
+    common::exe::copy(Path::new(MAKIBA), &bin);
     let wt = {
         let _d = org.start(&bin);
         org.prepared("t3")

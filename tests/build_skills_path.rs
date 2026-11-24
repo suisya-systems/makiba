@@ -32,6 +32,7 @@ fn copy(from: &Path, to: &Path) {
         }
     } else {
         std::fs::create_dir_all(to.parent().unwrap()).unwrap();
+        // not an executable: the copied tree is read by cargo, and nothing in it is run here
         std::fs::copy(from, to).unwrap();
     }
 }
