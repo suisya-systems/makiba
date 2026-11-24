@@ -41,6 +41,8 @@ use std::time::{Duration, Instant};
 
 /// The folders whose change may bring a check over `tests/` (the person's list, Issue 461).
 pub const WATCHED: [&str; 3] = ["tools/", ".github/", "tests/common/"];
+/// How long a merge recorded but not yet in the fetched tip holds the scan.
+const MERGE_WAIT: Duration = Duration::from_secs(60 * 60);
 /// At most this many changed paths are recorded.
 const MATCHED_KEPT: usize = 50;
 /// At most this many are named in a notice.
@@ -67,6 +69,10 @@ struct Due {
     /// The merge commits of every merge not scanned yet (P's among them): with no tip scanned
     /// before, the paths are read from the common ancestor of their first parents.
     unscanned: Vec<String>,
+    /// Those recorded within `MERGE_WAIT`: the scan waits until the tip holds each of them, so a
+    /// merge recorded before P but landing after it is not passed over. An older one that is not
+    /// in the tip (a pull request into another branch) does not hold the scan.
+    waiting: Vec<String>,
     runs: Vec<Candidate>,
 }
 
@@ -208,6 +214,7 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
                 repo: r.get(5)?,
                 pr: r.get(6)?,
                 unscanned: Vec::new(),
+                waiting: Vec::new(),
                 merge: r.get(7)?,
                 prev: None,
                 runs: Vec::new(),
@@ -229,9 +236,11 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
             .flatten();
         // Every merge not scanned yet, whatever order they were recorded in: the order of the
         // records need not be the order of the merges.
-        d.unscanned = c
+        let unscanned: Vec<(String, bool)> = c
             .prepare(
-                "SELECT json_extract(e.payload_json, '$.merge_commit') FROM events e
+                "SELECT json_extract(e.payload_json, '$.merge_commit'),
+                        julianday('now') - julianday(e.occurred_at) < ?2 / 86400.0
+                 FROM events e
                  JOIN runs r ON r.id = e.run_id
                  WHERE e.kind = 'pr_merged' AND r.project_id = ?1
                    AND json_extract(e.payload_json, '$.merge_commit') IS NOT NULL
@@ -241,8 +250,16 @@ fn due(w: &StateWriter) -> Result<Vec<Due>> {
                                           AND rs.project_id = ?1), 0)
                  ORDER BY e.id",
             )?
-            .query_map([d.project], |r| r.get(0))?
+            .query_map(params![d.project, MERGE_WAIT.as_secs() as i64], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })?
             .collect::<std::result::Result<_, _>>()?;
+        d.waiting = unscanned
+            .iter()
+            .filter(|(_, recent)| *recent)
+            .map(|(m, _)| m.clone())
+            .collect();
+        d.unscanned = unscanned.into_iter().map(|(m, _)| m).collect();
         d.runs = candidates(w, d.project, &d.task)?;
         out.push(d);
     }
@@ -289,6 +306,9 @@ fn scan(clone: &Path, d: &Due, cancel: &AtomicBool) -> Option<Scan> {
         run_gh("git", &all, cancel).ok()
     };
     let in_tip = |c: &String| git(&["merge-base", "--is-ancestor", c, &tip]).is_some();
+    if !d.waiting.iter().all(in_tip) {
+        return None;
+    }
     let parent =
         |m: &str| git(&["rev-parse", "--verify", &format!("{m}^1")]).map(|s| s.trim().to_string());
     // The tip scanned last; with none (or one the branch no longer holds), the common ancestor
@@ -618,6 +638,7 @@ mod tests {
             merge: merge.into(),
             prev: None,
             unscanned: unscanned.iter().map(|s| s.to_string()).collect(),
+            waiting: Vec::new(),
             runs: Vec::new(),
         }
     }
@@ -638,6 +659,33 @@ mod tests {
         // Only the newest merge: its own change, not the older one's.
         let only = scan(&clone, &due_of(&m[1], &[&m[1]]), &never).unwrap();
         assert!(only.matched.is_empty(), "{:?}", only.matched);
+    }
+
+    /// Merges recorded out of order with the origin behind: a recent merge not yet in the tip
+    /// holds the scan until it is there; one recorded long ago that never lands does not.
+    #[test]
+    fn a_recent_merge_not_yet_in_the_tip_holds_the_scan() {
+        let dir = tempfile::tempdir().unwrap();
+        let (clone, m) = world(dir.path(), &[b"README.md"]);
+        let work = dir.path().join("work");
+        let later = land(&work, "later", b"tools/new.py");
+        let never = AtomicBool::new(false);
+        // P is the README merge, recorded last; the tools merge was recorded first, not at the
+        // origin yet.
+        let mut d = due_of(&m[0], &[&later, &m[0]]);
+        d.waiting = vec![later.clone(), m[0].clone()];
+        assert!(
+            scan(&clone, &d, &never).is_none(),
+            "held until the tip has it"
+        );
+        let mut old = d.clone();
+        old.waiting = vec![m[0].clone()];
+        let s = scan(&clone, &old, &never).expect("an old merge holds nothing");
+        assert!(s.matched.is_empty(), "{:?}", s.matched);
+        g(&work, &["push", "-q", "origin", "main"]);
+        let s = scan(&clone, &d, &never).expect("the tip has both");
+        assert_eq!(s.tip, later);
+        assert_eq!(s.matched, vec!["tools/new.py".to_string()]);
     }
 
     /// A path git quotes (past ASCII, or no UTF-8 at all, inside or outside the watched folders)
@@ -700,6 +748,10 @@ mod tests {
         let d = due(&w).unwrap();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].unscanned, vec!["m1", "m2"]);
+        assert_eq!(
+            d[0].waiting, d[0].unscanned,
+            "recorded just now: both hold the scan"
+        );
         assert_eq!((d[0].merge.as_str(), d[0].prev.as_deref()), ("m2", None));
         w.append_event(&NewEvent {
             kind: "landing_scanned",
