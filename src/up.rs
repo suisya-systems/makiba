@@ -11,7 +11,7 @@
 //! daemon's passes take on.
 //!
 //! A core that answers with another version than the pinned one stops `up` at once, before the
-//! ledger is opened and before `hc` is run, naming what to run (Issue 418): `up` never stops a core.
+//! ledger is opened and before the base is started, naming what to run (Issue 418): `up` never stops a core.
 
 use crate::agents::version;
 use crate::base::{self, BaseError};
