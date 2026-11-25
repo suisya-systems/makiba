@@ -173,6 +173,7 @@ pub enum Verb {
     Answer,
     Pr,
     Renew,
+    Handover,
     Config,
     Gate,
     Inbox,
@@ -203,6 +204,7 @@ impl Verb {
         Verb::Answer,
         Verb::Pr,
         Verb::Renew,
+        Verb::Handover,
         Verb::Config,
         Verb::Gate,
         Verb::Inbox,
@@ -233,6 +235,7 @@ impl Verb {
             Verb::Answer => "answer",
             Verb::Pr => "pr",
             Verb::Renew => "renew",
+            Verb::Handover => "handover",
             Verb::Config => "config",
             Verb::Gate => "gate",
             Verb::Inbox => "inbox",
@@ -286,8 +289,8 @@ impl Role {
         use Verb::*;
         match self {
             Role::Secretary => &[
-                Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Inbox, Note,
-                Push, Project, Update, Candidate, Goal, Range, Review, Merge,
+                Dispatch, Close, Answer, Pr, Pending, Peek, Status, Send, Show, Renew, Handover,
+                Inbox, Note, Push, Project, Update, Candidate, Goal, Range, Review, Merge,
             ],
             Role::Worker => &[Report, Send, Show, Inbox, Review],
             Role::Curator => &[Report, Send, Show, Inbox],

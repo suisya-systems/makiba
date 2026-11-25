@@ -435,6 +435,7 @@ fn each_role_is_listed_exactly_the_tools_of_its_verbs() {
             "send",
             "show",
             "renew",
+            "handover",
             "inbox",
             "note",
             "push",
