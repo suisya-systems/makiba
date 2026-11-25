@@ -3163,7 +3163,9 @@ fn pr_before_ci(
 }
 
 /// `(repo, pr, head)` of a `gate` request.
-fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
+/// The argument `repo` as the gate takes it: `owner/name`, each part letters, digits, `.`, `_`
+/// or `-` (shared by `merge` action `order`, Issue 338).
+fn repo_arg(args: &Value) -> Result<&str, DoorError> {
     let repo = str_arg(args, "repo")?;
     let ok = |s: &str| {
         !s.is_empty()
@@ -3173,6 +3175,11 @@ fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
     if !repo.split_once('/').is_some_and(|(o, n)| ok(o) && ok(n)) {
         return Err(usage(format!("repo is owner/name, not {repo:?}")));
     }
+    Ok(repo)
+}
+
+fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
+    let repo = repo_arg(args)?;
     let pr = args["pr"]
         .as_i64()
         .filter(|n| *n > 0)
@@ -4920,13 +4927,7 @@ fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str
         r
     };
     let parsed = (|| -> Result<(String, i64, &'static str, i64, String), DoorError> {
-        let repo = str_arg(args, "repo")?;
-        if repo
-            .split_once('/')
-            .is_none_or(|(o, n)| o.is_empty() || n.is_empty() || n.contains('/'))
-        {
-            return Err(usage(format!("repo is owner/name, not {repo:?}")));
-        }
+        let repo = repo_arg(args)?;
         let number = |k: &str| -> Result<Option<i64>, DoorError> {
             match args.get(k) {
                 None | Some(Value::Null) => Ok(None),
@@ -6352,5 +6353,28 @@ mod merge_order_tests {
                           "reason": "the person's condition"});
         let v = merge_order_set(&w, "secretary", &args, None).unwrap();
         assert_eq!(v["status"], json!("recorded"), "{v}");
+    }
+
+    /// Issue 338, diff review round 3: a repository the gate would refuse as malformed is refused
+    /// for an order too, so no order is recorded that never matches the pull request it names.
+    #[test]
+    fn an_order_with_a_malformed_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        for repo in ["o/r ", " o/r", "o/r/x", "o r/r", "o/", "/r", "o/r\n"] {
+            let args = json!({"action": "order", "repo": repo, "pr": 2, "after_pr": 1,
+                              "reason": "the person's condition"});
+            let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Usage, "{repo:?}: {e:?}");
+        }
+        let n: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'merge_order_set'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }
