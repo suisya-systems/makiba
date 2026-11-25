@@ -906,7 +906,11 @@
         "candidate_count": 3,
         "truncated_count": 6,
         "free_workers": 1,
-        "repos": 3,
+        "repos": [
+          "example-org/loom",
+          "example-org/quill",
+          "example-org/harbor"
+        ],
         "notified": true,
         "error": null,
         "input_truncated": "",
