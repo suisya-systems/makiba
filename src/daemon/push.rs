@@ -247,23 +247,33 @@ fn work(places: &Places, j: &Job) -> Outcome {
             before_ci(&repo, j, &base, &sent)?;
             push_head(&repo, &sent, &j.branch).map(|()| Done::Pushed(sent))
         }
-        Some(base) => {
-            judged_head(j, &head)?;
-            update(&repo, j, base, &head).map(|d| judged_merge(&repo, j, base, d))
-        }
+        Some(base) => update(&repo, j, base, &head).map(|d| judged_merge(&repo, j, base, d)),
     }
 }
 
-/// A readiness update (Issue 475) merges only the head makibad judged: a worktree that has moved
-/// on since holds the worker's own commits, which go to origin with `push`, never with it.
-fn judged_head(j: &Job, head: &str) -> std::result::Result<(), String> {
+/// The head an update merges into: the worktree's `head`, except for a readiness update (Issue
+/// 475), which merges only the head makibad judged. A worktree behind the judged head (`behind`:
+/// the worker has not fast-forwarded after an earlier update of makibad) merges the judged head;
+/// one that holds commits of its own (the worker's, which go to origin with `push`) is refused.
+fn judged_head(
+    j: &Job,
+    head: &str,
+    behind: impl FnOnce(&str) -> std::result::Result<bool, String>,
+) -> std::result::Result<String, String> {
     match &j.readiness {
-        Some(r) if !r.head.eq_ignore_ascii_case(head) => Err(format!(
-            "the worktree of {} is at {head}, not at {}, the head makibad judged for the queue; \
-             nothing was merged or pushed (the worker's newer commits go to origin with push)",
-            j.task, r.head
-        )),
-        _ => Ok(()),
+        Some(r) if !r.head.eq_ignore_ascii_case(head) => {
+            if behind(&r.head)? {
+                Ok(r.head.clone())
+            } else {
+                Err(format!(
+                    "the worktree of {} is at {head}, which is not the head makibad judged for \
+                     the queue ({}) nor behind it; nothing was merged or pushed (the worker's \
+                     newer commits go to origin with push)",
+                    j.task, r.head
+                ))
+            }
+        }
+        _ => Ok(head.to_string()),
     }
 }
 
@@ -493,6 +503,7 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     let id = |r: String| git(dir, &["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
     let base_id = id(format!("refs/remotes/origin/{base}"))?;
     let old = id(format!("refs/remotes/origin/{}", j.branch))?;
+    let head = &judged_head(j, head, |judged| is_ancestor(dir, head, judged))?;
     if !is_ancestor(dir, &old, head)? {
         // A restart after the merge was pushed and before it was recorded: origin holds the
         // worktree's head and the base, which the worktree does not (it is not written).
@@ -967,10 +978,17 @@ mod tests {
     #[test]
     fn a_readiness_update_merges_only_the_judged_head() {
         let (a, b) = ("a".repeat(40), "b".repeat(40));
-        assert!(judged_head(&job("t", Some(&a)), &a).is_ok());
-        let e = judged_head(&job("t", Some(&a)), &b).unwrap_err();
+        let never = |_: &str| -> std::result::Result<bool, String> { panic!("not asked") };
+        assert_eq!(judged_head(&job("t", Some(&a)), &a, never).unwrap(), a);
+        let e = judged_head(&job("t", Some(&a)), &b, |_| Ok(false)).unwrap_err();
         assert!(e.contains("nothing was merged or pushed"), "{e}");
-        assert!(judged_head(&job("t", None), &b).is_ok());
+        assert_eq!(judged_head(&job("t", None), &b, never).unwrap(), b);
+        // Two updates of makibad with no fast-forward of the worker between them: the worktree
+        // is behind the judged head (the first update's merge), which the second one merges.
+        assert_eq!(
+            judged_head(&job("t", Some(&a)), &b, |_| Ok(true)).unwrap(),
+            a
+        );
     }
 
     /// Issue 475: an update that ends after a newer head was recorded does not record its own

@@ -2491,27 +2491,33 @@ impl PrWatch {
         let Some(class) = now.filter(|c| c != "draft" && c != "unknown") else {
             return Ok(());
         };
-        let decision = match decision {
-            Decision::Ready { base_tip, .. } if class == "conflict" => Decision::Update {
-                reason: "conflict",
-                base_tip: Some(base_tip),
-                ci_base: None,
-                landings: Vec::new(),
-            },
-            Decision::Update {
-                base_tip, ci_base, ..
-            } if class == "conflict" => Decision::Update {
-                reason: "conflict",
-                base_tip,
-                ci_base,
-                landings: Vec::new(),
-            },
-            other => other,
-        };
+        let decision = on_merge_state(decision, &class, self.covered.get(&key).cloned());
         if decide(w, &self.repos, &d.task, &d.head, d.watch, &class, &decision)? {
             self.read_failing.remove(&key);
         }
         Ok(())
+    }
+}
+
+/// A decision as the head's merge state `class` makes it: a conflict is an update, reason
+/// `conflict`, whatever the reading found or failed to find (`covered`: the base tip a watching
+/// reader last found nothing in).
+fn on_merge_state(d: Decision, class: &str, covered: Option<String>) -> Decision {
+    if class != "conflict" {
+        return d;
+    }
+    let (base_tip, ci_base) = match d {
+        Decision::Ready { base_tip, ci_base } => (Some(base_tip), Some(ci_base)),
+        Decision::Update {
+            base_tip, ci_base, ..
+        } => (base_tip, ci_base),
+        Decision::Unknown { .. } => (covered, None),
+    };
+    Decision::Update {
+        reason: "conflict",
+        base_tip,
+        ci_base,
+        landings: Vec::new(),
     }
 }
 
@@ -3739,6 +3745,39 @@ esac"#,
                 .unwrap();
             assert_eq!(written, 0);
         }
+    }
+
+    /// Issue 475: a conflict is an update whatever the reading gave, a failure for good included.
+    #[test]
+    fn a_conflict_overrides_every_decision() {
+        let t = "t".repeat(40);
+        for d in [
+            Decision::Ready {
+                base_tip: t.clone(),
+                ci_base: t.clone(),
+            },
+            Decision::Unknown {
+                reason: "fetch failed".into(),
+            },
+            Decision::Update {
+                reason: "checks_changed",
+                base_tip: None,
+                ci_base: None,
+                landings: Vec::new(),
+            },
+        ] {
+            assert!(matches!(
+                on_merge_state(d, "conflict", Some(t.clone())),
+                Decision::Update {
+                    reason: "conflict",
+                    ..
+                }
+            ));
+        }
+        assert!(matches!(
+            on_merge_state(Decision::Unknown { reason: "x".into() }, "ready", None),
+            Decision::Unknown { .. }
+        ));
     }
 
     /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two

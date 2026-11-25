@@ -129,8 +129,9 @@ cannot run and the secretary has the worker merge the base. The `Push` pass runs
 The update thread, for a job whose args carry `readiness`, also computes `base_merge` for the head
 it ends with (`gate::pushed_base_merge` of the project's repository, the base, the args' `head` and
 that head: true only for a clean merge of the base), as the door computes it for `pr pushed`
-outside its lock. The job merges only the judged head: a worktree whose HEAD has moved past it (the worker committed
-since) fails with nothing merged or pushed. `push.rs` `finish`, for such a job, and only while the
+outside its lock. The job merges only the judged head: a worktree behind it (the worker has not fast-forwarded after
+an earlier update of makibad) is let through, and one that holds commits of its own (the worker
+committed since) fails with nothing merged or pushed. `push.rs` `finish`, for such a job, and only while the
 run's current pull request is still the one judged with the judged head its newest record (a head
 or pull request recorded while the update ran is never overwritten):
 
@@ -202,6 +203,8 @@ counts:
     step's `path: |`) is scheduling too.
 - The diff is read as text (`--text`, whatever the attributes say); contents that differ with no
   hunk read count.
+- An anchor, an alias or a tag anywhere outside quotes and block scalars, a flow collection
+  included (`{group: &cmd x}`): the file is not read and the change counts.
 - A file version holding a tab in its indentation, a flow mapping or sequence spanning lines, an
   anchor or alias (`&`, `*` as a node), or a second document (`---`) is not read: the change
   counts.

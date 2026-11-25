@@ -394,6 +394,28 @@ fn unreadable(value: &str) -> bool {
     if value.starts_with(['&', '*', '!']) || value.starts_with("<<") {
         return true;
     }
+    // The same anywhere in a flow collection (`{group: &cmd x}`, `[*cmd]`): outside quotes, a `&`,
+    // `*` or `!` after an opening bracket, a comma, a colon or a space, before a name.
+    let (mut single, mut double, mut before) = (false, false, ' ');
+    let chars: Vec<char> = value.chars().collect();
+    for (i, c) in chars.iter().copied().enumerate() {
+        match c {
+            '\'' if !double => single = !single,
+            '"' if !single => double = !double,
+            '&' | '*' | '!'
+                if !single
+                    && !double
+                    && matches!(before, ' ' | '[' | '{' | ',' | ':')
+                    && chars
+                        .get(i + 1)
+                        .is_some_and(|n| n.is_alphanumeric() || matches!(n, '_' | '-' | '!')) =>
+            {
+                return true;
+            }
+            _ => {}
+        }
+        before = c;
+    }
     let balanced = |open: char, close: char| {
         value.chars().filter(|c| *c == open).count()
             == value.chars().filter(|c| *c == close).count()
@@ -837,6 +859,18 @@ jobs:
         let base = "jobs:\n  t:\n    steps:\n      - run: !!str |\n          cat <<EOF\n          # data\n          EOF\n";
         let changed = base.replace("          # data", "          # other data");
         assert!(!only_scheduling(base, &changed));
+    }
+
+    #[test]
+    fn an_anchor_or_alias_inside_a_flow_collection_counts() {
+        let base = "concurrency: {group: &cmd 'cargo test'}\njobs:\n  t:\n    env: {CMD: *cmd}\n    steps:\n      - run: $CMD\n";
+        let changed = base.replace("'cargo test'", "'cargo test --release'");
+        assert!(!only_scheduling(base, &changed));
+        let plain = "concurrency: {group: a}\njobs:\n  t:\n    steps:\n      - run: x && y\n";
+        assert!(only_scheduling(
+            plain,
+            &plain.replace("group: a", "group: b")
+        ));
     }
 
     #[test]
