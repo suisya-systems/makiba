@@ -4,7 +4,7 @@ Carried from paddock (`docs/design/acceptance-check.md`, `scripts/acceptance-che
 
 ## What runs
 
-The `acceptance` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every pull request. It installs the toolchain of `rust-toolchain.toml` and Python, then runs:
+The `acceptance` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every pull request. It installs the toolchain of `rust-toolchain.toml` and Python with pytest and pyyaml (as the `tests` job has them, so a declared test that reads `ci.yml` can be collected), then runs:
 
 ```sh
 bash scripts/acceptance-check.sh <base sha> <head sha>

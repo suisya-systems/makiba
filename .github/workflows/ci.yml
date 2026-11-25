@@ -260,7 +260,8 @@ jobs:
         if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         with:
           python-version: "3.11"
-      - run: python3 -m pip install pytest
+      # pyyaml: a declared Python test may read this file (tests/test_ci_test_commit_scope.py), as in the tests job.
+      - run: python3 -m pip install pytest pyyaml
         if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
       - name: Declared tests fail at the test commit, pass at head, stay unchanged
         if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
