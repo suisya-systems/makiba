@@ -11,6 +11,12 @@
 //! git names. A match refuses
 //! (exit 1) naming the file, the line and the shape, never the matched text. Anything that cannot
 //! be read refuses too.
+//!
+//! `makiba hook prepare-commit-msg <pid>` (Issue 300, line L-K3) holds git's flag that skips the
+//! hooks: git runs `prepare-commit-msg` even with that flag, and its script passes the id of the
+//! git that runs it, whose argv (as exec received it, after the shell) is read for the flag
+//! (`skipping_flag`). It reads no shell text. Linux only; elsewhere it passes and the worker's
+//! Bash hook keeps reading the flag in the command text.
 
 use super::Refusal;
 use regex::bytes::Regex;
@@ -156,6 +162,106 @@ pub fn main(name: &str, args: &[String]) -> ExitCode {
     }
 }
 
+/// The git hook that refuses git's flag that skips the hooks (Issue 300, line L-K3). git runs it
+/// even with that flag, so it sees what `pre-commit` and `commit-msg` would not.
+pub const FLAG_HOOK: &str = "prepare-commit-msg";
+
+/// The line the flag check holds.
+const FLAG_LINE: &str = "L-K3";
+
+/// git commit's short options that take a value (required `m F C c t`, stuck-optional `S u`):
+/// what follows one of them in a bundle is its value.
+const VALUE_SHORT: &[char] = &['m', 'F', 'C', 'c', 't', 'S', 'u'];
+
+/// The element of `argv` (the argv of the git that runs the hook) that asks git commit to skip
+/// the hooks, if any. The commit's options are the elements after the first one equal to
+/// `commit` (after argv[0] when its basename is `git-commit`), read to the end: a `--` is not a
+/// stop, so `-m -- -n` is read too. Refused: a prefix of `--no-verify` at least as long as
+/// `--no-ver` (up to `=`), and a single-dash bundle whose letters hold `n` before the first
+/// short option that takes a value. Conservative: a separate value that looks like the flag
+/// (`-m -n`) is refused too; with no `commit` element (merge, rebase, cherry-pick), nothing is.
+pub fn skipping_flag(argv: &[String]) -> Option<String> {
+    let dashed = argv
+        .first()
+        .and_then(|a| Path::new(a).file_name())
+        .is_some_and(|n| n == "git-commit");
+    let start = if dashed {
+        1
+    } else {
+        argv.iter().skip(1).position(|a| a == "commit")? + 2
+    };
+    argv.iter().skip(start).find(|a| is_skip(a)).cloned()
+}
+
+fn is_skip(arg: &str) -> bool {
+    if let Some(long) = arg.strip_prefix("--") {
+        let name = long.split('=').next().unwrap_or_default();
+        return name.len() >= "no-ver".len() && "no-verify".starts_with(name);
+    }
+    let Some(bundle) = arg.strip_prefix('-') else {
+        return false;
+    };
+    for c in bundle.chars() {
+        if c == 'n' {
+            return true;
+        }
+        if VALUE_SHORT.contains(&c) || !c.is_ascii_alphabetic() {
+            return false;
+        }
+    }
+    false
+}
+
+/// The argv of process `pid`, as exec received it.
+#[cfg(target_os = "linux")]
+fn argv_of(pid: &str) -> Result<Vec<String>, String> {
+    if pid.is_empty() || !pid.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(format!(
+            "{pid:?} is not the id of the git that runs the hook"
+        ));
+    }
+    let raw = std::fs::read(format!("/proc/{pid}/cmdline"))
+        .map_err(|e| format!("cannot read the argv of git (process {pid}): {e}"))?;
+    Ok(raw
+        .split(|&b| b == 0)
+        .filter(|a| !a.is_empty())
+        .map(|a| String::from_utf8_lossy(a).into_owned())
+        .collect())
+}
+
+fn check_flag(args: &[String]) -> Result<(), Refusal> {
+    #[cfg(target_os = "linux")]
+    {
+        let pid = args.first().map(String::as_str).unwrap_or_default();
+        let argv = argv_of(pid).map_err(|why| Refusal::new(FLAG_LINE, "the argv of git", why))?;
+        if let Some(arg) = skipping_flag(&argv) {
+            return Err(Refusal::new(
+                FLAG_LINE,
+                arg.clone(),
+                format!(
+                    "git commit {arg} skips the repository's hooks (the secret scanner among them); run it without the flag. \
+                     If these letters are part of the message, pass it as -m \"<text>\" or put it in a file and pass -F <file>"
+                ),
+            ));
+        }
+    }
+    // Elsewhere the Bash hook `deny-no-verify-code-run` keeps reading the flag in the text.
+    #[cfg(not(target_os = "linux"))]
+    let _ = args;
+    Ok(())
+}
+
+/// Run `FLAG_HOOK` with the id of the git that runs it, then git's arguments.
+pub fn flag_main(args: &[String]) -> ExitCode {
+    match check_flag(args) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(refusal) => {
+            eprintln!("{}", refusal.message(FLAG_HOOK));
+            ExitCode::from(1)
+        }
+    }
+}
+
 /// The shell text of a refusal by the script of hook `name`, as `Refusal::message` writes it;
 /// `reason` and `matched` may hold shell expansions (inside double quotes).
 fn script_refusal(name: &str, reason: &str, matched: &str) -> String {
@@ -170,10 +276,9 @@ fn quoted(s: &str) -> String {
 }
 
 /// The hook names whose scripts only forward to the project's own hook (Issue 236): every name
-/// git runs by name except the scanner's, `push-to-checkout` and `proc-receive` (whose mere
-/// presence changes what git does) and `fsmonitor-watchman` (not run by name).
-pub const FORWARDED: [&str; 19] = [
-    "prepare-commit-msg",
+/// git runs by name except the scanner's, `FLAG_HOOK`, `push-to-checkout` and `proc-receive`
+/// (whose mere presence changes what git does) and `fsmonitor-watchman` (not run by name).
+pub const FORWARDED: [&str; 18] = [
     "post-commit",
     "pre-rebase",
     "post-checkout",
@@ -218,10 +323,12 @@ fn forward(name: &str, last: bool) -> String {
     )
 }
 
-/// Write the scripts of `NAMES` and `FORWARDED` into `dir`, each running `makiba` (an absolute
-/// path) and refusing with the path when it is missing or cannot run. A scanner script scans,
-/// runs the project's hook of its name (Issue 236) and scans again, for what that hook staged or
-/// wrote; a forwarding script runs the project's hook only. What `prepare-commit-msg` or
+/// Write the scripts of `NAMES`, `FLAG_HOOK` and `FORWARDED` into `dir`, each running `makiba`
+/// (an absolute path) and refusing with the path when it is missing or cannot run. A scanner
+/// script scans, runs the project's hook of its name (Issue 236) and scans again, for what that
+/// hook staged or wrote; the `FLAG_HOOK` script passes makiba its parent's id (`$PPID`, the git
+/// that runs the hook, since git starts a hook itself) and then runs the project's hook; a
+/// forwarding script runs the project's hook only. What `prepare-commit-msg` or
 /// `commit-msg` stages is not in that commit (git writes its tree before them): it stays staged,
 /// and the next commit's `pre-commit` scan reads it. A script already as wanted is left as it is.
 pub fn install(dir: &Path, makiba: &Path) -> std::io::Result<()> {
@@ -254,6 +361,14 @@ pub fn install(dir: &Path, makiba: &Path) -> std::io::Result<()> {
             );
             (name, script)
         })
+        .chain(std::iter::once((
+            &FLAG_HOOK,
+            format!(
+                "{}\"$m\" hook {FLAG_HOOK} \"$PPID\" \"$@\" || exit $?\n{}",
+                head(FLAG_HOOK),
+                forward(FLAG_HOOK, true)
+            ),
+        )))
         .chain(FORWARDED.iter().map(|name| {
             let script = format!(
                 "#!/bin/sh\n# Written by makibad (Issue 236): the project's own hook. Preparing a worktree rewrites it.\n{}",
@@ -274,6 +389,46 @@ pub fn install(dir: &Path, makiba: &Path) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn argv(words: &[&str]) -> Vec<String> {
+        words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn the_flag_is_read_from_git_commits_arguments_only() {
+        let refused = |w: &[&str]| skipping_flag(&argv(w));
+        let g = ["git", "-C", "/w", "-c", "user.name=t"];
+        let with = |rest: &[&'static str]| [&g[..], rest].concat();
+        for (rest, arg) in [
+            (&["commit", "-n", "-m", "x"][..], "-n"),
+            (&["commit", "--no-verify"], "--no-verify"),
+            (&["commit", "--no-ver"], "--no-ver"),
+            (&["commit", "--no-verify=1"], "--no-verify=1"),
+            (&["commit", "-anm", "x"], "-anm"),
+            (&["commit", "-qn"], "-qn"),
+            (&["commit", "-m", "--", "-n"], "-n"),
+            (&["commit", "-m", "-n"], "-n"),
+        ] {
+            assert_eq!(refused(&with(rest)).as_deref(), Some(arg), "{rest:?}");
+        }
+        assert_eq!(
+            refused(&["/usr/lib/git-core/git-commit", "-n"]).as_deref(),
+            Some("-n")
+        );
+        for rest in [
+            &["commit", "-m", "bash -n; never --no-verify"][..],
+            &["commit", "-uno", "-m", "x"],
+            &["commit", "-Cmain"],
+            &["commit", "-Fnotes.txt"],
+            &["commit", "-mrun"],
+            &["commit", "--no-verbose", "-m", "x"],
+            &["commit", "--no-ve"],
+            &["merge", "-n", "x"],
+            &["rebase", "--continue"],
+        ] {
+            assert_eq!(refused(&with(rest)), None, "{rest:?}");
+        }
+    }
 
     #[test]
     fn each_shape_is_found_on_its_line_and_plain_text_is_not() {

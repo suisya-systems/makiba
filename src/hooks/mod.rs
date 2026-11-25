@@ -119,6 +119,7 @@ const HOOKS: &[(&str, Hook)] = &[
     ("deny-push", deny_push::check),
     ("deny-dangerous-git", deny_dangerous_git::check),
     ("deny-no-verify", deny_no_verify::check),
+    ("deny-no-verify-code-run", deny_no_verify::check_code_run),
     ("deny-workers-delete", deny_workers_delete::check),
     ("worker-boundary", worker_boundary::check),
     ("deny-foreground-subagent", deny_foreground_subagent::check),
@@ -144,6 +145,10 @@ pub fn main(args: &[String]) -> ExitCode {
     if let Some(git) = git_hook::NAMES.iter().find(|n| Some(**n) == name) {
         return git_hook::main(git, &args[1..]);
     }
+    // The git hook that holds git's flag that skips the hooks (Issue 300) reads no payload either.
+    if name == Some(git_hook::FLAG_HOOK) {
+        return git_hook::flag_main(&args[1..]);
+    }
     // The premise reminder (Issue 269) only prints a line and never refuses.
     if name == Some("premise-check") {
         return premise_check::main();
@@ -153,6 +158,7 @@ pub fn main(args: &[String]) -> ExitCode {
             .iter()
             .map(|(n, _)| *n)
             .chain(git_hook::NAMES)
+            .chain([git_hook::FLAG_HOOK])
             .chain(["premise-check"])
             .collect();
         eprintln!("usage: makiba hook <{}>", names.join("|"));
