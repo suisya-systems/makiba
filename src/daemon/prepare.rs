@@ -346,6 +346,8 @@ impl Prepare {
         // `CLAUDE_CODE_TMPDIR` name it in the settings and in the launch's environment.
         let tmp = make_tmp_dir(&self.places.settings, l.id)?;
         write_dirs.push(tmp.clone());
+        // Claude Code's own shared folder, which its sandbox adds to the write surface itself.
+        deny_write_dirs.extend(agents::CLAUDE_SHARED_TMP.map(PathBuf::from));
         // No credential to push with or to write to GitHub (Issue 140, line L-K2).
         let (cred_dirs, cred_files) = if role == Role::Secretary {
             (vec![], vec![])

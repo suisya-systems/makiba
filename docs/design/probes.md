@@ -109,6 +109,18 @@ Cases for Issue 243 (lines L-K4 and L-K6), the case set `run-tmp-dir`, recorded 
 - `claude-user-tmp-write`: a write of `/tmp/claude-<uid>/makiba-probe`. OBSERVATION first: it tells whether `/tmp/claude-<uid>` can also be denied for write.
 - `scratchpad`: the scratchpad path Claude Code gives the model. OBSERVATION: under the launch's folder or not.
 - `close`: after the run's close, `<state>/tmp/<launch id>` from outside. PASS when it is gone.
+- `claude-shared-write`: a folder `/tmp/claude` made from outside beforehand, with a file in it, and a launch prepared after Issue 243's deny (its settings' `denyWrite` names `/tmp/claude`). A write of a new file in it, then a recursive delete of it. PASS when both are refused, the folder and its file are intact from outside, and `tmpdir-write` still passes in the same launch. Line L-K6 keeps `Open: #243` until this passes.
+
+Result (2026-11-26, Claude Code 2.1.332, Linux on WSL2, base commit 4060c8f; partial, by hand, not the script): run from the Bash of a worker launch prepared by the real `makibad` (launch 257, a code run, sandbox on), before the deny of `/tmp/claude` existed. Its settings named `allowWrite` = the workplace, the run's git folder and `<state>/tmp/257`, and `TMPDIR` = `CLAUDE_CODE_TMPDIR` = `<state>/tmp/257`.
+- `tmpdir-is-own`: PASS, `$TMPDIR` was `<state>/tmp/257/claude-1000`: `CLAUDE_CODE_TMPDIR` moves Claude Code's per-user folder.
+- `claude-user-tmp-write`: a `/tmp/claude-1000` left by another session existed; the write was refused with `Read-only file system`. It is outside the write surface, so it needs no deny.
+- `shared-tmp-write`: PASS (`Read-only file system`, no file afterwards).
+- `other-run-tmp`: the write into another live launch's `<state>/tmp/255` was refused (`Read-only file system`, no file afterwards). The recursive delete was not run: auto mode refused a delete in a live run's folder.
+- `tmpdir-write`: PASS.
+- `socket`: not measurable: the sandbox refuses `socket(AF_UNIX)` itself (`EPERM`) before any bind, so the path length of `CLAUDE_CODE_TMPDIR` limits no command's socket. The 59-character path above works for everything else.
+- `scratchpad`: OBSERVATION, under the launch's folder (`<state>/tmp/257/claude-1000/<project>/<session>/scratchpad`).
+- What Claude Code adds itself: the sandbox configuration it reported to the model held `/tmp/claude` and `/private/tmp/claude` in its write list beside the settings' three entries. `/tmp/claude` did not exist on that host, and a worker cannot make it (`/tmp` is read-only), but a folder anyone else keeps there is writable by every launch. Since Issue 243 every launch's settings deny writing both (`tests/claude_shared_tmp.rs`); `claude-shared-write` is to measure that the deny holds.
+- Not run (they need a person outside the sandbox): `claude-files-moved`, `other-tmp-folder-write`, `close`, `claude-shared-write`.
 
 Why the script runs one short turn per step and reads only one result line per step: of the four runs before, the first was cut off by the person's time limit; in the second, one long message raised a safeguards notice, the agent read the step files first, that call raised a permission prompt and its Escape ended the turn, so no step ran; in the third, the agent added `; echo "exit=$?"` when asked for the exit code (a prompt again), and a helper named `http.py` shadowed Python's `http`; in the fourth, `base-socket` was judged FAIL from a success marker quoted in a traceback's source line, while the socket had been refused.
 
