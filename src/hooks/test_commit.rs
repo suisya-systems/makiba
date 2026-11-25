@@ -9,9 +9,11 @@
 //!
 //! 1. it has more such lines than git reads as trailers (`git interpret-trailers --parse`), as on
 //!    pull request 308, where a blank line before `Co-Authored-By` left the key out of the block;
-//! 2. a declared path names no file the commit adds or changes (nor a folder holding one);
-//! 3. the run's project has a `prepare-commit-msg` hook of its own: it runs after git wrote the
-//!    commit's tree, so what it stages is in the index read here and not in the commit;
+//! 2. the run's project has a `prepare-commit-msg` or `commit-msg` hook of its own: it runs after
+//!    git wrote the commit's tree, so what it stages is in the index read here and not in the
+//!    commit (and a `commit-msg` hook may add the declaration itself);
+//! 3. a declared path names no file the commit adds or changes (nor a folder holding one); when
+//!    the index is HEAD's tree (a message-only `--amend`), what HEAD itself changes counts;
 //! 4. a declared Rust test target, as the index holds it, starts makibad directly, as on pull
 //!    requests 315 and 316.
 //!
@@ -197,12 +199,37 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
         ));
     }
 
-    // 2. Every declared path is a file the commit adds or changes, or a folder holding one.
-    let changed: Vec<String> = staged()
+    // 2. No project hook runs after git wrote the commit's tree: prepare-commit-msg before both
+    // checks, commit-msg between the scanner's two. What either stages is in the index read here
+    // and not in the commit, and a commit-msg hook may also add the declaration itself.
+    if let Ok(dir) = git(&["config", "--get", PROJECT_KEY]) {
+        let dir = text(dir);
+        for name in ["prepare-commit-msg", "commit-msg"] {
+            let hook = Path::new(dir.trim_end_matches('\n')).join(name);
+            if is_executable(&hook) {
+                let shown = hook.display().to_string();
+                return Err(Refusal::new(
+                    LINE,
+                    shown.clone(),
+                    format!(
+                        "the project's {name} hook {shown} runs after git wrote the commit's tree and may stage what the commit does not hold, so the declared tests cannot be read as committed: make the test commit where that hook is not run, or ask the person; {FINAL}"
+                    ),
+                ));
+            }
+        }
+    }
+
+    // 3. Every declared path is a file the commit adds or changes, or a folder holding one.
+    let mut changed: Vec<String> = staged()
         .map_err(cannot)?
         .into_iter()
         .map(|(p, _)| p)
         .collect();
+    if changed.is_empty() {
+        // The index is HEAD's tree: a message-only `--amend` (or an empty commit). The commit
+        // amended is judged by what HEAD itself adds or changes.
+        changed = head_changes().map_err(cannot)?;
+    }
     let declared: Vec<String> = read.iter().map(|v| normalized(v)).collect();
     if let Some(d) = declared
         .iter()
@@ -215,22 +242,6 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
                 "the commit declares {d}, which it neither adds nor changes: declare the test file this commit adds, or add it in this commit; {FINAL}"
             ),
         ));
-    }
-
-    // 3. No project hook stages after git wrote the commit's tree.
-    if let Ok(dir) = git(&["config", "--get", PROJECT_KEY]) {
-        let dir = text(dir);
-        let hook = Path::new(dir.trim_end_matches('\n')).join("prepare-commit-msg");
-        if is_executable(&hook) {
-            let shown = hook.display().to_string();
-            return Err(Refusal::new(
-                LINE,
-                shown.clone(),
-                format!(
-                    "the project's prepare-commit-msg hook {shown} runs after git wrote the commit's tree and may stage what the commit does not hold, so the declared tests cannot be read as committed: make the test commit where that hook is not run, or ask the person; {FINAL}"
-                ),
-            ));
-        }
     }
 
     // 4. No declared Rust test starts makibad directly, as the index holds it.
@@ -252,6 +263,30 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
         }
     }
     Ok(())
+}
+
+/// The paths HEAD adds or changes against its first parent (all of them for a root commit);
+/// none before a first commit.
+fn head_changes() -> Result<Vec<String>, String> {
+    if git(&["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
+        return Ok(Vec::new());
+    }
+    let out = git(&[
+        "diff-tree",
+        "--no-commit-id",
+        "--root",
+        "-r",
+        "-z",
+        "--name-only",
+        "--no-renames",
+        "--diff-filter=d",
+        "HEAD",
+    ])?;
+    Ok(text(out)
+        .split('\0')
+        .filter(|p| !p.is_empty())
+        .map(String::from)
+        .collect())
 }
 
 fn is_executable(path: &Path) -> bool {
