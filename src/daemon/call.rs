@@ -26,6 +26,7 @@
 use crate::db::writer::NewEvent;
 use crate::db::{Result, StateWriter};
 use crate::status_local::Mask;
+use rusqlite::Connection;
 use serde_json::{Value, json};
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -88,10 +89,108 @@ fn resolved(path: &Path) -> PathBuf {
     std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
-/// The places an agent writes (spec section 2) and the system's temporary folders, resolved.
-fn agent_places(state: &Path) -> Vec<(PathBuf, &'static str)> {
+/// `~/x` with `HOME`; any other text as it is.
+fn expand_home(entry: &str) -> PathBuf {
+    match (entry.strip_prefix("~/"), std::env::var_os("HOME")) {
+        (Some(rest), Some(home)) => PathBuf::from(home).join(rest),
+        _ => PathBuf::from(entry),
+    }
+}
+
+/// Every place an agent's sandbox may write, as `makibad` wrote it: the `sandbox.filesystem.
+/// allowWrite` entries of every settings file in `<state>/settings` (one per launch; those of
+/// closed launches are kept too, which only refuses more), each resolved, so a workplace that is
+/// a link is seen at its target. Fail closed: a settings file that cannot be read or parsed, or an
+/// entry that is not an absolute path, refuses every command.
+fn sandbox_places(state: &Path) -> std::result::Result<Vec<PathBuf>, String> {
+    let dir = state.join("settings");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => {
+            return Err(format!(
+                "the launches' settings ({}) cannot be read: {e}",
+                dir.display()
+            ));
+        }
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let file = entry
+            .map_err(|e| {
+                format!(
+                    "the launches' settings ({}) cannot be read: {e}",
+                    dir.display()
+                )
+            })?
+            .path();
+        if file.extension().and_then(|x| x.to_str()) != Some("json") {
+            continue;
+        }
+        let v: Value = std::fs::read_to_string(&file)
+            .map_err(|e| e.to_string())
+            .and_then(|t| serde_json::from_str(&t).map_err(|e| e.to_string()))
+            .map_err(|e| format!("the settings {} cannot be read: {e}", file.display()))?;
+        let Some(list) = v.pointer("/sandbox/filesystem/allowWrite") else {
+            continue;
+        };
+        let list = list
+            .as_array()
+            .ok_or_else(|| format!("the settings {}: allowWrite is not a list", file.display()))?;
+        for item in list {
+            let p = item
+                .as_str()
+                .map(expand_home)
+                .filter(|p| p.is_absolute())
+                .ok_or_else(|| {
+                    format!(
+                        "the settings {}: allowWrite entry {item} is not an absolute path",
+                        file.display()
+                    )
+                })?;
+            out.push(resolved(&p));
+        }
+    }
+    Ok(out)
+}
+
+/// The workplace of every run not closed, resolved.
+fn open_worktrees(c: &Connection) -> std::result::Result<Vec<PathBuf>, String> {
+    let mut q = c
+        .prepare(
+            "SELECT DISTINCT l.worktree FROM run_launch l JOIN runs r ON r.id = l.run_id
+             WHERE r.status NOT IN ('completed', 'failed', 'abandoned') AND l.worktree IS NOT NULL",
+        )
+        .map_err(|e| format!("the open runs cannot be read: {e}"))?;
+    let rows = q
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| format!("the open runs cannot be read: {e}"))?;
+    rows.map(|r| {
+        r.map(|p| resolved(Path::new(&p)))
+            .map_err(|e| format!("the open runs cannot be read: {e}"))
+    })
+    .collect()
+}
+
+/// The places an agent writes, resolved: the roots of spec section 2, the system's temporary
+/// folders, every `allowWrite` entry `makibad` wrote into a launch's sandbox, and the workplace of
+/// every open run.
+fn agent_places(
+    c: &Connection,
+    state: &Path,
+) -> std::result::Result<Vec<(PathBuf, &'static str)>, String> {
     let p = super::prepare::Places::from_env(state);
-    let mut out = vec![
+    // The places read from the launches first: the refusal then names the narrowest place.
+    let mut out: Vec<(PathBuf, &'static str)> = sandbox_places(state)?
+        .into_iter()
+        .map(|s| (s, "a place a launch's sandbox may write"))
+        .collect();
+    out.extend(
+        open_worktrees(c)?
+            .into_iter()
+            .map(|t| (t, "the workplace of an open run")),
+    );
+    out.extend([
         (resolved(state), "the state folder"),
         (resolved(&p.workers), "the worktrees"),
         (resolved(&p.docs), "the document folders"),
@@ -100,7 +199,7 @@ fn agent_places(state: &Path) -> Vec<(PathBuf, &'static str)> {
             resolved(&super::curator::knowledge_dir()),
             "the knowledge folder",
         ),
-    ];
+    ]);
     for t in [
         PathBuf::from("/tmp"),
         PathBuf::from("/private/tmp"),
@@ -109,20 +208,20 @@ fn agent_places(state: &Path) -> Vec<(PathBuf, &'static str)> {
     ] {
         out.push((resolved(&t), "a temporary folder"));
     }
-    out
+    Ok(out)
 }
 
 /// Rules 3 to 5 of design section 2.1, on a value that passed rule 2: the resolved file exists,
 /// is a regular file, is under no place an agent writes, and it and every folder above it are
 /// the user's or root's and writable by nobody else (a sticky folder excepted).
-fn disk_rule(value: &str, state: &Path) -> std::result::Result<PathBuf, String> {
+fn disk_rule(c: &Connection, value: &str, state: &Path) -> std::result::Result<PathBuf, String> {
     let file =
         std::fs::canonicalize(value).map_err(|e| format!("{value} cannot be resolved: {e}"))?;
     let meta = std::fs::metadata(&file).map_err(|e| format!("{}: {e}", file.display()))?;
     if !meta.is_file() {
         return Err(format!("{} is not a regular file", file.display()));
     }
-    for (place, what) in agent_places(state) {
+    for (place, what) in agent_places(c, state)? {
         if !place.as_os_str().is_empty() && file.starts_with(&place) {
             return Err(format!(
                 "{} is under {what} ({}), which an agent may write",
@@ -158,12 +257,12 @@ fn disk_rule(value: &str, state: &Path) -> std::result::Result<PathBuf, String> 
 }
 
 /// The rule of a set: empty is off; anything else passes every rule of design section 2.1.
-pub fn check_set(value: &str, state: &Path) -> std::result::Result<(), String> {
+pub fn check_set(c: &Connection, value: &str, state: &Path) -> std::result::Result<(), String> {
     if value.is_empty() {
         return Ok(());
     }
     text_rule(value)?;
-    disk_rule(value, state).map(|_| ())
+    disk_rule(c, value, state).map(|_| ())
 }
 
 /// Every control character but newline as a space.
@@ -387,7 +486,9 @@ impl Call {
         self.last_start = Some(Instant::now());
         // The resolved file is what runs: a link checked here cannot be pointed elsewhere
         // between the check and the start.
-        let program = match text_rule(&command).and_then(|()| disk_rule(&command, &self.state)) {
+        let program = match text_rule(&command)
+            .and_then(|()| disk_rule(w.conn(), &command, &self.state))
+        {
             Ok(p) => p,
             Err(why) => {
                 let mask = Mask::new(w.conn());
@@ -695,7 +796,9 @@ mod tests {
         let link = dir.join("link");
         std::os::unix::fs::symlink(&real, &link).unwrap();
         let state = dir.join("state");
-        match disk_rule(&link.to_string_lossy(), &state) {
+        std::fs::create_dir_all(&state).unwrap();
+        let w = StateWriter::open(&state.join("state.db")).unwrap();
+        match disk_rule(w.conn(), &link.to_string_lossy(), &state) {
             Ok(p) => assert_eq!(p, real),
             // A sandbox that shows root's files as another user's refuses `/` itself.
             Err(e) => assert!(
@@ -703,6 +806,69 @@ mod tests {
                 "refused where root owns /: {e}"
             ),
         }
+    }
+
+    /// A folder `dir` with a state folder (its database made), and a script in a folder
+    /// `outside` reached through a link `link` beside the state folder: (dir, state, writer,
+    /// link, script).
+    fn linked_outside() -> (tempfile::TempDir, PathBuf, StateWriter, PathBuf, PathBuf) {
+        let d = private_folder();
+        let dir = std::fs::canonicalize(d.path()).unwrap();
+        let state = dir.join("state");
+        std::fs::create_dir_all(state.join("settings")).unwrap();
+        let w = StateWriter::open(&state.join("state.db")).unwrap();
+        let outside = dir.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let script = outside.join("call");
+        std::fs::write(&script, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = state.join("work");
+        std::os::unix::fs::symlink(&outside, &link).unwrap();
+        (d, state, w, link, script)
+    }
+
+    /// An open run whose workplace is a link to a folder outside every root: a script there is
+    /// refused, since the run's worker writes it.
+    #[test]
+    fn a_script_in_an_open_runs_linked_workplace_is_refused() {
+        let (_d, state, w, link, script) = linked_outside();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t1",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage)
+                 VALUES ((SELECT id FROM runs WHERE task_id = 't1'), 's1', 'document', 'fake',
+                         'b', ?1, 'settings_ready')",
+                [link.to_string_lossy()],
+            )
+            .unwrap();
+        let e = disk_rule(w.conn(), &script.to_string_lossy(), &state).unwrap_err();
+        assert!(e.contains("the workplace of an open run"), "{e}");
+    }
+
+    /// A launch's sandbox whose allowWrite entry is a link to a folder outside every root: a
+    /// script there is refused; and a settings file that cannot be read refuses every command.
+    #[test]
+    fn a_script_under_a_linked_allow_write_entry_is_refused_and_an_unreadable_settings_file_refuses_all()
+     {
+        let (_d, state, w, link, script) = linked_outside();
+        std::fs::write(
+            state.join("settings").join("t1.json"),
+            json!({"sandbox": {"filesystem": {"allowWrite": [link.to_string_lossy()]}}})
+                .to_string(),
+        )
+        .unwrap();
+        let e = disk_rule(w.conn(), &script.to_string_lossy(), &state).unwrap_err();
+        assert!(e.contains("a place a launch's sandbox may write"), "{e}");
+
+        std::fs::write(state.join("settings").join("t1.json"), "{").unwrap();
+        let e = disk_rule(w.conn(), &script.to_string_lossy(), &state).unwrap_err();
+        assert!(e.contains("cannot be read"), "{e}");
     }
 
     /// A failure made under an older setting does not count against a newer one.

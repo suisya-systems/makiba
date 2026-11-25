@@ -2904,7 +2904,7 @@ fn notify_command(w: &StateWriter, actor: &str, action: &str, args: &Value) -> R
         .path()
         .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
         .unwrap_or_default();
-    super::call::check_set(value, &state).map_err(usage)?;
+    super::call::check_set(w.conn(), value, &state).map_err(usage)?;
     w.append_event(&NewEvent {
         kind: "config_set",
         actor: Some(actor),
