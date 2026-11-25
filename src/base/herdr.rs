@@ -33,6 +33,42 @@ pub struct Herdr {
     session: Option<String>,
 }
 
+/// The process that serves `socket` (Issue 382): its pid, and the file it runs when that can be
+/// read. Linux only: the peer's pid by `SO_PEERCRED` on a connection that writes nothing, then
+/// `/proc/<pid>/exe`. Nothing is run and nothing is sent to the core. `None` when nothing
+/// listens, or on another system.
+#[cfg(target_os = "linux")]
+pub fn server_process(socket: &Path) -> Option<(u32, Option<PathBuf>)> {
+    use std::os::fd::AsRawFd;
+    let stream = UnixStream::connect(socket).ok()?;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the buffer is a ucred of the length given, owned by this frame.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 || cred.pid <= 0 {
+        return None;
+    }
+    let pid = cred.pid as u32;
+    Some((pid, std::fs::read_link(format!("/proc/{pid}/exe")).ok()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn server_process(_socket: &Path) -> Option<(u32, Option<PathBuf>)> {
+    None
+}
+
 /// `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`; `/tmp` when the variable is not set, as the base does.
 pub fn socket_path(runtime_dir: Option<&Path>, session: &str) -> PathBuf {
     runtime_dir

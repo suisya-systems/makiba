@@ -49,6 +49,13 @@ pub fn app_register_command(session: &str) -> String {
     format!("hc.exe machine add wsl --name {session} --session {session}")
 }
 
+/// The process serving the real base of `session` (Issue 382, `makiba up`): its pid and, when it
+/// can be read, its file. Linux only; `None` elsewhere or when nothing listens.
+pub fn server_process_of_session(session: &str) -> Option<(u32, Option<PathBuf>)> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    herdr::server_process(&herdr::socket_path(runtime.as_deref(), session))
+}
+
 /// The real base of `session`, which `Base::start` can start (`makiba up`).
 pub fn connect_session_for_start(session: &str, timeout: Duration) -> Box<dyn Base> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);

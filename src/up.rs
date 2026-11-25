@@ -12,6 +12,9 @@
 //!
 //! A core that answers with another version than the pinned one stops `up` at once, before the
 //! ledger is opened and before the base is started, naming what to run (Issue 418): `up` never stops a core.
+//! A core of another version that `hc server start` itself started (an older `herdr-core` found
+//! first, Issue 382) stops `up` too, before a run is resumed or `makibad` started; the message
+//! names the server's file (Linux) and its version, and the core is left running.
 
 use crate::agents::version;
 use crate::base::{self, BaseError};
@@ -264,6 +267,72 @@ fn other_version(session: &str, found: &str) -> Failure {
     (ErrorKind::Unavailable, text)
 }
 
+/// After `hc server start`: the version of the core that answers, when it is not the pinned one
+/// (Issue 382). While nothing listens yet it asks again every 100 ms for up to 5 s; anything
+/// else (the pinned version, still nothing, another error) is `None`, and `up` goes on as before.
+fn started_version(the_base: &dyn base::Base) -> Option<String> {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match the_base.hello() {
+            Err(BaseError::UnsupportedVersion { found, .. }) => return Some(found),
+            Err(BaseError::Unavailable(d)) if d.kind == "connect" && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The `hc` that `start` ran (`$HC_BIN`, else `hc` on `PATH`), as a file, when it is found.
+fn hc_file() -> Option<std::path::PathBuf> {
+    let hc = std::env::var_os("HC_BIN").unwrap_or_else(|| "hc".into());
+    let hc = std::path::PathBuf::from(hc);
+    if hc.components().count() > 1 {
+        return Some(hc);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(&hc))
+        .find(|p| p.is_file())
+}
+
+/// The refusal of a core of session `session` that `hc server start` started and that runs
+/// `found`, not the pinned release (Issue 382): it names the server's file (Linux), and the way
+/// out by the path of this binary.
+fn started_other_version(session: &str, found: &str) -> Failure {
+    let pinned = base::version::PINNED;
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "makiba".into());
+    let hc = std::env::var("HC_BIN").unwrap_or_else(|_| "hc".into());
+    let server = base::server_process_of_session(session);
+    let file = server.as_ref().and_then(|(_, f)| f.clone());
+    let named = match &server {
+        Some((pid, Some(f))) => format!("its server is {} (pid {pid})", f.display()),
+        Some((pid, None)) => format!("its server's file could not be read (pid {pid})"),
+        None => "its server's file could not be read".into(),
+    };
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    let is_hc = match (&file, hc_file()) {
+        (Some(f), Some(h)) => same(f, &h),
+        _ => false,
+    };
+    let mut text = format!(
+        "`{hc} server start` started a base of session {session} that runs {found}, this makiba \
+         pins {pinned}; {named}. Stop it with `{exe} down --stop-base`, then install {pinned} with \
+         `bash scripts/install-base.sh PREFIX` and fix what it names until it exits 0 (it names a \
+         herdr-core or hc that HC_BIN or PATH finds before the installed one), then run `{exe} up` again"
+    );
+    if is_hc {
+        text.push_str(
+            "; HC_BIN or PATH names that file as hc: point HC_BIN at PREFIX/bin/hc or unset it",
+        );
+    }
+    (ErrorKind::Unavailable, text)
+}
+
 fn run(secretary: bool) -> Result<(), Failure> {
     if let Some(v) = agent_variable() {
         return Err((
@@ -316,6 +385,13 @@ fn run(secretary: bool) -> Result<(), Failure> {
             format!("cannot start the base: {e}"),
         )
     })?;
+    // The core `hc server start` started may be an older `herdr-core` found first (Issue 382):
+    // refused before a run is resumed or `makibad` started. Not stopped: `up` never stops a core.
+    if probe.is_some()
+        && let Some(found) = started_version(&*the_base)
+    {
+        return Err(started_other_version(&session, &found));
+    }
     // Printed only: the app's machine list is the person's (Issue 196).
     println!(
         "app: to see this organization in the app, run on the app's machine: {}",
