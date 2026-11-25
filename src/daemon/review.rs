@@ -78,13 +78,16 @@ impl Programs {
     }
 }
 
-/// The program `p` as it would run: a path as it is, a bare name looked up on PATH.
+/// The program `p` as it would run: a path made absolute against makibad's own folder (a reader
+/// starts in the round's tree, where a relative path would name the worker's files), a bare name
+/// looked up on PATH.
 fn resolve(p: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     if p.components().count() > 1 {
-        return std::fs::metadata(p)
+        let p = std::path::absolute(p).ok()?;
+        return std::fs::metadata(&p)
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .then(|| p.to_path_buf());
+            .then_some(p);
     }
     agents::on_path(&p.to_string_lossy())
 }
@@ -1450,6 +1453,35 @@ mod tests {
         assert!(
             !has(&["--ro-bind".into(), s(&found), s(&found)]),
             "{args:?}"
+        );
+    }
+
+    /// A program named by a relative path is kept as the absolute path it names from makibad's
+    /// folder (the review of Issue 262): the reader and the boundary start in the round's tree,
+    /// where the same relative path could name a file the worker committed.
+    #[test]
+    fn a_relative_program_is_resolved_from_makibads_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let here = std::env::current_dir().unwrap();
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let program = t.join("bin/bwrap");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        // Only its metadata is read; it is never run.
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The same file named relative to the folder the test runs in, through the root.
+        let mut rel = PathBuf::from(".");
+        for _ in here.components().skip(1) {
+            rel.push("..");
+        }
+        rel.push(program.strip_prefix("/").unwrap());
+        let r = resolve(&rel).unwrap_or_else(|| panic!("{} not resolved", rel.display()));
+        assert!(r.is_absolute(), "{}", r.display());
+        assert_eq!(std::fs::canonicalize(&r).unwrap(), program);
+        assert_eq!(resolve(Path::new("./no/such/program")), None);
+        assert_eq!(
+            resolve(Path::new("/bin/sh")),
+            Some(PathBuf::from("/bin/sh"))
         );
     }
 
