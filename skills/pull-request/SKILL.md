@@ -98,6 +98,13 @@ In this order, because `makibad` counts the raw notes when a close is recorded:
 2. Run the retro skill; it may save a note of its own.
 3. `close` the worker with mcp__makiba__close. It refuses while the worktree holds uncommitted changes or unpushed commits.
 
+A merged pull request whose worker could not report done, because its last diff review found a blocker the person accepts as a known limit, is not abandoned: it closes as completed with that limit recorded.
+
+1. mcp__makiba__pending, `action` `add`, for the task, with the question `Accept as a known limit of <task_id> and close it as completed: <finding>` word for word (the finding in one line) and `why` the one-line reason, with the other parts of its context; then `escalate` it.
+2. Once the person answers yes, mcp__makiba__close with `task_id`, `limit` (the same finding), `reason` (the same reason) and `pending` (the entry's id). It refuses without the person's yes to that exact question, asked after the last review, and without a merge of the run's current pull request.
+
+A task you abandon: mcp__makiba__close with `abandon` and a one-line `reason`, kept in the record of the close.
+
 ## Not carried
 
 paddock's re-placing of its own files after a landing in its own repository: makiba's role files are carried in its binary.
