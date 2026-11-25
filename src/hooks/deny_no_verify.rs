@@ -2,7 +2,8 @@
 //! that skips the repository's hooks (inventory HK-2, lines L-K3 and L-K12). Ported from
 //! claude-org-ja's `.hooks/block-no-verify.sh`:
 //!
-//! - `--no-verify` on `commit`, `push`, `merge`, `pull` or `am`;
+//! - `--no-verify`, or an abbreviation of it from `--no-ver`, on `commit`, `push`, `merge`,
+//!   `pull` or `am`;
 //! - `-n` on `commit`, alone or inside a bundle of short options;
 //! - `HUSKY=`, `SKIP_SECRET_SCAN=` or `NO_VERIFY=` beside one of those commands;
 //! - `git -c core.hooksPath=...` or `git -c hook.*` beside one of them.
@@ -68,7 +69,13 @@ fn check_with(payload: &Value, commit_flag: bool) -> Result<(), Refusal> {
         if !subs.iter().any(|&s| s) {
             continue;
         }
-        if has(&flat, r"(^|[[:space:]])--no-verify([[:space:]]|$)") {
+        // The long flag and each abbreviation git accepts (from `--no-ver`), with or without a
+        // value: the deny rules on git commit text that also held the abbreviations are gone
+        // (Issue 300).
+        if has(
+            &flat,
+            r"(^|[[:space:]])--no-ver(i|if|ify)?(=[^[:space:]]*)?([[:space:]]|$)",
+        ) {
             let which = ["commit", "push", "merge", "pull", "am"]
                 .iter()
                 .zip(subs)
@@ -83,7 +90,7 @@ fn check_with(payload: &Value, commit_flag: bool) -> Result<(), Refusal> {
                     if which == "commit" { REMEDY } else { "" }
                 ),
             )
-            .at(" --no-verify"));
+            .at(" --no-ver"));
         }
         if subs[0]
             && (has(&flat, r"(^|[[:space:]])-n([[:space:]]|$)")
@@ -144,4 +151,47 @@ fn check_with(payload: &Value, commit_flag: bool) -> Result<(), Refusal> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn bash(command: &str) -> Value {
+        json!({"tool_name": "Bash", "tool_input": {"command": command}})
+    }
+
+    #[test]
+    fn an_abbreviation_of_the_long_flag_is_refused_where_the_text_is_read() {
+        let flag = [
+            "--no-ver",
+            "--no-veri",
+            "--no-verif",
+            "--no-verify",
+            "--no-verify=1",
+        ];
+        for f in flag {
+            for sub in ["commit", "push origin x"] {
+                let c = format!("git {sub} {f} -m x");
+                assert!(check(&bash(&c)).is_err(), "{c}");
+            }
+            let push = format!("git push {f} origin x");
+            assert!(check_code_run(&bash(&push)).is_err(), "{push}");
+            // The worker's commit flag is git's prepare-commit-msg's on Linux.
+            let commit = format!("git commit {f} -m x");
+            assert_eq!(
+                check_code_run(&bash(&commit)).is_ok(),
+                cfg!(target_os = "linux"),
+                "{commit}"
+            );
+        }
+        for c in [
+            "git commit --no-verbose -m x",
+            "git merge --no-verify-signatures x",
+            "git commit -m x",
+        ] {
+            assert!(check(&bash(c)).is_ok(), "{c}");
+        }
+    }
 }
