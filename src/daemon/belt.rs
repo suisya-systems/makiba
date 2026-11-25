@@ -1005,7 +1005,8 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
                     AND json_extract(e.payload_json, '$.allow') = 0
-                    AND coalesce(json_extract(e.payload_json, '$.result'), '') != 'unavailable'
+                    AND coalesce(json_extract(e.payload_json, '$.verdict'),
+                                 json_extract(e.payload_json, '$.result'), '') != 'unavailable'
                     AND json_extract(e.payload_json, '$.head') = coalesce(
                       (SELECT json_extract(p.payload_json, '$.head_oid') FROM events p
                        WHERE p.kind IN ('pr_opened', 'fix_pushed') AND p.id < e.id

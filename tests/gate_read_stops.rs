@@ -657,6 +657,56 @@ fn an_otherwise_landable_pull_request_ordered_after_an_unreadable_one_is_unavail
         "{v}"
     );
     let verdicts = c.events("acceptance_gate");
-    assert_eq!(verdicts.last().unwrap()["result"], json!("unavailable"));
+    assert_eq!(verdicts.last().unwrap()["verdict"], json!("unavailable"));
+    assert!(c.events("merge_attempted").is_empty());
+}
+
+const TEST_REWRITTEN: &str =
+    "from calc import add\n\n\ndef test_add():\n    assert add(2, 2) in (0, 4)\n";
+
+impl Case {
+    /// A watch of `task`'s pull request `pr` at a new head, as `pr pushed` leaves it.
+    fn watch_head(&self, task: &str, pr: i64, head: &str) {
+        let run = self.run_of(task);
+        self.conn()
+            .execute(
+                "INSERT INTO pr_watches (repo, pr, head_oid, run_id) VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![self.repo, pr, head, run],
+            )
+            .unwrap();
+    }
+}
+
+#[test]
+fn a_ci_outage_still_pins_the_test_commit_and_a_rewrite_after_it_is_refused() {
+    let c = Case::new("outagepin");
+    c.fail("check-runs", "always");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["status"], json!("unavailable"), "{v}");
+    let first = c.events("acceptance_gate");
+    assert_eq!(first.len(), 1, "{first:?}");
+    assert!(first[0]["manifest_digest"].is_string(), "{}", first[0]);
+    assert_eq!(first[0]["verdict"], json!("unavailable"), "{}", first[0]);
+
+    // The pull request's test commit is rewritten, and GitHub answers again.
+    c.git(&["checkout", "-q", "-b", "rewritten", &c.base]);
+    c.commit(
+        &format!("test: failing test{TRAILER}"),
+        &[("tests/test_calc.py", Some(TEST_REWRITTEN))],
+    );
+    c.commit("fix", &[("calc.py", Some(FIXED))]);
+    let head = c.ci_all(7);
+    c.watch_head("t1", 7, &head);
+    c.reviewed("t1", &head);
+    c.heal("check-runs");
+    let v = answered(c.request(7, &head));
+    assert_eq!(v["status"], json!("refused"), "{v}");
+    assert!(
+        v["reason"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("rewritten"),
+        "{v}"
+    );
     assert!(c.events("merge_attempted").is_empty());
 }

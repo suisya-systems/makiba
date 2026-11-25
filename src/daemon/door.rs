@@ -3434,10 +3434,14 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         &mut v,
     ) {
         // A read of GitHub that still failed is the cause of the error: not a refusal (Issue 512).
-        if ci.unavailable().is_some() {
-            return Found::Unavailable(e.0);
+        // The verdict goes on, so that the test commit found is recorded (the pin) and the rules
+        // on the content still apply; `judge` answers `unavailable` only if none refuses.
+        v.result = if ci.unavailable().is_some() {
+            "unavailable"
+        } else {
+            "rejected"
         }
-        v.result = "rejected".into();
+        .into();
         v.reason = e.0;
     }
     // The tests edited after the test commit (Issue 282). A comparison that cannot be made is
@@ -3583,7 +3587,10 @@ impl Door {
                     v.result = "rejected".into();
                     v.reason = "the open pull requests of the repository changed while the gate ran; ask again".into();
                 }
+                // A CI read that failed (Issue 512) is held as allowed while the rules on the
+                // content run; if none refuses, it becomes `unavailable` below.
                 let allow = v.result == "passed"
+                    || v.result == "unavailable"
                     || (v.result == "no_manifest" && (mode == "human" || docs));
                 let reason = if v.result == "no_manifest" && !allow {
                     format!(
@@ -3688,6 +3695,12 @@ impl Door {
                 reason = format!("{reason}; {line}");
             }
         }
+        // Issue 512: a CI read that still failed, with no rule on the content refusing: the
+        // acceptance is not known, and that is all that stands.
+        if allow && verdict == "unavailable" {
+            allow = false;
+            reason = format!("GitHub could not be read: {reason}");
+        }
         // Issue 282: a range task's pull request lands without the person only when the range was
         // approved under acceptance and the mode read now is acceptance too. The checks above are
         // those of the mode read now; a pair that is not both only adds the question to the person.
@@ -3723,12 +3736,9 @@ impl Door {
                 "reason": reason, "mode": mode, "allow": allow,
             }),
         };
-        // An order that could not be read from GitHub (Issue 512) is no refusal: its row says so,
-        // and the pause of two refusals in a row does not count it.
-        if verdict == "unavailable" {
-            payload["result"] = json!("unavailable");
-            payload["reason"] = json!(reason);
-        }
+        // The answer's verdict (Issue 512): `unavailable` is no refusal, and the pause of two
+        // refusals in a row does not count it; `result` stays the acceptance result.
+        payload["verdict"] = json!(verdict);
         if let Some(v) = &event {
             if let Some(m) = &v.manifest_commit {
                 payload["manifest_commit"] = json!(m);
