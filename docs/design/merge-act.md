@@ -567,7 +567,13 @@ merge-wait.md section 5):
 5. The timeline items `AddedToMergeQueueEvent` and `RemovedFromMergeQueueEvent` are readable on
    the pull request, with their time; whether a removal carries a reason. Source:
    https://docs.github.com/en/graphql/reference/unions#pullrequesttimelineitems
+   Still [unverified] after build Issue 4 (Issue 434), built on the stand-in's answers: no GitHub
+   host was reachable while it was built. The build reads `__typename` and `createdAt` only, and
+   matches no entry id.
 6. Whether a pull request leaving the queue to land can be read `OPEN` with no entry for a moment.
+   Still [unverified] after Issue 434. So the build ends a queue act on reads out of the queue only
+   when the timeline also shows a removal after the attempt (the person's decision on Issue 434,
+   in place of section 7's two reads alone).
 7. What `mergedBy` reads after a queue merge. **Verified** (observed on PR 428 and PR 429,
    2026-11-24): the login of the person who added the pull request to the queue (the owner, from
    the web UI).

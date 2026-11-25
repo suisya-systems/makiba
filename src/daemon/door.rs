@@ -894,6 +894,22 @@ fn pending(w: &StateWriter, args: &Value) -> Response {
         }
         action @ ("escalate" | "withdraw") => {
             let id = id_arg(args)?;
+            // Issue 432: a pending merge stays open for the person's key (an escalated one could
+            // not be approved) and is withdrawn by merge withdraw, with its notice.
+            let merge: bool = c
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM pending WHERE id = ?1 AND kind = 'merge')",
+                    [id],
+                    |r| r.get(0),
+                )
+                .map_err(internal)?;
+            if merge {
+                return Err(refuse(
+                    ErrorKind::Denied,
+                    format!("pending entry {id} is a merge, which pending does not {action}"),
+                    "withdraw it with merge, action withdraw and its id; the person approves or refuses it with makiba merge",
+                ));
+            }
             if action == "escalate" {
                 missing_context(c, id)?;
                 // A range task's stop is recorded with its kind and the recommended answer
@@ -1089,6 +1105,16 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
             "",
         ));
     };
+    // Issue 432: a pending merge lands only on the person's key, never on an answer.
+    if kind == "merge" {
+        return Err(refuse(
+            ErrorKind::Denied,
+            format!(
+                "pending entry {id} is a merge: approve it with makiba merge approve {id} (the person's key)"
+            ),
+            "tell the person the entry's id; they approve or refuse it in their shell",
+        ));
+    }
     if !["open", "escalated"].contains(&status.as_str()) {
         return Err(refuse(
             ErrorKind::Conflict,
@@ -1933,8 +1959,20 @@ fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
     let r = super::prwatch::register_with(w, kind, task, repo, number, head, base_merge)
         .map_err(internal)?;
     if let Some(a) = dequeued {
-        merge_dequeued(w, task, repo, number, &a).map_err(internal)?;
+        merge_dequeued(w, task, repo, number, &a, "head recorded").map_err(internal)?;
     }
+    // Issue 432: a pending merge of another head of this pull request, or of the pull request this
+    // one replaces as the run's current one, is no longer what the person would approve.
+    withdraw_merge_entries(
+        w,
+        task,
+        repo,
+        number,
+        Some(head),
+        true,
+        &format!("a new head {} was recorded", &head[..12]),
+    )
+    .map_err(internal)?;
     // The belt (Issue 282): the stops of an older head go, and a fix that reaches the range's
     // `budget_fixes` is a stop of the task; a clean merge of the base is no fix (Issue 358). The
     // push is recorded whatever the count.
@@ -3188,6 +3226,8 @@ impl Door {
         let mode = super::gate::merge_approval_mode();
         let mut review = None;
         let mut warn = false;
+        // Each WARNING the gate adds, as its own line (Issue 432: a pending merge entry shows them).
+        let mut warnings: Vec<String> = Vec::new();
         let (mut verdict, reason, mut allow, event) = match found {
             Found::Before(why) => ("rejected".to_string(), why, false, None),
             Found::Ran(mut v, docs, rv) => {
@@ -3243,6 +3283,7 @@ impl Door {
                 );
             } else if allow && bad {
                 warn = true;
+                warnings.push(line.clone());
                 reason = format!("{reason}; WARNING {line}: the person decides this landing");
             } else {
                 reason = format!("{reason}; {line}");
@@ -3268,6 +3309,7 @@ impl Door {
                 );
             } else if allow {
                 warn = true;
+                warnings.push(line.clone());
                 reason = format!("{reason}; WARNING {line}: the person decides this landing");
             } else {
                 reason = format!("{reason}; {line}");
@@ -3288,6 +3330,9 @@ impl Door {
             let approved = range_mode.as_deref().unwrap_or("human");
             if allow && !(approved == "acceptance" && mode == "acceptance") {
                 warn = true;
+                warnings.push(format!(
+                    "range {id} was approved under merge_approval_mode {approved} and the mode now is {mode}"
+                ));
                 reason = format!(
                     "{reason}; WARNING range {id} was approved under merge_approval_mode {approved} and the mode now is {mode}: the person decides this landing"
                 );
@@ -3397,6 +3442,7 @@ impl Door {
             answer,
             allow,
             warn,
+            warnings,
             verdict,
             reason,
             mode,
@@ -3413,6 +3459,8 @@ struct Judged {
     answer: Value,
     allow: bool,
     warn: bool,
+    /// Each warning of `warn`, one line each.
+    warnings: Vec<String>,
     verdict: String,
     reason: String,
     mode: &'static str,
@@ -3445,6 +3493,18 @@ pub(super) fn act_awaiting(
     c: &Connection,
     repo: &str,
     pr: i64,
+) -> rusqlite::Result<Option<Awaiting>> {
+    act_awaiting_for(c, repo, pr, None)
+}
+
+/// `act_awaiting` for the run `run` (the PR watch's `followed`, Issue 434): only a `pr_merged` of
+/// that run ends the act, since each run that follows the pull request records its own landing;
+/// with `None`, a `pr_merged` of any run does.
+pub(super) fn act_awaiting_for(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+    run: Option<i64>,
 ) -> rusqlite::Result<Option<Awaiting>> {
     let of_pr = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
                  AND json_extract(payload_json, '$.pr') = ?2";
@@ -3484,9 +3544,10 @@ pub(super) fn act_awaiting(
     };
     let ended: bool = c.query_row(
         &format!(
-            "SELECT EXISTS (SELECT 1 FROM events WHERE kind IN ({ends}) AND id > ?3 AND {of_pr})"
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind IN ({ends}) AND id > ?3 AND {of_pr}
+               AND (kind != 'pr_merged' OR ?4 IS NULL OR run_id = ?4))"
         ),
-        params![repo, pr, attempt],
+        params![repo, pr, attempt, run],
         |r| r.get(0),
     )?;
     Ok((!ended).then(|| Awaiting {
@@ -3496,21 +3557,25 @@ pub(super) fn act_awaiting(
     }))
 }
 
-/// End the queue act `a` of `repo#pr` because another head of the pull request was recorded
-/// (`why` `head recorded`), and tell the secretary, in the caller's transaction.
+/// End the queue act `a` of `repo#pr` and tell the secretary, in the caller's transaction. `why`:
+/// `head recorded` (another head of the pull request was recorded, by the `pr` verb or the
+/// outcome writer), or, from the PR watch (Issue 434), `head moved` (GitHub shows another head),
+/// `closed` (read closed) or `left the queue` (read out of the queue with a removal on its
+/// timeline).
 pub(super) fn merge_dequeued(
     w: &StateWriter,
     task: &str,
     repo: &str,
     pr: i64,
     a: &Awaiting,
+    why: &str,
 ) -> crate::db::Result<()> {
     w.append_event(&NewEvent {
         kind: "merge_dequeued",
         actor: Some("makibad"),
         payload: Some(
             &json!({"repo": repo, "pr": pr, "head": a.head, "attempt": a.attempt,
-                               "why": "head recorded"}),
+                               "why": why}),
         ),
         run_task_id: Some(task),
         ..Default::default()
@@ -3519,10 +3584,23 @@ pub(super) fn merge_dequeued(
         w,
         crate::spec::AGENT_SECRETARY,
         task,
-        &format!(
-            "makibad's merge queue act for {repo}#{pr} at {} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge.",
-            a.head
-        ),
+        &match why {
+            "left the queue" => format!(
+                "{repo}#{pr} left the merge queue without landing (the queue's checks failed, or someone removed it). Read why on the pull request; fix it or ask again with merge."
+            ),
+            "head moved" => format!(
+                "makibad's merge queue act for {repo}#{pr} at {} has ended: GitHub shows another head of the pull request, and the queue entry was bound to the old one. Record the new head with makiba pr pushed; once CI passes at it, ask again with merge.",
+                a.head
+            ),
+            "closed" => format!(
+                "makibad's merge queue act for {repo}#{pr} at {} has ended: the pull request was closed without landing.",
+                a.head
+            ),
+            _ => format!(
+                "makibad's merge queue act for {repo}#{pr} at {} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge.",
+                a.head
+            ),
+        },
     )?;
     Ok(())
 }
@@ -3563,11 +3641,277 @@ fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError
     Ok(task)
 }
 
+/// The text of a pending merge entry (Issue 432, merge-act.md section 5.1): exactly what
+/// `makiba merge approve` prints, whose SHA-256 the approval carries as `shown`.
+#[allow(clippy::too_many_arguments)]
+fn merge_entry_text(
+    repo: &str,
+    pr: i64,
+    task: &str,
+    title: &str,
+    head: &str,
+    method: &str,
+    reason: &str,
+    warnings: &[String],
+    requested_by: &str,
+) -> String {
+    let mut text = format!(
+        "Merge pull request {repo}#{pr}\nTask: {task} ({title})\nHead: {head}\nMethod: {method} (on a branch that requires the merge queue, the queue's own method applies)\nGate: {reason}\n"
+    );
+    for w in warnings {
+        text.push_str(&format!("Warning: {w}\n"));
+    }
+    text.push_str(&format!("Requested by: {requested_by}\n"));
+    text
+}
+
+/// The context of a pending merge entry for the gate's reading `j` (merge-act.md section 5.1).
+#[allow(clippy::too_many_arguments)]
+fn merge_entry_context(
+    w: &StateWriter,
+    j: &Judged,
+    repo: &str,
+    pr: i64,
+    task: &str,
+    head: &str,
+    method: &str,
+    requested_by: &str,
+) -> rusqlite::Result<Value> {
+    let title: String = w
+        .conn()
+        .query_row("SELECT title FROM runs WHERE task_id = ?1", [task], |r| {
+            r.get(0)
+        })
+        .optional()?
+        .unwrap_or_default();
+    let text = merge_entry_text(
+        repo,
+        pr,
+        task,
+        &title,
+        head,
+        method,
+        &j.reason,
+        &j.warnings,
+        requested_by,
+    );
+    Ok(json!({
+        "repo": repo, "pr": pr, "head": head, "method": method, "mode": j.mode,
+        "gate_event": j.event, "reason": j.reason, "warnings": j.warnings,
+        "requested_by": requested_by, "text_sum": sha256_hex(&text), "text": text,
+    }))
+}
+
+/// An open merge entry, as the door reads it.
+struct MergeEntry {
+    id: i64,
+    run_task: Option<String>,
+    context: Value,
+}
+
+/// The pending entry `id` when it is of kind `merge`, whatever its status, and its status.
+fn merge_entry(w: &StateWriter, id: i64) -> rusqlite::Result<Option<(MergeEntry, String)>> {
+    w.conn()
+        .query_row(
+            "SELECT p.id, r.task_id, p.context_json, p.status FROM pending p
+             LEFT JOIN runs r ON r.id = p.run_id WHERE p.id = ?1 AND p.kind = 'merge'",
+            [id],
+            |r| {
+                let context: String = r.get(2)?;
+                Ok((
+                    MergeEntry {
+                        id: r.get(0)?,
+                        run_task: r.get(1)?,
+                        context: serde_json::from_str(&context).unwrap_or_default(),
+                    },
+                    r.get(3)?,
+                ))
+            },
+        )
+        .optional()
+}
+
+/// The open merge entries of `repo#pr`, oldest first.
+fn open_merge_entries(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<Vec<MergeEntry>> {
+    let mut st = w.conn().prepare(
+        "SELECT p.id, r.task_id, p.context_json FROM pending p LEFT JOIN runs r ON r.id = p.run_id
+         WHERE p.kind = 'merge' AND p.status = 'open'
+           AND lower(json_extract(p.context_json, '$.repo')) = lower(?1)
+           AND json_extract(p.context_json, '$.pr') = ?2
+         ORDER BY p.id",
+    )?;
+    st.query_map(params![repo, pr], |r| {
+        let context: String = r.get(2)?;
+        Ok(MergeEntry {
+            id: r.get(0)?,
+            run_task: r.get(1)?,
+            context: serde_json::from_str(&context).unwrap_or_default(),
+        })
+    })?
+    .collect()
+}
+
+/// Withdraw the open merge entry `e` because `why`, and tell the secretary, in the caller's
+/// transaction. Conditional on `status = 'open'`: an entry answered meanwhile is left as it is.
+/// Whether it was withdrawn.
+fn withdraw_merge_entry(w: &StateWriter, e: &MergeEntry, why: &str) -> crate::db::Result<bool> {
+    let changed = w.conn().execute(
+        "UPDATE pending SET status = 'withdrawn' WHERE id = ?1 AND kind = 'merge' AND status = 'open'",
+        [e.id],
+    )?;
+    if changed == 1 {
+        let c = &e.context;
+        let head = c["head"].as_str().unwrap_or_default();
+        let body = format!(
+            "makibad withdrew pending merge entry {} ({}#{} at {}): {why}. Nothing was merged; when the pull request is ready again, ask again with merge.",
+            e.id,
+            c["repo"].as_str().unwrap_or_default(),
+            c["pr"],
+            &head[..head.len().min(12)]
+        );
+        match &e.run_task {
+            Some(task) => notice(w, crate::spec::AGENT_SECRETARY, task, &body)?,
+            None => notice_untasked(w, crate::spec::AGENT_SECRETARY, &body)?,
+        };
+    }
+    Ok(changed == 1)
+}
+
+/// makibad's withdrawal of the pending merge entries a record leaves behind (Issue 432,
+/// merge-act.md section 5.1), in the caller's transaction: every open entry of `repo#pr` at a head
+/// other than `keep_head` (every one when `None`), and with `others`, every open entry of `task`'s
+/// run for another pull request (the run's current pull request is now `repo#pr`).
+pub(super) fn withdraw_merge_entries(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    keep_head: Option<&str>,
+    others: bool,
+    why: &str,
+) -> crate::db::Result<()> {
+    for e in open_merge_entries(w, repo, pr)? {
+        if keep_head.is_none_or(|h| e.context["head"].as_str() != Some(h)) {
+            withdraw_merge_entry(w, &e, why)?;
+        }
+    }
+    if others {
+        let mut st = w.conn().prepare(
+            "SELECT p.id, r.task_id, p.context_json FROM pending p JOIN runs r ON r.id = p.run_id
+             WHERE r.task_id = ?1 AND p.kind = 'merge' AND p.status = 'open'
+               AND NOT (lower(json_extract(p.context_json, '$.repo')) = lower(?2)
+                        AND json_extract(p.context_json, '$.pr') = ?3)
+             ORDER BY p.id",
+        )?;
+        let entries: Vec<MergeEntry> = st
+            .query_map(params![task, repo, pr], |r| {
+                let context: String = r.get(2)?;
+                Ok(MergeEntry {
+                    id: r.get(0)?,
+                    run_task: r.get(1)?,
+                    context: serde_json::from_str(&context).unwrap_or_default(),
+                })
+            })?
+            .collect::<rusqlite::Result<_>>()?;
+        let replaced = format!("the run's pull request is now {repo}#{pr}");
+        for e in entries {
+            withdraw_merge_entry(w, &e, &replaced)?;
+        }
+    }
+    Ok(())
+}
+
+/// Commit the open transaction with the `merge` command of `status` and its answer `r`.
+#[allow(clippy::too_many_arguments)]
+fn merge_finish(
+    w: &StateWriter,
+    actor: &str,
+    args: &Value,
+    idem: Option<&str>,
+    status: &str,
+    r: Response,
+) -> Response {
+    if insert_command(w, actor, "merge", args, idem, status, &r).is_none()
+        || w.conn().is_autocommit()
+    {
+        let _ = w.rollback();
+        return Err(internal(
+            "the request could not be recorded; nothing was done",
+        ));
+    }
+    if let Err(e) = w.commit() {
+        let _ = w.rollback();
+        return Err(internal(e));
+    }
+    r
+}
+
+/// The attempt (`merge_attempted`, merge-act.md section 4.1) with its command `accepted`, in the
+/// open transaction; the answer. `pending_id`: the entry the person approved.
+#[allow(clippy::too_many_arguments)]
+fn merge_attempt(
+    w: &StateWriter,
+    actor: &str,
+    args: &Value,
+    idem: Option<&str>,
+    j: &Judged,
+    (repo, pr, head, method): (&str, i64, &str, &str),
+    task: &str,
+    approved_by: Option<&str>,
+    pending_id: Option<i64>,
+) -> Result<Value, String> {
+    let provisional: Response = Err(internal("the attempt was not recorded"));
+    let command = insert_command(w, actor, "merge", args, idem, "accepted", &provisional)
+        .ok_or("the command could not be recorded")?;
+    let mut payload = json!({
+        "repo": repo, "pr": pr, "head": head, "method": method,
+        "gate_event": j.event, "command": command, "approved_by": approved_by,
+        "boot": super::merge::boot(), "task_id": task,
+    });
+    if let Some(id) = pending_id {
+        payload["pending_id"] = json!(id);
+    }
+    let attempt = w
+        .append_event(&NewEvent {
+            kind: "merge_attempted",
+            actor: Some(actor),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })
+        .map_err(|e| e.to_string())?;
+    let mut answer = json!({"status": "accepted", "attempt": attempt, "repo": repo, "pr": pr,
+                            "head": head, "method": method, "mode": j.mode});
+    if let Some(id) = pending_id {
+        answer["pending_id"] = json!(id);
+    }
+    w.conn()
+        .execute(
+            // The provisional line was an error: its kind goes with it.
+            "UPDATE commands SET result_json = ?1, error_kind = NULL WHERE id = ?2",
+            params![line(&Ok(answer.clone())).to_string(), command],
+        )
+        .map_err(|e| e.to_string())?;
+    Ok(answer)
+}
+
+/// A refusal of a merge entry that is no longer the one shown, or no longer open.
+fn merge_stale(id: i64, why: &str) -> DoorError {
+    refuse(
+        ErrorKind::Stale,
+        format!("pending merge entry {id} {why}; nothing was merged"),
+        "run makiba merge approve <id> again: it prints the entry as it is now",
+    )
+}
+
 impl Door {
     /// `merge` (Issue 431, merge-act.md section 3): `request` runs the gate at `head` and, on an
     /// allowance that needs no person, commits the attempt (`merge_attempted`) with the gate's row
     /// and the command `accepted`; makibad's merge pass runs the act afterwards. A refusal answers
-    /// the verdict and sends nothing; an allowance that needs the person writes no attempt.
+    /// the verdict and sends nothing. An allowance that needs the person (under human from the
+    /// secretary, or with a warning) writes a pending entry of kind `merge` instead (Issue 432,
+    /// section 5), which only the person's `approve` turns into an attempt; `refuse` and
+    /// `withdraw` end it.
     fn merge(
         &self,
         w: MutexGuard<'_, StateWriter>,
@@ -3580,18 +3924,34 @@ impl Door {
             let _ = record(w, actor, "merge", args, idem, &r);
             r
         };
+        let action = match args.get("action") {
+            None | Some(Value::Null) => "request",
+            Some(a) => match a.as_str() {
+                Some(a @ ("request" | "approve" | "refuse" | "withdraw")) => a,
+                _ => {
+                    return fail(
+                        &w,
+                        Err(usage("action is request, approve, refuse or withdraw")),
+                    );
+                }
+            },
+        };
+        if ["approve", "refuse"].contains(&action) && role != Role::Person {
+            return fail(
+                &w,
+                Err(refuse(
+                    ErrorKind::Denied,
+                    format!("only the person may {action} a pending merge"),
+                    "the person approves it in their shell with makiba merge approve <id>",
+                )),
+            );
+        }
+        match action {
+            "approve" => return self.merge_approve(w, actor, args, idem),
+            "refuse" | "withdraw" => return merge_end(&w, actor, role, action, args, idem),
+            _ => {}
+        }
         let parsed = (|| -> Result<_, DoorError> {
-            let action = match args.get("action") {
-                None | Some(Value::Null) => "request",
-                Some(a) => a
-                    .as_str()
-                    .ok_or_else(|| usage("action is the text request"))?,
-            };
-            if action != "request" {
-                return Err(usage(format!(
-                    "action is request, not {action:?} (approve, refuse and withdraw come with build Issue 2)"
-                )));
-            }
             let (repo, pr, head) = gate_args(args)?;
             let method = match args.get("method") {
                 None | Some(Value::Null) => "squash",
@@ -3638,72 +3998,86 @@ impl Door {
                 return fail(&w, Err(e));
             }
         };
-        let finish = |w: &StateWriter, status: &str, r: Response| -> Response {
-            if insert_command(w, actor, "merge", args, idem, status, &r).is_none()
-                || w.conn().is_autocommit()
-            {
-                let _ = w.rollback();
-                return Err(internal(
-                    "the request could not be recorded; nothing was done",
-                ));
-            }
-            if let Err(e) = w.commit() {
-                let _ = w.rollback();
-                return Err(internal(e));
-            }
-            r
-        };
         if !j.allow {
             let mut answer = json!({"status": "refused", "verdict": j.verdict, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head});
-            if let Some(rv) = j.review {
-                answer["review"] = rv;
+            if let Some(rv) = &j.review {
+                answer["review"] = rv.clone();
             }
-            return finish(&w, "rejected", Ok(answer));
+            return merge_finish(&w, actor, args, idem, "rejected", Ok(answer));
         }
         if j.warn || (j.mode != "acceptance" && role != Role::Person) {
-            return finish(
-                &w,
-                "rejected",
-                Err(refuse(
-                    ErrorKind::Denied,
-                    format!(
-                        "needs the person: makiba merge approve comes with build Issue 2; until then the GitHub web UI ({})",
-                        j.reason
-                    ),
-                    "tell the person the pull request and the gate's reason; the person merges it in the GitHub web UI",
-                )),
-            );
+            // Issue 432: the person's key decides. The same request again is the same entry; one
+            // at another head or with another method replaces it.
+            let written = (|| -> crate::db::Result<i64> {
+                for e in open_merge_entries(&w, &repo, pr)? {
+                    let c = &e.context;
+                    if c["head"].as_str() == Some(head.as_str())
+                        && c["method"].as_str() == Some(method.as_str())
+                    {
+                        return Ok(e.id);
+                    }
+                    withdraw_merge_entry(
+                        &w,
+                        &e,
+                        "the secretary asked again at another head or with another method",
+                    )?;
+                }
+                let context = merge_entry_context(&w, &j, &repo, pr, &task, &head, &method, actor)?;
+                w.conn().execute(
+                    "INSERT INTO pending (run_id, kind, question, context_json)
+                     VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'merge', ?2, ?3)",
+                    params![
+                        task,
+                        format!(
+                            "Merge {repo}#{pr} at {} by {method}?",
+                            &head[..head.len().min(12)]
+                        ),
+                        context.to_string()
+                    ],
+                )?;
+                Ok(w.conn().last_insert_rowid())
+            })();
+            let id = match written {
+                Ok(id) => id,
+                Err(e) => {
+                    let _ = w.rollback();
+                    return Err(internal(format!(
+                        "the pending merge could not be recorded; nothing was done: {e}"
+                    )));
+                }
+            };
+            let answer = json!({"status": "pending", "pending_id": id, "repo": repo, "pr": pr,
+                                "head": head, "method": method, "mode": j.mode,
+                                "warnings": j.warnings});
+            return merge_finish(&w, actor, args, idem, "done", Ok(answer));
         }
-        let attempted = (|| -> Result<Value, String> {
-            let provisional: Response = Err(internal("the attempt was not recorded"));
-            let command = insert_command(&w, actor, "merge", args, idem, "accepted", &provisional)
-                .ok_or("the command could not be recorded")?;
-            let attempt = w
-                .append_event(&NewEvent {
-                kind: "merge_attempted",
-                actor: Some(actor),
-                payload: Some(&json!({
-                    "repo": repo, "pr": pr, "head": head, "method": method,
-                    "gate_event": j.event, "command": command,
-                    "approved_by": if role == Role::Person { json!("person") } else { Value::Null },
-                    "boot": super::merge::boot(), "task_id": task,
-                })),
-                run_task_id: Some(&task),
-                ..Default::default()
-            })
-                .map_err(|e| e.to_string())?;
-            let answer = json!({"status": "accepted", "attempt": attempt, "repo": repo, "pr": pr,
-                                "head": head, "method": method, "mode": j.mode});
-            w.conn()
-                .execute(
-                    // The provisional line was an error: its kind goes with it.
-                    "UPDATE commands SET result_json = ?1, error_kind = NULL WHERE id = ?2",
-                    params![line(&Ok(answer.clone())).to_string(), command],
-                )
-                .map_err(|e| e.to_string())?;
-            Ok(answer)
-        })();
+        let approved_by = (role == Role::Person).then_some("person");
+        // A pending merge of this pull request is superseded by the act that runs now: left open,
+        // it could be approved after this attempt ended, for a request nobody makes any more.
+        let attempted = withdraw_merge_entries(
+            &w,
+            &task,
+            &repo,
+            pr,
+            None,
+            false,
+            "makibad's merge of the pull request was asked again and runs now without the entry",
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            merge_attempt(
+                &w,
+                actor,
+                args,
+                idem,
+                &j,
+                (&repo, pr, &head, &method),
+                &task,
+                approved_by,
+                None,
+            )
+        });
         let answer = match attempted {
             Ok(a) => a,
             Err(e) => {
@@ -3723,6 +4097,334 @@ impl Door {
             return Err(internal(e));
         }
         Ok(answer)
+    }
+
+    /// `merge approve` (Issue 432, merge-act.md section 5.2), the person only: the gate runs again
+    /// at the entry's head, and in the final transaction one conditional update consumes the entry
+    /// only while it is open and holds the text the person was shown; the attempt is written only
+    /// when that update changed the row. A refusal, a withdrawal or another approval committed
+    /// while the gate ran leaves it unchanged: `stale`, and nothing is written.
+    fn merge_approve(
+        &self,
+        w: MutexGuard<'_, StateWriter>,
+        actor: &str,
+        args: &Value,
+        idem: Option<&str>,
+    ) -> Response {
+        let fail = |w: &StateWriter, r: Response| {
+            let _ = record(w, actor, "merge", args, idem, &r);
+            r
+        };
+        let parsed = (|| -> Result<(i64, String), DoorError> {
+            Ok((id_arg(args)?, str_arg(args, "shown")?.to_string()))
+        })();
+        let (id, shown) = match parsed {
+            Ok(p) => p,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        let first = match merge_entry(&w, id) {
+            Ok(e) => e,
+            Err(e) => return fail(&w, Err(internal(e))),
+        };
+        let Some((entry, status)) = first else {
+            return fail(
+                &w,
+                Err(refuse(
+                    ErrorKind::NotFound,
+                    format!("no pending merge entry {id}"),
+                    "",
+                )),
+            );
+        };
+        // A first check: it only saves a gate run; the final transaction decides.
+        if status != "open" {
+            return fail(&w, Err(merge_stale(id, &format!("is {status}"))));
+        }
+        if entry.context["text_sum"].as_str() != Some(shown.as_str()) {
+            return fail(&w, Err(merge_stale(id, "is not the text that was printed")));
+        }
+        let c = &entry.context;
+        let (Some(repo), Some(pr), Some(head), Some(method)) = (
+            c["repo"].as_str().map(String::from),
+            c["pr"].as_i64(),
+            c["head"].as_str().map(String::from),
+            c["method"].as_str().map(String::from),
+        ) else {
+            return fail(
+                &w,
+                Err(internal(format!(
+                    "pending merge entry {id} names no pull request"
+                ))),
+            );
+        };
+        let shown_warnings: Vec<String> = c["warnings"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str().map(String::from))
+            .collect();
+        let requested_by = c["requested_by"].as_str().unwrap_or(actor).to_string();
+        if let Err(e) = merge_check(&w, &repo, pr) {
+            return fail(&w, Err(e));
+        }
+        let rows = match gate_rows(&w, &repo, pr) {
+            Ok(r) => r,
+            Err(e) => return fail(&w, Err(internal(e))),
+        };
+        drop(w);
+        let found = gate_outside(&rows, &repo, pr, &head);
+        let w = self.writer();
+        if let Some(idem) = idem
+            && let Some(first) = replay(&w, actor, idem).map_err(internal)?
+        {
+            return first;
+        }
+        if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+            return Err(internal(e));
+        }
+        let j = match self.judge(&w, actor, &repo, pr, &head, &rows, found, "merge") {
+            Ok(j) => j,
+            Err(e) => return fail(&w, Err(e)),
+        };
+        let task = match merge_check(&w, &repo, pr) {
+            Ok(t) => t,
+            Err(e) => {
+                let _ = w.rollback();
+                return fail(&w, Err(e));
+            }
+        };
+        // The entry read again with the lock: refused, withdrawn, approved or changed while the gate
+        // ran, it is no longer the one this approval names, whatever the gate said; nothing stands.
+        let now: rusqlite::Result<Option<(String, Option<String>)>> = w
+            .conn()
+            .query_row(
+                "SELECT status, json_extract(context_json, '$.text_sum') FROM pending
+                 WHERE id = ?1 AND kind = 'merge'",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional();
+        match now {
+            Ok(Some((status, sum))) if status == "open" && sum.as_deref() == Some(&shown) => {}
+            Ok(_) => {
+                let _ = w.rollback();
+                return fail(
+                    &w,
+                    Err(merge_stale(
+                        id,
+                        "was answered or changed while the gate ran",
+                    )),
+                );
+            }
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+        }
+        if !j.allow {
+            // The entry stays open: the person may approve it again once the cause is dealt with.
+            let told = notice(
+                &w,
+                crate::spec::AGENT_SECRETARY,
+                &task,
+                &format!(
+                    "The gate refused the person's approval of pending merge entry {id} ({repo}#{pr} at {}): {}. The entry stays open; deal with the cause, then the person approves it again.",
+                    &head[..head.len().min(12)],
+                    j.reason
+                ),
+            );
+            if let Err(e) = told {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+            let mut answer = json!({"status": "refused", "verdict": j.verdict, "reason": j.reason,
+                                    "mode": j.mode, "repo": repo, "pr": pr, "head": head,
+                                    "pending_id": id});
+            if let Some(rv) = &j.review {
+                answer["review"] = rv.clone();
+            }
+            return merge_finish(&w, actor, args, idem, "rejected", Ok(answer));
+        }
+        if j.warnings.iter().any(|x| !shown_warnings.contains(x)) {
+            // A warning the person was not shown: the entry takes the new reading, and the person
+            // approves what they are shown next, nothing else.
+            let replaced =
+                merge_entry_context(&w, &j, &repo, pr, &task, &head, &method, &requested_by)
+                    .map_err(crate::db::Error::from)
+                    .and_then(|context| {
+                        Ok(w.conn().execute(
+                            "UPDATE pending SET context_json = ?1
+                     WHERE id = ?2 AND kind = 'merge' AND status = 'open'
+                       AND json_extract(context_json, '$.text_sum') = ?3",
+                            params![context.to_string(), id, shown],
+                        )?)
+                    });
+            if let Err(e) = replaced {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+            return merge_finish(
+                &w,
+                actor,
+                args,
+                idem,
+                "rejected",
+                Err(merge_stale(
+                    id,
+                    "now has a warning the printed text did not show",
+                )),
+            );
+        }
+        let consumed = w.conn().execute(
+            "UPDATE pending SET status = 'answered', answer = 'approved', answered_by = 'person',
+               answered_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+             WHERE id = ?1 AND kind = 'merge' AND status = 'open'
+               AND json_extract(context_json, '$.text_sum') = ?2",
+            params![id, shown],
+        );
+        match consumed {
+            Ok(1) => {}
+            Ok(_) => {
+                // Refused, withdrawn, approved or changed while the gate ran: nothing stands.
+                let _ = w.rollback();
+                return fail(
+                    &w,
+                    Err(merge_stale(
+                        id,
+                        "was answered or changed while the gate ran",
+                    )),
+                );
+            }
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+        }
+        let attempted = merge_attempt(
+            &w,
+            actor,
+            args,
+            idem,
+            &j,
+            (&repo, pr, &head, &method),
+            &task,
+            Some("person"),
+            Some(id),
+        );
+        let answer = match attempted {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(format!(
+                    "the attempt could not be recorded; nothing was done: {e}"
+                )));
+            }
+        };
+        if w.conn().is_autocommit() {
+            return Err(internal(
+                "the request could not be recorded; nothing was done",
+            ));
+        }
+        if let Err(e) = w.commit() {
+            let _ = w.rollback();
+            return Err(internal(e));
+        }
+        Ok(answer)
+    }
+}
+
+/// `merge refuse` (the person) and `merge withdraw` (the secretary or the person), Issue 432: the
+/// entry ends by one conditional update on `status = 'open'`; an entry no longer open is `stale`.
+/// Neither needs the pull request to be a current one (merge-act.md, the last review's follow-up 1).
+fn merge_end(
+    w: &StateWriter,
+    actor: &str,
+    role: Role,
+    action: &str,
+    args: &Value,
+    idem: Option<&str>,
+) -> Response {
+    let fail = |r: Response| {
+        let _ = record(w, actor, "merge", args, idem, &r);
+        r
+    };
+    let id = match id_arg(args) {
+        Ok(id) => id,
+        Err(e) => return fail(Err(e)),
+    };
+    let reason = args
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|r| !r.trim().is_empty());
+    if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+        return Err(internal(e));
+    }
+    let ended = (|| -> Result<Response, crate::db::Error> {
+        let Some((entry, _)) = merge_entry(w, id)? else {
+            return Ok(Err(refuse(
+                ErrorKind::NotFound,
+                format!("no pending merge entry {id}"),
+                "",
+            )));
+        };
+        let (to, answer) = if action == "refuse" {
+            ("answered", Some("refused"))
+        } else {
+            ("withdrawn", None)
+        };
+        let changed = w.conn().execute(
+            "UPDATE pending SET status = ?1, answer = ?2,
+               answered_by = CASE WHEN ?2 IS NULL THEN answered_by ELSE 'person' END,
+               answered_at = CASE WHEN ?2 IS NULL THEN answered_at
+                                  ELSE strftime('%Y-%m-%dT%H:%M:%fZ','now') END
+             WHERE id = ?3 AND kind = 'merge' AND status = 'open'",
+            params![to, answer, id],
+        )?;
+        if changed != 1 {
+            return Ok(Err(merge_stale(id, "is no longer open")));
+        }
+        let c = &entry.context;
+        let head = c["head"].as_str().unwrap_or_default();
+        let what = format!(
+            "{}#{} at {}",
+            c["repo"].as_str().unwrap_or_default(),
+            c["pr"],
+            &head[..head.len().min(12)]
+        );
+        let because = reason.map(|r| format!(": {r}")).unwrap_or_default();
+        let body = if action == "refuse" {
+            Some(format!(
+                "The person refused the merge of {what} (pending merge entry {id}){because}. Do not ask again for this head unless the person says so."
+            ))
+        } else if role == Role::Person {
+            Some(format!(
+                "The person withdrew pending merge entry {id} ({what}){because}. Nothing was merged."
+            ))
+        } else {
+            None
+        };
+        if let Some(body) = body {
+            match &entry.run_task {
+                Some(task) => notice(w, crate::spec::AGENT_SECRETARY, task, &body)?,
+                None => notice_untasked(w, crate::spec::AGENT_SECRETARY, &body)?,
+            };
+        }
+        let mut v = json!({"id": id, "status": to});
+        if let Some(a) = answer {
+            v["answer"] = json!(a);
+        }
+        Ok(Ok(v))
+    })();
+    match ended {
+        Ok(r @ Ok(_)) => merge_finish(w, actor, args, idem, "done", r),
+        Ok(r @ Err(_)) => {
+            let _ = w.rollback();
+            fail(r)
+        }
+        Err(e) => {
+            let _ = w.rollback();
+            Err(internal(e))
+        }
     }
 }
 
@@ -4699,11 +5401,11 @@ fn tool(v: Verb) -> Value {
             &[],
         ),
         Verb::Merge => (
-            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. An allowance that needs the person is denied for now (the person merges in the GitHub web UI). Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing.",
+            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing.",
             Map::from_iter([
                 (
                     "action".into(),
-                    json!({"type": "string", "enum": ["request"]}),
+                    json!({"type": "string", "enum": ["request", "withdraw"]}),
                 ),
                 ("repo".into(), text.clone()),
                 ("pr".into(), json!({"type": "integer"})),
@@ -4712,8 +5414,11 @@ fn tool(v: Verb) -> Value {
                     "method".into(),
                     json!({"type": "string", "enum": ["squash", "merge", "rebase"]}),
                 ),
+                ("id".into(), json!({"type": "integer"})),
+                ("reason".into(), text.clone()),
             ]),
-            &["repo", "pr", "head"],
+            // Each action checks its own (request: repo, pr, head; withdraw: id).
+            &[],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
     };

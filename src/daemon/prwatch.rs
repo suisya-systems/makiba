@@ -18,12 +18,23 @@
 //! a day after its close, Issue 385) has one state poller, which reads
 //! `gh pr view` each interval and brings back a merge, or a close or a reopen it did not start
 //! with. The loop writes it (`apply_state`) only for the generation it was read for: the merge
-//! (`pr_merged`, with who merged it; `merged_via` is always `hand`, Issue 424, since an allowance
-//! of the gate is no proof that its command ran), the close (`pr_closed`) or the reopen
+//! (`pr_merged`, with who merged it, and `merged_via` read from makibad's merge act records only,
+//! Issue 434: `gate`, `unknown` or `hand`; an allowance of the gate is no proof that anything ran,
+//! Issue 424), the close (`pr_closed`) or the reopen
 //! (`pr_reopened`), the pull request's watches ended, and the secretary told of each merge (its
 //! text says whether the gate allowed that head) and of what else happened outside makiba. One
 //! `gh` call cannot carry both reads: the state call has no workflow runs and no exact head,
 //! which the CI reading relies on.
+//!
+//! makibad's merge act (Issue 434, docs/design/merge-act.md section 7): a pull request with an act
+//! awaiting its landing (`door::act_awaiting`) is followed whatever its run's status or age, and
+//! its state is read through GraphQL (`STATE_QUERY`, with the merge queue and its timeline items)
+//! by a poller that keeps reading after a merge, close or reopen until the loop writes one. A read
+//! is held while the attempt is open and dropped when it began before the act's outcome was
+//! recorded (`act_holds`). `apply_queue` ends a queue act (`merge_dequeued`) on a read at another
+//! head, or, on two reads an interval apart, out of the queue with a removal on its timeline; a
+//! close ends it in `apply_state`. Not carried from the design: two reads out of the queue alone
+//! do not end it (claim 6 is [unverified]), and the entry's id is not matched with the timeline.
 //!
 //! The merge state (Issue 387, in place of claude-org-ja's conflict announce): the same state read
 //! carries `mergeable`, `mergeStateStatus` and `isDraft`, and each open read is brought back to
@@ -983,6 +994,9 @@ pub struct PrWatch {
     /// When the loop received the passed CI result of a head, by the same key: a read that began
     /// before it is not that head's state after its CI passed.
     ci_seen: HashMap<(String, i64, String), Instant>,
+    /// The first read out of the merge queue with a removal on its timeline, by queue act (its
+    /// attempt), with its pull request (Issue 434). Memory only: a restart costs one more read.
+    dequeue_seen: HashMap<i64, (String, i64, Instant)>,
 }
 
 impl PrWatch {
@@ -1013,6 +1027,7 @@ impl PrWatch {
             merges: HashMap::new(),
             told: HashMap::new(),
             ci_seen: HashMap::new(),
+            dequeue_seen: HashMap::new(),
         }
     }
 
@@ -1041,7 +1056,10 @@ impl PrWatch {
         let follows = followed(w.conn(), None)?;
         let mut fresh = Vec::new();
         while let Ok(r) = self.merge_rx.try_recv() {
-            if follows.contains(&r.f) {
+            // A read held by makibad's merge act (Issue 434: the attempt open, or the read begun
+            // before its outcome was recorded) is used for nothing: not cached for the CI notice,
+            // not recorded (`pr_read`), not told as a merge state, not read for the queue.
+            if follows.contains(&r.f) && !act_holds(w.conn(), &r.f.repo, r.f.pr, r.started_ms)? {
                 self.merges.insert(r.f.task.clone(), r.clone());
                 fresh.push(r);
             }
@@ -1093,6 +1111,33 @@ impl PrWatch {
                 );
                 self.seen_queued.push(s);
             }
+        }
+        // The merge queue (Issue 434): each open read, in order, before the merge state.
+        for r in &fresh {
+            match apply_queue(w, r, &self.dequeue_seen, self.interval) {
+                Ok(QueueStep::Nothing) => {}
+                Ok(QueueStep::Note(attempt)) => {
+                    self.dequeue_seen
+                        .insert(attempt, (r.f.repo.clone(), r.f.pr, r.started));
+                }
+                Ok(QueueStep::Clear(attempt) | QueueStep::Ended(attempt)) => {
+                    self.dequeue_seen.remove(&attempt);
+                }
+                Err(e) => eprintln!(
+                    "makibad: pr watch {}#{}: cannot record its merge queue: {e}",
+                    r.f.repo, r.f.pr
+                ),
+            }
+        }
+        let mut gone = Vec::new();
+        for (attempt, (repo, pr, _)) in &self.dequeue_seen {
+            let awaiting = super::door::act_awaiting(w.conn(), repo, *pr)?;
+            if awaiting.is_none_or(|a| a.attempt != *attempt || !a.queue) {
+                gone.push(*attempt);
+            }
+        }
+        for attempt in gone {
+            self.dequeue_seen.remove(&attempt);
         }
         for r in newest_per_task(fresh) {
             if let Err(e) = record_read(w, &r) {
@@ -1323,12 +1368,9 @@ impl PrWatch {
                     (self.gh.clone(), self.state_tx.clone(), Arc::clone(&cancel));
                 let (interval, f, merge_tx) = (self.interval, f.clone(), self.merge_tx.clone());
                 std::thread::spawn(move || {
-                    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        poll_state(&gh, &f, interval, &cancel, &merge_tx)
+                    let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        poll_state(&gh, &f, interval, &cancel, &tx, &merge_tx)
                     }));
-                    if let Ok(Some(read)) = read {
-                        let _ = tx.send(StateDone { f, read });
-                    }
                 })
             };
             self.states.insert(
@@ -1501,34 +1543,42 @@ pub(super) struct Followed {
     pub gen_close: i64,
     /// Read closed unmerged with nothing since (`pr_closed_sql`).
     pub closed: bool,
+    /// The pull request has a merge act of makibad awaiting its landing (`door::act_awaiting`,
+    /// Issue 434): its state is read through GraphQL, which carries the merge queue.
+    pub act: bool,
 }
 
 /// The pull requests the runs follow (of `task` only, when given): each run's current pull
 /// request (`current_pr_sql`) with no `pr_merged` of it, while the run is open, a completed run of
 /// a range, a run an open design-only run waits for (`AWAITED`, not abandoned), or, unless its
 /// pull request was read closed, a run outside a range completed, or any run closed with
-/// `--abandon` (Issue 385: its work may still land), within a day of its close.
+/// `--abandon` (Issue 385: its work may still land), within a day of its close; and, whatever the
+/// run's status or age, while the pull request has a merge act awaiting its landing (Issue 434).
 pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followed>> {
     let mut q = c.prepare(&format!(
-        "SELECT r.task_id, {repo}, {pr},
-                coalesce((SELECT max(g.id) FROM events g WHERE g.run_id = r.id
-                          AND g.kind IN ('pr_opened', 'fix_pushed')), 0),
-                coalesce((SELECT max(g.id) FROM events g WHERE g.run_id = r.id
-                          AND g.kind IN ('pr_closed', 'pr_reopened')), 0),
-                {closed}
-         FROM runs r
-         WHERE (?1 IS NULL OR r.task_id = ?1)
-           AND {repo} IS NOT NULL AND {pr} IS NOT NULL
-           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged' AND e.run_id = r.id
-                           AND {merged})
-           AND (r.status IN ('queued', 'in_use', 'review', 'suspended', 'parked')
-                OR (r.range_id IS NOT NULL AND r.status = 'completed')
-                OR (r.status != 'abandoned' AND r.task_id IN ({awaited}))
-                OR (NOT {closed} AND r.completed_at IS NOT NULL
-                    AND julianday('now') - julianday(r.completed_at) <= 1.0
-                    AND ((r.range_id IS NULL AND r.status = 'completed')
-                         OR r.status = 'abandoned')))
-         ORDER BY r.id",
+        "SELECT * FROM (
+           SELECT r.id AS run, r.task_id, {repo} AS repo, {pr} AS pr,
+                  coalesce((SELECT max(g.id) FROM events g WHERE g.run_id = r.id
+                            AND g.kind IN ('pr_opened', 'fix_pushed')), 0),
+                  coalesce((SELECT max(g.id) FROM events g WHERE g.run_id = r.id
+                            AND g.kind IN ('pr_closed', 'pr_reopened')), 0),
+                  {closed},
+                  (r.status IN ('queued', 'in_use', 'review', 'suspended', 'parked')
+                   OR (r.range_id IS NOT NULL AND r.status = 'completed')
+                   OR (r.status != 'abandoned' AND r.task_id IN ({awaited}))
+                   OR (NOT {closed} AND r.completed_at IS NOT NULL
+                       AND julianday('now') - julianday(r.completed_at) <= 1.0
+                       AND ((r.range_id IS NULL AND r.status = 'completed')
+                            OR r.status = 'abandoned'))) AS plain,
+                  EXISTS (SELECT 1 FROM events a WHERE a.kind = 'merge_attempted'
+                          AND {attempted}) AS attempted
+           FROM runs r
+           WHERE (?1 IS NULL OR r.task_id = ?1)
+             AND {repo} IS NOT NULL AND {pr} IS NOT NULL
+             AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged'
+                             AND e.run_id = r.id AND {merged}))
+         WHERE plain OR attempted
+         ORDER BY run",
         repo = current_pr_sql("r", "repo"),
         pr = current_pr_sql("r", "pr"),
         closed = pr_closed_sql("r"),
@@ -1538,24 +1588,48 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
             "json_extract(e.payload_json, '$.repo')",
             "json_extract(e.payload_json, '$.pr')"
         ),
+        attempted = is_current_pr_sql(
+            "r",
+            "json_extract(a.payload_json, '$.repo')",
+            "json_extract(a.payload_json, '$.pr')"
+        ),
     ))?;
-    Ok(q.query_map([task], |r| {
-        Ok(Followed {
-            task: r.get(0)?,
-            repo: r.get(1)?,
-            pr: r.get(2)?,
-            gen_reg: r.get(3)?,
-            gen_close: r.get(4)?,
-            closed: r.get(5)?,
-        })
-    })?
-    .collect::<std::result::Result<_, _>>()?)
+    let rows: Vec<(i64, Followed, bool, bool)> = q
+        .query_map([task], |r| {
+            Ok((
+                r.get(0)?,
+                Followed {
+                    task: r.get(1)?,
+                    repo: r.get(2)?,
+                    pr: r.get(3)?,
+                    gen_reg: r.get(4)?,
+                    gen_close: r.get(5)?,
+                    closed: r.get(6)?,
+                    act: false,
+                },
+                r.get(7)?,
+                r.get(8)?,
+            ))
+        })?
+        .collect::<std::result::Result<_, _>>()?;
+    let mut out = Vec::new();
+    for (run, mut f, plain, attempted) in rows {
+        // Each run records its own landing: another run's `pr_merged` of the same pull request
+        // does not end the act for this one.
+        f.act = attempted && super::door::act_awaiting_for(c, &f.repo, f.pr, Some(run))?.is_some();
+        if plain || f.act {
+            out.push(f);
+        }
+    }
+    Ok(out)
 }
 
-/// A state read worth writing, for the pull request and generation it was read for.
+/// A state read worth writing, for the pull request and generation it was read for, and when
+/// the read began (milliseconds since 1970, the wall clock).
 struct StateDone {
     f: Followed,
     read: Value,
+    started_ms: i64,
 }
 
 struct StatePoller {
@@ -1573,37 +1647,103 @@ impl StatePoller {
     }
 }
 
+/// The state read of a pull request with a merge act awaiting its landing (Issue 434): the fields
+/// of `STATE_FIELDS`, under the same names, and the merge queue (whether the pull request is in
+/// it, its entry, and the timeline's additions to and removals from it). gh's `--json` has no
+/// queue field (merge-act.md section 10, claim 3). The timeline items are [unverified] (claim 5).
+const STATE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state mergedAt mergedBy{login} headRefOid mergeCommit{oid} title mergeable mergeStateStatus isDraft isInMergeQueue mergeQueueEntry{id state position} timelineItems(last:50,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt}}}}}}";
+
+/// The wall clock, in milliseconds since 1970.
+fn now_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_millis() as i64)
+}
+
+/// The merge queue items of a state read, `(added, at)` (`at` in milliseconds since 1970);
+/// `None` when the read carries no timeline or an item cannot be read.
+fn queue_items(v: &Value) -> Option<Vec<(bool, i64)>> {
+    v["timelineItems"]["nodes"]
+        .as_array()?
+        .iter()
+        .map(|n| {
+            let added = match n["__typename"].as_str()? {
+                "AddedToMergeQueueEvent" => true,
+                "RemovedFromMergeQueueEvent" => false,
+                _ => return None,
+            };
+            Some((added, parse_time(n["createdAt"].as_str()?)?))
+        })
+        .collect()
+}
+
+/// The arguments of the state read of `f`: `gh pr view`, or, while it has a merge act awaiting
+/// its landing, `gh api graphql` (Issue 434). Both name github.com, whatever `GH_HOST` says.
+fn state_args(f: &Followed) -> Vec<String> {
+    if f.act {
+        let (owner, name) = f.repo.split_once('/').unwrap_or((&f.repo, ""));
+        vec![
+            "api".into(),
+            "graphql".into(),
+            "--hostname".into(),
+            "github.com".into(),
+            "-f".into(),
+            format!("query={STATE_QUERY}"),
+            "-f".into(),
+            format!("owner={owner}"),
+            "-f".into(),
+            format!("name={name}"),
+            "-F".into(),
+            format!("number={}", f.pr),
+        ]
+    } else {
+        vec![
+            "pr".into(),
+            "view".into(),
+            f.pr.to_string(),
+            "--repo".into(),
+            format!("github.com/{}", f.repo),
+            "--json".into(),
+            STATE_FIELDS.into(),
+        ]
+    }
+}
+
 /// Read the state of `f` each interval until it is merged, or read in the other state than the
-/// one it was followed in (`closed`). A failed read is read again, without bound; `None`:
-/// cancelled. Each read open of a pull request followed open is sent to `merges` (Issue 387).
+/// one it was followed in (`closed`): that read is sent to `states`. A failed read is read again,
+/// without bound; it returns when cancelled. Each read open of a pull request followed open is
+/// sent to `merges` (Issue 387). While the pull request has a merge act awaiting its landing
+/// (`f.act`, Issue 434) the read is GraphQL's, and the poller does not return after sending a
+/// merge, a close or a reopen: the loop holds such a read while the attempt is open, so it reads
+/// again on its interval until the loop writes one and stops it.
 fn poll_state(
     gh: &str,
     f: &Followed,
     interval: Duration,
     cancel: &AtomicBool,
+    states: &Sender<StateDone>,
     merges: &Sender<MergeRead>,
-) -> Option<Value> {
+) {
     let closed = f.closed;
-    let (number, place) = (f.pr.to_string(), format!("github.com/{}", f.repo));
-    let args = [
-        "pr",
-        "view",
-        &number,
-        "--repo",
-        &place,
-        "--json",
-        STATE_FIELDS,
-    ];
+    let owned = state_args(f);
+    let args: Vec<&str> = owned.iter().map(String::as_str).collect();
     loop {
         if cancel.load(Ordering::SeqCst) {
-            return None;
+            return;
         }
-        let started = Instant::now();
+        let (started, started_ms) = (Instant::now(), now_ms());
         match run_gh(gh, &args, cancel) {
-            Err(GhError::Cancelled) => return None,
+            Err(GhError::Cancelled) => return,
             Err(_) => {}
             Ok(text) => {
-                if let Ok(v) = serde_json::from_str::<Value>(&text) {
+                let read = serde_json::from_str::<Value>(&text).ok().map(|v| {
+                    if f.act {
+                        v["data"]["repository"]["pullRequest"].clone()
+                    } else {
+                        v
+                    }
+                });
+                if let Some(v) = read.filter(Value::is_object) {
                     let state = v["state"].as_str().unwrap_or("");
                     if state == "OPEN" && !closed {
                         let _ = merges.send(MergeRead {
@@ -1613,19 +1753,146 @@ fn poll_state(
                             draft: v["isDraft"].as_bool().unwrap_or(false),
                             title: v["title"].as_str().map(str::to_string),
                             started,
+                            started_ms,
+                            queued: v["isInMergeQueue"].as_bool(),
+                            timeline: queue_items(&v),
                         });
                     }
                     if matches!(
                         (state, closed),
                         ("MERGED", _) | ("CLOSED", false) | ("OPEN", true)
                     ) {
-                        return Some(v);
+                        let _ = states.send(StateDone {
+                            f: f.clone(),
+                            read: v,
+                            started_ms,
+                        });
+                        if !f.act {
+                            return;
+                        }
                     }
                 }
             }
         }
         sleep_unless(cancel, interval);
     }
+}
+
+/// Whether a state read of `repo#pr` begun at `started_ms` is not written (Issue 434): the pull
+/// request's newest attempt of makibad's merge is open (held: the act's own answer is recorded
+/// first), or its outcome was recorded at or after the read began (dropped: the read may show
+/// GitHub before the act; the ledger keeps milliseconds only, so an equal time is dropped too).
+fn act_holds(c: &Connection, repo: &str, pr: i64, started_ms: i64) -> Result<bool> {
+    let newest: Option<i64> = c
+        .query_row(
+            "SELECT id FROM events WHERE kind = 'merge_attempted'
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![repo, pr],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(attempt) = newest else {
+        return Ok(false);
+    };
+    let outcome_at: Option<String> = c
+        .query_row(
+            &format!(
+                "SELECT occurred_at FROM events WHERE kind IN ({})
+                   AND json_extract(payload_json, '$.attempt') = ?1 ORDER BY id LIMIT 1",
+                super::door::MERGE_OUTCOMES
+            ),
+            [attempt],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(match outcome_at {
+        None => true,
+        Some(at) => parse_time(&at).is_none_or(|t| t >= started_ms),
+    })
+}
+
+/// The time of event `id` in milliseconds since 1970, moved a minute early: the boundary after
+/// which a queue item counts as the act's (makibad's clock and GitHub's are compared).
+fn boundary_of(c: &Connection, id: i64) -> Result<Option<i64>> {
+    let at: Option<String> = c
+        .query_row("SELECT occurred_at FROM events WHERE id = ?1", [id], |r| {
+            r.get(0)
+        })
+        .optional()?;
+    Ok(at.and_then(|a| parse_time(&a)).map(|t| t - 60_000))
+}
+
+/// How a landing at `head` came about, from makibad's act records only (merge-act.md section 7):
+/// `gate`, `unknown` or `hand`, and the attempt that decided it. The newest attempt at that head
+/// decides: `merge_done` is `gate`; `merge_unknown` (not observed `merged_other_head`) is
+/// `unknown`; `merge_enqueued` is `gate` only when the read's timeline shows exactly one addition
+/// to the queue and no removal after the attempt, and no `merge_dequeued` ended it, else
+/// `unknown`; anything else is `hand`. An allowance of the gate is never read.
+fn merged_via(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    read: &Value,
+) -> Result<(&'static str, Option<i64>)> {
+    let attempt: Option<i64> = c
+        .query_row(
+            "SELECT id FROM events WHERE kind = 'merge_attempted'
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2
+               AND lower(json_extract(payload_json, '$.head')) = lower(?3)
+             ORDER BY id DESC LIMIT 1",
+            params![repo, pr, head],
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(attempt) = attempt else {
+        return Ok(("hand", None));
+    };
+    let outcome: Option<(String, Option<String>)> = c
+        .query_row(
+            &format!(
+                "SELECT kind, json_extract(payload_json, '$.observed') FROM events
+                 WHERE kind IN ({}) AND json_extract(payload_json, '$.attempt') = ?1
+                 ORDER BY id LIMIT 1",
+                super::door::MERGE_OUTCOMES
+            ),
+            [attempt],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let via = match outcome.as_ref().map(|(k, o)| (k.as_str(), o.as_deref())) {
+        Some(("merge_done", _)) => "gate",
+        Some(("merge_unknown", Some("merged_other_head"))) => return Ok(("hand", None)),
+        Some(("merge_unknown", _)) => "unknown",
+        Some(("merge_enqueued", _)) => {
+            let dequeued: bool = c.query_row(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'merge_dequeued'
+                   AND json_extract(payload_json, '$.attempt') = ?1)",
+                [attempt],
+                |r| r.get(0),
+            )?;
+            let after = match (boundary_of(c, attempt)?, queue_items(read)) {
+                (Some(b), Some(items)) if !dequeued => Some(
+                    items
+                        .into_iter()
+                        .filter(|(_, t)| *t >= b)
+                        .collect::<Vec<_>>(),
+                ),
+                _ => None,
+            };
+            match after {
+                Some(items) if items.len() == 1 && items[0].0 => "gate",
+                _ => "unknown",
+            }
+        }
+        // An attempt still open is held before this is read (`act_holds`).
+        None => "unknown",
+        Some(_) => return Ok(("hand", None)),
+    };
+    Ok((via, Some(attempt)))
 }
 
 /// End the `watching` row `id` (`failed`) with its `ci_watch_failed` and `reason`, no notice.
@@ -1711,6 +1978,11 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
             return Ok(false);
         }
         let (task, repo, pr, v) = (f.task.as_str(), d.f.repo.as_str(), f.pr, &d.read);
+        // While makibad's attempt is open, or for a read begun before its outcome was recorded,
+        // nothing is written (Issue 434): the act's own answer comes first.
+        if act_holds(w.conn(), repo, pr, d.started_ms)? {
+            return Ok(false);
+        }
         let event = |kind: &str, payload: Value| -> Result<i64> {
             w.append_event(&NewEvent {
                 kind,
@@ -1733,18 +2005,20 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
                     |r| r.get(0),
                 )?;
                 // An allowance of the gate at that head is no proof that the allowed command ran
-                // (Issue 424: the secretary's own permission check can refuse it after the gate
-                // allowed it, and the owner then merge that head by hand): nothing records the
-                // run, so the merge is `hand`, and the allowance only chooses the notice's text.
-                let via = "hand";
-                event(
-                    "pr_merged",
-                    json!({"repo": repo, "pr": pr, "title": v["title"], "merged_at": v["mergedAt"],
-                           "merge_commit": v["mergeCommit"]["oid"], "task_id": task,
-                           "merged_by": v["mergedBy"]["login"], "head_oid": v["headRefOid"],
-                           "merged_via": via}),
-                )?;
+                // (Issue 424): the merge is classed from makibad's act records only (Issue 434),
+                // and the allowance only chooses the text of a `hand` notice.
+                let (via, attempt) = merged_via(w.conn(), repo, pr, head.unwrap_or(""), v)?;
+                let mut payload = json!({"repo": repo, "pr": pr, "title": v["title"],
+                       "merged_at": v["mergedAt"], "merge_commit": v["mergeCommit"]["oid"],
+                       "task_id": task, "merged_by": v["mergedBy"]["login"],
+                       "head_oid": v["headRefOid"], "merged_via": via});
+                if let Some(attempt) = attempt {
+                    payload["attempt"] = json!(attempt);
+                }
+                event("pr_merged", payload)?;
                 end_watches(w, repo, pr, "merged")?;
+                // Issue 432: a pending merge of a pull request that landed is nobody's to approve.
+                super::door::withdraw_merge_entries(w, task, repo, pr, None, false, "the pull request landed")?;
                 let at = v["mergedAt"].as_str().unwrap_or("an unknown time");
                 // A parked run whose pull request landed is brought back with that reason, and
                 // told (Issue 283).
@@ -1762,7 +2036,15 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
                     .as_str()
                     .map_or("unknown", |m| &m[..m.len().min(7)]);
                 // Every merge is told (Issue 424), whatever made it.
-                let notice = if allowed {
+                let notice = if via == "gate" {
+                    format!(
+                        "Pull request {repo}#{pr} of task {task} landed (makibad's merge) (by {by}, at {at}, merge commit {merge}): run the retro and close the task."
+                    )
+                } else if via == "unknown" {
+                    format!(
+                        "Pull request {repo}#{pr} of task {task} landed; makibad cannot tell whether its attempt or another merge landed it (by {by}, at {at}, merge commit {merge}): run the retro and close the task."
+                    )
+                } else if allowed {
                     format!(
                         "Pull request {repo}#{pr} of task {task} was merged by hand (by {by}, at {at}, merge commit {merge}); the gate allowed that head, but makiba saw no gated merge command run: run the retro and close the task."
                     )
@@ -1776,11 +2058,18 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
             }
             // A pull request closed without its merge: it will not land as it is (belt.md 4.3).
             Some("CLOSED") if !f.closed => {
+                // A queue act of a pull request read closed ends first (Issue 434).
+                if let Some(a) = super::door::act_awaiting(w.conn(), repo, pr)?
+                    && a.queue
+                {
+                    super::door::merge_dequeued(w, task, repo, pr, &a, "closed")?;
+                }
                 event(
                     "pr_closed",
                     json!({"repo": repo, "pr": pr, "title": v["title"], "task_id": task}),
                 )?;
                 end_watches(w, repo, pr, "closed")?;
+                super::door::withdraw_merge_entries(w, task, repo, pr, None, false, "the pull request was closed")?;
                 super::verify::notify_secretary(
                     w,
                     Some(task),
@@ -1823,6 +2112,83 @@ struct MergeRead {
     /// `title`, when given.
     title: Option<String>,
     started: Instant,
+    /// When the call began, on the wall clock (milliseconds since 1970), compared with the
+    /// ledger's times (Issue 434).
+    started_ms: i64,
+    /// `isInMergeQueue`; `None` when the read does not carry it (`gh pr view`).
+    queued: Option<bool>,
+    /// The queue items of the timeline (`queue_items`).
+    timeline: Option<Vec<(bool, i64)>>,
+}
+
+/// What `apply_queue` did with an open read, for the notes of `PrWatch::dequeue_seen`.
+#[derive(Debug, PartialEq, Eq)]
+enum QueueStep {
+    Nothing,
+    /// The read shows the entry, or no removal: the note of the attempt goes.
+    Clear(i64),
+    /// A first read out of the queue with a removal on its timeline: noted.
+    Note(i64),
+    /// The queue act ended (`merge_dequeued`).
+    Ended(i64),
+}
+
+/// An open read of a pull request whose queue act awaits its landing (Issue 434), in one
+/// transaction: a read `act_holds` drops does nothing; a read at another head than the act's ends
+/// it (`head moved`); a read out of the queue at its head whose newest queue item on the timeline
+/// after the attempt is a removal ends it (`left the queue`) only when the note of that attempt in
+/// `notes`, the start of such a read before it, is at least `interval` earlier (claim 6 of
+/// merge-act.md section 10 is [unverified]: a pull request leaving the queue to land may be read
+/// so for a moment). A read out of the queue with no such removal never ends it: the act stays
+/// followed, and its landing is read.
+fn apply_queue(
+    w: &StateWriter,
+    r: &MergeRead,
+    notes: &HashMap<i64, (String, i64, Instant)>,
+    interval: Duration,
+) -> Result<QueueStep> {
+    w.transaction(|w| {
+        let (task, repo, pr) = (r.f.task.as_str(), r.f.repo.as_str(), r.f.pr);
+        let Some(a) = super::door::act_awaiting(w.conn(), repo, pr)? else {
+            return Ok(QueueStep::Nothing);
+        };
+        if !a.queue || act_holds(w.conn(), repo, pr, r.started_ms)? {
+            return Ok(QueueStep::Nothing);
+        }
+        if !r.head.is_empty() && !r.head.eq_ignore_ascii_case(&a.head) {
+            super::door::merge_dequeued(w, task, repo, pr, &a, "head moved")?;
+            return Ok(QueueStep::Ended(a.attempt));
+        }
+        match r.queued {
+            Some(true) => Ok(QueueStep::Clear(a.attempt)),
+            Some(false) => {
+                // Evidence of leaving the queue: the newest queue item in the window (the
+                // timeline lists them oldest first) is a removal; one followed by another
+                // addition is not, since the pull request was queued again.
+                let removed = match (boundary_of(w.conn(), a.attempt)?, &r.timeline) {
+                    (Some(b), Some(items)) => items
+                        .iter()
+                        .rfind(|(_, t)| *t >= b)
+                        .is_some_and(|(added, _)| !added),
+                    _ => false,
+                };
+                if !removed {
+                    return Ok(QueueStep::Clear(a.attempt));
+                }
+                // The note of this attempt only: one an earlier act of the pull request left
+                // never counts for a later one.
+                match notes.get(&a.attempt).map(|n| n.2) {
+                    Some(t) if r.started >= t + interval => {
+                        super::door::merge_dequeued(w, task, repo, pr, &a, "left the queue")?;
+                        Ok(QueueStep::Ended(a.attempt))
+                    }
+                    Some(_) => Ok(QueueStep::Nothing),
+                    None => Ok(QueueStep::Note(a.attempt)),
+                }
+            }
+            None => Ok(QueueStep::Nothing),
+        }
+    })
 }
 
 /// Record what an open read saw (`pr_read`, Issue 405), in one transaction, while its task still
@@ -3084,8 +3450,17 @@ esac"#,
             gen_reg: now.as_ref().map_or(0, |f| f.gen_reg),
             gen_close: now.as_ref().map_or(0, |f| f.gen_close),
             closed: now.as_ref().is_some_and(|f| f.closed),
+            act: false,
         };
-        apply_state(w, &StateDone { f, read }).unwrap()
+        apply_state(
+            w,
+            &StateDone {
+                f,
+                read,
+                started_ms: now_ms(),
+            },
+        )
+        .unwrap()
     }
 
     fn merge_read(f: &Followed, head: &str, status: &str) -> MergeRead {
@@ -3096,6 +3471,9 @@ esac"#,
             draft: false,
             title: None,
             started: Instant::now(),
+            started_ms: now_ms(),
+            queued: None,
+            timeline: None,
         }
     }
 
@@ -3110,6 +3488,7 @@ esac"#,
             gen_reg: 1,
             gen_close: 0,
             closed: false,
+            act: false,
         };
         let early = merge_read(&f, "h", "CLEAN");
         std::thread::sleep(Duration::from_millis(5));
@@ -3218,6 +3597,7 @@ esac"#,
                              "mergedAt": "2026-11-23T00:00:00Z",
                              "mergedBy": {"login": "owner"}, "headRefOid": head,
                              "mergeCommit": {"oid": "m"}}),
+                started_ms: now_ms(),
             })
             .unwrap();
         watch.pass(&w).unwrap();
@@ -3251,6 +3631,7 @@ esac"#,
             gen_reg: 1,
             gen_close: 0,
             closed: false,
+            act: false,
         };
         let reads = vec![
             merge_read(&f("a"), "h", "CLEAN"),
@@ -3708,6 +4089,7 @@ esac"#,
         let stale = StateDone {
             f: old,
             read: read.clone(),
+            started_ms: now_ms(),
         };
         assert!(!apply_state(&w, &stale).unwrap(), "stale: nothing written");
         assert_eq!(merges(), 0);
@@ -3718,13 +4100,24 @@ esac"#,
                 &w,
                 &StateDone {
                     f: closed_since,
-                    read: read.clone()
+                    read: read.clone(),
+                    started_ms: now_ms(),
                 }
             )
             .unwrap(),
             "another close generation: nothing written"
         );
-        assert!(apply_state(&w, &StateDone { f: now, read }).unwrap());
+        assert!(
+            apply_state(
+                &w,
+                &StateDone {
+                    f: now,
+                    read,
+                    started_ms: now_ms(),
+                }
+            )
+            .unwrap()
+        );
         assert_eq!(merges(), 1);
         let ended: i64 = count(
             &w,
@@ -3733,6 +4126,66 @@ esac"#,
         )
         .unwrap();
         assert_eq!(ended, 1, "the watching row of the current head ended");
+    }
+
+    /// Issue 432: a landing or a close read by the watch withdraws the pending merge of that pull
+    /// request in the same transaction, and tells the secretary; another pull request's is kept.
+    #[test]
+    fn a_landing_or_a_close_withdraws_the_pending_merge_of_its_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "2".repeat(40);
+        for t in ["t", "u"] {
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: t,
+                project_slug: "p",
+                status: Some("in_use"),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        register(&w, "pr_opened", "u", "o/r", 6, &head).unwrap();
+        let entry = |task: &str, pr: i64| -> i64 {
+            w.conn()
+                .execute(
+                    "INSERT INTO pending (run_id, kind, question, context_json)
+                     VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'merge', 'q', ?2)",
+                    params![
+                        task,
+                        json!({"repo": "o/r", "pr": pr, "head": head, "method": "squash"})
+                            .to_string()
+                    ],
+                )
+                .unwrap();
+            w.conn().last_insert_rowid()
+        };
+        let (landed, closed) = (entry("t", 5), entry("u", 6));
+        let status = |id: i64| -> String {
+            w.conn()
+                .query_row("SELECT status FROM pending WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let read = |state: &str| {
+            json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                   "mergedBy": {"login": "owner"}, "headRefOid": head,
+                   "mergeCommit": {"oid": "m"}})
+        };
+        assert!(seen_read(&w, "t", "o/r", 5, read("MERGED")));
+        assert_eq!(status(landed), "withdrawn");
+        assert_eq!(status(closed), "open", "another pull request's entry stays");
+        assert!(seen_read(&w, "u", "o/r", 6, read("CLOSED")));
+        assert_eq!(status(closed), "withdrawn");
+        let told = count(
+            &w,
+            "SELECT count(*) FROM messages WHERE recipient = 'secretary' AND kind = 'notice'
+               AND body LIKE '%withdrew pending merge entry%'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(told, 2);
     }
 
     /// An attempt makibad took up is concluded on only by its own activation (Issue 427): a
@@ -3794,5 +4247,377 @@ esac"#,
         assert_eq!(consumed().get(&11), Some(&2));
         assert!(!newer(&consumed(), 11, 2));
         assert!(newer(&consumed(), 11, 3));
+    }
+
+    /// Two runs completed two days ago follow one pull request only through makibad's act: the
+    /// landing one of them records does not end the act for the other, which is still followed
+    /// until it records its own (Issue 434).
+    #[test]
+    fn a_landing_of_one_run_keeps_the_act_for_another_run_of_the_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        for t in ["a", "b"] {
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: t,
+                project_slug: "p",
+                status: Some("completed"),
+                ..Default::default()
+            })
+            .unwrap();
+            register(&w, "pr_opened", t, "o/r", 5, &head).unwrap();
+        }
+        w.conn()
+            .execute(
+                "UPDATE runs SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 days')",
+                [],
+            )
+            .unwrap();
+        let tasks = |w: &StateWriter| -> Vec<(String, bool)> {
+            followed(w.conn(), None)
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.task, f.act))
+                .collect()
+        };
+        assert!(tasks(&w).is_empty(), "no act: not followed");
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            Some("a"),
+            json!({"repo": "o/r", "pr": 5, "head": head}),
+        );
+        let attempt: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        event(
+            &w,
+            "merge_done",
+            "makibad",
+            Some("a"),
+            json!({"attempt": attempt}),
+        );
+        assert_eq!(
+            tasks(&w),
+            vec![("a".to_string(), true), ("b".to_string(), true)]
+        );
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("a"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "merged_via": "gate"}),
+        );
+        assert_eq!(tasks(&w), vec![("b".to_string(), true)]);
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("b"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "merged_via": "gate"}),
+        );
+        assert!(tasks(&w).is_empty(), "both landed");
+    }
+
+    /// A removal from the queue followed by another addition is no evidence that the pull request
+    /// left it: two reads out of the queue then end nothing (it may be landing); a removal that is
+    /// the newest queue item does end the act (Issue 434).
+    #[test]
+    fn a_removal_followed_by_another_addition_does_not_end_a_queue_act() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head": head}),
+        );
+        let attempt: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        event(
+            &w,
+            "merge_enqueued",
+            "makibad",
+            Some("t"),
+            json!({"attempt": attempt}),
+        );
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let (interval, t0, at) = (Duration::from_millis(50), Instant::now(), now_ms());
+        let read = |started: Instant, timeline: Vec<(bool, i64)>| MergeRead {
+            started,
+            started_ms: now_ms() + 1000,
+            queued: Some(false),
+            timeline: Some(timeline),
+            ..merge_read(&f, &head, "CLEAN")
+        };
+        let again = vec![(true, at), (false, at + 1000), (true, at + 2000)];
+        let mut notes = HashMap::new();
+        assert_eq!(
+            apply_queue(&w, &read(t0, again.clone()), &notes, interval).unwrap(),
+            QueueStep::Clear(attempt)
+        );
+        notes.insert(attempt, ("o/r".to_string(), 5, t0));
+        assert_eq!(
+            apply_queue(&w, &read(t0 + interval * 2, again), &notes, interval).unwrap(),
+            QueueStep::Clear(attempt),
+            "queued again after its removal: not evidence"
+        );
+        let dequeued = || {
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'merge_dequeued'",
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(dequeued(), 0);
+        let removed = vec![(true, at), (false, at + 1000)];
+        assert_eq!(
+            apply_queue(&w, &read(t0 + interval * 3, removed), &notes, interval).unwrap(),
+            QueueStep::Ended(attempt),
+            "removed last: evidence"
+        );
+        assert_eq!(dequeued(), 1);
+    }
+
+    /// An open read begun while makibad's attempt is open is used for nothing: no `pr_read`, no
+    /// merge-state notice; one begun after the outcome is recorded is (Issue 434).
+    #[test]
+    fn an_open_read_held_by_the_act_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"}),
+        );
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head": head}),
+        );
+        let attempt: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let mut watch = PrWatch::from_env();
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let reads = |w: &StateWriter| {
+            count(w, "SELECT count(*) FROM events WHERE kind = 'pr_read'", []).unwrap()
+        };
+        let told = |w: &StateWriter| {
+            count(
+                w,
+                "SELECT count(*) FROM messages WHERE body LIKE 'The merge state of o/r#5%'",
+                [],
+            )
+            .unwrap()
+        };
+        let mut early = merge_read(&f, &head, "CLEAN");
+        early.started_ms = 0;
+        watch.merge_tx.send(early.clone()).unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!((reads(&w), told(&w)), (0, 0), "attempt open: held");
+        event(
+            &w,
+            "merge_done",
+            "makibad",
+            Some("t"),
+            json!({"attempt": attempt}),
+        );
+        watch.merge_tx.send(early).unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!((reads(&w), told(&w)), (0, 0), "begun before the outcome");
+        let mut late = merge_read(&f, &head, "CLEAN");
+        late.started_ms = now_ms() + 1000;
+        watch.merge_tx.send(late).unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!(reads(&w), 1, "begun after the outcome: recorded");
+        assert_eq!(told(&w), 1, "and its merge state told");
+    }
+
+    /// The note of a read out of the queue belongs to its attempt: after that queue act ended and
+    /// another attempt was enqueued, the old note does not let one read end the new act; that read
+    /// is noted for the new attempt, and a second one an interval later ends it (Issue 434).
+    #[test]
+    fn a_dequeue_note_of_an_earlier_attempt_does_not_count_for_a_later_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        let last_id = |w: &StateWriter| -> i64 {
+            w.conn()
+                .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+                .unwrap()
+        };
+        let enqueue = |w: &StateWriter| -> i64 {
+            event(
+                w,
+                "merge_attempted",
+                "makibad",
+                Some("t"),
+                json!({"repo": "o/r", "pr": 5, "head": head}),
+            );
+            let attempt = last_id(w);
+            event(
+                w,
+                "merge_enqueued",
+                "makibad",
+                Some("t"),
+                json!({"attempt": attempt}),
+            );
+            attempt
+        };
+        let old = enqueue(&w);
+        event(
+            &w,
+            "merge_dequeued",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head": head, "attempt": old, "why": "left the queue"}),
+        );
+        let new = enqueue(&w);
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let interval = Duration::from_millis(50);
+        let read = |started: Instant| MergeRead {
+            started,
+            started_ms: now_ms() + 1000,
+            queued: Some(false),
+            timeline: Some(vec![(true, now_ms()), (false, now_ms())]),
+            ..merge_read(&f, &head, "CLEAN")
+        };
+        let t0 = Instant::now();
+        let mut notes = HashMap::new();
+        notes.insert(old, ("o/r".to_string(), 5, t0));
+        let later = t0 + interval * 2;
+        assert_eq!(
+            apply_queue(&w, &read(later), &notes, interval).unwrap(),
+            QueueStep::Note(new)
+        );
+        let dequeued = || {
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'merge_dequeued'
+                   AND json_extract(payload_json, '$.attempt') = ?1",
+                [new],
+            )
+            .unwrap()
+        };
+        assert_eq!(dequeued(), 0, "one read ends nothing");
+        notes.insert(new, ("o/r".to_string(), 5, later));
+        assert_eq!(
+            apply_queue(&w, &read(later + interval), &notes, interval).unwrap(),
+            QueueStep::Ended(new)
+        );
+        assert_eq!(dequeued(), 1);
+    }
+
+    /// Both forms of the state read name github.com, so an inherited `GH_HOST` cannot send the
+    /// read of a pull request with an act awaiting its landing to another server (Issue 434).
+    #[test]
+    fn both_state_reads_name_github_com() {
+        let mut f = Followed {
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            gen_reg: 1,
+            gen_close: 0,
+            closed: false,
+            act: false,
+        };
+        let view = state_args(&f);
+        assert_eq!(&view[..3], ["pr", "view", "5"]);
+        assert!(view.windows(2).any(|w| w == ["--repo", "github.com/o/r"]));
+        f.act = true;
+        let graphql = state_args(&f);
+        assert_eq!(&graphql[..2], ["api", "graphql"]);
+        assert!(
+            graphql
+                .windows(2)
+                .any(|w| w == ["--hostname", "github.com"]),
+            "{graphql:?}"
+        );
+        for a in ["owner=o", "name=r", "number=5"] {
+            assert!(graphql.iter().any(|g| g == a), "{a}: {graphql:?}");
+        }
+    }
+
+    /// A state read is held while makibad's attempt is open, and dropped when it began at or
+    /// before the millisecond its outcome was recorded (the ledger keeps milliseconds only);
+    /// one begun a millisecond later is written (Issue 434).
+    #[test]
+    fn a_read_begun_at_the_outcomes_millisecond_is_dropped() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let c = w.conn();
+        assert!(!act_holds(c, "o/r", 5, 0).unwrap(), "no attempt: written");
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            None,
+            json!({"repo": "O/R", "pr": 5, "head": "h"}),
+        );
+        let attempt: i64 = c
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        assert!(act_holds(c, "o/r", 5, i64::MAX).unwrap(), "open: held");
+        event(
+            &w,
+            "merge_enqueued",
+            "makibad",
+            None,
+            json!({"attempt": attempt}),
+        );
+        c.execute(
+            "UPDATE events SET occurred_at = '2026-11-25T01:02:03.456Z' WHERE kind = 'merge_enqueued'",
+            [],
+        )
+        .unwrap();
+        let at = parse_time("2026-11-25T01:02:03.456Z").unwrap();
+        assert!(act_holds(c, "o/r", 5, at - 1).unwrap(), "before: dropped");
+        assert!(
+            act_holds(c, "o/r", 5, at).unwrap(),
+            "same millisecond: dropped"
+        );
+        assert!(!act_holds(c, "o/r", 5, at + 1).unwrap(), "after: written");
+        assert!(
+            !act_holds(c, "o/r", 6, at - 1).unwrap(),
+            "another pull request"
+        );
     }
 }

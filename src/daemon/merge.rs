@@ -716,7 +716,14 @@ fn finish(w: &StateWriter, a: &Attempt, o: &Outcome) -> Result<()> {
                     head: a.head.clone(),
                     queue: true,
                 };
-                door::merge_dequeued(w, a.task.as_deref().unwrap_or_default(), &a.repo, a.pr, &act)?;
+                door::merge_dequeued(
+                    w,
+                    a.task.as_deref().unwrap_or_default(),
+                    &a.repo,
+                    a.pr,
+                    &act,
+                    "head recorded",
+                )?;
             }
         }
         Ok(())

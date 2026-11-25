@@ -51,6 +51,43 @@ pub fn read_here() -> Result<Value, String> {
     read(&crate::daemon::state_dir().join("state.db"))
 }
 
+/// The text of the open pending merge entry `id` in the `state.db` at `path`, read-only (Issue
+/// 432): what `makiba merge approve` prints, and whose SHA-256 its approval carries.
+pub fn merge_entry_text(path: &Path, id: i64) -> Result<String, String> {
+    let conn = open(path)?;
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind, status, context_json FROM pending WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read pending entry {id}: {e}"))?;
+    let Some((kind, status, context)) = row else {
+        return Err(format!("no pending entry {id} in state.db"));
+    };
+    if kind != "merge" {
+        return Err(format!("pending entry {id} is a {kind}, not a merge"));
+    }
+    if status != "open" {
+        return Err(format!("pending merge entry {id} is {status}, not open"));
+    }
+    let context: Value = serde_json::from_str(&context)
+        .map_err(|e| format!("pending merge entry {id} holds no readable context: {e}"))?;
+    context["text"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| format!("pending merge entry {id} holds no text"))
+}
+
+/// `merge_entry_text` of this organization's `state.db`, and the SHA-256 of that text, which
+/// `makiba merge approve` sends as `shown` (Issue 432).
+pub fn merge_entry_here(id: i64) -> Result<(String, String), String> {
+    let text = merge_entry_text(&crate::daemon::state_dir().join("state.db"), id)?;
+    let sum = crate::daemon::door::sha256_hex(&text);
+    Ok((text, sum))
+}
+
 /// Who reads the status, which decides where `merge_approval_mode` comes from (Issue 383).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reader {
@@ -543,9 +580,10 @@ fn pr_watches(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 /// ledger and `pr_watches`; see `pull_request` for the fields. A pull request's merge is read
 /// from any run's `pr_merged`, so that a run not closed which still names a pull request another
 /// run merged does not list it as open and hide the merge; such an entry has the task of the
-/// merge's run (else the merge's `task_id`), as one listed from the merges of today has.
+/// merge's run (else the merge's `task_id`), as one listed from the merges of today has. Its
+/// close is read from any run too (Issue 491), in `pull_request`.
 fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
-    use crate::daemon::belt::{current_pr_sql, pr_closed_sql};
+    use crate::daemon::belt::current_pr_sql;
     let open = rows(
         conn,
         &format!(
@@ -553,8 +591,8 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
                     CASE WHEN m.id IS NULL THEN o.task_id
                          ELSE coalesce(mr.task_id, json_extract(m.payload_json, '$.task_id'),
                                        o.task_id) END AS task_id,
-                    o.repo, o.pr, o.closed, m.payload_json AS merged
-             FROM (SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr, {closed} AS closed,
+                    o.repo, o.pr, m.payload_json AS merged
+             FROM (SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr,
                           (SELECT e.id FROM events e WHERE e.kind = 'pr_merged'
                              AND lower(json_extract(e.payload_json, '$.repo')) = lower({repo})
                              AND json_extract(e.payload_json, '$.pr') = {pr}
@@ -567,7 +605,6 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
              ORDER BY o.id",
             repo = current_pr_sql("r", "repo"),
             pr = current_pr_sql("r", "pr"),
-            closed = pr_closed_sql("r"),
         ),
         [],
     )?;
@@ -575,7 +612,7 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         conn,
         "SELECT e.run_id AS id, coalesce(r.task_id, json_extract(e.payload_json, '$.task_id'))
                 AS task_id, json_extract(e.payload_json, '$.repo') AS repo,
-                json_extract(e.payload_json, '$.pr') AS pr, 0 AS closed,
+                json_extract(e.payload_json, '$.pr') AS pr,
                 e.payload_json AS merged
          FROM events e LEFT JOIN runs r ON r.id = e.run_id
          WHERE e.kind = 'pr_merged'
@@ -646,9 +683,14 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
             .optional()?
             .flatten(),
     };
+    // Closed when the newest close, reopen or registration of this pull request, of any run, is
+    // a close (Issue 491): a close one run recorded is not hidden by another run listed first.
+    let closed = newest("'pr_closed', 'pr_reopened', 'pr_opened', 'fix_pushed'")?
+        .zip(newest("'pr_closed'")?)
+        .is_some_and(|((last, _), (close, _))| last == close);
     let state = if merged.is_some() {
         "merged"
-    } else if row["closed"] == json!(1) {
+    } else if closed {
         "closed"
     } else {
         "open"
