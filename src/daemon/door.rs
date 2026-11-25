@@ -698,7 +698,7 @@ fn run(
             Ok(json!({"id": id}))
         }
         Verb::Report => report(w, actor, role, args),
-        Verb::Close => close(w, actor, args),
+        Verb::Close => close(w, actor, role, args),
         Verb::Show => show(w, actor, args),
         Verb::Inbox => {
             let b = super::inbox::inbox(w, actor).map_err(internal)?;
@@ -1720,11 +1720,50 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
 }
 
 /// `close` (spec section 12), the gate of Issue 36: refused without a `report_done` unless
-/// `abandon`; a run closed already is `done` again. A launch under way is failed. Ending the
-/// terminal and removing the working folder are Issue 37's.
-fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
+/// `abandon`, or `limit` (Issue 320: a run whose current pull request merged, with a known limit
+/// the person accepted); a run closed already is `done` again. A launch under way is failed.
+/// Ending the terminal and removing the working folder are Issue 37's. The outcome is recorded in
+/// `run_closed`'s payload (`status`, `reason`, `limit`), once: a retry of a failed teardown changes
+/// neither it nor the run's status.
+fn close(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     let task = str_arg(args, "task_id")?;
     let abandon = args.get("abandon") == Some(&json!(true));
+    let line = |name: &str| -> Result<Option<String>, DoorError> {
+        match args.get(name) {
+            None | Some(Value::Null) => Ok(None),
+            Some(Value::String(t)) if t.trim().is_empty() || t.contains(['\n', '\r']) => {
+                Err(usage(format!("{name} is one line of text, not blank")))
+            }
+            Some(Value::String(t)) => Ok(Some(t.clone())),
+            Some(_) => Err(usage(format!("the argument {name} is text"))),
+        }
+    };
+    let limit = line("limit")?;
+    let reason = line("reason")?;
+    let pending = match args.get("pending") {
+        None | Some(Value::Null) => None,
+        Some(v) => Some(
+            v.as_i64()
+                .filter(|n| *n > 0)
+                .ok_or_else(|| usage("pending is the id of a pending entry"))?,
+        ),
+    };
+    if limit.is_some() && abandon {
+        return Err(usage(
+            "a close with a limit is a completion: it takes no abandon",
+        ));
+    }
+    if limit.is_some() && reason.is_none() {
+        return Err(usage("a limit takes a reason"));
+    }
+    if reason.is_some() && !abandon && limit.is_none() {
+        return Err(usage("a reason is given with abandon or with a limit"));
+    }
+    if pending.is_some() && limit.is_none() {
+        return Err(usage(
+            "pending names the person's yes to a limit: give the limit",
+        ));
+    }
     // The newest close of the run that was accepted (an `already` answer is not one).
     let row: Option<(i64, bool, bool, Option<String>)> = w
         .conn()
@@ -1752,33 +1791,64 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
     if closed && !retry {
         return Ok(json!({"task_id": task, "closed": "already"}));
     }
-    if !closed && !done && !abandon {
+    let record = match (&limit, retry) {
+        (Some(_), true) => {
+            // A limit is recorded only by the close that writes `run_closed`.
+            let had: bool = w
+                .conn()
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM events WHERE run_id = ?1 AND kind = 'run_closed'
+                       AND json_type(payload_json, '$.limit') = 'object')",
+                    [run],
+                    |r| r.get(0),
+                )
+                .map_err(internal)?;
+            if !had {
+                return Err(refuse(
+                    ErrorKind::Conflict,
+                    format!("task {task:?} was closed without a limit"),
+                    "close it again without one, or with --abandon",
+                ));
+            }
+            Value::Null
+        }
+        (Some(finding), false) => accepted_limit(
+            w,
+            role,
+            task,
+            run,
+            finding,
+            reason.as_deref().unwrap_or(""),
+            pending,
+        )?,
+        (None, _) => Value::Null,
+    };
+    if !closed && !done && !abandon && limit.is_none() {
         return Err(refuse(
             ErrorKind::Conflict,
             format!("task {task:?} has no done report"),
-            "wait for the worker's report done, or close with --abandon",
+            "wait for the worker's report done, or close with --abandon (and a --reason); a \
+             merged run with a limit the person accepted closes with --limit",
         ));
     }
     if !abandon {
         unsaved_work(w, run)?;
     }
-    let status = if done && !abandon {
+    let outcome = if (done || limit.is_some()) && !abandon {
         "completed"
     } else {
         "abandoned"
     };
+    let abandon_reason = if abandon { reason.as_deref() } else { None };
     let store = || -> crate::db::Result<()> {
-        if retry && !abandon {
+        if retry {
             return Ok(());
         }
         w.conn().execute(
             "UPDATE runs SET status = ?1, completed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
              WHERE id = ?2",
-            params![status, run],
+            params![outcome, run],
         )?;
-        if retry {
-            return Ok(());
-        }
         // A launch under way would start a worker for a closed run (as `down` fails them).
         w.conn().execute(
             "UPDATE run_launch SET stage = 'failed', failed_reason = 'makiba close'
@@ -1796,18 +1866,142 @@ fn close(w: &StateWriter, actor: &str, args: &Value) -> Response {
         w.append_event(&NewEvent {
             kind: "run_closed",
             actor: Some(actor),
-            payload: Some(&json!({"task_id": task})),
+            payload: Some(&json!({
+                "task_id": task, "status": outcome, "reason": abandon_reason, "limit": record,
+            })),
             run_task_id: Some(task),
             ..Default::default()
         })?;
         Ok(())
     };
     store().map_err(internal)?;
-    let status: String = w
+    let now: String = w
         .conn()
         .query_row("SELECT status FROM runs WHERE id = ?1", [run], |r| r.get(0))
         .map_err(internal)?;
-    Ok(json!({"task_id": task, "status": status}))
+    Ok(json!({"task_id": task, "status": now}))
+}
+
+/// The question the secretary asks the person for a limit of `task` (Issue 320), word for word:
+/// the person's yes to it, with the reason as its `why`, is the person's word for that limit.
+fn limit_question(task: &str, finding: &str) -> String {
+    format!("Accept as a known limit of {task} and close it as completed: {finding}")
+}
+
+/// The record of a limit the person accepted for the run `run` of `task` (Issue 320), or the
+/// refusal: the person's word (the person's own key, or the pending entry `pending` of the run
+/// that the person answered yes, asking `limit_question` with `reason` as its `why`, made at or
+/// after the worker's last diff review) and a `pr_merged` of the run's current pull request.
+fn accepted_limit(
+    w: &StateWriter,
+    role: Role,
+    task: &str,
+    run: i64,
+    finding: &str,
+    reason: &str,
+    pending: Option<i64>,
+) -> Result<Value, DoorError> {
+    let c = w.conn();
+    // The worker's last diff review, read as `report` reads it.
+    let review: Option<(i64, String, Value)> = c
+        .query_row(
+            "SELECT id, received_at, result_json FROM commands
+             WHERE verb = 'review' AND actor = ?1 AND status = 'done'
+               AND json_extract(result_json, '$.result.kind') = 'diff'
+             ORDER BY id DESC LIMIT 1",
+            [worker_agent_id(task)],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get::<_, String>(2)?)),
+        )
+        .optional()
+        .map_err(internal)?
+        .map(|(id, at, text)| (id, at, serde_json::from_str(&text).unwrap_or(Value::Null)));
+    let question = limit_question(task, finding);
+    let no_word = || {
+        refuse(
+            ErrorKind::Conflict,
+            format!(
+                "no accepted limit: the person has not answered yes to the limit's question of {task}"
+            ),
+            format!(
+                "pending add, for the task, the question {question:?} with the reason as why, \
+                 escalate it, and close with --pending once the person answers yes"
+            ),
+        )
+    };
+    let answered_at: Option<String> = match pending {
+        None if role == Role::Person => None,
+        None => return Err(no_word()),
+        Some(id) => {
+            let entry: Option<(String, String)> = c
+                .query_row(
+                    "SELECT created_at, answered_at FROM pending
+                     WHERE id = ?1 AND run_id = ?2 AND kind = 'question' AND status = 'answered'
+                       AND answer = 'yes' AND answered_by = ?3 AND question = ?4
+                       AND json_extract(context_json, '$.why') = ?5 AND answered_at IS NOT NULL",
+                    params![id, run, crate::spec::AGENT_PERSON, question, reason],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .optional()
+                .map_err(internal)?;
+            let Some((created, answered)) = entry else {
+                return Err(no_word());
+            };
+            if review.as_ref().is_some_and(|(_, at, _)| created < *at) {
+                return Err(refuse(
+                    ErrorKind::Conflict,
+                    format!("pending entry {id} was asked before the last diff review of {task}"),
+                    "ask the person again about the last review",
+                ));
+            }
+            Some(answered)
+        }
+    };
+    let merge: Option<(i64, Value)> = c
+        .query_row(
+            &format!(
+                "SELECT e.id, e.payload_json FROM events e JOIN runs r ON r.id = e.run_id
+                 WHERE e.run_id = ?1 AND e.kind = 'pr_merged' AND {}
+                 ORDER BY e.id DESC LIMIT 1",
+                super::belt::is_current_pr_sql(
+                    "r",
+                    "json_extract(e.payload_json, '$.repo')",
+                    "json_extract(e.payload_json, '$.pr')"
+                )
+            ),
+            [run],
+            |r| Ok((r.get(0)?, r.get::<_, String>(1)?)),
+        )
+        .optional()
+        .map_err(internal)?
+        .map(|(id, p)| (id, serde_json::from_str(&p).unwrap_or(Value::Null)));
+    let Some((merge_id, merged)) = merge else {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!("task {task:?} has no merge of its current pull request recorded"),
+            "close with --abandon and a --reason, or wait for the merge to be recorded",
+        ));
+    };
+    let read = review.map(|(id, _, r)| {
+        json!({
+            "command_id": id,
+            "head": r["result"]["head"],
+            "findings": r["result"]["findings"],
+        })
+    });
+    Ok(json!({
+        "finding": finding,
+        "reason": reason,
+        "accepted_by": crate::spec::AGENT_PERSON,
+        "pending_id": pending,
+        "answered_at": answered_at,
+        "review": read,
+        "merge": {
+            "event_id": merge_id,
+            "repo": merged["repo"],
+            "pr": merged["pr"],
+            "merge_commit": merged["merge_commit"],
+        },
+    }))
 }
 
 /// Refuse a close (without `--abandon`) while a code worktree of the run holds unsaved work.
@@ -5263,10 +5457,13 @@ fn tool(v: Verb) -> Value {
             &["state", "task", "text"],
         ),
         Verb::Close => (
-            "Close a task's run. Refused (conflict) before its done report unless abandon is true, which marks the run abandoned.",
+            "Close a task's run. Refused (conflict) before its done report unless abandon is true, which marks the run abandoned (give its reason). A run whose current pull request merged, with a known limit the person accepted, closes as completed with limit (the review finding, one line), reason (one line) and pending: the entry the person answered yes whose question is \"Accept as a known limit of <task_id> and close it as completed: <limit>\" and whose why is the reason.",
             Map::from_iter([
                 ("task_id".into(), text.clone()),
                 ("abandon".into(), json!({"type": "boolean"})),
+                ("reason".into(), text.clone()),
+                ("limit".into(), text.clone()),
+                ("pending".into(), json!({"type": "integer"})),
             ]),
             &["task_id"],
         ),

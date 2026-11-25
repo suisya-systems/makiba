@@ -182,11 +182,21 @@ pub enum Command {
         #[arg(long)]
         issue: Option<i64>,
     },
-    /// Close a task's run; refused before its done report unless --abandon.
+    /// Close a task's run; refused before its done report unless --abandon, or --limit for a
+    /// merged run with a known limit the person accepted.
     Close {
         task_id: String,
         #[arg(long)]
         abandon: bool,
+        /// Why the run is abandoned, or why the limit is accepted (one line).
+        #[arg(long)]
+        reason: Option<String>,
+        /// The review finding the person accepted as a known limit (one line).
+        #[arg(long)]
+        limit: Option<String>,
+        /// The pending entry the person answered yes for the limit.
+        #[arg(long)]
+        pending: Option<i64>,
     },
     /// The last lines of a worker's screen, read by makibad.
     Peek {
@@ -522,8 +532,23 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             }
             ("range", args)
         }
-        Command::Close { task_id, abandon } => {
-            ("close", json!({"task_id": task_id, "abandon": abandon}))
+        Command::Close {
+            task_id,
+            abandon,
+            reason,
+            limit,
+            pending,
+        } => {
+            let mut args = json!({"task_id": task_id, "abandon": abandon});
+            for (name, value) in [("reason", reason), ("limit", limit)] {
+                if let Some(v) = value {
+                    args[name] = v.into();
+                }
+            }
+            if let Some(p) = pending {
+                args["pending"] = p.into();
+            }
+            ("close", args)
         }
         Command::Peek { task_id, lines } => {
             let mut args = json!({"task_id": task_id});
