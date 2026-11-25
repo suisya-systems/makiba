@@ -290,9 +290,13 @@ fn hc_file() -> Option<std::path::PathBuf> {
     if hc.components().count() > 1 {
         return Some(hc);
     }
+    use std::os::unix::fs::PermissionsExt;
+    // As the lookup that runs it: the first regular file on PATH with an execute bit.
     std::env::split_paths(&std::env::var_os("PATH")?)
         .map(|d| d.join(&hc))
-        .find(|p| p.is_file())
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
 }
 
 /// The refusal of a core of session `session` that `hc server start` started and that runs
