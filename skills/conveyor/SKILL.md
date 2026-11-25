@@ -42,13 +42,13 @@ In the conversation, as often as the person likes:
 
 ## 3. The merge
 
-Read the approval mode with mcp__makiba__status before every merge you would make without the person's word: its `merge_approval_mode` is the setting now, and the range's `approval_mode` the one it was approved under.
+Read the approval mode with mcp__makiba__status before every merge call: its `merge_approval_mode` is the setting now, and the range's `approval_mode` the one it was approved under. When you cannot read them, do not call merge: tell the person.
 
-- The merge gate holds the pair: a range task's pull request lands without the person only when both are `acceptance`; for any other pair (`human` in either) your merge command stops at a question to the person. So read the pair to know what to say, not to decide: both `acceptance`, go on below; otherwise, once the newest notice for the head reads it mergeable now (`makiba:pull-request`, "The CI notice": a head behind its base is updated first), tell the person the pull request is green and can merge, with its link, and wait for their word. The rest of the belt goes on.
-- Both `acceptance`: check the stop lines of `makiba:pull-request` (its "Merging" section, stop lines 1 to 8). Hitting none, merge with the one command that section names. Hitting one, stop on that pull request and tell the person which line, with its link; the rest of the belt goes on. The exception is stop line 8 for a head only behind its base: that is not taken to the person; update it first, as that skill's "The CI notice" says.
+- The merge gate holds the pair: a range task's pull request lands without the person only when both are `acceptance`; for any other pair (`human` in either) mcp__makiba__merge answers `pending`, and the pull request lands only once the person approves it with their key. So read the pair to know what to expect, not to decide: both `acceptance`, go on below; otherwise, once the newest notice for the head reads it mergeable now (`makiba:pull-request`, "The CI notice": a head behind its base is updated first) and it hits none of the stop lines, call merge as that skill's "Merging" says, and on `pending` tell the person the pull request, its link, the warnings and that they approve it with `makiba merge approve <id>`. A word in the conversation does not land it. The rest of the belt goes on.
+- Both `acceptance`: check the stop lines of `makiba:pull-request` (its "Merging" section, stop lines 1 to 8). Hitting none, call mcp__makiba__merge as that section says; `makibad` lands it and its notice tells you the outcome. Hitting one, stop on that pull request and tell the person which line, with its link; the rest of the belt goes on. The exception is stop line 8 for a head only behind its base: that is not taken to the person; update it first, as that skill's "The CI notice" says.
 - A refusal of the merge gate is stop line 7, and `makibad` has written it as a stop already (section 2): never another way, never `--admin`.
 
-This read replaces, while a range is in force, the pull-request skill's "ask the person which mode is in force".
+While a range is in force, this read adds the range's `approval_mode` to the pull-request skill's read of the mode.
 
 ## 4. Showing the belt
 
@@ -65,6 +65,6 @@ The range is in the records: a renewed secretary's brief names the ranges in for
 - Answering a stop with the recommendation on the person's behalf: not in this version; each stop records the recommendation and the answer so that the person can decide later.
 - The review round cap's relay: the door counts the rounds (`review`); a worker out of rounds reports it (stop line 5), and only you raise its allowance, with a reason.
 - A journal of the belt: `makibad` records every dispatch, push, pull request and close itself.
-- A notice when a pull request is merged: you merge it yourself; a merge by the person on GitHub you learn from the person.
+- Your own watch for a landing: `makibad` tells you of every merge, by its own act or by hand on GitHub, and of every outcome of its act.
 - A classifier of what a change touches and its evidence for the pull request: the worker says how it ran its change, and the pull request says how it was checked.
 - Ports for parallel runs: the worker's and the project's own concern.
