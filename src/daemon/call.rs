@@ -298,6 +298,20 @@ fn waiting(w: &StateWriter) -> Result<Vec<Waiting>> {
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The entries due under the setting `since`: waiting for the person, never called, fewer than
+/// `TRIES` failures under it, the newest of them at least `retry` old.
+fn due(w: &StateWriter, since: i64, retry: Duration) -> Result<Vec<Waiting>> {
+    let records = records(w, since, retry)?;
+    Ok(waiting(w)?
+        .into_iter()
+        .filter(|e| {
+            records
+                .get(&e.id)
+                .is_none_or(|r| !r.called && r.failures < TRIES && !r.recent)
+        })
+        .collect())
+}
+
 /// A call whose process runs.
 struct Flight {
     child: Child,
@@ -362,25 +376,18 @@ impl Call {
         if self.last_start.is_some_and(|t| t.elapsed() < self.gap) {
             return Ok(());
         }
-        let records = records(w, since, self.retry)?;
-        let due: Vec<Waiting> = waiting(w)?
-            .into_iter()
-            .filter(|e| {
-                let r = records.get(&e.id);
-                r.is_none_or(|r| !r.called && r.failures < TRIES && !r.recent)
-            })
-            .collect();
-        if due.is_empty() {
+        let first = due(w, since, self.retry)?;
+        if first.is_empty() {
             return Ok(());
         }
         self.last_start = Some(Instant::now());
-        let ids: Vec<i64> = due.iter().map(|e| e.id).collect();
-        let mask = Mask::new(w.conn());
         // The resolved file is what runs: a link checked here cannot be pointed elsewhere
         // between the check and the start.
         let program = match text_rule(&command).and_then(|()| disk_rule(&command, &self.state)) {
             Ok(p) => p,
             Err(why) => {
+                let mask = Mask::new(w.conn());
+                let ids: Vec<i64> = first.iter().map(|e| e.id).collect();
                 self.done = Some(Done {
                     kind: "notify_failed",
                     payload: json!({"to": TO, "pending_ids": ids, "command": command,
@@ -391,8 +398,27 @@ impl Call {
                 return self.write(w);
             }
         };
-        let (title, body) = texts(&mask, &due);
-        match self.spawn(&program, &title, &body) {
+        // The setting and the entries are read again, and the process started, inside one write
+        // transaction: an answer, a withdrawal or a new setting that the door commits meanwhile
+        // is either seen here or waits until the process has started.
+        let started = w.transaction(|w| {
+            if setting(w)?.as_ref().map(|(c, id)| (c.as_str(), *id)) != Some((&command, since)) {
+                return Ok(None);
+            }
+            let entries = due(w, since, self.retry)?;
+            if entries.is_empty() {
+                return Ok(None);
+            }
+            let mask = Mask::new(w.conn());
+            let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
+            let (title, body) = texts(&mask, &entries);
+            let spawned = self.spawn(&program, &title, &body);
+            Ok(Some((ids, title, body, spawned)))
+        })?;
+        let Some((ids, title, body, spawned)) = started else {
+            return Ok(());
+        };
+        match spawned {
             Ok((child, files)) => {
                 let pgid = child.id() as i32;
                 self.flight = Some(Flight {

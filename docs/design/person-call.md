@@ -61,7 +61,7 @@ A pass runs every tick of makibad's loop, beside `exe_watch`, not behind the rec
 1. `notify_command` is the value of the newest `config_set` with key `notify_command` and project `''`; its event id is the setting's id. Unset or empty: no new call starts (off).
 2. While a call's process runs, or while a finished call's event is not yet written, nothing new starts (one call at a time).
 3. An entry is due when it waits for the person (section 1), no `notify_sent` with `to` `person` names it in `pending_ids`, fewer than 3 `notify_failed` with `to` `person` and `setting` equal to the setting's id name it, and the newest of those failures, if any, is at least `RETRY` old (`MAKIBA_CALL_RETRY_MS`, default 60000). So a failure counts only against the setting it was made with: setting the command again (the same value, a new one, or after off) gives every entry that still waits three tries again.
-4. When at least one entry is due and the last call started at least `GAP` ago (`MAKIBA_CALL_GAP_MS`, default 30000; in memory, so a restart may call sooner), the path is checked (2.1) and one process is started with every due entry; what runs is the resolved file the check returned, never the stored text again, so a link cannot be pointed elsewhere between the check and the start. The entries are read again in the same read as the check, so an entry answered or withdrawn by then is not in the call.
+4. When at least one entry is due and the last call started at least `GAP` ago (`MAKIBA_CALL_GAP_MS`, default 30000; in memory, so a restart may call sooner), the path is checked (2.1) and one process is started with every due entry; what runs is the resolved file the check returned, never the stored text again, so a link cannot be pointed elsewhere between the check and the start. After the check, the setting and the entries are read again and the process is started inside one write transaction (`BEGIN IMMEDIATE`): an answer, a withdrawal or a new setting the door commits during the check is seen there (a changed setting starts nothing), and one that comes later waits until the process has started.
 5. The process is polled with `try_wait` each tick; makibad never blocks on it. Exit status 0: `notify_sent` (actor `makibad`; payload `to` `person`, `pending_ids` ascending, `command`, `setting` (the id of the `config_set` the call was started under, so a call that ends after the person set the command again does not count against the new setting), `title`, `body`). Any other exit, a signal, a start that fails, a path refused before the start, or no exit within `TIMEOUT` (`MAKIBA_CALL_TIMEOUT_MS`, default 10000): `notify_failed` (same `to`, `pending_ids`, `command`, `setting`, and `reason`: `exit <n>`, `signal <n>`, `timeout`, `spawn: <error>` or `unsafe: <rule>`; `stderr`, masked and cut as in section 3) and one line to makibad's log. At `TIMEOUT` the whole process group is killed (`kill(-pgid, SIGKILL)`) and the direct child reaped. After a direct child exits, makibad does not wait for anything it left behind (stderr is a file, so nothing holds the tick). After the third failure for an entry under the current setting, the log says that entry will not be called again until the command is set again.
 6. A finished call's result is kept in memory until its transaction commits; a refused write is tried again on the next tick, and no new call starts meanwhile.
 
@@ -182,13 +182,22 @@ A Linux desktop:
 exec notify-send --app-name=makiba "$1" "$(cat)"
 ```
 
-WSL, a Windows toast (needs the BurntToast PowerShell module; any other toast command works the same way):
+WSL, a Windows toast (needs the BurntToast PowerShell module). The title and the body hold text the secretary and workers wrote, so they must reach PowerShell as data, never as code: never put them after `-Command`, whose arguments PowerShell joins into the command it runs. A fixed script run with `-File` takes its arguments as strings. `~/bin/makiba-toast.ps1`:
+
+```powershell
+param([string]$Title, [string]$Body)
+New-BurntToastNotification -Text $Title, $Body
+```
+
+and the command:
 
 ```sh
 #!/bin/sh
 body=$(cat)
-exec powershell.exe -NoProfile -Command "New-BurntToastNotification -Text \$args[0], \$args[1]" "$1" "$body"
+exec powershell.exe -NoProfile -NonInteractive -File "$(wslpath -w "$HOME/bin/makiba-toast.ps1")" "$1" "$body"
 ```
+
+The same holds for any sender: pass the text as an argument or on stdin, never inside a command line that a shell or an interpreter parses.
 
 A push to a phone through a service of your choice (its host is reached by makibad, not by a worker):
 
