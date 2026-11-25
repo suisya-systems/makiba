@@ -6,9 +6,11 @@
 //! - `report`: its worker's `report blocked` is its design (`design_reported`); `report done` is
 //!   refused while it waits. From the design report it waits for a landing (`belt::LANDING_WAIT`):
 //!   it counts in neither count and may be parked (`park.rs`).
-//! - `settle`, from the records each pass, task by task of what it waits for: closed `completed`,
-//!   its pull request read merged and the merge commit seen in the project's clone
-//!   (`landed_in_clone`, the workers' `origin`) is a landing. One abandoned, whose newest pull
+//! - `settle`, from the records each pass, Issue by Issue of what it waits for: a run that may land
+//!   it (`LANDERS`: the task it was dispatched to wait for, or any other run of the project that
+//!   names the Issue, such as a one-off dispatched with `issue` or a redo, Issue 488) closed
+//!   `completed`, its pull request read merged and the merge commit seen in the project's clone
+//!   (`landed_in_clone`, the workers' `origin`) is a landing. A task waited for that is abandoned, whose newest pull
 //!   request was read closed unmerged, or whose launch failed, is a question to the person: go on
 //!   without it? Their `yes` (`answered`) lets that one task go (`ahead_released`); the others are
 //!   still waited for. When every task has landed or been let go, the wait is settled and the run
@@ -21,6 +23,40 @@ use crate::db::Result;
 use crate::db::writer::{NewEvent, StateWriter};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
+
+/// The SQL of `LANDERS`, as a literal so that `AWAITED` can be one constant.
+macro_rules! landers {
+    () => {
+        "SELECT o.task_id AS waiting, CAST(i.value AS INTEGER) AS issue, d.task_id AS task,
+                d.id AS run
+         FROM runs o
+         JOIN events e ON e.id = (SELECT min(b.id) FROM events b WHERE b.run_id = o.id
+                                  AND b.kind = 'belt_dispatched')
+              AND json_extract(e.payload_json, '$.design_only') = 1
+         JOIN json_each(json_extract(e.payload_json, '$.waits_for')) i
+         JOIN projects lp ON lp.id = o.project_id
+         JOIN runs d ON d.id != o.id
+              AND (d.task_id = json_extract(e.payload_json, '$.waits_tasks[' || i.key || ']')
+                   OR (d.project_id = o.project_id
+                       AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(d.issue_refs)
+                                                          THEN d.issue_refs ELSE '[]' END) k
+                                   WHERE k.value = lp.slug || '#' || i.value)))
+         WHERE o.status IN ('queued', 'in_use', 'suspended', 'parked')
+           AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = o.id
+                           AND s.kind = 'ahead_settled')"
+    };
+}
+
+/// The runs that may land an Issue an open design-only run waits for (Issue 488), a row each:
+/// the `waiting` task, the `issue`, the lander's `task` and `run` id. They are the task it was
+/// dispatched to wait for, and every other run of its project whose `issue_refs` names the Issue
+/// (a one-off dispatched with `issue`, a redo, a task of another range). The landing (`settle`),
+/// the clone check (`belt::clone_checks`) and the PR watch (`AWAITED`) read this one set.
+pub(super) const LANDERS: &str = landers!();
+
+/// The tasks open design-only runs wait for (Issue 284), or that may land what they wait for
+/// (Issue 488): their landings and closures are read whatever their status.
+pub(super) const AWAITED: &str = concat!("SELECT l.task FROM (", landers!(), ") l");
 
 /// What a design-only run waits for: the Issues and their tasks, in the dispatch's order.
 pub struct Wait {
@@ -146,6 +182,9 @@ struct Dep {
     run: Option<(i64, String)>,
     /// Its newest pull request was read closed unmerged.
     pr_closed: bool,
+    /// The run that landed the Issue (the oldest of `LANDERS` that did), with its merge and its
+    /// clone record.
+    landed_by: Option<String>,
     merged: Option<Value>,
     in_clone: Option<Value>,
     /// The person let the waiting run go on without it.
@@ -154,9 +193,7 @@ struct Dep {
 
 impl Dep {
     fn landed(&self) -> bool {
-        self.run.as_ref().is_some_and(|(_, s)| s == "completed")
-            && self.merged.is_some()
-            && self.in_clone.is_some()
+        self.landed_by.is_some()
     }
 
     /// Why it will not land as things are, if so: a question to the person.
@@ -194,6 +231,59 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
+    // The Issue lands through the first run that may land it (`LANDERS`, oldest first) closed
+    // `completed` with its merge in the clone: the task waited for, or another run naming it.
+    let landers: Vec<(String, String)> = c
+        .prepare(&format!(
+            "SELECT l.task, d.status FROM ({LANDERS}) l JOIN runs d ON d.id = l.run
+             WHERE l.waiting = ?1 AND l.issue = ?2 ORDER BY d.id"
+        ))?
+        .query_map(rusqlite::params![waiting, issue], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut landed_by = None;
+    let (mut merged, mut in_clone) = (None, None);
+    for (lander, status) in landers {
+        if status != "completed" {
+            continue;
+        }
+        let (m, l) = landing(c, &lander)?;
+        if m.is_some() && l.is_some() {
+            (landed_by, merged, in_clone) = (Some(lander), m, l);
+            break;
+        }
+    }
+    let pr_closed: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ?1 AND {})",
+            super::belt::pr_closed_sql("r")
+        ),
+        [task],
+        |r| r.get(0),
+    )?;
+    let released: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
+                        WHERE r.task_id = ?1 AND e.kind = 'ahead_released'
+                          AND json_extract(e.payload_json, '$.issue') = ?2)",
+        rusqlite::params![waiting, issue],
+        |r| r.get(0),
+    )?;
+    Ok(Dep {
+        issue,
+        task: task.to_string(),
+        run,
+        pr_closed,
+        landed_by,
+        merged,
+        in_clone,
+        released,
+    })
+}
+
+/// The merge of the current pull request of `task` (`pr_merged`) and its record in the clone
+/// (`landed_in_clone`), each when recorded.
+fn landing(c: &Connection, task: &str) -> rusqlite::Result<(Option<Value>, Option<Value>)> {
     // The landing of its current pull request only (`belt::current_pr_sql`, Issue 345): a merge
     // of another, replaced since or of another repository with the same number, is not this
     // task's landing.
@@ -242,30 +332,7 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
             None => None,
         },
     };
-    let pr_closed: bool = c.query_row(
-        &format!(
-            "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.task_id = ?1 AND {})",
-            super::belt::pr_closed_sql("r")
-        ),
-        [task],
-        |r| r.get(0),
-    )?;
-    let released: bool = c.query_row(
-        "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
-                        WHERE r.task_id = ?1 AND e.kind = 'ahead_released'
-                          AND json_extract(e.payload_json, '$.issue') = ?2)",
-        rusqlite::params![waiting, issue],
-        |r| r.get(0),
-    )?;
-    Ok(Dep {
-        issue,
-        task: task.to_string(),
-        run,
-        pr_closed,
-        merged,
-        in_clone,
-        released,
-    })
+    Ok((merged, in_clone))
 }
 
 /// Withdraw the questions `settle` wrote for the waiting run `task` that are still open: about
@@ -390,7 +457,7 @@ pub fn settle(w: &StateWriter) -> Result<()> {
             .map(|d| {
                 let m = d.merged.clone().unwrap_or_default();
                 let c = d.in_clone.clone().unwrap_or_default();
-                json!({"issue": d.issue, "task_id": d.task, "repo": m["repo"], "pr": m["pr"],
+                json!({"issue": d.issue, "task_id": d.landed_by, "repo": m["repo"], "pr": m["pr"],
                        "merge_commit": c["merge_commit"], "base": c["base"],
                        "base_head": c["base_head"]})
             })

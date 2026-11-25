@@ -1232,14 +1232,10 @@ pub(super) fn is_current_pr_sql(alias: &str, repo: &str, pr: &str) -> String {
     )
 }
 
-/// The tasks open design-only runs wait for (Issue 284): their landings and closures are read
-/// whatever their status.
-pub(super) const AWAITED: &str = "SELECT j.value FROM runs o
-    JOIN events e ON e.run_id = o.id AND e.kind = 'belt_dispatched'
-         AND json_extract(e.payload_json, '$.design_only') = 1
-    JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
-    WHERE o.status IN ('queued', 'in_use', 'suspended', 'parked')
-      AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = o.id AND s.kind = 'ahead_settled')";
+/// The tasks open design-only runs wait for (Issue 284), and every other run that may land what
+/// they wait for (`ahead::LANDERS`, Issue 488): their landings and closures are read whatever
+/// their status.
+pub(super) const AWAITED: &str = super::ahead::AWAITED;
 
 /// The task of the range `id` (or its chain) that a design-only candidate may wait for, for the
 /// Issue `issue` (belt.md 4.3): the run dispatched for it, not abandoned or failed, with a pull
@@ -1684,11 +1680,8 @@ fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
     let mut q = w.conn().prepare(&format!(
         "SELECT DISTINCT d.task_id, p.slug, coalesce(p.default_branch, 'main'), m.merge,
                 {repo}, {pr}
-         FROM runs r
-         JOIN events e ON e.run_id = r.id AND e.kind = 'belt_dispatched'
-              AND json_extract(e.payload_json, '$.design_only') = 1
-         JOIN json_each(json_extract(e.payload_json, '$.waits_tasks')) j
-         JOIN runs d ON d.task_id = j.value
+         FROM ({landers}) l
+         JOIN runs d ON d.id = l.run
          JOIN projects p ON p.id = d.project_id
          LEFT JOIN (SELECT run_id, json_extract(payload_json, '$.repo') AS repo,
                            json_extract(payload_json, '$.pr') AS pr,
@@ -1696,9 +1689,7 @@ fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
                     FROM events WHERE kind = 'pr_merged'
                     GROUP BY run_id, lower(json_extract(payload_json, '$.repo')), pr) m
               ON m.run_id = d.id AND {merged}
-         WHERE r.status IN ('queued', 'in_use', 'suspended', 'parked')
-           AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = r.id AND s.kind = 'ahead_settled')
-           AND d.status = 'completed'
+         WHERE d.status = 'completed'
            AND NOT EXISTS (SELECT 1 FROM events x WHERE x.run_id = d.id
                            AND x.kind = 'landed_in_clone' AND m.run_id IS NOT NULL
                            AND (json_extract(x.payload_json, '$.merge_commit') = m.merge
@@ -1707,6 +1698,7 @@ fn clone_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
                                         = lower(m.repo)
                                     AND json_extract(x.payload_json, '$.pr') = m.pr)))
          ORDER BY d.id",
+        landers = super::ahead::LANDERS,
         repo = current_pr_sql("d", "repo"),
         pr = current_pr_sql("d", "pr"),
         merged = is_current_pr_sql("d", "m.repo", "m.pr"),
