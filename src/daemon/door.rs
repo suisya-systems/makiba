@@ -3572,35 +3572,63 @@ pub(super) fn merge_dequeued(
     a: &Awaiting,
     why: &str,
 ) -> crate::db::Result<()> {
+    merge_dequeued_with(w, task, repo, pr, &a.head, Some(a.attempt), why, None)
+}
+
+/// End a stay of `repo#pr` in the merge queue at `head` and tell the secretary, in the caller's
+/// transaction: makibad's queue act (`attempt` its id) or, with `attempt` `None`, a stay the PR
+/// watch recorded for a pull request queued outside makibad (Issue 476, `merge_queue_entered`).
+/// `reason` is GitHub's reason for the removal that ended it (`left the queue`), when read.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn merge_dequeued_with(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    attempt: Option<i64>,
+    why: &str,
+    reason: Option<&str>,
+) -> crate::db::Result<()> {
     w.append_event(&NewEvent {
         kind: "merge_dequeued",
         actor: Some("makibad"),
         payload: Some(
-            &json!({"repo": repo, "pr": pr, "head": a.head, "attempt": a.attempt,
-                               "why": why}),
+            &json!({"repo": repo, "pr": pr, "head": head, "attempt": attempt,
+                              "why": why, "reason": reason}),
         ),
         run_task_id: Some(task),
         ..Default::default()
     })?;
+    let whose = if attempt.is_some() {
+        "makibad's merge queue act for"
+    } else {
+        "The merge queue entry, queued outside makibad, of"
+    };
     notice(
         w,
         crate::spec::AGENT_SECRETARY,
         task,
         &match why {
             "left the queue" => format!(
-                "{repo}#{pr} left the merge queue without landing (the queue's checks failed, or someone removed it). Read why on the pull request; fix it or ask again with merge."
+                "{repo}#{pr} at {head} left the merge queue without landing ({}); it is still open. {}. Read why on the pull request; fix the cause (for a conflict, update the branch and record the new head), then ask again with merge.",
+                reason.map_or("GitHub gave no reason".to_string(), |r| format!(
+                    "GitHub's reason: {r}"
+                )),
+                if attempt.is_some() {
+                    "makibad had enqueued it"
+                } else {
+                    "It was queued outside makibad"
+                }
             ),
             "head moved" => format!(
-                "makibad's merge queue act for {repo}#{pr} at {} has ended: GitHub shows another head of the pull request, and the queue entry was bound to the old one. Record the new head with makiba pr pushed; once CI passes at it, ask again with merge.",
-                a.head
+                "{whose} {repo}#{pr} at {head} has ended: GitHub shows another head of the pull request, and the queue entry was bound to the old one. Record the new head with makiba pr pushed; once CI passes at it, ask again with merge."
             ),
             "closed" => format!(
-                "makibad's merge queue act for {repo}#{pr} at {} has ended: the pull request was closed without landing.",
-                a.head
+                "{whose} {repo}#{pr} at {head} has ended: the pull request was closed without landing."
             ),
             _ => format!(
-                "makibad's merge queue act for {repo}#{pr} at {} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge.",
-                a.head
+                "{whose} {repo}#{pr} at {head} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge."
             ),
         },
     )?;

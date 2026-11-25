@@ -152,7 +152,8 @@ with the same `idem` is answered from `commands` as every verb is (`replay`, `do
 | `merge_enqueued` | same | GitHub answered that the pull request is in the queue | `attempt`, `entry` (the queue entry's id and position, when read) |
 | `merge_failed` | same | GitHub answered a refusal, or makibad found before sending that it cannot act | `attempt`, `sent` (bool), `exit`, `http_status` (when read), `stderr` (bounded, section 8), `state` (the pull request's state read right after) |
 | `merge_unknown` | same, or the restart reconciliation | the answer could not be read (a timeout, a killed or crashed call, unreadable output), or makibad restarted with the attempt open | `attempt`, `observed` (`merged`, `merged_other_head`, `enqueued`, `open`, `closed` or `unreadable`), `actor` (`unknown`), `state` (the read), `why` |
-| `merge_dequeued` | the PR watch, or the `pr` verb (section 7) | a pull request makibad enqueued left the queue without landing, or its head or state moved on | `repo`, `pr`, `head`, `attempt`, `why` (`left the queue`, `head moved`, `closed`, `head recorded`), `state` (the read) |
+| `merge_dequeued` | the PR watch, or the `pr` verb (section 7) | a pull request makibad enqueued left the queue without landing, or its head or state moved on; also (Issue 476, merge-queue-watch.md) one queued outside makibad, recorded by `merge_queue_entered`: one kind serves both | `repo`, `pr`, `head`, `attempt` (null for a pull request makibad did not enqueue), `why` (`left the queue`, `head moved`, `closed`, `head recorded`), `reason` (GitHub's `RemovedFromMergeQueueEvent.reason` for `left the queue`, when read, else null) |
+| `merge_queue_entered` | the PR watch (Issue 476) | its membership read finds a followed pull request in the queue with no act awaiting its landing and no open stay | `repo`, `pr`, `head`, `entry`, `attempt` null |
 
 Each outcome event is written with the attempt's command finished (`done` for `merge_done` and
 `merge_enqueued`, `failed` for the others) and one notice to the secretary, in one transaction, as
@@ -389,7 +390,11 @@ bound against merging around makibad stays GitHub's branch protection, set by th
   the note. The second read guards a pull request read between leaving the queue and showing
   `MERGED` [unverified: whether GitHub shows such a state]. The note is memory only: a restart
   costs one more interval, and the classification above does not depend on it. The reason for the
-  removal is not read [unverified: a removal timeline item carries a reason].
+  removal is not read [unverified: a removal timeline item carries a reason]. Issue 476 reads
+  it (`reason` on `RemovedFromMergeQueueEvent`) into `merge_dequeued` and its notice, and
+  follows a pull request queued outside makibad the same way: a membership read per repository
+  finds it in the queue, `merge_queue_entered` records it, and this reader ends its stay
+  (docs/design/merge-queue-watch.md; no second reader of a pull request in the queue).
 - **A queue act whose head or state moves.** The entry may be removed and another commit pushed
   before the next read, or the pull request closed. So a queue act still open (as above) is also
   ended with `merge_dequeued`, with `why`, by a single read, with no second read: a read `OPEN` at
@@ -569,7 +574,8 @@ merge-wait.md section 5):
    https://docs.github.com/en/graphql/reference/unions#pullrequesttimelineitems
    Still [unverified] after build Issue 4 (Issue 434), built on the stand-in's answers: no GitHub
    host was reachable while it was built. The build reads `__typename` and `createdAt` only, and
-   matches no entry id.
+   matches no entry id. Issue 476 also reads `reason` on `RemovedFromMergeQueueEvent`, still
+   [unverified] (the stand-in's answers).
 6. Whether a pull request leaving the queue to land can be read `OPEN` with no entry for a moment.
    Still [unverified] after Issue 434. So the build ends a queue act on reads out of the queue only
    when the timeline also shows a removal after the attempt (the person's decision on Issue 434,
