@@ -15,7 +15,9 @@
 //! - A run that waits only for the person (an escalated pending entry) counts in neither count.
 //! - The proof of a landing: the run's registered pull request read merged (`pr_merged`), which
 //!   the PR watch records (`prwatch.rs`, Issue 388); the belt only checks the project's clone.
-//! - The read surface's `ranges[]` (spec section 12, table "Range field").
+//! - The read surface's `ranges[]` (spec section 12, table "Range field"). Its `approves_under`
+//!   (the mode approving a draft would fix) is set by `status_local`, which owns the mode as each
+//!   reader knows it (Issue 326); `approve` refuses as `stale` a mode shown that is not makibad's.
 //!
 //! Step 2 (Issue 282): the stops `makibad` writes itself, each a pending entry escalated at once
 //! with `belt_stopped`, in the transaction of what caused it and before the fill there.
@@ -403,6 +405,25 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "look at the range again (makiba range approve shows it) and approve that",
         ));
     }
+    // Issue 326: the approval fixes the merge approval mode the person was shown, as it fixes the
+    // read; the mode in force is read once, compared and stored.
+    let shown_mode = str_arg(args, "approval_mode")?;
+    if !["human", "acceptance"].contains(&shown_mode) {
+        return Err(usage(format!(
+            "approval_mode is human or acceptance (the mode shown), not {shown_mode:?}"
+        )));
+    }
+    let mode = super::gate::merge_approval_mode();
+    if shown_mode != mode {
+        return Err(refuse(
+            ErrorKind::Stale,
+            format!(
+                "range {} was shown under merge_approval_mode {shown_mode} and makibad's mode now is {mode}",
+                g.id
+            ),
+            "look at the range again (makiba range approve shows it) and approve that",
+        ));
+    }
     if let Some(old) = g.replaces {
         let st = load(w, old)?.status;
         // A draft replaced by this draft was ended at the proposal: nothing is left to replace.
@@ -428,7 +449,6 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
             g.slug
         )));
     }
-    let mode = super::gate::merge_approval_mode();
     let store = || -> Result<()> {
         if let Some(old) = g.replaces {
             end_range(w, old, "replaced", actor)?;
@@ -872,6 +892,18 @@ pub(super) struct GateStop<'a> {
 /// the pause rule: two refusals in a row of different pull requests pause the range. The caller
 /// fills after this, so the refusal that pauses puts nothing in. Returns the entry's id.
 pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
+    gate_stop_asking(w, s, None)
+}
+
+/// A refusal for a change to the language check (Issue 339) as a stop of line `gate` that asks
+/// `question`, the gate's question word for word, under a key of its own (`language:`), so that
+/// the person's yes to it, with their own key, is the approval the gate reads; then the pause
+/// rule as for any refusal.
+pub(super) fn language_stop(w: &StateWriter, s: &GateStop, question: &str) -> Result<Option<i64>> {
+    gate_stop_asking(w, s, Some(question))
+}
+
+fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Result<Option<i64>> {
     let Some(range) = range_of(w, s.task)? else {
         return Ok(None);
     };
@@ -882,10 +914,10 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    // One question per head (Issue 512): a stop on the content (a refusal, line `gate`, or edited
-    // tests, line `tests`) still escalated stands over a read of GitHub that failed later, and a
-    // stop on the content replaces the question a failed read asked, marked as makibad's own
-    // withdrawal.
+    // One question per head (Issue 512): a stop on the content (a refusal, line `gate`, also one
+    // for the language check, or edited tests, line `tests`) still escalated stands over a read
+    // of GitHub that failed later, and a stop on the content replaces the question a failed read
+    // asked, marked as makibad's own withdrawal.
     let read_key = format!("gate-read:{subject}@{}", s.head);
     if s.unavailable {
         let standing: Option<i64> = w
@@ -893,12 +925,13 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
             .query_row(
                 "SELECT id FROM pending WHERE status = 'escalated'
                    AND json_extract(context_json, '$.range_id') = ?1
-                   AND json_extract(context_json, '$.key') IN (?2, ?3)
+                   AND json_extract(context_json, '$.key') IN (?2, ?3, ?4)
                  ORDER BY id DESC LIMIT 1",
                 params![
                     range,
                     format!("gate:{subject}@{}", s.head),
-                    format!("tests:{subject}@{}", s.head)
+                    format!("tests:{subject}@{}", s.head),
+                    format!("language:{subject}@{}", s.head)
                 ],
                 |r| r.get(0),
             )
@@ -939,6 +972,24 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
             why: "A failed read is not a judgement of the pull request.",
             recommend_answer: "yes",
             more: json!({"pr": subject, "head": s.head, "unavailable": true}),
+        }
+    } else if let Some(question) = language.filter(|_| s.refused) {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: format!("language:{subject}@{}", s.head),
+            question: question.to_string(),
+            background: format!(
+                "makibad's merge gate refused the pull request of task {}: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The gate lets this change to the language check land; the merge still follows the merge approval mode. Answer with your own makiba answer <id> yes: an answer the secretary relays does not count.".into(),
+            if_no: "The secretary sends the worker back to take the change to the language check out.".into(),
+            recommend: "No: the language check gets no new exception.",
+            why: "On 2026-11-22 the person said the language check gets no new exception; only the person makes one.",
+            recommend_answer: "no",
+            more,
         }
     } else if s.refused {
         Stop {
@@ -2904,7 +2955,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 (SELECT count(*) FROM runs WHERE range_id = g.id),
                 g.budget_hours, g.budget_fixes,
                 round((julianday(coalesce(g.ended_at, 'now')) - julianday(g.approved_at)) * 24.0, 3),
-                g.follow_ups, g.design_ahead = 1
+                g.follow_ups, g.design_ahead = 1, g.replaces
          FROM ranges g JOIN projects p ON p.id = g.project_id WHERE g.id = ?1",
         [id],
         |r| {
@@ -2923,6 +2974,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 "used": {"tasks": r.get::<_, i64>(14)?, "hours": r.get::<_, Option<f64>>(17)?},
                 "follow_ups": r.get::<_, String>(18)?,
                 "design_ahead": r.get::<_, bool>(19)?,
+                "replaces": r.get::<_, Option<i64>>(20)?,
             }))
         },
     )?;
@@ -3072,10 +3124,24 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 if let Some(at) = newest_event_at(c, run, "run_in_review")? {
                     it["since"] = json!(at);
                 }
+                // The watch of its current pull request (Issue 357), of its current head
+                // first: a pull request registered again keeps its older row, behind another's
+                // newer one, and so does a head it returns to.
                 let watch: Option<(String, Option<String>)> = c
                     .query_row(
-                        "SELECT status, conclusion FROM pr_watches WHERE run_id = ?1
-                         ORDER BY id DESC LIMIT 1",
+                        &format!(
+                            "SELECT w.status, w.conclusion FROM pr_watches w
+                             JOIN runs r ON r.id = w.run_id
+                             WHERE w.run_id = ?1 AND {}
+                             ORDER BY coalesce(w.head_oid = (
+                                        SELECT json_extract(ch.payload_json, '$.head_oid')
+                                        FROM events ch WHERE ch.run_id = r.id
+                                          AND ch.kind IN ('pr_opened', 'fix_pushed')
+                                        ORDER BY ch.id DESC LIMIT 1), 0) DESC,
+                                      w.id DESC
+                             LIMIT 1",
+                            is_current_pr_sql("r", "w.repo", "w.pr")
+                        ),
                         [run],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
@@ -3087,10 +3153,20 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 });
             }
             "completed" => {
+                // A merge of its current pull request only (Issue 357): one of a pull request
+                // it replaced is not its landing.
                 let merged: Option<String> = c
                     .query_row(
-                        "SELECT payload_json FROM events WHERE kind = 'pr_merged' AND run_id = ?1
-                         ORDER BY id LIMIT 1",
+                        &format!(
+                            "SELECT m.payload_json FROM events m JOIN runs r ON r.id = m.run_id
+                             WHERE m.kind = 'pr_merged' AND m.run_id = ?1 AND {}
+                             ORDER BY m.id DESC LIMIT 1",
+                            is_current_pr_sql(
+                                "r",
+                                "json_extract(m.payload_json, '$.repo')",
+                                "json_extract(m.payload_json, '$.pr')"
+                            )
+                        ),
                         [run],
                         |r| r.get(0),
                     )
@@ -3388,7 +3464,8 @@ pub(in crate::daemon) mod tests {
             &w,
             "person",
             Role::Person,
-            &json!({"action": "approve", "id": second, "read": read}),
+            &json!({"action": "approve", "id": second, "read": read,
+                    "approval_mode": super::super::gate::merge_approval_mode()}),
         );
         assert_eq!(r.unwrap()["status"], json!("active"));
     }
@@ -4565,5 +4642,64 @@ pub(in crate::daemon) mod tests {
             landed_of(&w),
             Some(vec![(1, "d".to_string(), "m2".to_string())])
         );
+    }
+
+    /// A run in review that returns to an older head of its current pull request takes the
+    /// stage from that head's watch, not from a newer head's (Issue 357, diff review round 1).
+    #[test]
+    fn the_review_stage_is_that_of_the_current_head() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 1, 9, 'h', 's')",
+                [],
+            )
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "r1-9",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute("UPDATE runs SET range_id = 1 WHERE task_id = 'r1-9'", [])
+            .unwrap();
+        w.append_event(&NewEvent {
+            kind: "belt_dispatched",
+            actor: Some("makibad"),
+            payload: Some(&json!({"range_id": 1, "issue": 9, "task_id": "r1-9"})),
+            run_task_id: Some("r1-9"),
+            ..Default::default()
+        })
+        .unwrap();
+        let h1 = "1".repeat(40);
+        let h2 = "2".repeat(40);
+        let stage = || {
+            let items = items(w.conn(), 1, &json!({}), &[]).unwrap();
+            items[0]["stage"].clone()
+        };
+        super::super::prwatch::register(&w, "pr_opened", "r1-9", "o/p", 11, &h1).unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h2).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
+                 WHERE head_oid = ?1",
+                [&h2],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("to_land"));
+        // Back to h1: its row is watched again, older than h2's passed one.
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h1).unwrap();
+        assert_eq!(stage(), json!("ci"));
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'failed'
+                 WHERE head_oid = ?1",
+                [&h1],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("ci"));
     }
 }

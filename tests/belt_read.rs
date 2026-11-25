@@ -299,17 +299,18 @@ impl Org {
     fn approve(&self, id: i64) {
         wait("the read of the draft", || self.read_done(id));
         let s = self.status();
-        let read = s["ranges"]
+        let range = s["ranges"]
             .as_array()
             .unwrap()
             .iter()
             .find(|r| r["id"] == json!(id))
-            .unwrap_or_else(|| panic!("range {id} not listed: {s}"))["read_id"]
-            .clone();
+            .unwrap_or_else(|| panic!("range {id} not listed: {s}"));
+        // The mode the read surface shows is the one the approval binds (Issue 326).
+        let (read, mode) = (range["read_id"].clone(), range["approves_under"].clone());
         self.call(
             &self.person,
             "range",
-            json!({"action": "approve", "id": id, "read": read}),
+            json!({"action": "approve", "id": id, "read": read, "approval_mode": mode}),
         );
     }
 
