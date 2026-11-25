@@ -19,6 +19,7 @@ use std::ops::Deref;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 /// The line the fixture's terminal prints.
 pub const LINE: &str = "makiba-fixture-line";
@@ -172,6 +173,10 @@ pub fn unsupported(what: &str) -> BaseError {
     })
 }
 
+/// The number of the next real base this test process starts: each `Real::start` gets a session
+/// and a place of its own, so tests that run at once never share a base (#477).
+static NEXT_PLACE: AtomicU64 = AtomicU64::new(0);
+
 /// The real base for tests: `hc` run in a place of its own. A test helper only; the real
 /// implementation is `src/base/herdr.rs`, built in M1. Flags follow scripts/probes/lib.sh.
 pub struct Real {
@@ -186,9 +191,10 @@ impl Real {
             .map(PathBuf::from)
             .unwrap_or_else(|| PathBuf::from("hc"));
         let pid = std::process::id();
-        let root = std::env::temp_dir().join(format!("mk-{pid}"));
+        let n = NEXT_PLACE.fetch_add(1, Ordering::Relaxed);
+        let root = std::env::temp_dir().join(format!("mk-{pid}-{n}"));
         let place = Place {
-            session: format!("makiba-test-{pid}"),
+            session: format!("makiba-test-{pid}-{n}"),
             config_home: root.join("config"),
             state_home: root.join("state"),
             runtime_dir: root.join("run"),
@@ -249,7 +255,8 @@ impl Real {
 }
 
 impl Drop for Real {
-    /// Stops only this place's base: the session is ours, so `server stop` reaches nothing else.
+    /// Stops only this place's base: the session is ours, so `server stop` reaches nothing else,
+    /// and the root it removes is this base's own, not another test's.
     fn drop(&mut self) {
         assert!(self.place.session.starts_with("makiba-test-"));
         for t in self.terminals.lock().unwrap().iter() {

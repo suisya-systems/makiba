@@ -37,8 +37,10 @@ jobs:
   real-base:
     # The whole suite again on the real base (M0-3, #5): `tests/common/mod.rs` starts `hc` in a place of
     # its own when MAKIBA_TEST_REAL_BASE=1. A required check (#81): `tests/real_base_wire.rs` holds the
-    # wire checks that scripts/check-*-wire.sh made by hand. One test thread:
-    # the fixtures share one session per process, so concurrent tests would stop each other's base.
+    # wire checks that scripts/check-*-wire.sh made by hand. Each fixture gets a session and a place
+    # of its own (`makiba-test-{pid}-{n}`, `mk-{pid}-{n}`), so tests that run at once never share a
+    # base (#477). The suite runs under cargo-nextest, one process per test across all binaries, with
+    # the `ci` profile of .config/nextest.toml (#485, docs/design/real-base-speed.md option B1).
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -54,18 +56,48 @@ jobs:
             ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Install the pinned herdr-core
         run: bash scripts/install-base.sh "$HOME/.makiba-base"
+      - name: Install the pinned cargo-nextest
+        # Version and SHA-256 are pinned in the script; nothing is installed unless the digest matches.
+        run: bash scripts/install-nextest.sh "$HOME/.cargo"
       - name: Suite on the real base
+        # nextest runs no doctests, so `cargo test --doc` runs them (none today; a later one is not
+        # dropped). Then the real base must have run: real_base_wire's events test takes 16 s or
+        # more on it (two scripted terminal runs) and returns at once on the stand-in, so a duration
+        # under 10 s in the JUnit report fails the step. The report of an earlier run (target/ is
+        # cached) is removed first, so the one checked and kept is this run's.
         run: |
           export HC_BIN="$HOME/.makiba-base/bin/hc"
           "$HC_BIN" --version
-          MAKIBA_TEST_REAL_BASE=1 cargo test --locked -- --test-threads=1
+          rm -f target/nextest/ci/junit.xml
+          MAKIBA_TEST_REAL_BASE=1 cargo nextest run --locked --profile ci --no-fail-fast
+          cargo test --locked --doc
+          python3 -I - target/nextest/ci/junit.xml <<'EOF'
+          import sys, xml.etree.ElementTree as ET
+          name = "events_subscribe_sends_a_snapshot_then_notices_and_heartbeats"
+          found = [c for c in ET.parse(sys.argv[1]).iter("testcase")
+                   if c.get("name") == name and c.get("classname", "").endswith("real_base_wire")]
+          if len(found) != 1:
+              sys.exit(f"real_base_wire::{name}: {len(found)} entries in the JUnit report, not one")
+          took = float(found[0].get("time"))
+          print(f"real_base_wire::{name} took {took:.1f} s")
+          if took < 10:
+              sys.exit("under 10 s: the suite did not run on the real base")
+          EOF
+      - name: Keep the JUnit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: real-base-junit
+          path: target/nextest/ci/junit.xml
+          if-no-files-found: warn
       - name: The real base is what ran (a missing hc must fail the fixture)
         # A pass is read as success, so a green run cannot tell the stand-in from the real base.
         # With HC_BIN pointing nowhere, only the real base can fail: the fixture's start-up
         # (tests/common/mod.rs, Real::start) panics when `hc --version` cannot run. This step
-        # succeeds only when the run fails and shows that panic, not a build error.
+        # succeeds only when the run fails and shows that panic, not a build error. It runs the
+        # suite's runner, nextest, with its default profile (no JUnit, so the kept report stays).
         run: |
-          if MAKIBA_TEST_REAL_BASE=1 HC_BIN=/nonexistent cargo test --locked --test base_fixture -- --test-threads=1 > "$RUNNER_TEMP/negative.log" 2>&1; then
+          if MAKIBA_TEST_REAL_BASE=1 HC_BIN=/nonexistent cargo nextest run --locked --test base_fixture > "$RUNNER_TEMP/negative.log" 2>&1; then
             echo "base_fixture passed with no hc: it did not run on the real base"; exit 1
           fi
           grep -q "the real base is the pinned release" "$RUNNER_TEMP/negative.log" || { cat "$RUNNER_TEMP/negative.log"; echo "it failed for another reason"; exit 1; }
