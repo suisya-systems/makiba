@@ -1,8 +1,11 @@
 //! Issue 300, after the diff review: git's own sequencer runs `git commit -n` as a child when a
-//! rebase continues after a conflict. In a worktree prepared by a real `makibad`, whose
-//! `prepare-commit-msg` refuses that flag, `git rebase --continue` and `git cherry-pick
-//! --continue` still land; a commit with the flag that `git rebase --exec` starts is still
-//! refused, through a shell and as the rebase's direct child (the shell's `exec`).
+//! rebase continues after a conflict. The person chose no exception for it: in a worktree
+//! prepared by a real `makibad`, whose `prepare-commit-msg` refuses that flag,
+//! `git rebase --continue` is refused, the refusal naming `git merge` as the way, and nothing
+//! lands; a cherry-pick continues without the flag and lands; a merge whose conflict is
+//! resolved commits; a
+//! commit with the flag that `git rebase --exec` starts is refused, through a shell and as the
+//! rebase's direct child (the shell's `exec`).
 //!
 //! Linux only, as the flag check is.
 #![cfg(target_os = "linux")]
@@ -149,9 +152,21 @@ fn change(wt: &Path, text: &str, message: &str) {
     git(wt, &["commit", "-q", "-a", "-m", message]);
 }
 
+/// The refusal of a step git commits with the flag: by `prepare-commit-msg`, naming `-n` and
+/// `git merge`.
+fn refused_naming_merge(what: &str, out: &Output) {
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{what} landed: {err}");
+    assert!(
+        err.contains(REFUSED_BY_GIT)
+            && err.contains("Matched: \"-n\"")
+            && err.contains("git merge"),
+        "{what}: {err}"
+    );
+}
+
 #[test]
-fn a_rebase_or_cherry_pick_continued_after_a_conflict_lands_and_an_exec_commit_with_the_flag_does_not()
- {
+fn a_step_git_commits_with_the_flag_is_refused_naming_merge_and_a_resolved_merge_commits() {
     let org = Org::new("t1");
     let _d = org.start();
     let wt = org.prepared("t1");
@@ -163,8 +178,10 @@ fn a_rebase_or_cherry_pick_continued_after_a_conflict_lands_and_an_exec_commit_w
     git(&wt, &["checkout", "-q", "other"]);
     change(&wt, "theirs\n", "theirs");
     git(&wt, &["checkout", "-q", &work]);
+    let before = git(&wt, &["rev-parse", "HEAD"]);
 
-    // A rebase stops on the conflict; resolved and continued, it lands.
+    // A rebase stops on the conflict; resolved and continued, git commits the pick with the flag:
+    // refused, naming merge; aborted, nothing has moved.
     let out = git_out(&wt, &["rebase", "other"]);
     assert!(
         !out.status.success(),
@@ -172,45 +189,54 @@ fn a_rebase_or_cherry_pick_continued_after_a_conflict_lands_and_an_exec_commit_w
     );
     std::fs::write(wt.join("f.txt"), "resolved\n").unwrap();
     git(&wt, &["add", "f.txt"]);
-    let out = git_out(&wt, &["rebase", "--continue"]);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(out.status.success(), "git rebase --continue failed: {err}");
-    assert!(!err.contains(REFUSED_BY_GIT), "{err}");
-    assert_eq!(git(&wt, &["log", "-1", "--format=%s"]), "ours");
-    assert_eq!(git(&wt, &["show", "HEAD:f.txt"]), "resolved");
+    refused_naming_merge(
+        "git rebase --continue",
+        &git_out(&wt, &["rebase", "--continue"]),
+    );
+    git(&wt, &["rebase", "--abort"]);
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), before);
 
-    // A cherry-pick stops on a conflict; resolved and continued, it lands.
-    git(&wt, &["checkout", "-q", "other"]);
-    change(&wt, "theirs again\n", "theirs again");
-    git(&wt, &["checkout", "-q", &work]);
+    // A cherry-pick continues without the flag (its hooks run), so it lands; on a branch of its
+    // own, so the run's branch stays where it was.
+    git(&wt, &["checkout", "-q", "-b", "pick"]);
     let out = git_out(&wt, &["cherry-pick", "other"]);
     assert!(!out.status.success(), "the cherry-pick did not stop");
-    std::fs::write(wt.join("f.txt"), "resolved again\n").unwrap();
+    std::fs::write(wt.join("f.txt"), "resolved\n").unwrap();
     git(&wt, &["add", "f.txt"]);
     let out = git_out(&wt, &["cherry-pick", "--continue"]);
-    let err = String::from_utf8_lossy(&out.stderr);
     assert!(
         out.status.success(),
-        "git cherry-pick --continue failed: {err}"
+        "git cherry-pick --continue was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
-    assert_eq!(git(&wt, &["log", "-1", "--format=%s"]), "theirs again");
+    assert_eq!(git(&wt, &["rev-parse", "HEAD^"]), before);
+    git(&wt, &["checkout", "-q", &work]);
+    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), before);
 
-    // A commit with the flag that rebase --exec starts is still refused: through a shell, and
-    // when the shell's `exec` makes it the rebase's direct child.
-    let before = git(&wt, &["rev-parse", "HEAD"]);
+    // A commit with the flag that rebase --exec starts is refused: through a shell, and when
+    // the shell's `exec` makes it the rebase's direct child.
     let commit = "git -c user.name=t -c user.email=t@example.com commit --allow-empty -n -m y";
     for exec in [commit.to_string(), format!("exec {commit}")] {
         let out = git_out(&wt, &["rebase", "-x", &exec, "HEAD~1"]);
-        let err = String::from_utf8_lossy(&out.stderr);
-        assert!(
-            !out.status.success(),
-            "the exec commit with the flag landed: {exec}"
-        );
-        assert!(
-            err.contains(REFUSED_BY_GIT) && err.contains("Matched: \"-n\""),
-            "{exec}: {err}"
-        );
+        refused_naming_merge(&exec, &out);
         git(&wt, &["rebase", "--abort"]);
         assert_eq!(git(&wt, &["rev-parse", "HEAD"]), before, "{exec}");
     }
+
+    // The way the refusal names: a merge stops on the conflict, and once resolved, commits.
+    let out = git_out(&wt, &["merge", "other"]);
+    assert!(
+        !out.status.success(),
+        "the merge did not stop on the conflict"
+    );
+    std::fs::write(wt.join("f.txt"), "resolved\n").unwrap();
+    git(&wt, &["add", "f.txt"]);
+    let out = git_out(&wt, &["commit", "-q", "--no-edit"]);
+    assert!(
+        out.status.success(),
+        "the resolved merge was refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(git(&wt, &["rev-parse", "HEAD^1"]), before);
+    assert_eq!(git(&wt, &["show", "HEAD:f.txt"]), "resolved");
 }
