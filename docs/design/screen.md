@@ -561,7 +561,7 @@ Not decided. The owner's first candidate is herdr-app, because the secretary's t
 | What makiba ships | Whatever the app loads; not known. | Part of the one binary (goal G10). |
 | Works when the app is not installed | No. | Yes. |
 
-The measurement, to be run by the owner on the machine where the app runs, with a real organization up. Each row is a yes or no with the version of `hc` and of the app, recorded in [probes.md](probes.md) as probe P16 (script `scripts/probes/p16-screen-place.sh`, Issue 404):
+The measurement, to be run by the owner on the machine where the app runs, with a real organization up. Each row is a yes or no with the version of `hc` and of the app, recorded in [probes.md](probes.md) as probe P17 (script `scripts/probes/p17-screen-place.sh`, Issue 404):
 
 | # | Question | Passes when |
 | --- | --- | --- |

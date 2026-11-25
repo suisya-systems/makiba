@@ -395,7 +395,7 @@ Record, per case: the version `hello` answered, the executable path, and the exi
 
 Pass: `layout` and `self` start the pinned version. `beside` and `on-path` are measurements, not pass or fail: their results say which of the script's checks protect a real install. If it fails (`layout` starts another version): the layout does not protect the install; reopen #382 with the case's record. If `on-path` starts the older version while `layout` passes, the exit-3 check of `PATH` is the guard: keep it; if neither `beside` nor `on-path` starts the older version, write which file the reported start came from before closing #382.
 
-### P16. Where the person's screen can run: M1 to M4 of screen.md section 5
+### P17. Where the person's screen can run: M1 to M4 of screen.md section 5
 
 Why: Issue 404 (the screen acts as the person) waits for this. Its owner decision 2, how a page's request is told from another local program's, depends on where the buttons sit: inside herdr-app, acting through the app, or on a page served on 127.0.0.1, which an agent's tools outside the Bash sandbox can also reach (the door's MCP server is there already). The owner does not decide 1 to 5 of Issue 404 before this is measured. P12 showed only that the app shows the organization's terminals, given labels; nothing has shown that the app can show makiba's read surface, frame a page or run a command as the person. The measurement is the table of screen.md section 5; this probe writes it down as steps.
 
@@ -405,7 +405,7 @@ Preconditions:
 - `makiba` on the person's `PATH` in the base's machine, the person key in its usual place.
 - Run from the person's login shell in the base's machine, never from an agent's terminal. The app's side is done by hand.
 
-Steps (`scripts/probes/p16-screen-place.sh <result-dir>`; the script prints each numbered action, waits for the owner's Enter, asks what the app showed, and checks the base's side). Run it as `MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p16-screen-place.sh <result-dir>`.
+Steps (`scripts/probes/p17-screen-place.sh <result-dir>`; the script prints each numbered action, waits for the owner's Enter, asks what the app showed, and checks the base's side). Run it as `MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p17-screen-place.sh <result-dir>`.
 
 1 to 3. The owner gives the app's version, the version of `hc` on the app's side, and where the app and the base run. The script records `hc --version` and `makiba --version` on the base's side itself.
 
@@ -534,6 +534,6 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | P5 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | |
 | P8 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | makiba's one subscription (`src/base/herdr/events.rs`) sends `events.subscribe` with empty params and drops `doc` notices |
 | P15 (Issue 382) | | | not used | not yet run | the owner runs it on the pinned release and the previous one; #382 stays open until this row is filled |
-| P16 (Issue 404) | | | not used | not yet run | the owner runs it in herdr-app with the real organization up; Issue 404's owner decisions wait for it. M1: , M2: , M3: , M4: |
+| P17 (Issue 404) | | | not used | not yet run | the owner runs it in herdr-app with the real organization up; Issue 404's owner decisions wait for it. M1: , M2: , M3: , M4: |
 
 Not covered by a row on 2.1.328: steps 10 to 13 of `door-and-base-reach` since #144 (the port checks, the unsandboxed run, the Read and Edit tools on the decoy key; on 2.1.330 the whole probe has a row after #144, the run of 2026-11-21 at 12:24Z, Refs #150), P3, P4, P5, P7, P8, P9, P10 as their own probes, paddock's carried probes, and the runbook of M4-5. See `docs/upgrading-claude-code.md`.

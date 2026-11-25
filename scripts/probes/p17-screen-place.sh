@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Issue 404 (probes.md P16): where the person's screen can run. The measurement M1 to M4 of
+# Issue 404 (probes.md P17): where the person's screen can run. The measurement M1 to M4 of
 # docs/design/screen.md section 5, run by the owner on the machine where herdr-app runs, against the real
 # organization (`makiba up` done, makibad running). The app's side is done by hand: this script prints each action
 # as a numbered step, waits for the owner's Enter, asks what the app showed, and checks on the base's side
@@ -27,13 +27,13 @@
 # probes.md by hand; the script records only the owner's one-line summary.
 #
 # Run from the person's login shell, never from an agent:
-#   MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p16-screen-place.sh <result-dir>
-# Env: MAKIBA_BIN (default makiba), P16_PORT (default 0: the system chooses), HC_BIN (only for its version).
+#   MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p17-screen-place.sh <result-dir>
+# Env: MAKIBA_BIN (default makiba), P17_PORT (default 0: the system chooses), HC_BIN (only for its version).
 set -u
 . "$(dirname "$0")/lib.sh"
-case "${1:-}" in -h|--help) probe_usage "$0" "P16 (Issue 404): where the screen can run, M1 to M4 of screen.md section 5, by hand in herdr-app with a real organization (env MAKIBA_BIN, P16_PORT)"; exit 0 ;; esac
+case "${1:-}" in -h|--help) probe_usage "$0" "P17 (Issue 404): where the screen can run, M1 to M4 of screen.md section 5, by hand in herdr-app with a real organization (env MAKIBA_BIN, P17_PORT)"; exit 0 ;; esac
 MAKIBA_BIN=${MAKIBA_BIN:-makiba}
-type -P "$MAKIBA_BIN" >/dev/null 2>&1 || { echo "RESULT p16: precondition-failed (MAKIBA_BIN=$MAKIBA_BIN not found)"; exit 2; }
+type -P "$MAKIBA_BIN" >/dev/null 2>&1 || { echo "RESULT p17: precondition-failed (MAKIBA_BIN=$MAKIBA_BIN not found)"; exit 2; }
 MAKIBA_BIN=$(type -P "$MAKIBA_BIN")
 case "$MAKIBA_BIN" in /*) ;; *) MAKIBA_BIN=$PWD/$MAKIBA_BIN ;; esac
 
@@ -46,14 +46,14 @@ done
 REAL_DB=${MAKIBA_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/makiba}/state.db
 mk() { env ${REAL_UNSET[@]+"${REAL_UNSET[@]}"} ${REAL_SET[@]+"${REAL_SET[@]}"} "$MAKIBA_BIN" "$@"; }
 
-probe_init p16 "${1:-}"
+probe_init p17 "${1:-}"
 say "MAKIBA_BIN: $MAKIBA_BIN"
 say "state.db (read-only): $REAL_DB"
 PAGE_PID=""
 extra_cleanup() { [ -n "$PAGE_PID" ] && kill "$PAGE_PID" 2>/dev/null; return 0; }
 probe_dry_stop   # PROBE_DRY_RUN=1 ends here, through the exit handler
 
-[ -r /dev/tty ] || { say "RESULT p16: precondition-failed (no terminal to read the owner's answers from)"; exit 2; }
+[ -r /dev/tty ] || { say "RESULT p17: precondition-failed (no terminal to read the owner's answers from)"; exit 2; }
 say "makiba --version: $(mk --version 2>&1 | head -n 1)"
 
 status_json() { mk status --json 2>/dev/null; }
@@ -92,8 +92,8 @@ step() { # step <n> <text>: a numbered action for the owner, then Enter
 # ---- preconditions: a running organization, the state.db readable
 S=$(status_json)
 [ "$(printf '%s' "$S" | jfield 'd.get("makibad",{}).get("running")')" = True ] \
-  || { say "RESULT p16: precondition-failed (makiba status --json does not show makibad running; run makiba up first)"; exit 2; }
-db 'SELECT 1' >/dev/null 2>&1 || { say "RESULT p16: precondition-failed (cannot read $REAL_DB read-only)"; exit 2; }
+  || { say "RESULT p17: precondition-failed (makiba status --json does not show makibad running; run makiba up first)"; exit 2; }
+db 'SELECT 1' >/dev/null 2>&1 || { say "RESULT p17: precondition-failed (cannot read $REAL_DB read-only)"; exit 2; }
 say "organization: makibad running, heartbeat $(printf '%s' "$S" | jfield 'd["makibad"].get("heartbeat_at")')"
 line "1. The app's version (as the app shows it in its About or settings):"; say "herdr-app version: $LINE"
 line "2. The version of hc on the app's side (for example hc.exe --version on Windows):"; say "hc on the app's side: $LINE"
@@ -117,8 +117,8 @@ cat > "$PAGE/serve.py" <<'PY'
 import http.server, json, secrets, subprocess, sys, os
 state, argv = sys.argv[1], sys.argv[2:]
 token = secrets.token_hex(16)
-HTML = """<!doctype html><meta charset="utf-8"><title>makiba P16</title>
-<body style="font:16px system-ui;margin:24px"><h1>makiba P16 stand-in</h1>
+HTML = """<!doctype html><meta charset="utf-8"><title>makiba P17</title>
+<body style="font:16px system-ui;margin:24px"><h1>makiba P17 stand-in</h1>
 <p>Reads: <b id="n">0</b> &middot; last read: <b id="t">-</b></p>
 <p>makibad running: <b id="r">-</b> &middot; heartbeat: <b id="h">-</b> &middot; questions waiting: <b id="q">-</b></p>
 <script>
@@ -149,7 +149,7 @@ class H(http.server.BaseHTTPRequestHandler):
             with open(os.path.join(state, "reads"), "a") as f: f.write("x\n")
             return self.send(200, "application/json", out)
         self.send(404, "text/plain", b"not found\n")
-port = int(os.environ.get("P16_PORT", "0"))
+port = int(os.environ.get("P17_PORT", "0"))
 s = http.server.ThreadingHTTPServer(("127.0.0.1", port), H)
 with open(os.path.join(state, "ready.tmp"), "w") as f: f.write("http://127.0.0.1:%d/%s/" % (s.server_address[1], token))
 os.replace(os.path.join(state, "ready.tmp"), os.path.join(state, "ready"))
@@ -159,7 +159,7 @@ PY
 env ${REAL_UNSET[@]+"${REAL_UNSET[@]}"} ${REAL_SET[@]+"${REAL_SET[@]}"} python3 "$PAGE/serve.py" "$PAGE" "$MAKIBA_BIN" status --json &
 PAGE_PID=$!
 i=0; while [ ! -s "$PAGE/ready" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1)); done
-[ -s "$PAGE/ready" ] || { say "RESULT p16: precondition-failed (the stand-in page did not start)"; exit 2; }
+[ -s "$PAGE/ready" ] || { say "RESULT p17: precondition-failed (the stand-in page did not start)"; exit 2; }
 URL=$(cat "$PAGE/ready")
 say "stand-in page served (127.0.0.1 only, for this run; the URL's path is random and is not recorded)"
 printf '   The page: %s\n' "$URL" > /dev/tty
@@ -230,6 +230,6 @@ else
 fi
 
 # ---- M4
-line "14. M4 in one line (what an addition to the app is made of, how it is installed, and what can start it: only a click in the app, or also a request from another local program). Write the paragraph into probes.md P16 by hand:"
+line "14. M4 in one line (what an addition to the app is made of, how it is installed, and what can start it: only a click in the app, or also a request from another local program). Write the paragraph into probes.md P17 by hand:"
 say "M4 (owner's summary): $LINE"
 finish
