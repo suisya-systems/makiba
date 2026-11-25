@@ -32,6 +32,13 @@
 //! a conflict, blocked, a draft, or not known yet). A later change of the merge state of a head
 //! whose CI passed (main moved under it) is told once per change.
 //!
+//! What the open read saw (Issue 405): the loop records `pr_read` (the head, the title and the
+//! merge state's class) for the pull request and generation still followed, only when the head or
+//! the class differs from the newest `pr_read` of that pull request, or the title from the newest
+//! title recorded for it (`pr_read`, `pr_closed`, `pr_merged`). The comparison is with the ledger,
+//! so a restart records nothing again. `makiba status` reads it (`pull_requests[]`); nothing of
+//! makibad reads it back.
+//!
 //! The attempt scout (Issue 427): a rerun nobody recorded with `pr rerun`. A failed result
 //! carries the attempts of the head's workflow runs it concluded on (`run_attempts`, read before
 //! the checks are read again). A candidate is a `completed` or `failed` row of the head recorded
@@ -1088,6 +1095,12 @@ impl PrWatch {
             }
         }
         for r in newest_per_task(fresh) {
+            if let Err(e) = record_read(w, &r) {
+                eprintln!(
+                    "makibad: pr watch {}#{}: cannot record its read: {e}",
+                    r.f.repo, r.f.pr
+                );
+            }
             let key = told_key(&r.f.repo, r.f.pr, &r.head);
             if began_before_ci(&r, self.ci_seen.get(&key)) {
                 continue;
@@ -1598,6 +1611,7 @@ fn poll_state(
                             head: v["headRefOid"].as_str().unwrap_or("").to_string(),
                             status: v["mergeStateStatus"].as_str().unwrap_or("").to_string(),
                             draft: v["isDraft"].as_bool().unwrap_or(false),
+                            title: v["title"].as_str().map(str::to_string),
                             started,
                         });
                     }
@@ -1806,7 +1820,61 @@ struct MergeRead {
     status: String,
     /// `isDraft`.
     draft: bool,
+    /// `title`, when given.
+    title: Option<String>,
     started: Instant,
+}
+
+/// Record what an open read saw (`pr_read`, Issue 405), in one transaction, while its task still
+/// follows the same pull request at the same generation: only when its head or its merge state's
+/// class differs from the newest `pr_read` of that pull request, or its title from the newest
+/// title recorded for it. Whether it was recorded.
+fn record_read(w: &StateWriter, r: &MergeRead) -> Result<bool> {
+    if r.head.is_empty() {
+        return Ok(false);
+    }
+    let class = merge_class(&r.status, r.draft);
+    w.transaction(|w| {
+        if followed(w.conn(), Some(&r.f.task))?.first() != Some(&r.f) {
+            return Ok(false);
+        }
+        let (repo, pr) = (r.f.repo.as_str(), r.f.pr);
+        // The newest `field` of the events `kinds` of this pull request: `None` with no event.
+        let newest = |kinds: &str, field: &str| -> Result<Option<Option<String>>> {
+            Ok(w.conn()
+                .query_row(
+                    &format!(
+                        "SELECT json_extract(payload_json, '$.{field}') FROM events
+                         WHERE kind IN ({kinds})
+                           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                           AND json_extract(payload_json, '$.pr') = ?2
+                         ORDER BY id DESC LIMIT 1"
+                    ),
+                    params![repo, pr],
+                    |q| q.get::<_, Option<String>>(0),
+                )
+                .optional()?)
+        };
+        let head = newest("'pr_read'", "head_oid")?.flatten();
+        let seen = newest("'pr_read'", "merge_state")?.flatten();
+        let title = newest("'pr_read', 'pr_closed', 'pr_merged'", "title")?;
+        let same = head.is_some_and(|h| h.eq_ignore_ascii_case(&r.head))
+            && seen.as_deref() == Some(class.as_str())
+            && title.is_some_and(|t| t == r.title);
+        if same {
+            return Ok(false);
+        }
+        w.append_event(&NewEvent {
+            kind: "pr_read",
+            actor: Some("makibad"),
+            payload: Some(&json!({"repo": repo, "pr": pr, "task_id": r.f.task,
+                                  "head_oid": r.head, "title": r.title, "merge_state": class,
+                                  "merge_state_status": r.status, "is_draft": r.draft})),
+            run_task_id: Some(&r.f.task),
+            ..Default::default()
+        })?;
+        Ok(true)
+    })
 }
 
 /// The newest of `reads` for each task, in the order of those newest reads: an older read queued
@@ -3026,6 +3094,7 @@ esac"#,
             head: head.into(),
             status: status.into(),
             draft: false,
+            title: None,
             started: Instant::now(),
         }
     }
