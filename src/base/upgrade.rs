@@ -75,19 +75,48 @@ fn try_lock(path: &Path, exclusive: bool) -> std::io::Result<Lock> {
 }
 
 /// `makiba up`'s side of the session lock: shared, held by the returned file until it is dropped.
-/// A `base upgrade` holding it refuses `up` (`conflict`). When the lock file cannot be opened at
-/// all, no upgrade can hold it either (the verb refuses without it), and `up` goes on without.
+/// A `base upgrade` holding it refuses `up` (`conflict`).
 pub(crate) fn up_lock(session: &str) -> Result<Option<File>, Failure> {
-    match try_lock(&session_lock_path(session), false) {
-        Ok(Lock::Held(f)) => Ok(Some(f)),
-        Ok(Lock::Busy) => Err((
+    up_lock_at(&session_lock_path(session), session)
+}
+
+/// `up_lock` on the lock file `path`. An existing file is opened for writing, else for reading (a
+/// shared lock needs no more), and one that cannot be opened either way refuses `up`: a verb may
+/// hold it. Only a file that does not exist and cannot be made lets `up` go on without the lock,
+/// since a verb holds the lock only on a file that exists.
+fn up_lock_at(path: &Path, session: &str) -> Result<Option<File>, Failure> {
+    let busy = || {
+        (
             ErrorKind::Conflict,
             format!(
                 "a `makiba base upgrade` runs on session {session}; wait for it to end, then run \
                  `makiba up` again"
             ),
+        )
+    };
+    let shared = |file: File| match file.try_lock_shared() {
+        Ok(()) => Ok(Some(file)),
+        Err(TryLockError::WouldBlock) => Err(busy()),
+        Err(TryLockError::Error(e)) => Err((
+            ErrorKind::Unavailable,
+            format!("cannot lock {}: {e}", path.display()),
         )),
-        Err(_) => Ok(None),
+    };
+    match try_lock(path, false) {
+        Ok(Lock::Held(f)) => Ok(Some(f)),
+        Ok(Lock::Busy) => Err(busy()),
+        Err(_) if !path.exists() => Ok(None),
+        Err(_) => match File::open(path) {
+            Ok(f) => shared(f),
+            Err(e) => Err((
+                ErrorKind::Unavailable,
+                format!(
+                    "cannot open the upgrade lock {}: {e}; a `makiba base upgrade` may hold it. \
+                     Make it readable or remove it once no upgrade runs, then run `makiba up` again",
+                    path.display()
+                ),
+            )),
+        },
     }
 }
 
@@ -775,7 +804,8 @@ fn run(secretary: bool) -> Result<(), Failure> {
                 ErrorKind::Unavailable,
                 format!(
                     "{e}; {} was not replaced. What was done is what a failed `makiba down \
-                     --secretary --stop-base` leaves: `makiba up` brings the work back",
+                     --secretary --stop-base` leaves: run this verb again, or the old makiba's \
+                     `up` by its path (this makiba's `up` refuses the older core)",
                     t.file.display()
                 ),
             ));
@@ -902,6 +932,38 @@ mod tests {
         assert_eq!(runs_to_suspend(dir.path()), Ok(Vec::new()));
         fs::write(dir.path().join("state.db"), "not a database").unwrap();
         assert!(runs_to_suspend(dir.path()).is_err());
+    }
+
+    #[test]
+    fn up_is_refused_while_an_upgrade_holds_the_lock_and_fails_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("makiba-upgrade-s.lock");
+        // No file and no folder to make it in: no upgrade can hold it.
+        assert!(matches!(
+            up_lock_at(&dir.path().join("none/x.lock"), "s"),
+            Ok(None)
+        ));
+        let held = match try_lock(&path, true).unwrap() {
+            Lock::Held(f) => f,
+            Lock::Busy => panic!("busy"),
+        };
+        assert_eq!(
+            up_lock_at(&path, "s").map(|_| ()).unwrap_err().0,
+            ErrorKind::Conflict
+        );
+        // SAFETY: geteuid(2) only reads.
+        if unsafe { libc::geteuid() } != 0 {
+            // An upgrade holds it and `up` can open it neither way: refused, never let through.
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+            assert_eq!(
+                up_lock_at(&path, "s").map(|_| ()).unwrap_err().0,
+                ErrorKind::Unavailable
+            );
+            // Readable only: the shared lock is taken on a read-only open.
+            drop(held);
+            fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
+            assert!(matches!(up_lock_at(&path, "s"), Ok(Some(_))));
+        }
     }
 
     #[test]
