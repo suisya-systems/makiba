@@ -25,7 +25,7 @@ Today the person is the clock: a run closes, `makibad` scans, the secretary prop
 | `project` | One registered project (its slug). One active range per project in the first version: a check on every move to `active` (`approve`, `resume`), not a property of the records (section 10). | `makibad` |
 | `issues` | An explicit list of Issue numbers, or empty. | `makibad` |
 | `takes` | A condition over open Issues, or empty. A fixed grammar, joined by AND: `label:<l>`, `no-label:<l>`, `milestone:<m>`, `clause:<=G<n>` (the goal clause the Issue names, `docs/goals.md`). A candidate is in the range when it is in `issues` or matches `takes`. | `makibad`, on its own read of the project's open Issues (section 3.3). No model. |
-| always | Every candidate must also be open; have no run of its own not `completed` or `abandoned` (by `runs.issue_refs`, which a range dispatch fills), and no run of this range at all (an abandoned one included: a retry is the secretary's dispatch naming the range); have no open pull request that closes it; and have every Issue named on a `Depends on` line of its body closed. A dependency whose state cannot be read counts as open. A line of its body that starts with `Blocked by`, `Depends on` or `Requires` and names no `#<n>` (a dependency in words) leaves it out as `dependency_unreadable` (Issue 299). | `makibad` |
+| always | Every candidate must also be open; have no run of its own not `completed` or `abandoned` (by `runs.issue_refs`, which a range dispatch fills), and no run of this range at all (an abandoned one included: a retry is the secretary's dispatch naming the range); have no open pull request that closes it; and have every Issue its body depends on closed (a `Blocked by`, `Depends on` or `Requires` line, read by the one parser the triage uses, Issue 356). A dependency whose state cannot be read counts as open. A dependency line of its body not read whole (a dependency in words, its number only on the next line or in prose) leaves it out as `dependency_unreadable` (Issues 299, 356). | `makibad` |
 | `at_once` | Runs of the range that count at a time (section 4). Never more than `max_concurrent_workers`. | `makibad` |
 | `budget_tasks` | Tasks the range may dispatch in all, follow-ups included. Taken at dispatch, never given back. Required. | `makibad` |
 | `budget_hours` | Wall-clock hours from approval. Optional. | `makibad` |
@@ -146,7 +146,7 @@ The triage pass cannot serve the clock as it is (review): it scans only after a 
 
 ### 4.2 What "does not depend on the answer" means
 
-A candidate depends on a task waiting for the person when a `Depends on` line of its body names that task's Issue. `makibad` passes over such a candidate while the task waits and takes the next. Only the body's `Depends on` lines are read as dependencies (not comments, not other words; review: the triage parser reads more, and the range uses this one grammar). A dependency the Issue does not write is the secretary's `skip`. A dependency written in words is not read as none: a line of the body that starts with `Blocked by`, `Depends on` or `Requires` (after an optional quote, heading, list marker, task box or emphasis) and holds no `#<n>` leaves the candidate out as `dependency_unreadable (<the line>)` until the line names its Issue; which Issue the words mean is not guessed (Issue 299).
+A candidate depends on a task waiting for the person when a dependency line of its body (`Blocked by`, `Depends on` or `Requires`) names that task's Issue. `makibad` passes over such a candidate while the task waits and takes the next. Only the body's dependency keywords are read as dependencies (not comments), by the one parser the triage uses too (Issue 356). A dependency the Issue does not write is the secretary's `skip`. A dependency written in words is not read as none: a line of the body that starts with `Blocked by`, `Depends on` or `Requires` (after an optional quote, heading, list marker, task box or emphasis) and is not read whole (no run of Issue refs after its keyword, or a ref outside it) leaves the candidate out as `dependency_unreadable (<the line>)` until the line names its Issue; which Issue the words mean is not guessed (Issues 299, 356).
 
 ### 4.3 A task waiting for another may still do its design
 
@@ -198,7 +198,7 @@ The first version has no `answers: recommend` (Q4). It is decided after the firs
 | --- | --- |
 | Writing the scope contract in a file and appending each widening | Record: `ranges`, `range_*` events; widening is a new proposal. |
 | The owner's "OK" in chat as the approval | Stays with the person, as their key (Q1). |
-| Picking the next Issue whose `Depends on` are closed | Record and code: the range's read and order. |
+| Picking the next Issue whose dependencies are closed | Record and code: the range's read and order. |
 | Copying Issue text and comments into the worker's scratch folder | Record and verb: `range_candidates`, put into the brief by the range's dispatch. |
 | Counting panes as slots; a pane waiting for a landing held a slot for hours | Record: the counts of 3.2; parking. |
 | Leaving free slots empty while a follow-up was asked one by one | Record: `follow_ups: inside`. |
