@@ -144,7 +144,7 @@ pub enum Command {
         #[arg(long)]
         stop_base: bool,
     },
-    /// `upgrade`: take the herdr-core release this makiba pins, asking once before the base's
+    /// `upgrade`: take the base release this makiba pins, asking once before the base's
     /// terminals end. From a login shell.
     Base {
         action: String,
