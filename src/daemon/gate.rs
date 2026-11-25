@@ -28,6 +28,11 @@
 //! differs at head is reported (`edited_tests`); under `acceptance` such a pull request is refused,
 //! under `human` the person is asked. A test kept outside a folder `tests` is not seen.
 //!
+//! Merge order (Issue 331, docs/design/merge-order.md): a pull request whose own changes touch
+//! `landing::CHECKS` may add or tighten a check over `tests/`; `merge_order` reads, git only,
+//! which other open pull requests have a test commit (whose declared tests cannot change), and the
+//! door holds it while there are any.
+//!
 //! Pin: the first verdict that saw a manifest records a digest of the declared files and of the
 //! other paths the test commit changed (its test helpers); a later
 //! verdict for the same PR whose digest differs, or that finds no manifest, is rejected.
@@ -778,6 +783,8 @@ pub struct Verdict {
     /// The tests that were there before the test commit, are not declared and differ at head
     /// (`edited_tests`); the door decides what they mean under the mode.
     pub edited_tests: Vec<String>,
+    /// The merge order (Issue 331); the door decides what it means under the mode.
+    pub merge_order: MergeOrder,
 }
 
 /// A file under a folder `tests`: what the gate reports when a pull request edits it without
@@ -820,6 +827,83 @@ pub fn edited_tests(
         .filter(|(p, e)| th.get(*p) != Some(*e) && th.get(*p) != tb.get(*p))
         .map(|(p, _)| p.clone())
         .collect())
+}
+
+// ---- the merge order (Issue 331) ---------------------------------------------------------------
+
+/// The paths the PR's own changes (from the merge base of `base` and `head` to `head`) touch that
+/// may add or tighten a check over `tests/` (`landing::CHECKS`); empty: it is not check-adding.
+pub fn check_paths(repo: &Path, base: &str, head: &str) -> Result<Vec<String>, Reject> {
+    let mb = git(repo, &["merge-base", base, head])?;
+    Ok(git(
+        repo,
+        &["diff", "--no-renames", "--name-only", "-z", mb.trim(), head],
+    )?
+    .split('\0')
+    .filter(|p| !p.is_empty() && super::landing::is_check_path(p))
+    .map(String::from)
+    .collect())
+}
+
+/// An open pull request whose test commit holds a check-adding one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Waiting {
+    pub pr: i64,
+    pub task: String,
+    pub test_commit: String,
+    pub declared: Vec<String>,
+    /// Its own changes touch `landing::CHECKS` too: the two hold each other.
+    pub check_adding: bool,
+}
+
+/// What the merge order found (docs/design/merge-order.md 3.2): empty `paths`, not check-adding.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct MergeOrder {
+    pub paths: Vec<String>,
+    pub waits_for: Vec<Waiting>,
+    /// `(pr, task, why)` of an open pull request that could not be read: it holds as one waiting.
+    pub not_read: Vec<(i64, String, String)>,
+}
+
+impl MergeOrder {
+    pub fn holds(&self) -> bool {
+        !self.waits_for.is_empty() || !self.not_read.is_empty()
+    }
+}
+
+/// The merge order of the PR at `head` on `base` (both in `clone`): its check paths and, when it
+/// has any, each other open pull request `(task, pr)` of `repo` with a test commit. Git only.
+pub fn merge_order(
+    clone: &Path,
+    repo: &str,
+    base: &str,
+    base_branch: &str,
+    head: &str,
+    others: &[(String, i64)],
+) -> Result<MergeOrder, Reject> {
+    let mut m = MergeOrder {
+        paths: check_paths(clone, base, head)?,
+        ..Default::default()
+    };
+    if m.paths.is_empty() {
+        return Ok(m);
+    }
+    for (task, pr) in others {
+        let read = fetch(clone, repo, *pr, base_branch)
+            .and_then(|(_, h)| Ok((find_manifest(clone, base, &h)?, h)));
+        match read {
+            Ok((Some((test_commit, declared)), h)) => m.waits_for.push(Waiting {
+                pr: *pr,
+                task: task.clone(),
+                test_commit,
+                declared,
+                check_adding: check_paths(clone, base, &h).is_ok_and(|p| !p.is_empty()),
+            }),
+            Ok((None, _)) => {}
+            Err(e) => m.not_read.push((*pr, task.clone(), e.0)),
+        }
+    }
+    Ok(m)
 }
 
 /// The first earlier verdict for the PR that saw a manifest: its commit, paths and digest.

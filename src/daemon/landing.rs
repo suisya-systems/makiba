@@ -41,6 +41,27 @@ use std::time::{Duration, Instant};
 
 /// The folders whose change may bring a check over `tests/` (the person's list, Issue 461).
 pub const WATCHED: [&str; 3] = ["tools/", ".github/", "tests/common/"];
+/// The paths whose change in a pull request may add or tighten a check that test targets must
+/// pass (Issue 331, docs/design/merge-order.md): `WATCHED`'s folders and the acceptance checker,
+/// which CI takes from the base. A folder ends with `/`; any other entry is one file. The merge
+/// gate holds such a pull request while another open one has a test commit.
+pub const CHECKS: [&str; 4] = [
+    "tools/",
+    ".github/",
+    "tests/common/",
+    "scripts/acceptance-check.sh",
+];
+
+/// Whether `path` is one of `CHECKS` or under one of its folders.
+pub fn is_check_path(path: &str) -> bool {
+    CHECKS.iter().any(|c| {
+        if c.ends_with('/') {
+            path.starts_with(c)
+        } else {
+            path == *c
+        }
+    })
+}
 /// How long a merge recorded but not yet in the fetched tip holds the scan.
 const MERGE_WAIT: Duration = Duration::from_secs(60 * 60);
 /// At most this many changed paths are recorded.

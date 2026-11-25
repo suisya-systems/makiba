@@ -2709,6 +2709,19 @@ struct GateRows {
     projects: Vec<(String, Option<String>)>,
     task: Option<String>,
     review: ReviewRows,
+    /// The other open pull requests of the repository (Issue 331), as `prwatch::followed` reads
+    /// them; read again when the verdict is recorded, a difference there is "ask again".
+    others: Vec<OpenPr>,
+}
+
+/// One other open pull request of the repository (Issue 331, merge-order.md 3.3): its task,
+/// number and generations, so that a registration, a close or a reopen while the gate ran is seen.
+#[derive(Clone, Debug, PartialEq)]
+struct OpenPr {
+    task: String,
+    pr: i64,
+    gen_reg: i64,
+    gen_close: i64,
 }
 
 /// What the gate read of the PR's task's reviews (Issue 263): the kind of its newest launch and
@@ -2791,6 +2804,21 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
             .optional()?;
         review.row = row.and_then(|(id, t)| Some((id, serde_json::from_str(&t?).ok()?)));
     }
+    // Issue 331: the other pull requests makibad follows in this repository, not read closed.
+    let others = super::prwatch::followed(c, None)
+        .map_err(|e| match e {
+            crate::db::Error::Sqlite(e) => e,
+            other => rusqlite::Error::InvalidParameterName(other.to_string()),
+        })?
+        .into_iter()
+        .filter(|f| f.repo.eq_ignore_ascii_case(repo) && f.pr != pr && !f.closed)
+        .map(|f| OpenPr {
+            task: f.task,
+            pr: f.pr,
+            gen_reg: f.gen_reg,
+            gen_close: f.gen_close,
+        })
+        .collect();
     Ok(GateRows {
         latest_ci: ci
             .last()
@@ -2800,6 +2828,7 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         projects,
         task,
         review,
+        others,
     })
 }
 
@@ -3065,6 +3094,63 @@ fn gate_review_line(r: &Value) -> String {
     }
 }
 
+/// The line of the merge order (Issue 331): the check paths, the open pull requests that hold
+/// the pull request and those that could not be read.
+fn merge_order_line(repo: &str, pr: i64, m: &super::gate::MergeOrder) -> String {
+    let paths = if m.paths.len() > 10 {
+        format!(
+            "{}, and {} more",
+            m.paths[..10].join(", "),
+            m.paths.len() - 10
+        )
+    } else {
+        m.paths.join(", ")
+    };
+    let mut line = format!(
+        "{repo}#{pr} changes {paths} (it may add or tighten a check over tests/); open pull requests have test commits whose declared tests cannot change"
+    );
+    let waiting: Vec<String> = m
+        .waits_for
+        .iter()
+        .map(|w| {
+            format!(
+                "#{} (task {}, test commit {}: {})",
+                w.pr,
+                w.task,
+                &w.test_commit[..w.test_commit.len().min(7)],
+                w.declared.join(", ")
+            )
+        })
+        .collect();
+    if !waiting.is_empty() {
+        line = format!("{line}: {}", waiting.join(", "));
+    }
+    if !m.not_read.is_empty() {
+        let unread: Vec<String> = m
+            .not_read
+            .iter()
+            .map(|(n, t, why)| format!("#{n} (task {t}: {why})"))
+            .collect();
+        line = format!(
+            "{line}; not read, so held as if waiting: {}",
+            unread.join(", ")
+        );
+    }
+    let mutual: Vec<String> = m
+        .waits_for
+        .iter()
+        .filter(|w| w.check_adding)
+        .map(|w| format!("#{}", w.pr))
+        .collect();
+    if !mutual.is_empty() {
+        line = format!(
+            "{line}; {} may add a check too: the two hold each other, and the person decides their order",
+            mutual.join(", ")
+        );
+    }
+    line
+}
+
 /// The gate's reads of GitHub and git: no lock is held while they run.
 fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
     use super::gate;
@@ -3143,6 +3229,25 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
             v.result = "rejected".into();
             v.reason = format!(
                 "the tests at head could not be compared with those before the test commit: {}",
+                e.0
+            );
+        }
+        Err(_) => {}
+    }
+    // The merge order (Issue 331): read here, with no lock held, as every fetch of the gate. A
+    // read that fails is never read as "not check-adding".
+    let others: Vec<(String, i64)> = rows.others.iter().map(|o| (o.task.clone(), o.pr)).collect();
+    let mut seen = std::collections::BTreeSet::new();
+    let others: Vec<(String, i64)> = others
+        .into_iter()
+        .filter(|(_, n)| seen.insert(*n))
+        .collect();
+    match gate::merge_order(&clone, repo, &base, &base_branch, head, &others) {
+        Ok(m) => v.merge_order = m,
+        Err(e) if v.result != "rejected" => {
+            v.result = "rejected".into();
+            v.reason = format!(
+                "the gate could not read whether this pull request may add a check over tests/: {}",
                 e.0
             );
         }
@@ -3247,6 +3352,9 @@ impl Door {
                     v.result = "rejected".into();
                     v.reason =
                         "the PR's task or its reviews changed while the gate ran; ask again".into();
+                } else if now.others != rows.others {
+                    v.result = "rejected".into();
+                    v.reason = "the open pull requests of the repository changed while the gate ran; ask again".into();
                 }
                 let allow = v.result == "passed"
                     || (v.result == "no_manifest" && (mode == "human" || docs));
@@ -3317,6 +3425,30 @@ impl Door {
                 reason = format!("{reason}; {line}");
             }
         }
+        // Issue 331 (docs/design/merge-order.md 3.3): a pull request that may add or tighten a
+        // check over tests/ waits while other open pull requests have test commits, whose declared
+        // tests cannot change. Under acceptance no person is asked, so it is refused; under human
+        // the person decides. An earlier refusal keeps its verdict and has the line appended.
+        let order = event
+            .as_ref()
+            .map(|v| v.merge_order.clone())
+            .unwrap_or_default();
+        if order.holds() {
+            let line = merge_order_line(&repo, pr, &order);
+            if allow && mode == "acceptance" {
+                allow = false;
+                verdict = "merge_order".into();
+                reason = format!(
+                    "{line}; it waits until they land or are closed, or the person decides: the person merges it in the GitHub web UI ({reason})"
+                );
+            } else if allow {
+                warn = true;
+                warnings.push(line.clone());
+                reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
         // Issue 282: a range task's pull request lands without the person only when the range was
         // approved under acceptance and the mode read now is acceptance too. The checks above are
         // those of the mode read now; a pair that is not both only adds the question to the person.
@@ -3363,6 +3495,18 @@ impl Door {
         }
         if !edited.is_empty() {
             payload["edited_tests"] = json!(edited);
+        }
+        if order.holds() {
+            payload["merge_order"] = json!({
+                "paths": order.paths,
+                "waits_for": order.waits_for.iter().map(|w| json!({
+                    "pr": w.pr, "task": w.task, "test_commit": w.test_commit,
+                    "declared": w.declared, "check_adding": w.check_adding,
+                })).collect::<Vec<_>>(),
+                "not_read": order.not_read.iter().map(|(n, t, why)| json!({
+                    "pr": n, "task": t, "why": why,
+                })).collect::<Vec<_>>(),
+            });
         }
         if let Some(t) = &now.task {
             payload["task"] = json!(t);
@@ -4056,7 +4200,7 @@ impl Door {
             }
         };
         if !j.allow {
-            let mut answer = json!({"status": "refused", "verdict": j.verdict, "reason": j.reason,
+            let mut answer = json!({"status": "refused", "verdict": j.verdict, "allow": false, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head});
             if let Some(rv) = &j.review {
                 answer["review"] = rv.clone();
@@ -4294,7 +4438,7 @@ impl Door {
                 let _ = w.rollback();
                 return Err(internal(e));
             }
-            let mut answer = json!({"status": "refused", "verdict": j.verdict, "reason": j.reason,
+            let mut answer = json!({"status": "refused", "verdict": j.verdict, "allow": false, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head,
                                     "pending_id": id});
             if let Some(rv) = &j.review {
