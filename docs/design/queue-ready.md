@@ -14,11 +14,12 @@ repeating the list.
 - A pull request's head is **ready** to ask for the merge queue when its CI passed, it does not
   conflict with its base, and no **landing** since the base of that CI changed **what the checks
   check**.
-- What the checks check: a file under `tests/common/` or `tools/`; and under `.github/`, a change
-  that alters which checks run or what a check runs (a job's steps or commands, a new job). A
-  change to how runs are scheduled (triggers, concurrency, caching), as PR 473 (Issue 471), does not
-  count. Other files under `tests/` do not count. Section 4.2 says how makibad tells the two kinds
-  of `.github/` change apart.
+- What the checks check: a file under `tests/common/`, `tools/` or `.github/`. Other files under
+  `tests/` do not count. The person narrowed `.github/` to changes that alter which checks run or
+  what a check runs (not triggers, concurrency or caching, as PR 473); makibad cannot tell those
+  apart reliably without a YAML parser, and the line reader first built for it kept letting YAML
+  edges through review, so on 2026-11-25 the person chose that every `.github/` change counts
+  (section 4.2). A scheduling-only change then costs one update more than needed, never a miss.
 - Not ready because of a conflict or such a landing: makibad brings the branch up to date itself
   (the existing `update` job: a merge, never a rebase) and watches the new head's CI.
 - Any other move of the base is no reason to update: the queue tests the combination.
@@ -175,47 +176,21 @@ change is in the test commit and the gate does not read it as an edited test.
 
 ### 4.1 The list
 
-One constant, `CHECKED_PATHS`, `["tests/common/", "tools/", ".github/"]`, and one function,
-`counts(path, before, after) -> bool`, with the `.github/` rule below. Nothing else in code or docs
-lists the paths: the skill and spec.md name the module and this note.
+One constant, `CHECKED_PATHS`, `["tests/common/", "tools/", ".github/"]`; a landing's path counts
+when it lies under one of them. Nothing else in code or docs lists the paths: the skill and spec.md
+name the module and this note.
 
-### 4.2 Telling `.github/` changes apart
+### 4.2 `.github/`: every change counts
 
 makiba has no YAML parser (`Cargo.toml`), and adding one is a dependency decision this Issue does
-not make. The rule makibad can hold with certainty is a conservative line reader, where every doubt
-counts:
-
-- A path under `.github/` that is not `.github/workflows/<name>.yml` or `.yaml`, or a workflow file
-  added or deleted: counts.
-- A workflow file changed: the changed lines (`git diff -U0 L^1 L -- <path>`; a removed line is
-  read in the old file, an added one in the new) count unless every one is **scheduling**. Each
-  line of a file version gets a context by indentation: its enclosing keys, and whether it lies
-  inside a **block scalar** (the lines after a key whose value is `|` or `>` with any indicators,
-  up to the first non-blank line indented at or left of that key; blank lines between are inside).
-  A changed line is scheduling when:
-  - it is outside every block scalar and is blank or a comment line (first non-space character
-    `#`); inside a block scalar no line is neutral, a blank or `#` line included (it may be a
-    heredoc's data or a program's text);
-  - or it lies, by its enclosing keys, inside the top-level key `on` (also written `"on"`, `'on'`
-    or `true`) or `concurrency`, inside a job's own `concurrency` key, or inside a step (the list
-    item under a job's `steps`) whose own `uses:` names `actions/cache` (`actions/cache@...`,
-    `actions/cache/restore@...`, `actions/cache/save@...`); a block scalar there (the cache
-    step's `path: |`) is scheduling too.
-- The diff is read as text (`--text`, whatever the attributes say); contents that differ with no
-  hunk read count.
-- An anchor, an alias or a tag anywhere outside quotes and block scalars, a flow collection
-  included (`{group: &cmd x}`): the file is not read and the change counts.
-- A file version holding a tab in its indentation, a flow mapping or sequence spanning lines, an
-  anchor or alias (`&`, `*` as a node), or a second document (`---`) is not read: the change
-  counts.
-
-Measured on this repository's history: PR 473 (4cefa34) reads as scheduling only (the `on` block,
-the `concurrency` block and its column-0 comment, the two `actions/cache` steps with their comment
-lines and their `path: |` and `restore-keys: |` scalars); PR 483 (3bb84aa) counts (the job-level
-comment lines are neutral, the `run: |` scalar line of the real-base step counts). Known limits: a
-trigger can make a check not run on a pull request at all, which the person classed as scheduling;
-branch protection's required checks are not in the repository and are not seen. Q2 asks whether
-this rule is the one to hold.
+not make. A conservative line reader of the workflow files was built first (it cleared changes
+whose every changed line lay under `on`, `concurrency` or an `actions/cache` step) and reviewed in
+diff rounds 1 to 6; each of rounds 1, 4, 5 and 7 found a YAML form it misread (block scalars, a
+binary attribute, tags, anchors in flow collections, plain scalars spanning lines). On the person's
+word of 2026-11-25 (the design's Q2, its second option) it was replaced: every change under
+`.github/` counts. Known limits: a change of how runs are scheduled (PR 473) makes ready heads
+take one update more than needed; branch protection's required checks are not in the repository
+and are not seen. Telling the kinds apart again waits for a decision on a YAML parser.
 
 ## 5. What is kept in memory, and its rules
 
@@ -265,8 +240,9 @@ too. PR 492 (#433) changes the hook, not the functions named here.
 
 ## 7. Questions (answered by the person, 2026-11-25)
 
-Answers: Q1, the merge base is the rule to hold; Q2, the line reader of section 4.2; Q3, the
-refusals are in this change.
+Answers: Q1, the merge base is the rule to hold; Q2, first the line reader, then (2026-11-25,
+after diff round 7) every `.github/` change counts, section 4.2; Q3, the refusals are in this
+change.
 
 - **Q1, the base of the CI run.** Section 1 holds the merge base, a conservative approximation (it
   can cost one needless update, never a missed landing). The exact base would need GitHub's base of
@@ -356,10 +332,10 @@ every CI read as passed and finished. The door runs in the process for the merge
    with kind `conflict` and a message containing "not ready for the queue", and no
    `merge_attempted` is written.
 
-The `.github/` reader is tested by unit tests in `src/daemon/ready.rs` (the fix commit): PR 473's
-and PR 483's diffs as fixtures, a `#` and a blank line changed inside a `run: |` scalar (counts),
-a comment changed between steps (does not), a cache step's `key:` changed (does not), an anchor in
-the file (counts).
+Added after the test commit (new targets are allowed there): a unit test in `src/daemon/ready.rs`
+that PR 473's workflow change counts (section 4.2), and `tests/queue_ready_watch.rs` (diff review
+round 7): a head told ready is revoked and updated by a landing under `tools/` made while makibad
+runs, and by one made while makibad is down; the new head is recorded and told ready once.
 
 ## 10. Proposed build Issues (after this one)
 
