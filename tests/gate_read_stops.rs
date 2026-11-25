@@ -624,3 +624,39 @@ fn a_failed_read_after_edited_tests_leaves_that_stop_as_the_one_question() {
     assert_eq!(c.escalated(), first);
     assert_eq!(c.stops().len(), 1, "{:?}", c.stops());
 }
+
+/// PR 7 changes `tools/`, so it is ordered after PR 8 (task `t2`), which has a test commit and
+/// cannot be read from GitHub.
+fn ordered_after_an_unreadable_pull_request(name: &str) -> Case {
+    let c = Case::with(name, &[("tools/check.py", Some("print(1)\n"))]);
+    c.second_task_without_review();
+    std::fs::write(c.gh.join("fail.view.8"), "").unwrap();
+    c
+}
+
+#[test]
+fn a_missing_review_is_not_hidden_by_another_pull_request_that_cannot_be_read() {
+    let c = ordered_after_an_unreadable_pull_request("revieworder");
+    c.forget_reviews();
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["status"], json!("refused"), "{v}");
+    assert_eq!(v["verdict"], json!("review_missing"), "{v}");
+    assert!(
+        v["reason"].as_str().unwrap_or_default().contains("#8"),
+        "{v}"
+    );
+}
+
+#[test]
+fn an_otherwise_landable_pull_request_ordered_after_an_unreadable_one_is_unavailable() {
+    let c = ordered_after_an_unreadable_pull_request("landableorder");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["status"], json!("unavailable"), "{v}");
+    assert!(
+        v["reason"].as_str().unwrap_or_default().contains("#8"),
+        "{v}"
+    );
+    let verdicts = c.events("acceptance_gate");
+    assert_eq!(verdicts.last().unwrap()["result"], json!("unavailable"));
+    assert!(c.events("merge_attempted").is_empty());
+}

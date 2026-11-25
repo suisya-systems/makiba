@@ -118,24 +118,27 @@ fn with_tries<T>(read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(READ_WAIT_MS);
+    let started = std::time::Instant::now();
     with_tries_in(
         std::time::Duration::from_millis(wait),
         READ_WINDOW,
+        || started.elapsed(),
         std::thread::sleep,
         read,
     )
 }
 
-/// `with_tries` with its wait, window and sleep: no try is started once `window` has passed, so
-/// a wait that would end after it ends the read instead, and the window is read again after the
-/// wait (a sleep may last longer than asked: a busy host, a suspended one).
+/// `with_tries` with its wait, window, clock (the time since the first try began) and sleep: no
+/// try is started once `window` has passed, so a wait that would end after it ends the read
+/// instead, and the window is read again after the wait (a sleep may last longer than asked: a
+/// busy host, a suspended one).
 fn with_tries_in<T>(
     wait: std::time::Duration,
     window: std::time::Duration,
+    elapsed: impl Fn() -> std::time::Duration,
     sleep: impl Fn(std::time::Duration),
     mut read: impl FnMut() -> Try<T>,
 ) -> Result<T, Fault> {
-    let started = std::time::Instant::now();
     let mut tries = 0;
     loop {
         tries += 1;
@@ -143,9 +146,9 @@ fn with_tries_in<T>(
             Try::Done(r) => return r,
             Try::Again(why) => why,
         };
-        if tries < READ_TRIES && started.elapsed() + wait < window {
+        if tries < READ_TRIES && elapsed() + wait < window {
             sleep(wait);
-            if started.elapsed() < window {
+            if elapsed() < window {
                 continue;
             }
         }
@@ -989,7 +992,8 @@ pub struct MergeOrder {
     /// `(pr, task, why)` of an open pull request that could not be read: it holds as one waiting.
     pub not_read: Vec<(i64, String, String)>,
     /// A read of GitHub for another pull request that still failed after its tries (Issue 512):
-    /// with nothing in `waits_for`, the order is not known and the gate answers `unavailable`.
+    /// with nothing in `waits_for`, the order is not known, and the gate answers `unavailable`
+    /// when no rule on the content refused the pull request.
     pub unavailable: Option<String>,
 }
 
@@ -1329,38 +1333,47 @@ pub fn clone_of(
 #[cfg(test)]
 mod tests {
     use super::{Fault, Try, with_tries_in};
-    use std::time::{Duration, Instant};
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    /// A simulated clock: each read takes `read_takes`, and a sleep of `d` lasts `d * stretch`.
+    /// The start time of each try, and the answer.
+    fn tried(
+        wait: u64,
+        window: u64,
+        read_takes: u64,
+        stretch: u32,
+        answers_on: Option<usize>,
+    ) -> (Vec<u64>, Result<usize, Fault>) {
+        let now = Cell::new(Duration::ZERO);
+        let mut starts = Vec::new();
+        let r = with_tries_in(
+            Duration::from_millis(wait),
+            Duration::from_millis(window),
+            || now.get(),
+            |d| now.set(now.get() + d * stretch),
+            || {
+                starts.push(now.get().as_millis() as u64);
+                now.set(now.get() + Duration::from_millis(read_takes));
+                if answers_on == Some(starts.len()) {
+                    Try::Done(Ok(starts.len()))
+                } else {
+                    Try::Again(format!("fail {}", starts.len()))
+                }
+            },
+        );
+        (starts, r)
+    }
 
     /// Issue 512: a failed read is tried again up to three times; one that answers on a later try
     /// is its answer.
     #[test]
     fn a_failed_read_is_tried_again_at_most_three_times() {
-        let mut n = 0;
-        let r: Result<u8, Fault> = with_tries_in(
-            Duration::ZERO,
-            Duration::from_secs(60),
-            std::thread::sleep,
-            || {
-                n += 1;
-                Try::Again(format!("fail {n}"))
-            },
-        );
-        assert_eq!(n, 3);
+        let (starts, r) = tried(5000, 60_000, 100, 1, None);
+        assert_eq!(starts, [0, 5100, 10200]);
         assert_eq!(r, Err(Fault::Unavailable("fail 3 (after 3 tries)".into())));
-        let mut m = 0;
-        let r = with_tries_in(
-            Duration::ZERO,
-            Duration::from_secs(60),
-            std::thread::sleep,
-            || {
-                m += 1;
-                if m < 2 {
-                    Try::Again("once".into())
-                } else {
-                    Try::Done(Ok(m))
-                }
-            },
-        );
+        let (starts, r) = tried(5000, 60_000, 100, 1, Some(2));
+        assert_eq!(starts, [0, 5100]);
         assert_eq!(r, Ok(2));
     }
 
@@ -1368,41 +1381,20 @@ mod tests {
     /// the read instead.
     #[test]
     fn no_try_starts_after_the_window() {
-        let started = Instant::now();
-        let mut starts = Vec::new();
-        let r: Result<u8, Fault> = with_tries_in(
-            Duration::from_millis(30),
-            Duration::from_millis(50),
-            std::thread::sleep,
-            || {
-                starts.push(started.elapsed());
-                Try::Again("down".into())
-            },
-        );
-        assert_eq!(starts.len(), 2, "{starts:?}");
-        assert!(
-            starts.iter().all(|s| *s < Duration::from_millis(50)),
-            "{starts:?}"
-        );
-        assert_eq!(r, Err(Fault::Unavailable("down (after 2 tries)".into())));
+        // A read that times out at 40 s: the wait would end at 45 s, the second read at 85 s.
+        let (starts, r) = tried(5000, 60_000, 40_000, 1, None);
+        assert_eq!(starts, [0, 45_000]);
+        assert_eq!(r, Err(Fault::Unavailable("fail 2 (after 2 tries)".into())));
+        let (starts, _) = tried(30_000, 50_000, 1, 1, None);
+        assert_eq!(starts, [0, 30_001]);
     }
 
     /// Issue 512: a wait that lasts longer than asked (a busy or suspended host) and ends after
     /// the window starts no other try.
     #[test]
     fn a_wait_that_overshoots_the_window_starts_no_other_try() {
-        let started = Instant::now();
-        let mut starts = Vec::new();
-        let r: Result<u8, Fault> = with_tries_in(
-            Duration::from_millis(1),
-            Duration::from_millis(50),
-            |_| std::thread::sleep(Duration::from_millis(80)),
-            || {
-                starts.push(started.elapsed());
-                Try::Again("down".into())
-            },
-        );
-        assert_eq!(starts.len(), 1, "{starts:?}");
-        assert_eq!(r, Err(Fault::Unavailable("down (after 1 try)".into())));
+        let (starts, r) = tried(5000, 60_000, 100, 20, None);
+        assert_eq!(starts, [0]);
+        assert_eq!(r, Err(Fault::Unavailable("fail 1 (after 1 try)".into())));
     }
 }

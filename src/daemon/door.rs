@@ -3462,15 +3462,8 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         .filter(|(_, n)| seen.insert(*n))
         .collect();
     match gate::merge_order(&program, &clone, repo, &base, &base_branch, head, &others) {
-        // The order is not known while another pull request could not be read from GitHub and
-        // none is known to hold this one (Issue 512); a known hold stays the merge order, and a
-        // refusal already made stays that refusal, with the pull request not read named.
-        Ok(m) if v.result != "rejected" && m.waits_for.is_empty() && m.unavailable.is_some() => {
-            return Found::Unavailable(format!(
-                "the gate could not read an open pull request it must order this one after: {}",
-                m.unavailable.unwrap_or_default()
-            ));
-        }
+        // A pull request that could not be read from GitHub (Issue 512) is kept in the order:
+        // `judge` decides what it means once every rule on the content has been applied.
         Ok(m) => v.merge_order = m,
         Err(e) if v.result != "rejected" => {
             v.result = "rejected".into();
@@ -3669,7 +3662,19 @@ impl Door {
             .unwrap_or_default();
         if order.holds() {
             let line = merge_order_line(&repo, pr, &order);
-            if allow && mode == "acceptance" {
+            // Issue 512: with nothing known to hold it, an order that could not be read from
+            // GitHub is not known; after every rule on the content, that is all that stands.
+            let unread = order
+                .unavailable
+                .as_ref()
+                .filter(|_| order.waits_for.is_empty());
+            if allow && let Some(why) = unread {
+                allow = false;
+                verdict = "unavailable".into();
+                reason = format!(
+                    "GitHub could not be read: the gate could not read an open pull request it must order this one after: {why} ({reason})"
+                );
+            } else if allow && mode == "acceptance" {
                 allow = false;
                 verdict = "merge_order".into();
                 reason = format!(
@@ -3718,6 +3723,12 @@ impl Door {
                 "reason": reason, "mode": mode, "allow": allow,
             }),
         };
+        // An order that could not be read from GitHub (Issue 512) is no refusal: its row says so,
+        // and the pause of two refusals in a row does not count it.
+        if verdict == "unavailable" {
+            payload["result"] = json!("unavailable");
+            payload["reason"] = json!(reason);
+        }
         if let Some(v) = &event {
             if let Some(m) = &v.manifest_commit {
                 payload["manifest_commit"] = json!(m);
