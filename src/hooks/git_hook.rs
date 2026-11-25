@@ -15,8 +15,10 @@
 //! `makiba hook prepare-commit-msg <pid>` (Issue 300, line L-K3) holds git's flag that skips the
 //! hooks: git runs `prepare-commit-msg` even with that flag, and its script passes the id of the
 //! git that runs it, whose argv (as exec received it, after the shell) is read for the flag
-//! (`skipping_flag`). It reads no shell text. Linux only; elsewhere it passes and the worker's
-//! Bash hook keeps reading the flag in the command text.
+//! (`skipping_flag`). It reads no shell text. A commit git's own sequencer runs with the flag
+//! (`git rebase --continue` after a conflict, cherry-pick, revert) is let through when its parent
+//! is that git (`by_sequencer`). Linux only; elsewhere it passes and the worker's Bash hook keeps
+//! reading the flag in the command text.
 
 use super::Refusal;
 use regex::bytes::Regex;
@@ -229,12 +231,92 @@ fn argv_of(pid: &str) -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// The git subcommands whose sequencer runs `git commit -n` itself, as a child, to commit a pick
+/// after a stop (`git rebase --continue` after a conflict, for one): git runs no `pre-commit`
+/// for a pick in any case.
+const SEQUENCERS: [&str; 3] = ["rebase", "cherry-pick", "revert"];
+
+/// The subcommand of a git argv: the first word after git's own options (`-C`, `-c`,
+/// `--git-dir`, `--work-tree`, `--namespace` and `--config-env` take the next word), or the part
+/// after `git-` of a dashed argv[0].
+pub fn subcommand(argv: &[String]) -> Option<&str> {
+    let first = argv.first().map(|a| Path::new(a.as_str()))?;
+    if let Some(dashed) = first
+        .file_name()
+        .and_then(|n| n.to_str())
+        .and_then(|n| n.strip_prefix("git-"))
+    {
+        return Some(dashed);
+    }
+    let mut rest = argv.iter().skip(1);
+    while let Some(a) = rest.next() {
+        match a.as_str() {
+            "-C" | "-c" | "--git-dir" | "--work-tree" | "--namespace" | "--config-env" => {
+                rest.next();
+            }
+            a if a.starts_with('-') => {}
+            a => return Some(a),
+        }
+    }
+    None
+}
+
+/// Whether the git `pid` is a commit git's own sequencer started: its parent is a git of the same
+/// program (the same file, or the same content, since a git may run its exec-path copy) whose
+/// subcommand is one of `SEQUENCERS`. A shell, an alias or another program in between is not.
+#[cfg(target_os = "linux")]
+fn by_sequencer(pid: &str) -> bool {
+    let parent = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| {
+            // `pid (comm) state ppid ...`; comm may hold spaces and parentheses.
+            let after = &s[s.rfind(')')? + 1..];
+            after.split_whitespace().nth(1).map(String::from)
+        });
+    let Some(parent) = parent else {
+        return false;
+    };
+    let Ok(argv) = argv_of(&parent) else {
+        return false;
+    };
+    if !subcommand(&argv).is_some_and(|s| SEQUENCERS.contains(&s)) {
+        return false;
+    }
+    same_program(
+        Path::new(&format!("/proc/{pid}/exe")),
+        Path::new(&format!("/proc/{parent}/exe")),
+    )
+}
+
+/// Whether two executables are one file or hold the same bytes.
+#[cfg(target_os = "linux")]
+fn same_program(a: &Path, b: &Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    let (Ok(ma), Ok(mb)) = (std::fs::metadata(a), std::fs::metadata(b)) else {
+        return false;
+    };
+    if ma.dev() == mb.dev() && ma.ino() == mb.ino() {
+        return true;
+    }
+    if ma.len() != mb.len() {
+        return false;
+    }
+    let hash = |p: &Path| {
+        std::fs::File::open(p)
+            .ok()
+            .and_then(|mut f| crate::build::hash(&mut f).ok())
+    };
+    matches!((hash(a), hash(b)), (Some(x), Some(y)) if x == y)
+}
+
 fn check_flag(args: &[String]) -> Result<(), Refusal> {
     #[cfg(target_os = "linux")]
     {
         let pid = args.first().map(String::as_str).unwrap_or_default();
         let argv = argv_of(pid).map_err(|why| Refusal::new(FLAG_LINE, "the argv of git", why))?;
-        if let Some(arg) = skipping_flag(&argv) {
+        if let Some(arg) = skipping_flag(&argv)
+            && !by_sequencer(pid)
+        {
             return Err(Refusal::new(
                 FLAG_LINE,
                 arg.clone(),
@@ -392,6 +474,29 @@ mod tests {
 
     fn argv(words: &[&str]) -> Vec<String> {
         words.iter().map(|w| w.to_string()).collect()
+    }
+
+    #[test]
+    fn the_subcommand_is_the_first_word_after_gits_options() {
+        let sub = |w: &[&str]| subcommand(&argv(w)).map(String::from);
+        assert_eq!(
+            sub(&["git", "-C", "/w", "-c", "a=b", "rebase", "--continue"]).as_deref(),
+            Some("rebase")
+        );
+        assert_eq!(
+            sub(&["git", "--no-pager", "cherry-pick", "x"]).as_deref(),
+            Some("cherry-pick")
+        );
+        assert_eq!(
+            sub(&["/usr/lib/git-core/git-rebase", "--continue"]).as_deref(),
+            Some("rebase")
+        );
+        // The value of -C or -c is not the subcommand.
+        assert_eq!(
+            sub(&["git", "-C", "rebase", "commit"]).as_deref(),
+            Some("commit")
+        );
+        assert_eq!(sub(&["git", "-c", "x=1"]), None);
     }
 
     #[test]
