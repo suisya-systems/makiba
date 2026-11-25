@@ -28,6 +28,8 @@ Call mcp__makiba__dispatch with:
 - `branch` (optional): the branch name, when the person or the repository wants one.
 - `issue` (optional): the Issue number the task works on. Give it whenever the task is one Issue: a range of the project then does not dispatch that Issue again (`makibad` reads it from the run). A task without it is invisible to a range.
 
+- `design_first` (optional): `true` when the person must read the task's design before its test is fixed: a task on a trust boundary (git, the sandbox, keys, the push line, the merge gate or the acceptance checker), or one the person asked to see the design of. `makibad` then refuses the task's test commit (a commit with an `Acceptance-Test:` trailer), at the push and in the worker's commit hook, until the person answers `yes` to a pending entry of the task with `stop_kind` `design` (Issue 337, line L-K13). When the worker reports its design blocked, add that question with mcp__makiba__pending (`add` with the five parts, `stop_kind` `design`, `recommend_answer`; then `escalate`); your own `yes` does not open it. A design you approve yourself, within one module, is not dispatched with `design_first`.
+
 A refusal names its kind: `usage` (fix the arguments), `conflict` (the task id is in use: pick another), `unavailable` (`makibad` is not running: tell the person once and wait).
 
 ## The brief

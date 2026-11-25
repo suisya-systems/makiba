@@ -443,6 +443,9 @@ fn serve_until(
             if let Err(e) = prepare.pass(&w) {
                 eprintln!("makibad: prepare: {e}");
             }
+            if let Err(e) = prepare.design_markers(&w) {
+                eprintln!("makibad: design markers: {e}");
+            }
             // No launch step runs until the start pass has looked for every launch's terminal.
             if !resumed {
                 match resume::pass(&w, &*events_base) {

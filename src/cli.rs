@@ -181,6 +181,9 @@ pub enum Command {
         /// The Issue number the task works on, so that a range does not dispatch it again.
         #[arg(long)]
         issue: Option<i64>,
+        /// The task's test commit waits for the person's yes to its design (Issue 337).
+        #[arg(long)]
+        design_first: bool,
     },
     /// Close a task's run; refused before its done report unless --abandon, or --limit for a
     /// merged run with a known limit the person accepted.
@@ -389,6 +392,9 @@ pub enum Command {
         /// A candidate waiting only for range tasks with a pull request goes in for its design.
         #[arg(long)]
         design_ahead: bool,
+        /// Each task's test commit waits for the person's yes to its design (Issue 337).
+        #[arg(long)]
+        design_first: bool,
         /// Read here; its content travels over the door.
         #[arg(long)]
         brief_head_file: Option<PathBuf>,
@@ -458,9 +464,13 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             model,
             branch,
             issue,
+            design_first,
         } => {
             let mut args = json!({"kind": kind, "task_id": task_id, "title": title,
                                   "brief": read(&brief_file)?});
+            if design_first {
+                args["design_first"] = true.into();
+            }
             for (k, v) in [("project", project), ("model", model), ("branch", branch)] {
                 if let Some(v) = v {
                     args[k] = v.into();
@@ -484,6 +494,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             budget_fixes,
             follow_ups,
             design_ahead,
+            design_first,
             brief_head_file,
             replaces,
             reason,
@@ -494,6 +505,9 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             let mut args = json!({"action": action});
             if design_ahead {
                 args["design_ahead"] = true.into();
+            }
+            if design_first {
+                args["design_first"] = true.into();
             }
             if let Some(id) = range_id {
                 args["id"] = id.into();
@@ -809,6 +823,14 @@ fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> 
             "no"
         }
     );
+    println!(
+        "Design first: {}",
+        if range["design_first"] == json!(true) {
+            "yes (each task's test commit waits for your yes to its design)"
+        } else {
+            "no"
+        }
+    );
     // Issue 383: makibad's mode, the one the gate reads; this shell's only beside it. Issue 326:
     // the mode approving this draft fixes, as status shows it for the range.
     let fixes = range["approves_under"].as_str().map(str::to_string);
@@ -1068,6 +1090,10 @@ mod tests {
         let (_, v) = propose(&["--follow-ups", "ask", "--design-ahead"]).unwrap();
         assert_eq!(v["follow_ups"], json!("ask"));
         assert_eq!(v["design_ahead"], json!(true));
+        // Issue 337: design_first only when named.
+        assert!(v.get("design_first").is_none());
+        let (_, v) = propose(&["--design-first"]).unwrap();
+        assert_eq!(v["design_first"], json!(true));
         for bad in ["NaN", "inf", "-inf", "0", "-1"] {
             let flag = format!("--budget-hours={bad}");
             assert!(propose(&[&flag]).is_err(), "{bad}");

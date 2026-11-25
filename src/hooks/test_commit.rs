@@ -149,20 +149,16 @@ fn kept(message: &str) -> Vec<&str> {
         .collect()
 }
 
-/// Check the commit whose message file is `file`, holding `message`.
-pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
-    let cannot = |why: String| Refusal::new(LINE, "the commit message", why);
-    let message = String::from_utf8_lossy(message);
-    // The lines of the key, as written, with their numbers.
-    let written: Vec<(usize, &str, &str)> = kept(&message)
-        .into_iter()
-        .enumerate()
-        .filter_map(|(i, l)| key_value(l).map(|v| (i + 1, l.trim(), v)))
-        .collect();
-    // The values git reads under the key (`--no-divider`: a commit's trailers read none).
-    let parsed = git(&["interpret-trailers", "--parse", "--no-divider", file]).map_err(cannot)?;
-    let parsed = text(parsed);
-    let read: Vec<String> = parsed
+/// The values git reads under the key in the message file `file` (`--no-divider`: a commit's
+/// trailers read none), with the repository's own separators.
+fn read_values(file: &str) -> Result<Vec<String>, String> {
+    let parsed = text(git(&[
+        "interpret-trailers",
+        "--parse",
+        "--no-divider",
+        file,
+    ])?);
+    Ok(parsed
         .lines()
         .filter_map(|l| {
             let end = l
@@ -174,7 +170,84 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
                 .eq_ignore_ascii_case(KEY)
                 .then(|| rest[sep.len_utf8()..].trim().to_string())
         })
+        .collect())
+}
+
+/// The line the design check holds (Issue 337).
+const DESIGN_LINE: &str = "L-K13";
+
+/// Issue 337 (line L-K13): a commit whose message declares a test (a line starting with the key,
+/// spaces or a tab allowed before the colon, case aside; or a trailer git reads under it) is
+/// refused while `makibad`'s marker `<hooks path>/design-wait/<task>` exists, the task being the
+/// name of the run's git folder `<state>/git/<task>`. The marker holds the reason: the task was
+/// dispatched design-first and the person has not said yes to its design (`push::design_wait`).
+/// Run before `check`, so its refusal is the one shown. A message that declares a test where the
+/// hooks path or the git folder cannot be read is refused too; any other message is not read
+/// further. The push holds the same line outside the worker's git, which reads its own command
+/// line and environment.
+pub fn design_wait(file: &str, message: &[u8]) -> Result<(), Refusal> {
+    let message = String::from_utf8_lossy(message);
+    let written = kept(&message)
+        .into_iter()
+        .find(|l| key_value(l).is_some())
+        .map(|l| l.trim().to_string());
+    let line = match written {
+        Some(l) => l,
+        None => {
+            let unread = |why: String| Refusal::new(DESIGN_LINE, "the commit message", why);
+            if read_values(file).map_err(unread)?.is_empty() {
+                return Ok(());
+            }
+            format!("{KEY} (a trailer)")
+        }
+    };
+    let cannot = |why: String| {
+        Refusal::new(
+            DESIGN_LINE,
+            line.clone(),
+            format!(
+                "the commit declares a test, and whether its design is approved cannot be read ({why}); {FINAL}"
+            ),
+        )
+    };
+    let hooks = text(git(&["config", "--get", "core.hooksPath"]).map_err(&cannot)?);
+    let common =
+        text(git(&["rev-parse", "--path-format=absolute", "--git-common-dir"]).map_err(&cannot)?);
+    let task = Path::new(common.trim_end_matches('\n'))
+        .file_name()
+        .ok_or_else(|| cannot(format!("the git folder {common:?} has no name")))?
+        .to_string_lossy()
+        .into_owned();
+    let marker = Path::new(hooks.trim_end_matches('\n'))
+        .join(crate::daemon::prepare::DESIGN_WAIT)
+        .join(&task);
+    if !marker.exists() {
+        return Ok(());
+    }
+    let why = std::fs::read_to_string(&marker).unwrap_or_else(|e| {
+        format!("task {task} waits for the person's approval of its design ({e})")
+    });
+    Err(Refusal::new(
+        DESIGN_LINE,
+        line,
+        format!(
+            "{}; the test commit is not made before the design is approved: report the design and wait for the person's yes to its pending entry of stop kind design; {FINAL}",
+            why.trim()
+        ),
+    ))
+}
+
+/// Check the commit whose message file is `file`, holding `message`.
+pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
+    let cannot = |why: String| Refusal::new(LINE, "the commit message", why);
+    let message = String::from_utf8_lossy(message);
+    // The lines of the key, as written, with their numbers.
+    let written: Vec<(usize, &str, &str)> = kept(&message)
+        .into_iter()
+        .enumerate()
+        .filter_map(|(i, l)| key_value(l).map(|v| (i + 1, l.trim(), v)))
         .collect();
+    let read = read_values(file).map_err(cannot)?;
     if written.is_empty() && read.is_empty() {
         return Ok(());
     }

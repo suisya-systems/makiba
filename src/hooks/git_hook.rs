@@ -126,6 +126,7 @@ fn check(name: &str, args: &[String]) -> Result<(), Refusal> {
             Some((shape, line)) => Some(("the commit message".to_string(), shape, line)),
             // A clean message of a commit: the test commit's check (Issue 322).
             None if name == "commit-msg" => {
+                super::test_commit::design_wait(file, &text)?;
                 super::test_commit::check(file, &text)?;
                 None
             }
