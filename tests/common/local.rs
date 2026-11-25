@@ -164,6 +164,23 @@ impl Drop for Local {
     }
 }
 
+/// What `get` and `list` answer for the terminal `t`, read while the caller holds the lock.
+fn snapshot(t: &TerminalRef, p: &mut Proc) -> Result<Terminal, BaseError> {
+    let exit = p
+        .child
+        .try_wait()
+        .map_err(|e| err(BaseError::Other, "wait", e.to_string()))?;
+    Ok(Terminal {
+        id: t.clone(),
+        name: t.0.clone(),
+        tags: p.tags.clone(),
+        status: p.seen.lock().unwrap().status.clone(),
+        turn: None,
+        alive: exit.is_none(),
+        exit_code: exit.and_then(|e| e.code()),
+    })
+}
+
 impl Base for Local {
     fn name(&self) -> &'static str {
         "local"
@@ -286,30 +303,18 @@ impl Base for Local {
         Ok(TerminalRef(spec.name.clone()))
     }
 
+    /// The terminals as they are at one moment: read under one hold of the lock, so an `end` in
+    /// another thread falls before the list or after it, never inside it (Issue 506).
     fn list(&self) -> Result<Vec<Terminal>, BaseError> {
-        let names: Vec<String> = self.procs.lock().unwrap().keys().cloned().collect();
-        names
-            .iter()
-            .map(|n| self.get(&TerminalRef(n.clone())))
+        let mut procs = self.procs.lock().unwrap();
+        procs
+            .iter_mut()
+            .map(|(name, p)| snapshot(&TerminalRef(name.clone()), p))
             .collect()
     }
 
     fn get(&self, t: &TerminalRef) -> Result<Terminal, BaseError> {
-        self.with(t, |p| {
-            let exit = p
-                .child
-                .try_wait()
-                .map_err(|e| err(BaseError::Other, "wait", e.to_string()))?;
-            Ok(Terminal {
-                id: t.clone(),
-                name: t.0.clone(),
-                tags: p.tags.clone(),
-                status: p.seen.lock().unwrap().status.clone(),
-                turn: None,
-                alive: exit.is_none(),
-                exit_code: exit.and_then(|e| e.code()),
-            })
-        })
+        self.with(t, |p| snapshot(t, p))
     }
 
     fn read(&self, t: &TerminalRef, lines: usize) -> Result<Vec<String>, BaseError> {
