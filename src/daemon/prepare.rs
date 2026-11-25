@@ -567,13 +567,14 @@ fn start_of(
 /// executable ones named by the run's `git_hook::PROJECT_KEY`, a relative folder read in the
 /// workplace as git would.
 fn say_project_hooks(task: &str, gitdir: &Path, workplace: &Path) {
-    use crate::hooks::git_hook::{FORWARDED, NAMES, PROJECT_KEY};
+    use crate::hooks::git_hook::{FLAG_HOOK, FORWARDED, NAMES, PROJECT_KEY};
     use std::os::unix::fs::PermissionsExt;
     let Ok(dir) = run_repo::read(gitdir, workplace, &["config", "--get", PROJECT_KEY]) else {
         return;
     };
     let names: Vec<&str> = NAMES
         .iter()
+        .chain([FLAG_HOOK].iter())
         .chain(FORWARDED.iter())
         .copied()
         .filter(|n| {
