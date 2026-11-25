@@ -418,7 +418,6 @@ fn due(w: &StateWriter, since: i64, retry: Duration) -> Result<Vec<Waiting>> {
 /// A call whose process runs.
 struct Flight {
     child: Child,
-    pgid: i32,
     ids: Vec<i64>,
     command: String,
     /// The id of the `config_set` the call was started under.
@@ -506,29 +505,40 @@ impl Call {
         // The setting and the entries are read again, and the process started, inside one write
         // transaction: an answer, a withdrawal or a new setting that the door commits meanwhile
         // is either seen here or waits until the process has started.
-        let started = w.transaction(|w| {
+        // What was started is kept outside the transaction, so a commit that fails after the
+        // start still hands the process back here to be ended, never dropped untracked.
+        let mut started = None;
+        let committed = w.transaction(|w| {
             if setting(w)?.as_ref().map(|(c, id)| (c.as_str(), *id)) != Some((&command, since)) {
-                return Ok(None);
+                return Ok(());
             }
             let entries = due(w, since, self.retry)?;
             if entries.is_empty() {
-                return Ok(None);
+                return Ok(());
             }
             let mask = Mask::new(w.conn());
             let ids: Vec<i64> = entries.iter().map(|e| e.id).collect();
             let (title, body) = texts(&mask, &entries);
             let spawned = self.spawn(&program, &title, &body);
-            Ok(Some((ids, title, body, spawned)))
-        })?;
+            started = Some((ids, title, body, spawned));
+            Ok(())
+        });
+        if let Err(e) = committed {
+            if let Some((_, _, _, Ok((mut child, files)))) = started.take() {
+                end_child(&mut child);
+                for p in &files {
+                    let _ = std::fs::remove_file(p);
+                }
+            }
+            return Err(e);
+        }
         let Some((ids, title, body, spawned)) = started else {
             return Ok(());
         };
         match spawned {
             Ok((child, files)) => {
-                let pgid = child.id() as i32;
                 self.flight = Some(Flight {
                     child,
-                    pgid,
                     ids,
                     command,
                     setting: since,
@@ -736,10 +746,16 @@ impl Drop for Call {
 
 /// Kill the call's whole process group and reap its child.
 fn kill_group(f: &mut Flight) {
+    end_child(&mut f.child);
+}
+
+/// Kill the process group a call's child leads (it was started as its own group) and reap it.
+fn end_child(child: &mut Child) {
+    let pgid = child.id() as i32;
     // SAFETY: a negative pid names the process group the call was started in (its own).
-    unsafe { libc::kill(-f.pgid, libc::SIGKILL) };
-    let _ = f.child.kill();
-    let _ = f.child.wait();
+    unsafe { libc::kill(-pgid, libc::SIGKILL) };
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// stderr from its file: masked whole, control characters but newline replaced, then cut.
@@ -950,7 +966,6 @@ mod tests {
         };
         let mut call = Call::new(d.path());
         call.flight = Some(Flight {
-            pgid: child.id() as i32,
             child,
             ids: vec![1],
             command: "/bin/sh".into(),
