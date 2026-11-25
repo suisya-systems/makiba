@@ -278,98 +278,91 @@ pub fn unparsed_dependency_line(text: &str) -> Option<String> {
     None
 }
 
-// A line that starts with a dependency keyword, after an optional quote, heading, list marker,
-// task box and any run of emphasis or code marks; the keyword ends at a word boundary or at a
-// closing mark (`_Depends on_`, where `_` is a word char) (Issue 299).
+// The one form a dependency is written in (Issue 356), read on a line with its emphasis and code
+// marks taken out: an optional quote, heading, list marker and task box, one keyword, an optional
+// colon, a run of `#N` or `owner/repo#N` joined by `,`, `and` or `&`, an optional final `.`, and
+// nothing else.
+re!(
+    STRICT_FORM,
+    format!(
+        r"(?i)^\s*(?:>\s*)*(?:#{{1,6}}\s+|[-+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?(?:blocked\s+by|depends\s+on|requires)\s*:?\s*(?P<run>{r}(?:\s*,\s*(?:and\s+)?{r}|\s+and\s+{r}|\s*&\s*{r})*)\s*\.?\s*$",
+        r = format!(r"(?:{OWNER_REPO})?#\d+")
+    )
+);
+// A line that starts with a dependency keyword, after an optional quote, heading, list marker and
+// task box (Issue 299), its marks taken out.
 re!(
     DEP_LINE_START,
-    r"(?i)^\s*(?:>\s*)*(?:#{1,6}\s+|[-*+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?[*_~`]*\s*(?P<kw>blocked\s+by|depends\s+on|requires)(?:\b|[*_~`])"
+    r"(?i)^\s*(?:>\s*)*(?:#{1,6}\s+|[-+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?(?:blocked\s+by|depends\s+on|requires)\b"
 );
 // One ref token (home `#N`, `PR #N`, `owner/repo#N`, a GitHub URL), anywhere on a line.
 re!(REF_TOKEN, format!(r"(?i){}", ref_token_any()));
-// Emphasis or code marks closing a keyword (`**Depends on** #5`).
-re!(CLOSING_MARKS, r"^[*_~`]*");
 
 fn shown_line(line: &str) -> String {
     line.trim().chars().take(120).collect()
 }
 
+/// `line` with its emphasis and code marks (`*`, `_`, `~`, backtick) taken out, except a mark
+/// between two letters or digits (`my_repo`).
+fn without_marks(line: &str) -> String {
+    let chars: Vec<char> = line.chars().collect();
+    let inner = |i: usize| {
+        i > 0
+            && chars[i - 1].is_alphanumeric()
+            && chars.get(i + 1).is_some_and(|c| c.is_alphanumeric())
+    };
+    chars
+        .iter()
+        .enumerate()
+        .filter(|&(i, c)| !matches!(c, '*' | '_' | '~' | '`') || inner(i))
+        .map(|(_, c)| *c)
+        .collect()
+}
+
 /// What `dependency_lines` reads from a text (Issue 356).
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct DepLines {
-    /// Home `#N` named by a dependency keyword's run, sorted, each once.
+    /// Home `#N` named as dependencies, sorted, each once.
     pub home: Vec<i64>,
-    /// `owner/repo#N` and GitHub URLs named by such a run, sorted, each once.
+    /// `owner/repo#N` and GitHub URLs named as dependencies, sorted, each once.
     pub cross: Vec<(String, i64)>,
-    /// The first dependency line (at most 120 chars) that cannot be read whole.
+    /// The first dependency line (at most 120 chars) not written in the one form.
     pub unreadable: Option<String>,
-}
-
-/// The ref run after a keyword that ends at byte `at` of `line`, closing marks aside: its span.
-fn run_after(line: &str, at: usize) -> Option<(usize, usize)> {
-    let rest = &line[at..];
-    let skip = CLOSING_MARKS.find(rest).map_or(0, |m| m.end());
-    let run = LEADING_RUN.captures(&rest[skip..])?.get(1)?;
-    Some((at + skip + run.start(), at + skip + run.end()))
 }
 
 /// The one parser of dependency lines (Issue 356), for the triage, the guard and the range.
 ///
-/// Refs: on every line (every boundary `splitlines` knows), each non-negated `Blocked by`,
-/// `Depends on` or `Requires` and the run of refs right after it (closing emphasis aside), also
-/// inside a line and on a line that cannot be read whole. A **dependency line** starts with a
-/// keyword after an optional quote, heading, list marker, task box and emphasis or code marks
-/// (`DEP_LINE_START`); it is read whole when its keyword is followed by a run and every ref token
-/// on it lies in the run of one of its keywords and names a ref read from it (a negated keyword's
-/// run names nothing, and is no stray).
-/// Any other dependency line (the dependency in words, its number only on the next line, in prose,
-/// or after the run) is `unreadable`: the Issue is left out for its author to rewrite.
+/// Refs: the triage's reading (each non-negated `Blocked by`, `Depends on` or `Requires` and the
+/// run of refs right after it on its line), and the run of each line written in the one form
+/// (`STRICT_FORM`), so no blocker read before is lost.
+///
+/// Readable: a dependency is written in one form only. With its emphasis and code marks taken out,
+/// a line that starts with a keyword (after an optional quote, heading, list marker and task box),
+/// or that holds a keyword and a ref token anywhere, must be exactly that form: one keyword, an
+/// optional colon, a run of refs, an optional final `.`. Any other such line (a dependency in
+/// words, its number on the next line, a second keyword, a negation, a URL, prose around the refs)
+/// is `unreadable`, and the Issue is left out until its author rewrites the line. A keyword in
+/// prose with no ref on its line (`This requires a restart.`) is no dependency line.
 pub fn dependency_lines(text: &str) -> DepLines {
-    let mut home = BTreeSet::new();
-    let mut cross = BTreeSet::new();
+    let mut home: BTreeSet<i64> = keyword_lead_runs(text, &BLOCK_KEYWORD)
+        .into_iter()
+        .flat_map(home_refs)
+        .collect();
+    let mut cross: BTreeSet<(String, i64)> = keyword_lead_runs(text, &BLOCK_KEYWORD)
+        .into_iter()
+        .flat_map(cross_tokens)
+        .collect();
     let mut unreadable = None;
     for line in splitlines(text) {
-        let mut runs: Vec<(usize, usize)> = Vec::new();
-        // The runs of negated keywords: they name nothing, and are no ref outside a run.
-        let mut negated: Vec<(usize, usize)> = Vec::new();
-        let lead = DEP_LINE_START
-            .captures(line)
-            .and_then(|c| c.name("kw"))
-            .map(|m| m.end());
-        let lead_run = lead.and_then(|at| run_after(line, at));
-        runs.extend(lead_run);
-        for m in BLOCK_KEYWORD.find_iter(line) {
-            let Some(span) = run_after(line, m.end()) else {
-                continue;
-            };
-            // Emphasis and code marks aside, as the run reads them (`not **blocked by** #5`).
-            let before: String = line[..m.start()]
-                .chars()
-                .filter(|c| !matches!(c, '*' | '_' | '~' | '`'))
-                .collect();
-            if BLOCK_NEG.is_match(&before) {
-                negated.push(span);
-            } else if !runs.contains(&span) {
-                runs.push(span);
-            }
+        let plain = without_marks(line);
+        if let Some(run) = STRICT_FORM.captures(&plain).and_then(|c| c.name("run")) {
+            home.extend(home_refs(run.as_str()));
+            cross.extend(cross_tokens(run.as_str()));
+            continue;
         }
-        for &(s, e) in &runs {
-            home.extend(home_refs(&line[s..e]));
-            cross.extend(cross_tokens(&line[s..e]));
-        }
-        let inside = |spans: &[(usize, usize)], t: &regex::Match| {
-            spans.iter().any(|&(s, e)| s <= t.start() && t.end() <= e)
-        };
-        // Every ref token lies in a negated run, or in a run and names a ref that is read (a
-        // token the run accepts but no ref is read from, as `https://GITHUB.COM/...`, is not).
-        let whole = lead_run.is_some()
-            && REF_TOKEN.find_iter(line).all(|t| {
-                inside(&negated, &t)
-                    || (inside(&runs, &t)
-                        && !(home_refs(t.as_str()).is_empty()
-                            && cross_tokens(t.as_str()).is_empty()))
-            });
-        if unreadable.is_none() && lead.is_some() && !whole {
+        let dependency_line = DEP_LINE_START.is_match(&plain)
+            || (BLOCK_KEYWORD.is_match(&plain) && REF_TOKEN.is_match(&plain));
+        if unreadable.is_none() && dependency_line {
             unreadable = Some(shown_line(line));
         }
     }
@@ -380,7 +373,7 @@ pub fn dependency_lines(text: &str) -> DepLines {
     }
 }
 
-/// The first dependency line of `body` that `dependency_lines` cannot read whole, if any.
+/// The first dependency line of `body` not written in the one form, if any.
 pub fn dependency_line_unreadable(body: &str) -> Option<String> {
     dependency_lines(body).unreadable
 }
@@ -486,98 +479,100 @@ mod tests {
 
     const WORDS: &str = "Depends on the belt's step 2.";
 
-    /// Every Markdown lead before the keyword is read through (Issue 299).
+    /// The leads of the one form: quote, heading, list marker, task box, and emphasis or code
+    /// marks, which are taken out (Issues 299, 356).
+    const LEADS: [&str; 18] = [
+        "",
+        "  ",
+        "> ",
+        "## ",
+        "- ",
+        "* ",
+        "+ ",
+        "1. ",
+        "2) ",
+        "- [ ] ",
+        "- [x] ",
+        "* [X] ",
+        "**",
+        "***",
+        "_",
+        "__",
+        "`",
+        "> - [ ] **",
+    ];
+
+    /// A dependency in words is unreadable behind every lead; the one form is read behind it.
     #[test]
-    fn a_dependency_in_words_is_found_behind_any_markdown_lead() {
-        for lead in [
-            "",
-            "  ",
-            "> ",
-            "## ",
-            "- ",
-            "* ",
-            "+ ",
-            "1. ",
-            "2) ",
-            "- [ ] ",
-            "- [x] ",
-            "* [X] ",
-            "**",
-            "***",
-            "_",
-            "__",
-            "`",
-            "> - [ ] **",
-        ] {
+    fn the_one_form_is_read_behind_every_lead_and_words_are_not() {
+        for lead in LEADS {
             let body = format!("Intro.\n\n{lead}{WORDS}\n");
             assert!(dependency_line_unreadable(&body).is_some(), "{body:?}");
             let numbered = format!("Intro.\n\n{lead}Depends on #30\n");
-            assert_eq!(dependency_lines(&numbered).home, vec![30], "{numbered:?}");
-            assert_eq!(dependency_line_unreadable(&numbered), None, "{numbered:?}");
+            let d = dependency_lines(&numbered);
+            assert_eq!((d.home, d.unreadable), (vec![30], None), "{numbered:?}");
         }
     }
 
-    /// Emphasis closed right after the keyword (`_` is a word char) is read through too.
+    /// The three keywords, with emphasis or code marks around any part, all read the same.
     #[test]
-    fn a_dependency_in_words_with_closed_emphasis_is_found() {
-        for body in [
-            "_Depends on_ the previous step.",
-            "__Blocked by__ the previous step.",
-            "**Requires** the previous step.",
-            "`Depends on` the previous step.",
-        ] {
-            assert!(dependency_line_unreadable(body).is_some(), "{body:?}");
-        }
-        for body in ["_Depends on_ #5", "**Requires** #5.", "`Blocked by` #5"] {
-            let d = dependency_lines(body);
-            assert_eq!((d.home, d.unreadable), (vec![5], None), "{body:?}");
-        }
-    }
-
-    #[test]
-    fn a_dependency_naming_an_issue_or_prose_is_not_unreadable() {
-        for body in [
-            "Depends on #282.",
-            "- [ ] Depends on #282",
-            "***Blocked by #5***",
-            "Blocked by #1; depends on #2",
-            "Requires #3 and Blocked by #4",
-            "Depends on #3, #4 and o/r#5",
-            "The row budget depends on the window size.",
-            "This requires a restart.",
-            "This depends on #5, see #9.",
-        ] {
-            assert_eq!(dependency_line_unreadable(body), None, "{body:?}");
-        }
-    }
-
-    /// The three keywords, behind any lead, all read the same (Issue 356).
-    #[test]
-    fn every_keyword_reads_its_run() {
+    fn every_keyword_and_its_marks_read_the_same() {
         for body in [
             "Blocked by #30",
             "Requires #30",
             "- Depends on #30",
             "> **Depends on #30**",
+            "_Depends on_ #30",
+            "**Requires** #30.",
+            "`Blocked by` #30",
+            "Depends on: #30",
         ] {
             let d = dependency_lines(body);
             assert_eq!((d.home, d.unreadable), (vec![30], None), "{body:?}");
         }
-        let d = dependency_lines("Depends on other/repo#7 and #8");
+        for body in [
+            "Depends on #3 and #4",
+            "Depends on #3, #4 and o/r#5",
+            "Blocked by #3, #4",
+            "Requires #3 & #4.",
+        ] {
+            assert_eq!(dependency_line_unreadable(body), None, "{body:?}");
+        }
+        let d = dependency_lines("Depends on other/my_repo#7 and #8");
         assert_eq!(d.home, vec![8]);
-        assert_eq!(d.cross, vec![("other/repo".to_string(), 7)]);
+        assert_eq!(d.cross, vec![("other/my_repo".to_string(), 7)]);
+        assert_eq!(d.unreadable, None);
     }
 
-    /// A dependency line naming a ref outside a keyword's run, or only on the next line, is
-    /// unreadable; the refs its keywords do name are still read (Issue 356).
+    /// A keyword in prose with no ref is no dependency line.
     #[test]
-    fn a_ref_outside_the_run_or_on_the_next_line_is_unreadable() {
+    fn prose_with_no_ref_is_not_a_dependency_line() {
+        for body in [
+            "The row budget depends on the window size.",
+            "This requires a restart.",
+        ] {
+            assert_eq!(dependency_lines(body), Default::default(), "{body:?}");
+        }
+    }
+
+    /// Any other line holding a dependency keyword and a ref, or starting with a keyword, is
+    /// unreadable; the refs the triage reads from it are still read (Issue 356, the one form).
+    #[test]
+    fn any_other_form_is_unreadable_and_keeps_its_refs() {
         for (body, home) in [
             ("Depends on\n#12", vec![]),
             ("## Depends on\n\n- #12\n", vec![]),
             ("- Depends on: the tokenizer work, see #80.", vec![]),
             ("Depends on #3, then see #9", vec![3]),
             ("Depends on the parser (#282)", vec![]),
+            ("Depends on #3; requires the previous step", vec![3]),
+            ("Blocked by #1; depends on #2", vec![1, 2]),
+            ("This is blocked by #5 for now.", vec![5]),
+            ("This _depends on_ #30", vec![]),
+            ("Blocked by PR #55", vec![55]),
+            ("Depends on https://github.com/o/r/issues/30", vec![]),
+            ("Depends on https://GITHUB.COM/o/r/issues/30", vec![]),
+            ("Requires a restart after the upgrade.", vec![]),
         ] {
             let d = dependency_lines(body);
             assert!(d.unreadable.is_some(), "{body:?}");
@@ -585,21 +580,25 @@ mod tests {
         }
     }
 
-    /// A negated clause beside a readable one does not make the line unreadable (review round 1).
+    /// A negation is no part of the one form: the line is unreadable, and a negated keyword
+    /// names nothing.
     #[test]
-    fn a_negated_clause_beside_a_run_is_not_unreadable() {
+    fn a_negated_keyword_is_unreadable_and_names_nothing() {
         for body in [
+            "not blocked by #5",
+            "Not blocked by #5",
+            "no longer depends on #5",
+            "not **blocked by** #5",
+            "It is _not_ `blocked by` #5",
             "Depends on #3; not blocked by #4",
-            "Blocked by #3, no longer requires #4.",
         ] {
             let d = dependency_lines(body);
-            assert_eq!((d.home, d.unreadable), (vec![3], None), "{body:?}");
+            assert!(d.unreadable.is_some(), "{body:?}");
+            assert!(!d.home.contains(&5) && !d.home.contains(&4), "{body:?}");
         }
-        let d = dependency_lines("Depends on #3; not blocked by the UI, see #4");
-        assert!(d.unreadable.is_some());
     }
 
-    /// Every line boundary `splitlines` knows separates lines here too (review round 1).
+    /// Every line boundary `splitlines` knows separates dependency lines.
     #[test]
     fn every_line_boundary_separates_dependency_lines() {
         for sep in ["\r", "\r\n", "\u{2028}", "\u{85}", "\x0b"] {
@@ -608,32 +607,6 @@ mod tests {
             let numbered = format!("Intro.{sep}- Depends on #30{sep}More.");
             let d = dependency_lines(&numbered);
             assert_eq!((d.home, d.unreadable), (vec![30], None), "{numbered:?}");
-        }
-    }
-
-    /// A ref token the run accepts but no ref is read from leaves the line unreadable (review
-    /// round 2): `GITHUB.COM` is matched by the run, not by the cross ref.
-    #[test]
-    fn a_token_naming_no_readable_ref_is_unreadable() {
-        let d = dependency_lines("Depends on https://GITHUB.COM/o/r/issues/30");
-        assert!(d.unreadable.is_some(), "{d:?}");
-        let d = dependency_lines("Depends on https://github.com/o/r/issues/30");
-        assert_eq!(d.cross, vec![("o/r".to_string(), 30)]);
-        assert_eq!(d.unreadable, None);
-    }
-
-    /// A negated keyword names nothing, and a line it starts is no dependency line.
-    #[test]
-    fn a_negated_keyword_names_nothing() {
-        for body in [
-            "not blocked by #5",
-            "Not blocked by #5",
-            "no longer depends on #5",
-            "not **blocked by** #5",
-            "It is _not_ `blocked by` #5",
-            "This no longer __depends on__ #5.",
-        ] {
-            assert_eq!(dependency_lines(body), Default::default(), "{body:?}");
         }
     }
 }
