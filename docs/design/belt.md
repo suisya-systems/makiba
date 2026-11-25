@@ -1,6 +1,6 @@
 # The belt: work inside an approved range
 
-Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Steps 1 to 4 are built (Issues 257, 282, 283 and 284): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
+Status: design note for Issue 248, 2026-11-21; the owner's decisions of 2026-11-22 are taken in (section 9). Steps 1 to 4 are built (Issues 257, 282, 283 and 284), and the read fields of step 5 (Issue 248): section 11 says how, and where the build settled a finding of the design review or departed from this note; the rest (the screen) is not built. Read beside [plan.md](plan.md) (R4, M7), [spec.md](spec.md) (sections 5, 10, 12 and the read surface) and the skill `skills/conveyor/SKILL.md` (Issue 188), which this note turns from a skill into records. A design review (one round, before the commit) was folded in; what it found is marked "review" where it changed the design.
 
 Today the person is the clock: a run closes, `makibad` scans, the secretary proposes, the person picks. The conveyor skill lets the secretary keep going inside a scope, but the scope lives in the conversation, the count of slots is the secretary's own, and every stop holds a slot. On 2026-11-21 claude-org-ja ran this belt by hand over about a dozen makiba Issues; this note says what of that becomes a record or a verb here.
 
@@ -288,7 +288,7 @@ Not in the first version: parking terminals (step 3, Q5), `design_ahead`, `follo
 | 2 | Stops written by code: every gate refusal and the budgets as `belt_stopped` with a pending entry; `budget_hours`, `budget_fixes`; rework counting again; launch failures and gate refusals pausing the range; the gate reporting edited tests. | `tests/belt_stops.rs`: a refused gate verdict on a range task leaves a pending entry with `stop_line` `gate` and the next task is dispatched. |
 | 3 | Parking and unparking terminals; `parked` status; `up` leaves parked runs alone. | `tests/belt_park.rs`: a run waiting on an escalated question has no terminal after the wait, and `answer` brings it back on its conversation. |
 | 4 | `design_ahead`, and `follow_ups: inside` as the default of a proposal (built, 11.3). | `tests/belt_ahead.rs`: a dependent candidate is dispatched design-only and unparked when its dependency closes completed. |
-| 5 | The `belt` read fields, then the screen (Issue 169). | `tests/read_surface.rs` grows the rows above. |
+| 5 | The `belt` read fields, then the screen (Issue 169). | `tests/belt_read.rs` (built, 11.5): each open range task on `belt[]` with its place, count and stop; `waits_for` less what landed or was let go; the printed fields are spec section 12's table `Belt field`. |
 | later | `answers: recommend` (after N stops, 5.2); several active ranges (section 10); the review rule once Issue 135 is decided (5.1). | Each with its own. |
 | - | The skill `conveyor` shrinks to the judgment that stays with the secretary, in the pull request of each step. | `tests/conveyor_skill.rs`. |
 
@@ -415,3 +415,23 @@ Not built: a notice to the person when a design-only run is parked; reading the 
 A candidate admitted ready once its `Depends on` Issues read closed was dispatched in the read's transaction, and its worktree started on the clone's own default branch, which only the verb `project` moves; range 8's tasks of 2026-11-25 started without the landing they built on. Now the belt, which already owns a dependency's merge seen in the clone (4.3), holds such a candidate while a run naming its dependency has a merge recorded that no `landed_in_clone` names yet, or no merge recorded while the PR watch still reads its pull request. The same clone check fetches the recorded merge, and the fill of that transaction dispatches the candidate with `landed` in its `belt_dispatched`. Preparation starts its branch on the commit the clone's `origin/<default branch>` names, resolved once and checked to hold each landed merge, else the launch fails. A range does not end `used_up` while a candidate is held so. No state beside the ledger: the hold is computed from the records on each fill.
 
 Not covered: a dependency no run names (merged by hand) or whose run the PR watch no longer reads holds nothing, and its candidate starts on the default branch as before; one-off dispatches also still start there.
+
+### 11.5 Step 5 as built: the belt's read fields (Issue 248)
+
+Built: `belt[]` on the read surface (spec section 12, table `Belt field`; `belt::read_belt`) and `pending[].stop_line`, `.range_id`, `.to` (table `Status field`). No record, event, verb or state beside the ledger: every field is computed in the read's transaction.
+
+| Part | As built |
+| --- | --- |
+| The rows | One per run with a `range_id` not `completed` or `abandoned`, by run id. A run with no range is not on the belt. |
+| `place`, `stage`, `since` | Those of the run's item in `ranges[].items[]`, by the one function that places it (`run_item`), so the belt and the list never disagree. |
+| `counts` | The rule the fill counts by (`counts_sql`, used by `range_count`): `queued`, `in_use` or `suspended`, and not waiting. |
+| The stop | The newest `belt_stopped` of the run whose entry is still `escalated`: `stop_line`, `stop_reason`, `pending_id`. |
+| `waits_for` | The Issues of the dispatch's wait less each one landed or let go, judged as `ahead::settle` judges them (`ahead::still_waits_for`, design review finding), whatever the waiting run's status: a failed one is on the belt too, so its landings are read from every run that may land the Issue (`ANY_LANDERS`), not only those `settle` acts on (diff review). |
+
+Departures from section 7, decided with the secretary's answer of 2026-11-26:
+
+- `belt[].place` and `.stage` use the words of 7.1 (`in_work`, `waiting_person`, `review`, and the stages there) instead of section 7's list, which had no place for a failed launch or a design-only run and did not tell `waiting_person` from `stopped`.
+- `pending[].range_id` is added: a stop of a whole range has no task, so its range cannot be found through `task_id`.
+- The test is `tests/belt_read.rs` with a table of its own, not new rows of `tests/read_surface.rs`.
+
+Not changed: `ranges[].items[].why` of a waiting item still names the oldest escalated entry, while `belt[]` names the newest stop; `runs[].waiting.issues` and the stage `waits_landing #<n>` still name the whole set of the dispatch. The text of `makiba status` does not show the belt.
