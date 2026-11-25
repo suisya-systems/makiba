@@ -2017,6 +2017,8 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
                 }
                 event("pr_merged", payload)?;
                 end_watches(w, repo, pr, "merged")?;
+                // Issue 432: a pending merge of a pull request that landed is nobody's to approve.
+                super::door::withdraw_merge_entries(w, task, repo, pr, None, false, "the pull request landed")?;
                 let at = v["mergedAt"].as_str().unwrap_or("an unknown time");
                 // A parked run whose pull request landed is brought back with that reason, and
                 // told (Issue 283).
@@ -2067,6 +2069,7 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
                     json!({"repo": repo, "pr": pr, "title": v["title"], "task_id": task}),
                 )?;
                 end_watches(w, repo, pr, "closed")?;
+                super::door::withdraw_merge_entries(w, task, repo, pr, None, false, "the pull request was closed")?;
                 super::verify::notify_secretary(
                     w,
                     Some(task),
@@ -4123,6 +4126,66 @@ esac"#,
         )
         .unwrap();
         assert_eq!(ended, 1, "the watching row of the current head ended");
+    }
+
+    /// Issue 432: a landing or a close read by the watch withdraws the pending merge of that pull
+    /// request in the same transaction, and tells the secretary; another pull request's is kept.
+    #[test]
+    fn a_landing_or_a_close_withdraws_the_pending_merge_of_its_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "2".repeat(40);
+        for t in ["t", "u"] {
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: t,
+                project_slug: "p",
+                status: Some("in_use"),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        register(&w, "pr_opened", "u", "o/r", 6, &head).unwrap();
+        let entry = |task: &str, pr: i64| -> i64 {
+            w.conn()
+                .execute(
+                    "INSERT INTO pending (run_id, kind, question, context_json)
+                     VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'merge', 'q', ?2)",
+                    params![
+                        task,
+                        json!({"repo": "o/r", "pr": pr, "head": head, "method": "squash"})
+                            .to_string()
+                    ],
+                )
+                .unwrap();
+            w.conn().last_insert_rowid()
+        };
+        let (landed, closed) = (entry("t", 5), entry("u", 6));
+        let status = |id: i64| -> String {
+            w.conn()
+                .query_row("SELECT status FROM pending WHERE id = ?1", [id], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let read = |state: &str| {
+            json!({"state": state, "title": "T", "mergedAt": "2026-11-23T00:00:00Z",
+                   "mergedBy": {"login": "owner"}, "headRefOid": head,
+                   "mergeCommit": {"oid": "m"}})
+        };
+        assert!(seen_read(&w, "t", "o/r", 5, read("MERGED")));
+        assert_eq!(status(landed), "withdrawn");
+        assert_eq!(status(closed), "open", "another pull request's entry stays");
+        assert!(seen_read(&w, "u", "o/r", 6, read("CLOSED")));
+        assert_eq!(status(closed), "withdrawn");
+        let told = count(
+            &w,
+            "SELECT count(*) FROM messages WHERE recipient = 'secretary' AND kind = 'notice'
+               AND body LIKE '%withdrew pending merge entry%'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(told, 2);
     }
 
     /// An attempt makibad took up is concluded on only by its own activation (Issue 427): a

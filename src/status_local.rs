@@ -51,6 +51,43 @@ pub fn read_here() -> Result<Value, String> {
     read(&crate::daemon::state_dir().join("state.db"))
 }
 
+/// The text of the open pending merge entry `id` in the `state.db` at `path`, read-only (Issue
+/// 432): what `makiba merge approve` prints, and whose SHA-256 its approval carries.
+pub fn merge_entry_text(path: &Path, id: i64) -> Result<String, String> {
+    let conn = open(path)?;
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind, status, context_json FROM pending WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read pending entry {id}: {e}"))?;
+    let Some((kind, status, context)) = row else {
+        return Err(format!("no pending entry {id} in state.db"));
+    };
+    if kind != "merge" {
+        return Err(format!("pending entry {id} is a {kind}, not a merge"));
+    }
+    if status != "open" {
+        return Err(format!("pending merge entry {id} is {status}, not open"));
+    }
+    let context: Value = serde_json::from_str(&context)
+        .map_err(|e| format!("pending merge entry {id} holds no readable context: {e}"))?;
+    context["text"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| format!("pending merge entry {id} holds no text"))
+}
+
+/// `merge_entry_text` of this organization's `state.db`, and the SHA-256 of that text, which
+/// `makiba merge approve` sends as `shown` (Issue 432).
+pub fn merge_entry_here(id: i64) -> Result<(String, String), String> {
+    let text = merge_entry_text(&crate::daemon::state_dir().join("state.db"), id)?;
+    let sum = crate::daemon::door::sha256_hex(&text);
+    Ok((text, sum))
+}
+
 /// Who reads the status, which decides where `merge_approval_mode` comes from (Issue 383).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reader {

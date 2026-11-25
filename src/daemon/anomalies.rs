@@ -220,6 +220,19 @@ impl Default for Anomalies {
     }
 }
 
+/// When the oldest `pending` entry still `open` for the secretary was created (milliseconds). A
+/// pending merge (Issue 432) waits for the person's key, not the secretary, so it does not count.
+fn open_entry_at(w: &StateWriter) -> Result<Option<i64>> {
+    Ok(w.conn().query_row(
+        &format!(
+            "SELECT MIN({}) FROM pending WHERE status = 'open' AND kind != 'merge'",
+            ms("created_at")
+        ),
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 /// `col` (a UTC text time) as milliseconds since the epoch.
 fn ms(col: &str) -> String {
     format!("CAST(ROUND((julianday({col}) - 2440587.5) * 86400000.0) AS INTEGER)")
@@ -386,14 +399,7 @@ fn evaluate(w: &StateWriter, open: &HashSet<Subject>, now: i64) -> Result<Vec<Su
         .optional()?;
     if let Some((generation, launched, spawn)) = latest {
         let scene = secretary_scene(w, launched, spawn.as_deref())?;
-        let open_entry_at: Option<i64> = w.conn().query_row(
-            &format!(
-                "SELECT MIN({}) FROM pending WHERE status = 'open'",
-                ms("created_at")
-            ),
-            [],
-            |r| r.get(0),
-        )?;
+        let open_entry_at = open_entry_at(w)?;
         for rule in secretary_rules(&scene, worker_anomaly, open_entry_at, now) {
             out.push(Subject {
                 task: None,
@@ -635,4 +641,37 @@ fn raise(w: &StateWriter, s: &Subject, now: &str) -> Result<()> {
         params![event, AGENT_SECRETARY],
     )?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 432: an open pending merge is the person's to approve; only the secretary's open
+    /// entries make it still.
+    #[test]
+    fn an_open_pending_merge_is_no_entry_the_secretary_leaves_waiting() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let add = |kind: &str, at: &str| {
+            w.conn()
+                .execute(
+                    "INSERT INTO pending (kind, question, created_at) VALUES (?1, 'q', ?2)",
+                    params![kind, at],
+                )
+                .unwrap();
+        };
+        add("merge", "2026-01-01T00:00:00.000Z");
+        assert_eq!(open_entry_at(&w).unwrap(), None);
+        add("question", "2026-01-02T00:00:00.000Z");
+        let at: i64 = w
+            .conn()
+            .query_row(
+                &format!("SELECT {}", ms("'2026-01-02T00:00:00.000Z'")),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(open_entry_at(&w).unwrap(), Some(at));
+    }
 }
