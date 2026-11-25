@@ -1583,9 +1583,10 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
             "json_extract(a.payload_json, '$.pr')"
         ),
     ))?;
-    let rows: Vec<(Followed, bool, bool)> = q
+    let rows: Vec<(i64, Followed, bool, bool)> = q
         .query_map([task], |r| {
             Ok((
+                r.get(0)?,
                 Followed {
                     task: r.get(1)?,
                     repo: r.get(2)?,
@@ -1601,8 +1602,10 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
         })?
         .collect::<std::result::Result<_, _>>()?;
     let mut out = Vec::new();
-    for (mut f, plain, attempted) in rows {
-        f.act = attempted && super::door::act_awaiting(c, &f.repo, f.pr)?.is_some();
+    for (run, mut f, plain, attempted) in rows {
+        // Each run records its own landing: another run's `pr_merged` of the same pull request
+        // does not end the act for this one.
+        f.act = attempted && super::door::act_awaiting_for(c, &f.repo, f.pr, Some(run))?.is_some();
         if plain || f.act {
             out.push(f);
         }
@@ -4105,6 +4108,78 @@ esac"#,
         assert_eq!(consumed().get(&11), Some(&2));
         assert!(!newer(&consumed(), 11, 2));
         assert!(newer(&consumed(), 11, 3));
+    }
+
+    /// Two runs completed two days ago follow one pull request only through makibad's act: the
+    /// landing one of them records does not end the act for the other, which is still followed
+    /// until it records its own (Issue 434).
+    #[test]
+    fn a_landing_of_one_run_keeps_the_act_for_another_run_of_the_pull_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        for t in ["a", "b"] {
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: t,
+                project_slug: "p",
+                status: Some("completed"),
+                ..Default::default()
+            })
+            .unwrap();
+            register(&w, "pr_opened", t, "o/r", 5, &head).unwrap();
+        }
+        w.conn()
+            .execute(
+                "UPDATE runs SET completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 days')",
+                [],
+            )
+            .unwrap();
+        let tasks = |w: &StateWriter| -> Vec<(String, bool)> {
+            followed(w.conn(), None)
+                .unwrap()
+                .into_iter()
+                .map(|f| (f.task, f.act))
+                .collect()
+        };
+        assert!(tasks(&w).is_empty(), "no act: not followed");
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            Some("a"),
+            json!({"repo": "o/r", "pr": 5, "head": head}),
+        );
+        let attempt: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        event(
+            &w,
+            "merge_done",
+            "makibad",
+            Some("a"),
+            json!({"attempt": attempt}),
+        );
+        assert_eq!(
+            tasks(&w),
+            vec![("a".to_string(), true), ("b".to_string(), true)]
+        );
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("a"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "merged_via": "gate"}),
+        );
+        assert_eq!(tasks(&w), vec![("b".to_string(), true)]);
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("b"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "merged_via": "gate"}),
+        );
+        assert!(tasks(&w).is_empty(), "both landed");
     }
 
     /// Both forms of the state read name github.com, so an inherited `GH_HOST` cannot send the

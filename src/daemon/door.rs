@@ -3478,6 +3478,18 @@ pub(super) fn act_awaiting(
     repo: &str,
     pr: i64,
 ) -> rusqlite::Result<Option<Awaiting>> {
+    act_awaiting_for(c, repo, pr, None)
+}
+
+/// `act_awaiting` for the run `run` (the PR watch's `followed`, Issue 434): only a `pr_merged` of
+/// that run ends the act, since each run that follows the pull request records its own landing;
+/// with `None`, a `pr_merged` of any run does.
+pub(super) fn act_awaiting_for(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+    run: Option<i64>,
+) -> rusqlite::Result<Option<Awaiting>> {
     let of_pr = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
                  AND json_extract(payload_json, '$.pr') = ?2";
     let newest: Option<(i64, Option<String>)> = c
@@ -3516,9 +3528,10 @@ pub(super) fn act_awaiting(
     };
     let ended: bool = c.query_row(
         &format!(
-            "SELECT EXISTS (SELECT 1 FROM events WHERE kind IN ({ends}) AND id > ?3 AND {of_pr})"
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind IN ({ends}) AND id > ?3 AND {of_pr}
+               AND (kind != 'pr_merged' OR ?4 IS NULL OR run_id = ?4))"
         ),
-        params![repo, pr, attempt],
+        params![repo, pr, attempt, run],
         |r| r.get(0),
     )?;
     Ok((!ended).then(|| Awaiting {
