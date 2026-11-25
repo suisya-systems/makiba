@@ -176,11 +176,12 @@ fn status_of(r: &Response) -> Option<&'static str> {
     }
 }
 
-/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`, `gate`).
+/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `base`, `config`,
+/// `gate`, `events`).
 pub fn has_tool(v: Verb) -> bool {
     !matches!(
         v,
-        Verb::Up | Verb::Down | Verb::Config | Verb::Gate | Verb::Events
+        Verb::Up | Verb::Down | Verb::Base | Verb::Config | Verb::Gate | Verb::Events
     )
 }
 
@@ -3458,6 +3459,33 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         }
         Err(_) => {}
     }
+    // Issue 513: helpers changed after the test commit and helpers the base changed after it,
+    // with the diff stat of each and of the declared paths the base merged in. A comparison that
+    // cannot be made is never read as "none".
+    if let Some(m) = v.manifest_commit.clone() {
+        let read = gate::helper_changes(&clone, &base, head, &m, &v.paths).and_then(|(c, b)| {
+            let own: Vec<&gate::Change> = c.iter().chain(v.merged_tests.iter()).collect();
+            let based: Vec<&gate::Change> = b.iter().collect();
+            let mut stats = gate::diff_stat(&clone, &m, head, &own)?;
+            stats.extend(gate::diff_stat(&clone, &format!("{m}^"), &base, &based)?);
+            Ok((c, b, stats))
+        });
+        match read {
+            Ok((c, b, stats)) => {
+                v.helpers_changed = c;
+                v.base_helpers = b;
+                v.helper_stats = stats;
+            }
+            Err(e) if v.result != "rejected" => {
+                v.result = "rejected".into();
+                v.reason = format!(
+                    "the test helpers at head and at the base could not be compared with those of the test commit: {}",
+                    e.0
+                );
+            }
+            Err(_) => {}
+        }
+    }
     // The merge order (Issue 331): read here, with no lock held, as every fetch of the gate. A
     // read that fails is never read as "not check-adding".
     let others: Vec<(String, i64)> = rows.others.iter().map(|o| (o.task.clone(), o.pr)).collect();
@@ -3661,6 +3689,25 @@ impl Door {
                 reason = format!("{reason}; {line}");
             }
         }
+        // Issue 513 (docs/design/helper-fix.md, option D): a helper changed after the test commit,
+        // a declared path the base merged in cleanly, or a helper the base changed after the test
+        // commit needs the person's key under either mode. Each line names the object ids it was
+        // judged from, so an approval shown other contents is refused (`shown_warnings`).
+        let lists = event.as_ref().map(|v| helper_lines(v)).unwrap_or_default();
+        for line in &lists {
+            if allow {
+                warn = true;
+                warnings.push(line.clone());
+                reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
+        let stats: Vec<String> = event
+            .as_ref()
+            .filter(|_| !lists.is_empty())
+            .map(|v| v.helper_stats.clone())
+            .unwrap_or_default();
         // Issue 331 (docs/design/merge-order.md 3.3): a pull request that may add or tighten a
         // check over tests/ waits while other open pull requests have test commits, whose declared
         // tests cannot change. Under acceptance no person is asked, so it is refused; under human
@@ -3813,6 +3860,17 @@ impl Door {
                 "question": language_q, "approved": language_ok,
             });
         }
+        if let Some(v) = &event {
+            for (key, list) in [
+                ("helpers_changed", &v.helpers_changed),
+                ("merged_tests", &v.merged_tests),
+                ("base_helpers", &v.base_helpers),
+            ] {
+                if !list.is_empty() {
+                    payload[key] = json!(list.iter().map(|c| &c.path).collect::<Vec<_>>());
+                }
+            }
+        }
         if order.holds() || order.person_holds() {
             payload["merge_order"] = json!({
                 "paths": order.paths,
@@ -3868,7 +3926,7 @@ impl Door {
         // here, then the pause rule, then the fill (belt.md 3.4), all with the verdict's record.
         let mut pending_id = None;
         if let Some(t) = now.task.as_deref().filter(|_| range.is_some())
-            && (!allow || !edited.is_empty())
+            && (!allow || !edited.is_empty() || !lists.is_empty())
         {
             let stop = super::belt::GateStop {
                 task: t,
@@ -3879,6 +3937,7 @@ impl Door {
                 refused: !allow && verdict != "tests_edited",
                 reason: &reason,
                 edited_tests: &edited,
+                helpers: &lists,
             };
             // A refusal for the language check asks the gate's own question (Issue 339), so the
             // person's answer to the stop is the approval.
@@ -3902,7 +3961,13 @@ impl Door {
         // its tests stop too when no edited test is reported any more.
         if allow
             && range.is_some()
-            && let Err(e) = super::belt::gate_allowed(w, &repo, pr, &head, edited.is_empty())
+            && let Err(e) = super::belt::gate_allowed(
+                w,
+                &repo,
+                pr,
+                &head,
+                edited.is_empty() && lists.is_empty(),
+            )
         {
             let _ = w.rollback();
             return Err(internal(format!("the stop could not be withdrawn: {e}")));
@@ -3926,6 +3991,7 @@ impl Door {
             allow,
             warn,
             warnings,
+            stats,
             verdict,
             reason,
             mode,
@@ -3985,6 +4051,8 @@ struct Judged {
     warn: bool,
     /// Each warning of `warn`, one line each.
     warnings: Vec<String>,
+    /// The `git diff --stat` lines of the paths of the Issue 513 warnings, for the entry's text.
+    stats: Vec<String>,
     verdict: String,
     reason: String,
     mode: &'static str,
@@ -4220,6 +4288,45 @@ fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError
     Ok(task)
 }
 
+/// The warning lines of Issue 513 for verdict `v`, one per non-empty list, each path with the
+/// object ids it was judged from (`none` for a missing entry).
+fn helper_lines(v: &super::gate::Verdict) -> Vec<String> {
+    let list = |items: &[super::gate::Change], names: &[&str]| -> String {
+        items
+            .iter()
+            .map(|c| {
+                let ids: Vec<String> = names
+                    .iter()
+                    .zip(&c.ids)
+                    .map(|(n, id)| format!("{n} {id}"))
+                    .collect();
+                format!("{} ({})", c.path, ids.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let mut lines = Vec::new();
+    if !v.helpers_changed.is_empty() {
+        lines.push(format!(
+            "test helpers changed after the test commit, which no rule can tell a fix from a weakening: {}",
+            list(&v.helpers_changed, &["test commit", "head"])
+        ));
+    }
+    if !v.merged_tests.is_empty() {
+        lines.push(format!(
+            "declared tests that head holds as git's clean merge of the test commit and the base: {}",
+            list(&v.merged_tests, &["test commit", "base", "head"])
+        ));
+    }
+    if !v.base_helpers.is_empty() {
+        lines.push(format!(
+            "test helpers the base changed after the test commit was made, with which the declared test was never shown failing: {}",
+            list(&v.base_helpers, &["test commit's parent", "base"])
+        ));
+    }
+    lines
+}
+
 /// The text of a pending merge entry (Issue 432, merge-act.md section 5.1): exactly what
 /// `makiba merge approve` prints, whose SHA-256 the approval carries as `shown`.
 #[allow(clippy::too_many_arguments)]
@@ -4232,6 +4339,7 @@ fn merge_entry_text(
     method: &str,
     reason: &str,
     warnings: &[String],
+    stats: &[String],
     requested_by: &str,
 ) -> String {
     let mut text = format!(
@@ -4239,6 +4347,9 @@ fn merge_entry_text(
     );
     for w in warnings {
         text.push_str(&format!("Warning: {w}\n"));
+    }
+    for line in stats {
+        text.push_str(&format!("Diff: {line}\n"));
     }
     text.push_str(&format!("Requested by: {requested_by}\n"));
     text
@@ -4272,6 +4383,7 @@ fn merge_entry_context(
         method,
         &j.reason,
         &j.warnings,
+        &j.stats,
         requested_by,
     );
     Ok(json!({

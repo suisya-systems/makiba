@@ -443,8 +443,9 @@ impl Prepare {
             ));
         }
         let dir = self.hooks_dir()?;
-        let exe = std::env::current_exe().map_err(|e| format!("the scanner's program: {e}"))?;
-        crate::hooks::git_hook::install(&dir, &exe)
+        let exe = super::exe::started_path()
+            .ok_or("the scanner's program: cannot tell the path of makiba's own executable")?;
+        crate::hooks::git_hook::install(&dir, exe)
             .map_err(|e| format!("the secret scanner's hooks in {}: {e}", dir.display()))?;
         let want = dir.to_string_lossy().into_owned();
         let local = git(&["config", "--local", "--get", "core.hooksPath"])?;

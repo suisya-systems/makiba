@@ -7,6 +7,10 @@
 //! - A test that was there before the test commit, is not declared and differs at head is
 //!   reported: `tests_edited` and refused under `acceptance`, allowed with `warn` under `human`,
 //!   and a stop of line `tests` for a range task. A change the base brought is not one.
+//! - A test helper (Issue 513: under `tests/`, not a test target) changed after the test commit,
+//!   or changed by the base after it, is no edited test: it is allowed with `warn` under either
+//!   mode (the person's key decides) and is a stop of line `tests` for a range task, a new one
+//!   when what it names changes at the same head.
 //! - A refusal of a range task's pull request is a stop of line `gate`, whatever the range's mode.
 //!
 //! The helpers are those of `tests/gate_review_state.rs`, copied (that file keeps its own): the
@@ -165,6 +169,10 @@ impl Case {
                 (".github/workflows/ci.yml", Some("on: push\n")),
                 (
                     "tests/other.py",
+                    Some("def test_other():\n    assert True\n"),
+                ),
+                (
+                    "tests/test_other.py",
                     Some("def test_other():\n    assert True\n"),
                 ),
             ],
@@ -545,14 +553,14 @@ fn landable(name: &str) -> (Case, String) {
     (c, head)
 }
 
-/// A test-first pull request 7 that also edits `tests/other.py`, a test of the base it does not
-/// declare, after its test commit; passed CI, tied to `t1`, its head reviewed clean.
+/// A test-first pull request 7 that also edits `tests/test_other.py`, a test of the base it does
+/// not declare, after its test commit; passed CI, tied to `t1`, its head reviewed clean.
 fn edits_a_test(name: &str) -> (Case, String) {
     let c = Case::new(name);
     c.land();
     c.commit(
         "touch another test",
-        &[("tests/other.py", Some(OTHER_EDITED))],
+        &[("tests/test_other.py", Some(OTHER_EDITED))],
     );
     let head = c.ci_all(7);
     c.tie(7, &head, "code");
@@ -671,13 +679,13 @@ fn an_edited_test_is_refused_under_acceptance_and_is_a_stop_of_its_own_line() {
         (&json!("tests_edited"), &json!(false)),
         "{v}"
     );
-    assert!(reason(&v).contains("tests/other.py"), "{v}");
+    assert!(reason(&v).contains("tests/test_other.py"), "{v}");
     assert!(
         !reason(&v).contains("tests/test_calc.py"),
         "the declared test is not an edited one: {v}"
     );
     let e = c.gate_events().pop().unwrap();
-    assert_eq!(e["edited_tests"], json!(["tests/other.py"]), "{e}");
+    assert_eq!(e["edited_tests"], json!(["tests/test_other.py"]), "{e}");
     assert_eq!(
         (&e["result"], &e["allow"]),
         (&json!("passed"), &json!(false)),
@@ -707,7 +715,7 @@ fn an_edited_test_is_asked_for_under_human_and_is_a_stop_all_the_same() {
         (&json!("passed"), &json!(true), &json!(true)),
         "{v}"
     );
-    assert!(reason(&v).contains("tests/other.py"), "{v}");
+    assert!(reason(&v).contains("tests/test_other.py"), "{v}");
     let stops = c.stops();
     assert_eq!(stops.len(), 1, "{stops:?}");
     assert_eq!(stops[0].0, "tests");
@@ -745,7 +753,7 @@ fn a_test_the_base_changed_is_not_an_edited_test() {
     }
     let mut c = Case::new("bgbase");
     c.land();
-    move_base(&mut c, &[("tests/other.py", Some(OTHER_EDITED))]);
+    move_base(&mut c, &[("tests/test_other.py", Some(OTHER_EDITED))]);
     merge_base_in(&c, &[]);
     let head = c.ci_all(7);
     c.tie(7, &head, "code");
@@ -791,4 +799,101 @@ fn a_refusal_before_the_git_checks_is_recorded_and_pins_nothing() {
         (&json!("passed"), &json!(true)),
         "{v}"
     );
+}
+
+// ---- test helpers (Issue 513) -------------------------------------------------------------------
+
+/// A helper edited after the test commit is no edited test: under `acceptance` the pull request
+/// is allowed with `warn` (the person's key decides), and for a range task it is a stop.
+#[test]
+fn a_helper_edited_after_the_test_commit_of_a_range_task_is_a_warning_and_a_stop() {
+    if !in_mode(
+        "acceptance",
+        "a_helper_edited_after_the_test_commit_of_a_range_task_is_a_warning_and_a_stop",
+    ) {
+        return;
+    }
+    let c = Case::new("bghelper");
+    c.land();
+    c.commit("touch a helper", &[("tests/other.py", Some(OTHER_EDITED))]);
+    let head = c.ci_all(7);
+    c.tie(7, &head, "code");
+    c.clean_review(&head);
+    c.in_range("acceptance");
+    let v = c.gate_at(7, &head);
+    assert_eq!(
+        (&v["verdict"], &v["allow"], &v["warn"]),
+        (&json!("passed"), &json!(true), &json!(true)),
+        "{v}"
+    );
+    let e = c.gate_events().pop().unwrap();
+    assert_eq!(e["helpers_changed"], json!(["tests/other.py"]), "{e}");
+    assert!(e["edited_tests"].is_null(), "{e}");
+    let stops = c.stops();
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(
+        (stops[0].0.as_str(), stops[0].1.as_str()),
+        ("tests", "escalated")
+    );
+    assert_eq!(v["pending_id"], json!(stops[0].2), "{v}");
+}
+
+/// A helper the base changed after the test commit is a warning and a stop; a second change of
+/// it by the base, the head unchanged, is a new stop, and the first is withdrawn.
+#[test]
+fn a_helper_the_base_changed_twice_is_a_new_stop_each_time() {
+    if !in_mode(
+        "acceptance",
+        "a_helper_the_base_changed_twice_is_a_new_stop_each_time",
+    ) {
+        return;
+    }
+    let mut c = Case::new("bgbasehelper");
+    c.land();
+    let head = c.ci_all(7);
+    c.tie(7, &head, "code");
+    c.clean_review(&head);
+    c.in_range("acceptance");
+    move_base(&mut c, &[("tests/other.py", Some(OTHER_EDITED))]);
+    let v = c.gate_at(7, &head);
+    assert_eq!(
+        (&v["verdict"], &v["allow"], &v["warn"]),
+        (&json!("passed"), &json!(true), &json!(true)),
+        "{v}"
+    );
+    let e = c.gate_events().pop().unwrap();
+    assert_eq!(e["base_helpers"], json!(["tests/other.py"]), "{e}");
+    let stops = c.stops();
+    assert_eq!(stops.len(), 1, "{stops:?}");
+    assert_eq!(
+        (stops[0].0.as_str(), stops[0].1.as_str()),
+        ("tests", "escalated")
+    );
+    assert_eq!(v["pending_id"], json!(stops[0].2), "{v}");
+    let first = stops[0].2;
+
+    move_base(
+        &mut c,
+        &[("tests/other.py", Some("def test_other():\n    pass\n"))],
+    );
+    let v = c.gate_at(7, &head);
+    assert_eq!(
+        (&v["allow"], &v["warn"]),
+        (&json!(true), &json!(true)),
+        "{v}"
+    );
+    let stops = c.stops();
+    assert_eq!(stops.len(), 2, "{stops:?}");
+    assert_eq!(
+        (stops[0].2, stops[0].1.as_str()),
+        (first, "withdrawn"),
+        "{stops:?}"
+    );
+    assert_eq!(
+        (stops[1].0.as_str(), stops[1].1.as_str()),
+        ("tests", "escalated"),
+        "{stops:?}"
+    );
+    assert_ne!(stops[1].2, first);
+    assert_eq!(v["pending_id"], json!(stops[1].2), "{v}");
 }

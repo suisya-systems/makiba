@@ -144,6 +144,13 @@ pub enum Command {
         #[arg(long)]
         stop_base: bool,
     },
+    /// `upgrade`: take the base release this makiba pins, asking once before the base's
+    /// terminals end. From a login shell.
+    Base {
+        action: String,
+        #[arg(long)]
+        no_secretary: bool,
+    },
     /// Runs, terminals, anomalies, pending entries, PR watches and the heartbeat, from state.db.
     Status {
         #[arg(long)]
@@ -445,6 +452,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
     Ok(match c {
         Command::Up { .. }
         | Command::Down { .. }
+        | Command::Base { .. }
         | Command::Status { .. }
         | Command::Events { .. } => {
             return Err("this verb runs locally, not over the door".into());
