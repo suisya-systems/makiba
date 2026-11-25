@@ -164,6 +164,7 @@ pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
         };
     }
     v["ranges"] = Value::Array(ranges);
+    v["belt"] = Value::Array(crate::daemon::belt::read_belt(&conn).map_err(sql)?);
     v["next_work"] = next_work(&conn).map_err(sql)?;
     Mask::new(&conn).value(&mut v);
     Ok(v)
@@ -512,6 +513,17 @@ fn pending(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         }
         let stored = m.remove("context_json").unwrap_or_default();
         m.insert("context".into(), context(&stored, screen));
+        // The stop it is (belt.md 7): words `makibad` writes, never a screen's, so also printed
+        // for an entry made from a screen.
+        let parsed: Value =
+            serde_json::from_str(stored.as_str().unwrap_or("{}")).unwrap_or_default();
+        for key in ["stop_line", "range_id", "to"] {
+            let v = match &parsed[key] {
+                Value::String(_) | Value::Number(_) => parsed[key].clone(),
+                _ => Value::Null,
+            };
+            m.insert(key.into(), v);
+        }
     }
     Ok(out)
 }

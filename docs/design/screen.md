@@ -369,7 +369,7 @@ One point where the owner's words and the record differ: the owner lists "matchi
 | The card's one-line heading | The kind of entry and the task's title: for a range's stop, `ranges[].stops[].kind` ("A decision on design", "on scope", ...) and `ranges[].items[].title` by the entry's `task_id`; for another question, "A question" and the task id; for a permission prompt, "A permission prompt" and the task id. Never a cut copy of the question | Today (a title for a task outside a range is missing, section 6: `runs[].title`) |
 | Background, what each answer does, the recommendation and why | `pending[].context.background`, `.if_yes`, `.if_no`, `.recommend`, `.why` | Today |
 | Which answer is the recommended one (the highlighted box) | `ranges[].stops[].recommend_answer`, by the entry's id | Today for a range's stop; for other entries the recommendation is shown as text only |
-| Its range and stop line | `pending[].stop_line`, `.to` | Missing (belt step 5); until then, from `ranges[].stops[]` |
+| Its range and stop line | `pending[].stop_line`, `.range_id`, `.to` | Today (belt step 5, Issue 248) |
 | A permission prompt | `pending[].kind`; first line only, no context (the read surface shows no more) | Today; the row says "a permission prompt, no context recorded" |
 
 One entry is shown large. Several are a list, oldest first, and the one opened is shown large. Entries `open` (the secretary has not escalated them) are not the person's yet: the screen shows only `escalated` ones as waiting, and counts the open ones in one quiet line ("2 with the secretary").
@@ -595,7 +595,7 @@ Each is a small addition to `status --json` (or `events`) with a row in the tabl
 | H | `ranges[].repo`: the repository the belt resolved for the range | The match of a range's items with `next_work`, and `OWNER/NAME#N` | With a null repository the screen matches by the project's slug and the number, and writes `<project>#N`. |
 | I | `events --task <task_id>` | The trail of an old run | The screen keeps what it has read; a run older than its memory is read again from event 0. |
 | J | `ranges[].items[].since` of a review item as the time it went into review (today it is the dispatch) | "Active now": how long a task has been in review | The age of the task's newest pull-request event, from the events. |
-| - | `pending[].stop_line`, `.to`, and the `belt[]` rows (belt.md section 7, step 5) | The entry's range; what stopped and why, per task | Read from `ranges[].stops[]` and `ranges[].items[]`, which cover a first version. |
+| - | `pending[].stop_line`, `.range_id`, `.to`, and the `belt[]` rows (belt.md section 7, step 5) | The entry's range; what stopped and why, per task | Built (Issue 248, belt.md 11.5). |
 | - | `closed_today[]`, or runs closed since a time | "Closed today", "Merged today" | Folded from `run_closed` and `pr_merged`. |
 
 The rule behind the list: the screen states nothing `makibad` could state. Folding events in the screen is accepted for the trail, which is the events, and is a stopgap everywhere else.
