@@ -3879,11 +3879,14 @@ impl Door {
 }
 
 /// The question the person answers for a change to the language check of `repo`#`pr` (Issue
-/// 339), word for word: each file of `language` with its mode and object id at head.
+/// 339), word for word: each file of `language` with its mode and object id at head. The
+/// repository is written in lower case, as the gate matches repositories in any case, so that
+/// one approval holds however the repository was named.
 fn language_question(repo: &str, pr: i64, language: &[super::gate::LanguageEntry]) -> String {
     let words: Vec<String> = language.iter().map(|e| e.words()).collect();
     format!(
-        "Approve the change to the language check of {repo}#{pr}: {}",
+        "Approve the change to the language check of {}#{pr}: {}",
+        repo.to_lowercase(),
         words.join(", ")
     )
 }
