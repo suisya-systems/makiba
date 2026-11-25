@@ -52,7 +52,7 @@ The decision behind these steps is [`docs/design/base-upgrade.md`](design/base-u
 There is no automatic rollback, and the order matters, because the old makiba refuses the new core:
 
 1. With the **new** makiba, by its path: `makiba down --secretary --stop-base`.
-2. Put the old file back: copy `<state>/base/herdr-core-<old version>` over the program `hc` runs (both paths are in the verb's "to go back" line).
+2. Put the old file back: copy `<state>/base/herdr-core-<old version>` into the folder of the program `hc` runs under a new name, then `mv` that copy over the program (both paths are in the verb's "to go back" line). A `cp` straight over it fails with "Text file busy" while a core of another session still runs that file; a rename within the folder does not.
 3. Reinstall or rebuild the old makiba.
 4. The old makiba's `up`, by its path.
 
