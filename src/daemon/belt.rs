@@ -1416,7 +1416,7 @@ fn dep_runs(c: &Connection, slug: &str, d: i64) -> Result<Vec<DepRun>> {
 /// names, or whose run the watch no longer reads, holds nothing.
 fn landings(c: &Connection, slug: &str, body: &str) -> Result<Option<Vec<Landed>>> {
     let mut out = Vec::new();
-    for d in refs_on_lines(body, "depends on") {
+    for d in admitted_dependencies(body) {
         for r in dep_runs(c, slug, d)? {
             if r.merged {
                 let Some(merge) = r.seen else {
@@ -1454,7 +1454,7 @@ fn held_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
         .collect::<std::result::Result<_, _>>()?;
     let mut out: Vec<CloneCheck> = Vec::new();
     for (slug, branch, body) in rows {
-        for d in refs_on_lines(&body, "depends on") {
+        for d in admitted_dependencies(&body) {
             for r in dep_runs(w.conn(), &slug, d)? {
                 if !r.merged || r.seen.is_some() {
                     continue;
@@ -1827,6 +1827,39 @@ impl Takes {
             }
         })
     }
+}
+
+/// The Issues of the repository `repo` (`owner/name`) the body depends on, read by the one parser
+/// of dependency lines (`work_discovery::refs::dependency_lines`, Issue 356): every keyword
+/// (`Blocked by`, `Depends on`, `Requires`) behind any Markdown lead, and inside a line. `Err`
+/// says why they cannot be read: a dependency line not read whole, or a dependency of another
+/// repository, whose state the range does not read.
+fn dependencies(body: &str, repo: &str) -> std::result::Result<Vec<i64>, String> {
+    let d = crate::work_discovery::refs::dependency_lines(body);
+    if let Some(line) = d.unreadable {
+        return Err(line);
+    }
+    let mut out = d.home;
+    for (r, n) in d.cross {
+        if !r.eq_ignore_ascii_case(repo) {
+            return Err(format!("{r}#{n} is of another repository"));
+        }
+        out.push(n);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The dependencies of an admitted candidate's body: home and cross refs alike, since `admit`
+/// leaves out a body naming another repository's Issue.
+fn admitted_dependencies(body: &str) -> Vec<i64> {
+    let d = crate::work_discovery::refs::dependency_lines(body);
+    let mut out = d.home;
+    out.extend(d.cross.into_iter().map(|(_, n)| n));
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The `#<n>` numbers of the body's lines that start with `prefix` (any case).
@@ -2336,7 +2369,8 @@ fn read(gh: &str, s: &Spec, repos_dir: &Path, cancel: &AtomicBool) -> ReadResult
             && !refs_on_lines(i["body"].as_str().unwrap_or(""), "follow-up of").is_empty();
         if s.listed.contains(&n) || s.takes.matches(i) || follow_up {
             need.extend(
-                refs_on_lines(i["body"].as_str().unwrap_or(""), "depends on")
+                dependencies(i["body"].as_str().unwrap_or(""), &repo)
+                    .unwrap_or_default()
                     .into_iter()
                     .filter(|d| !open_numbers.contains(d)),
             );
@@ -2579,11 +2613,12 @@ fn admit(
         if why.is_none() && followed.contains(&n) {
             why = kept_out(&body);
         }
+        let deps = dependencies(&body, &f.repo);
         if why.is_none()
-            && let Some(line) = crate::work_discovery::refs::dependency_line_with_no_number(&body)
+            && let Err(line) = &deps
         {
-            // A dependency in words is not read as none (Issue 299): the line must name `#<n>`.
-            // The range's own records come first, so a skipped one does not hold the range open.
+            // A dependency line not read whole is not read as none (Issues 299, 356). The range's
+            // own records come first, so a skipped one does not hold the range open.
             why = Some(match records_why(w, s, n)? {
                 Some(r) => r,
                 None => format!("dependency_unreadable ({line})"),
@@ -2591,7 +2626,7 @@ fn admit(
         }
         let mut waits = None;
         if why.is_none() {
-            let deps: Vec<i64> = refs_on_lines(&body, "depends on");
+            let deps: Vec<i64> = deps.unwrap_or_default();
             let waiting: Vec<i64> = deps
                 .into_iter()
                 .filter(|d| {
@@ -2614,14 +2649,19 @@ fn admit(
             if ahead {
                 waits = Some(waiting);
             } else if !waiting.is_empty() {
-                why = Some(format!(
-                    "waits_for {}",
-                    waiting
-                        .iter()
-                        .map(|d| format!("#{d}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
+                // The range's own records come first here too (Issue 356): a skipped candidate
+                // does not hold the range open while its dependency is open.
+                why = Some(match records_why(w, s, n)? {
+                    Some(r) => r,
+                    None => format!(
+                        "waits_for {}",
+                        waiting
+                            .iter()
+                            .map(|d| format!("#{d}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                });
             }
         }
         if why.is_none()
@@ -4282,10 +4322,24 @@ pub(in crate::daemon) mod tests {
 
     #[test]
     fn only_the_lines_that_start_with_the_word_are_read() {
-        let body =
-            "Depends on #3 and #4\nThis mentions depends on #5\n  depends on: #6\nFollow-up of #7";
-        assert_eq!(refs_on_lines(body, "depends on"), vec![3, 4, 6]);
+        let body = "Follow-up of #7\nThis is a follow-up of #8";
         assert_eq!(refs_on_lines(body, "follow-up of"), vec![7]);
+    }
+
+    /// The range reads dependencies through the one parser (Issue 356).
+    #[test]
+    fn dependencies_are_read_by_the_one_parser() {
+        let body = "Depends on #3 and #4\n  depends on: #6\n- Blocked by o/R#9\n> **Requires** #10";
+        assert_eq!(dependencies(body, "o/r"), Ok(vec![3, 4, 6, 9, 10]));
+        assert_eq!(admitted_dependencies(body), vec![3, 4, 6, 9, 10]);
+        assert!(dependencies("Depends on other/x#5", "o/r").is_err());
+        // Only the one form is read: a keyword inside prose with a ref, or a URL, is not.
+        assert!(dependencies("This mentions depends on #5", "o/r").is_err());
+        assert!(dependencies("Depends on https://github.com/o/r/issues/30", "o/r").is_err());
+        assert_eq!(
+            dependencies("- Depends on the previous step.", "o/r"),
+            Err("- Depends on the previous step.".to_string())
+        );
     }
 
     /// A completed run `dep` and a design-only run `wait` waiting for it (Issue 345 tests).
