@@ -71,8 +71,11 @@ else:
         if x["repo"] is None: continue
         groups.setdefault((x["repo"].lower(), x["issue"], x["kind"], x["reason"]), []).append(x["project"])
     for (repo, issue, kind, _), got in groups.items():
+        # A project with no repository recorded may still own it through its clone's origin, which
+        # status does not print: such a slug may be among the entries, never required.
         want = owners.get(repo, [None])
-        if sorted(got, key=str) != sorted(want, key=str):
+        may = set(want) | {x["slug"] for x in s["projects"] if not x["repo"]}
+        if not set(want) <= set(got) or not set(got) <= may or len(got) != len(set(got)):
             bad.append(f"left_out {repo}#{issue} {kind}: projects {got} != the projects of the repository {want}")
 ids = [x["id"] for x in ev]
 if ids != sorted(ids) or len(set(ids)) != len(ids): bad.append("event ids are not increasing")
