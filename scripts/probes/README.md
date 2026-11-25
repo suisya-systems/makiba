@@ -102,6 +102,12 @@ The workplace is made a git repository with two untracked files (`out/draft.txt`
 
 The other outcomes: NEEDS-HUMAN when no call was logged for the step and no prompt was shown (the model did not make the call; it is not a pass), or when the hook answered as expected but its effect does not match (written or staged another way). FAIL when a prompt for the call was shown, or the call took effect, with no hook call logged (Claude Code did not call the hook); when the hook's exit code is not the one expected; when any hook exited with a code other than 0 or 2 (Claude Code takes it as a pass); or when another hook of the group refused a control. `<scratch>/outside` is inside the sandbox's write surface (`$TMPDIR`), so for the Write cases nothing but the hook can be what refuses. `PROBE_STEPS="2 5"` asks only the steps named (1 to 5); the others are NOT-RUN and the SUMMARY says the run was partial. The output also goes to `<result-dir>/hook-call-run.log`; the call log is printed in full, and the whole screen is kept as `<result-dir>/hook-call-screen.txt`. An OBSERVE line counts the screen lines naming `PreToolUse` or a hook. Written without a host run: that the model makes these calls when asked plainly, and the screen shape of a hook's refusal, are guesses until the first host run.
 
+## P16 `p16-review-read-boundary.sh <dir>` (Issue 262)
+
+Needs `cargo`, `bwrap`, `codex` and `claude` (both logged in) besides what every probe needs. Runs the two ignored tests of `tests/review_read_boundary.rs`, each in a cargo process of its own: `stand-in-readers` (stand-in readers inside the real bubblewrap try a decoy in a scratch home, a decoy in the state folder and the decoy person key, which the test reads outside first) and `real-readers` (the real codex, then the real claude as the fallback, each asked by the design note to read a decoy in `$HOME` and one in the state folder). The real readers use the person's own logins, which makibad binds into the round's home; the decoys are removed after the test. Each test's output goes into the result file.
+
+Pass: `stand-in-readers` PASS and `real-readers` PASS. A `real-readers` FAIL whose answer names `fresh-session` for the first run means codex did not run inside the boundary (its own nested sandbox, or a login it could not refresh): read its `fallback_reason` in the result file.
+
 ## TODO(confirm)
 
 Lines that use an `hc` or Claude Code feature not shown in paddock's measured scripts or `hc --help`, each marked `TODO(confirm)` in the source:

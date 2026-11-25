@@ -13,6 +13,14 @@
 //! with the hardened git of `run_repo`, never a value the worker wrote) and the diff from the
 //! project clone's base into a folder of its own under `<state>/tmp`, and removes it after.
 //!
+//! Both readers run inside an OS-level boundary that makibad sets up outside the reader's own
+//! program (Issue 262): bubblewrap (`MAKIBA_REVIEW_BOUNDARY`, default `bwrap`) with a mount plan
+//! of its own (`bounded_reader`). The reader sees the system folders, its program's own folders,
+//! the round's tree (read-only), its scratch and settings, and a home of the round holding, of
+//! the person's home, only its login (and codex's configuration, read-only); the keys, the state
+//! folder, the credentials, the base's folders and both readers' configuration are covered where
+//! a folder given holds them. When the boundary cannot start, no reader runs (fail closed).
+//!
 //! An answer is `passed` (established) only when the reader exited 0, opened at least one file
 //! of the change under review (the diff file or a file it changes; for a design the note), judged
 //! from its recorded commands or tool calls (a recognised read command with the file among its
@@ -44,12 +52,14 @@ pub const NOTE_FILE: &str = "MAKIBA_DESIGN.md";
 
 const FORM: &str = "List each finding on its own line as `[Blocker] <file>:<line> - <finding> - <fix>` (or `[Major]`, `[Minor]`). Blocker: wrong or unsafe, must be fixed. Major: should be fixed before it lands. Minor: may be left. Do not change any file. End with exactly one line `FINDINGS: blocker=<n> major=<n> minor=<n>`.";
 
-/// The two programs, read when makibad starts (`MAKIBA_REVIEW_OTHER`, default `codex`;
-/// `MAKIBA_REVIEW_SAME`, default `claude`) so that no request can choose them.
+/// The two programs and the boundary they run in, read when makibad starts
+/// (`MAKIBA_REVIEW_OTHER`, default `codex`; `MAKIBA_REVIEW_SAME`, default `claude`;
+/// `MAKIBA_REVIEW_BOUNDARY`, default `bwrap`) so that no request can choose them.
 #[derive(Clone, Debug)]
 pub struct Programs {
     pub other: PathBuf,
     pub same: PathBuf,
+    pub boundary: PathBuf,
 }
 
 impl Programs {
@@ -63,6 +73,7 @@ impl Programs {
         Programs {
             other: var("MAKIBA_REVIEW_OTHER", "codex"),
             same: var("MAKIBA_REVIEW_SAME", "claude"),
+            boundary: var("MAKIBA_REVIEW_BOUNDARY", "bwrap"),
         }
     }
 }
@@ -84,14 +95,56 @@ fn name(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-/// Which readers can start: the other model's program (or why not) and the same model's.
+/// Which readers can start: the boundary they run in (or why it cannot start), the other
+/// model's program (or why not) and the same model's.
 pub struct Plan {
+    pub boundary: Result<PathBuf, String>,
     pub other: Result<PathBuf, String>,
     pub same: Option<PathBuf>,
 }
 
+/// Can the boundary make its namespaces here? It is asked to run `true` in one.
+fn boundary_starts(p: &Path) -> Result<PathBuf, String> {
+    let path = resolve(p).ok_or_else(|| format!("{} not on PATH", name(p)))?;
+    let mut c = Command::new(&path);
+    c.args([
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--unshare-pid",
+        "--die-with-parent",
+        "--",
+        "true",
+    ]);
+    match bounded(c, None, Duration::from_secs(30)) {
+        Ok(r) if r.ok => Ok(path),
+        Ok(r) => Err(first_line(&r.err)
+            .unwrap_or("it exited with a failure")
+            .to_string()),
+        Err(e) => Err(e),
+    }
+}
+
 impl Plan {
     pub fn find(p: &Programs) -> Plan {
+        let boundary = boundary_starts(&p.boundary).map_err(|why| {
+            format!(
+                "the reader's boundary {} cannot start: {why}",
+                name(&p.boundary)
+            )
+        });
+        if let Err(why) = &boundary {
+            // No reader runs outside the boundary (Issue 262): nothing else is asked.
+            return Plan {
+                boundary: Err(why.clone()),
+                other: Err(why.clone()),
+                same: None,
+            };
+        }
         let other = match resolve(&p.other) {
             None => Err(format!("{} not on PATH", name(&p.other))),
             Some(path) => {
@@ -109,12 +162,16 @@ impl Plan {
             }
         };
         Plan {
+            boundary,
             other,
             same: resolve(&p.same),
         }
     }
 
     pub fn none(&self) -> Option<String> {
+        if let Err(why) = &self.boundary {
+            return Some(why.clone());
+        }
         match (&self.other, &self.same) {
             (Err(why), None) => Some(format!("{why}; the same model's program not on PATH")),
             _ => None,
@@ -785,14 +842,277 @@ fn same_settings(places: &Places, snap: &Snapshot) -> Result<PathBuf, String> {
     Ok(file)
 }
 
-fn run_other(
+/// Which reader a boundary is made for: the files of the person's home it is given differ.
+#[derive(Clone, Copy, PartialEq)]
+enum Reader {
+    Other,
+    Same,
+}
+
+/// The system folders every reader sees, read-only (when they exist).
+const SYSTEM: [&str; 7] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc"];
+
+/// The person's home as makibad has it.
+fn person_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `p` with a leading `~` read as the person's home.
+fn expand(p: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    match (p.strip_prefix("~"), home) {
+        (Ok(rest), Some(h)) => Some(h.join(rest)),
+        (Ok(_), None) => None,
+        (Err(_), _) => Some(std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())),
+    }
+}
+
+/// `$var`, else `<home>/<default>`: a reader's own configuration folder.
+fn config_dir(var: &str, home: Option<&Path>, default: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(default)))
+}
+
+/// The places no reader may see, also where a folder it is given holds them: the keys, the
+/// state folder, the person's credentials, the base's folders and both readers' configuration.
+fn denied(places: &Places, home: Option<&Path>) -> Vec<PathBuf> {
+    let (cred_dirs, cred_files) = super::prepare::credentials();
+    let mut out: Vec<PathBuf> = vec![crate::cli::person_key_path(), crate::cli::gate_key_path()];
+    if let Some(state) = places.state_db.parent() {
+        out.push(state.to_path_buf());
+    }
+    out.extend(cred_dirs.into_iter().chain(cred_files));
+    let base = crate::base::worker_denies();
+    out.extend(base.resolved.into_iter().chain(base.folders));
+    out.push(PathBuf::from("~/.claude.json"));
+    out.extend(config_dir("CODEX_HOME", home, ".codex"));
+    out.extend(config_dir("CLAUDE_CONFIG_DIR", home, ".claude"));
+    out.into_iter()
+        .filter_map(|p| expand(&p, home))
+        .map(|p| std::path::absolute(&p).unwrap_or(p))
+        .collect()
+}
+
+/// The files a reader's program needs to start: the program as found, the file it leads to,
+/// and a script's interpreter (`#!/usr/bin/env NAME` read on makibad's PATH, or a path).
+fn program_files(program: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    let found = std::path::absolute(program).unwrap_or_else(|_| program.to_path_buf());
+    add(found.clone(), &mut out);
+    let target = std::fs::canonicalize(&found).unwrap_or(found);
+    add(target.clone(), &mut out);
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(&target)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    let first = String::from_utf8_lossy(&head[..n]);
+    if let Some(line) = first.strip_prefix("#!").and_then(|l| l.lines().next()) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let interpreter = match words.as_slice() {
+            [env, name, ..] if env.ends_with("/env") && !name.starts_with('-') => {
+                agents::on_path(name)
+            }
+            [path, ..] if path.starts_with('/') => Some(PathBuf::from(path)),
+            _ => None,
+        };
+        if let Some(i) = interpreter {
+            add(i.clone(), &mut out);
+            if let Ok(c) = std::fs::canonicalize(&i) {
+                add(c, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// The folder given for a program file: its folder, or that folder's parent when it is a `bin`
+/// (the install prefix); `None` when that folder is `/`, holds the home, or holds or lies in a
+/// denied place: then only the file is given.
+fn program_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<PathBuf> {
+    let dir = file.parent()?;
+    let root = if dir.file_name().is_some_and(|n| n == "bin") {
+        dir.parent()?
+    } else {
+        dir
+    };
+    let wide = root == Path::new("/")
+        || home.is_some_and(|h| h.starts_with(root))
+        || deny
+            .iter()
+            .any(|q| q.starts_with(root) || root.starts_with(q));
+    (!wide).then(|| root.to_path_buf())
+}
+
+/// The reader `program` started inside the boundary (Issue 262): a command of the boundary
+/// program whose arguments end with `--` and the program; the caller adds the reader's own.
+/// Nothing is visible but the system folders, the program's own folders, the round's tree
+/// (read-only), its scratch and settings, and a home of the round holding only the reader's
+/// login (and codex's configuration, read-only) from the person's home.
+fn bounded_reader(
+    boundary: &Path,
     program: &Path,
+    reader: Reader,
+    places: &Places,
+    snap: &Snapshot,
+) -> Result<Command, String> {
+    let home = person_home();
+    let deny = denied(places, home.as_deref());
+    let scratch = snap.dir.join("scratch");
+    let round_home = snap.dir.join("home");
+    let mkdir = |d: &Path| std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()));
+    mkdir(&scratch)?;
+    mkdir(&round_home)?;
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let mut a: Vec<String> = [
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--new-session",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+    ]
+    .map(String::from)
+    .to_vec();
+    let ro = |a: &mut Vec<String>, src: &Path, dst: &Path| {
+        a.extend(["--ro-bind".into(), s(src), s(dst)]);
+    };
+    // The folders given read-only before the masks: what a mask must cover.
+    let mut given: Vec<PathBuf> = vec![];
+    for d in SYSTEM.map(Path::new) {
+        match d.symlink_metadata() {
+            Err(_) => {}
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(d).map_err(|e| format!("{}: {e}", d.display()))?;
+                a.extend(["--symlink".into(), s(&to), s(d)]);
+            }
+            Ok(_) => {
+                ro(&mut a, d, d);
+                given.push(d.to_path_buf());
+            }
+        }
+    }
+    let in_system = |p: &Path| {
+        let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        SYSTEM.iter().any(|d| c.starts_with(d)) && SYSTEM.iter().any(|d| p.starts_with(d))
+    };
+    if let Ok(r) = std::fs::canonicalize("/etc/resolv.conf")
+        && !in_system(&r)
+    {
+        ro(&mut a, &r, &r);
+    }
+    let mut files: Vec<PathBuf> = vec![];
+    for f in program_files(program) {
+        if in_system(&f) {
+            continue;
+        }
+        match program_root(&f, home.as_deref(), &deny) {
+            Some(root) if !given.iter().any(|g| root.starts_with(g)) => {
+                ro(&mut a, &root, &root);
+                given.push(root);
+            }
+            Some(_) => {}
+            None => files.push(f),
+        }
+    }
+    for q in &deny {
+        if !given.iter().any(|g| q.starts_with(g)) {
+            continue;
+        }
+        match q.symlink_metadata() {
+            Ok(m) if m.is_dir() => a.extend(["--tmpfs".into(), s(q)]),
+            Ok(_) => ro(&mut a, Path::new("/dev/null"), q),
+            Err(_) => {}
+        }
+    }
+    for f in &files {
+        ro(&mut a, f, f);
+    }
+    ro(&mut a, &snap.tree, &snap.tree);
+    a.extend(["--bind".into(), s(&scratch), s(&scratch)]);
+    let settings = snap.dir.join("settings.json");
+    if reader == Reader::Same && settings.exists() {
+        ro(&mut a, &settings, &settings);
+    }
+    a.extend(["--bind".into(), s(&round_home), s(&round_home)]);
+    // The reader's login, each a file of the person's, bound into the round's home.
+    let logins: Vec<(PathBuf, &str, bool)> = match reader {
+        Reader::Other => config_dir("CODEX_HOME", home.as_deref(), ".codex")
+            .map(|d| {
+                vec![
+                    (d.join("auth.json"), ".codex/auth.json", true),
+                    (d.join("config.toml"), ".codex/config.toml", false),
+                ]
+            })
+            .unwrap_or_default(),
+        Reader::Same => config_dir("CLAUDE_CONFIG_DIR", home.as_deref(), ".claude")
+            .map(|d| {
+                vec![(
+                    d.join(".credentials.json"),
+                    ".claude/.credentials.json",
+                    true,
+                )]
+            })
+            .unwrap_or_default(),
+    };
+    for (src, rel, rw) in logins {
+        if !src.is_file() {
+            continue;
+        }
+        let dst = round_home.join(rel);
+        if let Some(d) = dst.parent() {
+            mkdir(d)?;
+        }
+        std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(&dst)
+            .map_err(|e| format!("{}: {e}", dst.display()))?;
+        let opt = if rw { "--bind" } else { "--ro-bind" };
+        a.extend([opt.into(), s(&src), s(&dst)]);
+    }
+    a.extend(["--chdir".into(), s(&snap.tree), "--".into(), s(program)]);
+    let mut c = Command::new(boundary);
+    c.current_dir(&snap.tree)
+        .args(a)
+        .env("HOME", &round_home)
+        .env("TMPDIR", &scratch);
+    for v in [
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        c.env_remove(v);
+    }
+    Ok(c)
+}
+
+fn run_other(
+    boundary: &Path,
+    program: &Path,
+    places: &Places,
     snap: &Snapshot,
     design: bool,
     until: Instant,
 ) -> Result<(Ran, Stream), String> {
-    let mut c = Command::new(program);
-    c.current_dir(&snap.tree).args([
+    let mut c = bounded_reader(boundary, program, Reader::Other, places, snap)?;
+    c.args([
         "exec",
         "--json",
         "--skip-git-repo-check",
@@ -810,6 +1130,7 @@ fn run_other(
 }
 
 fn run_same(
+    boundary: &Path,
     program: &Path,
     places: &Places,
     snap: &Snapshot,
@@ -817,9 +1138,8 @@ fn run_same(
     until: Instant,
 ) -> Result<(Ran, Stream), String> {
     let settings = same_settings(places, snap)?;
-    let mut c = Command::new(program);
-    c.current_dir(&snap.tree)
-        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+    let mut c = bounded_reader(boundary, program, Reader::Same, places, snap)?;
+    c.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
         .args([
             "-p",
             "--output-format",
@@ -888,8 +1208,21 @@ fn judge(reader: String, ran: &Ran, read: Stream) -> Answer {
 /// timeout is above.
 pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answer {
     let until = Instant::now() + BOUND;
+    let boundary = match &plan.boundary {
+        Ok(b) => b.clone(),
+        Err(why) => {
+            return withheld(Answer {
+                established: false,
+                reader: "none".into(),
+                fallback_reason: None,
+                reason: Some(why.clone()),
+                findings: None,
+                text: String::new(),
+            });
+        }
+    };
     let fallback_reason = match &plan.other {
-        Ok(program) => match run_other(program, snap, design, until) {
+        Ok(program) => match run_other(&boundary, program, places, snap, design, until) {
             Ok((ran, read)) => {
                 // A failure before anything was read is the program not usable: fall back once.
                 if ran.ok || read.reads > 0 || plan.same.is_none() {
@@ -916,7 +1249,7 @@ pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answe
             text: String::new(),
         });
     };
-    let mut a = match run_same(same, places, snap, design, until) {
+    let mut a = match run_same(&boundary, same, places, snap, design, until) {
         Ok((ran, read)) => judge(FRESH.into(), &ran, read),
         Err(e) => Answer {
             established: false,

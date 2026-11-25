@@ -383,6 +383,14 @@ Record, per case: the version `hello` answered, the executable path, and the exi
 
 Pass: `layout` and `self` start the pinned version. `beside` and `on-path` are measurements, not pass or fail: their results say which of the script's checks protect a real install. If it fails (`layout` starts another version): the layout does not protect the install; reopen #382 with the case's record. If `on-path` starts the older version while `layout` passes, the exit-3 check of `PATH` is the guard: keep it; if neither `beside` nor `on-path` starts the older version, write which file the reported start came from before closing #382.
 
+### P16. The second reader cannot read a file outside its round's folder (Issue 262)
+
+Why: makibad starts both readers of a review inside bubblewrap with a mount plan of its own (line L-K10 of lines.md); CI's tests read that plan through a stand-in boundary, so only a host where bubblewrap can make a namespace shows that the real boundary holds, and that the real readers still work inside it (codex starts a sandbox of its own; a login is refreshed through a bound file).
+
+Script: `scripts/probes/p16-review-read-boundary.sh <result-dir>`, which runs the two ignored tests of `tests/review_read_boundary.rs` (`a_planted_secret_is_unreadable_inside_the_real_boundary`, `a_real_reader_cannot_read_a_planted_secret`), each alone.
+
+Pass: in the first, every decoy (a scratch home's, the state folder's, the person key) is unreadable inside the boundary and the diff file is readable, for codex and for the fallback, while the test reads each decoy outside; in the second, the real codex and then the real claude (codex named as a missing program) each answer `passed` under their own name and carry neither decoy's content. If it fails: a decoy readable inside is a hole in the mount plan, fixed in `src/daemon/review.rs` before anything else; codex answering as `fresh-session` means codex cannot run inside the boundary, and the reason in `fallback_reason` says what to give it.
+
 ## 3. If a move to Orca is considered
 
 Not part of this plan's work. herdr-core is the base (plan.md section 3.1), and Orca's orchestration is not used whatever these checks say. They are kept for the day one of the reasons listed there applies, and they concern Orca only as a base: its terminals, its status, its notifications.
@@ -490,5 +498,6 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | P5 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | |
 | P8 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | makiba's one subscription (`src/base/herdr/events.rs`) sends `events.subscribe` with empty params and drops `doc` notices |
 | P15 (Issue 382) | | | not used | not yet run | the owner runs it on the pinned release and the previous one; #382 stays open until this row is filled |
+| P16 (Issue 262) | | not used | | not yet run | the person runs it on a host where bubblewrap can make a namespace; L-K10 names it as the evidence still to be recorded |
 
 Not covered by a row on 2.1.328: steps 10 to 13 of `door-and-base-reach` since #144 (the port checks, the unsandboxed run, the Read and Edit tools on the decoy key; on 2.1.330 the whole probe has a row after #144, the run of 2026-11-21 at 12:24Z, Refs #150), P3, P4, P5, P7, P8, P9, P10 as their own probes, paddock's carried probes, and the runbook of M4-5. See `docs/upgrading-claude-code.md`.
