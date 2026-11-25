@@ -998,13 +998,29 @@ fn program_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<Pa
     } else {
         dir
     };
+    (!too_wide(root, home, deny)).then(|| root.to_path_buf())
+}
+
+/// Is `root` too wide to give a reader: `/`, the home or an ancestor of it, or a folder that
+/// holds or lies in a denied place (judged by its own and its real path)?
+fn too_wide(root: &Path, home: Option<&Path>, deny: &[PathBuf]) -> bool {
     let rr = real(root);
-    let wide = [root, rr.as_path()].iter().any(|r| {
+    [root, rr.as_path()].iter().any(|r| {
         *r == Path::new("/")
             || home.is_some_and(|h| h.starts_with(r) || real(h).starts_with(r))
             || deny.iter().any(|q| q.starts_with(r) || r.starts_with(q))
-    });
-    (!wide).then(|| root.to_path_buf())
+    })
+}
+
+/// The outermost `node_modules` folder above `file`, when it is not too wide: Node looks for a
+/// package's dependencies in every `node_modules` up from it, so a dependency hoisted beside the
+/// package (npm's global install under a prefix the reader is not given whole) is found there.
+fn node_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<PathBuf> {
+    let top = file
+        .ancestors()
+        .filter(|a| a.file_name().is_some_and(|n| n == "node_modules"))
+        .last()?;
+    (!too_wide(top, home, deny)).then(|| top.to_path_buf())
 }
 
 /// The empty file at `rel` in a reader's new home on which its login is bound: its folder is
@@ -1103,6 +1119,7 @@ fn bounded_reader(
         if in_system(&f) {
             continue;
         }
+        let modules = node_root(&f, home.as_deref(), &deny);
         match program_root(&f, home.as_deref(), &deny) {
             Some(root) if !given.iter().any(|g| root.starts_with(g)) => {
                 ro(&mut a, &root, &root);
@@ -1110,6 +1127,12 @@ fn bounded_reader(
             }
             Some(_) => {}
             None => files.push(f),
+        }
+        if let Some(nm) = modules
+            && !given.iter().any(|g| nm.starts_with(g))
+        {
+            ro(&mut a, &nm, &nm);
+            given.push(nm);
         }
     }
     for q in masks(&given, &deny) {
@@ -1464,6 +1487,12 @@ mod tests {
         );
         assert!(
             has(&["--ro-bind".into(), s(&package), s(&package)]),
+            "{args:?}"
+        );
+        // A dependency npm hoisted beside the package is in the outermost node_modules.
+        let modules = local.join("lib/node_modules");
+        assert!(
+            has(&["--ro-bind".into(), s(&modules), s(&modules)]),
             "{args:?}"
         );
         assert!(
