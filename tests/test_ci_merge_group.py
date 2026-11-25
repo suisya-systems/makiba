@@ -4,7 +4,10 @@
 `acceptance` must each report there. `acceptance` on `merge_group` runs no declared test: the
 declared test was judged at the pull request's head. So its steps there must not read the pull
 request payload, and must succeed with only the runner's environment. On `pull_request` it runs the
-checker on the pull request's base and head, as before.
+checker on the pull request's base and head, as before, unless the `scope` job answered that the head
+is its test commit alone (Issue 481): there it fails at once, with no checkout, and its last line is
+`ACCEPTANCE: fail`. The merge queue's commit is judged with the `scope` output false, the value the
+`scope` job writes there.
 
 `problems(text)` lists what is wrong with a workflow text; the real file must have none, and each
 mutated copy below must have at least one, so the check itself is shown to catch what it guards.
@@ -22,7 +25,13 @@ ROOT = Path(__file__).resolve().parent.parent
 WORKFLOW = ROOT / ".github" / "workflows" / "ci.yml"
 REQUIRED = ("tests", "lint", "real-base", "acceptance")
 JUDGED_LINE = "ACCEPTANCE: judged at the pull request's head"
-TERM = re.compile(r"""^github\.event_name\s*==\s*'([a-z_]+)'$""")
+FAIL_LINE = "ACCEPTANCE: fail"
+# The terms a condition may use: the event, `!cancelled()` and the scope job's answer.
+TOKEN = re.compile(
+    r"""\s*(?:(?P<paren>[()])|(?P<op>&&|\|\|)|(?P<cancelled>!cancelled\(\))"""
+    r"""|github\.event_name\s*==\s*'(?P<event>[a-z_]+)'"""
+    r"""|needs\.scope\.outputs\.test_commit\s*(?P<cmp>==|!=)\s*'true')"""
+)
 
 
 def triggers(doc):
@@ -33,32 +42,48 @@ def triggers(doc):
     return set(on or ())
 
 
-def holds(cond, event):
-    """Whether an `if:` holds for event. Only `github.event_name == '<e>'` terms joined by `||`
-    are understood; anything else raises, so a condition the check cannot read is a problem."""
+def holds(cond, event, scope):
+    """Whether an `if:` holds for event, with the scope job's answer scope (True: the head is its
+    test commit alone). Understood: `github.event_name == '<e>'`, `!cancelled()` (read as true),
+    `needs.scope.outputs.test_commit == 'true'` and `!= 'true'`, joined by `&&` and `||` with
+    parentheses (`&&` first); anything else raises, so a condition the check cannot read is a
+    problem."""
     if cond is None:
         return True
     text = str(cond).strip()
     if text.startswith("${{") and text.endswith("}}"):
         text = text[3:-2].strip()
-    names = []
-    for term in text.split("||"):
-        m = TERM.match(term.strip())
-        if not m:
+    parts, pos = [], 0
+    while pos < len(text):
+        m = TOKEN.match(text, pos)
+        if not m or m.end() == pos:
             raise ValueError(f"condition not understood: {cond!r}")
-        names.append(m.group(1))
-    return event in names
+        pos = m.end()
+        if m["paren"]:
+            parts.append(m["paren"])
+        elif m["op"]:
+            parts.append(" and " if m["op"] == "&&" else " or ")
+        elif m["cancelled"]:
+            parts.append("True")
+        elif m["event"]:
+            parts.append(str(event == m["event"]))
+        else:
+            parts.append(str(scope if m["cmp"] == "==" else not scope))
+    try:
+        return bool(eval("".join(parts), {"__builtins__": {}}))  # only True/False/and/or/()
+    except SyntaxError:
+        raise ValueError(f"condition not understood: {cond!r}") from None
 
 
-def steps_for(job, event):
-    return [s for s in job.get("steps", []) if holds(s.get("if"), event)]
+def steps_for(job, event, scope=False):
+    return [s for s in job.get("steps", []) if holds(s.get("if"), event, scope)]
 
 
-def run_merge_group_steps(steps):
+def run_merge_group_steps(steps, event="merge_group"):
     script = "set -e\n" + "\n".join(s["run"] for s in steps)
     env = {
         "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-        "GITHUB_EVENT_NAME": "merge_group",
+        "GITHUB_EVENT_NAME": event,
         "GITHUB_SHA": "0123456789abcdef0123456789abcdef01234567",
         "GITHUB_REF": "refs/heads/gh-readonly-queue/main/pr-1-89abcdef0123456789abcdef0123456789abcdef",
     }
@@ -79,7 +104,7 @@ def problems(text):
             out.append(f"job {name} is missing")
             continue
         try:
-            if not holds(job.get("if"), "merge_group"):
+            if not holds(job.get("if"), "merge_group", False):
                 out.append(f"job {name} does not run on merge_group")
         except ValueError as e:
             out.append(f"job {name}: {e}")
@@ -87,12 +112,15 @@ def problems(text):
     if acc is None:
         return out
     try:
-        on_queue = steps_for(acc, "merge_group")
-        on_pr = steps_for(acc, "pull_request")
-        if holds(acc.get("if"), "push"):
+        on_queue = steps_for(acc, "merge_group", False)
+        on_pr = steps_for(acc, "pull_request", False)
+        on_test_commit = steps_for(acc, "pull_request", True)
+        if holds(acc.get("if"), "push", False):
             out.append("acceptance runs on push")
-        if not holds(acc.get("if"), "pull_request"):
+        if not holds(acc.get("if"), "pull_request", False):
             out.append("acceptance does not run on pull_request")
+        if not holds(acc.get("if"), "pull_request", True):
+            out.append("acceptance does not run at a test-commit head")
     except ValueError as e:
         return out + [f"acceptance: {e}"]
 
@@ -115,7 +143,8 @@ def problems(text):
         elif JUDGED_LINE not in r.stdout:
             out.append(f"acceptance on merge_group does not print {JUDGED_LINE!r}: {r.stdout}")
 
-    # pull_request: the checker on the pull request's base and head, at its head with full history.
+    # pull_request, scope false: the checker on the pull request's base and head, at its head with
+    # full history.
     checkout = [s for s in on_pr if str(s.get("uses", "")).startswith("actions/checkout@")]
     if not checkout or (checkout[0].get("with") or {}).get("ref") != (
         "${{ github.event.pull_request.head.sha }}"
@@ -130,6 +159,23 @@ def problems(text):
         out.append("acceptance on pull_request does not end with the checker on base and head")
     if any(JUDGED_LINE in str(s.get("run", "")) for s in on_pr):
         out.append("acceptance on pull_request prints the merge queue's line instead of judging")
+
+    # pull_request, scope true (a test-commit head): no checkout; plain run steps that exit 1 and
+    # end with the line ACCEPTANCE: fail.
+    if not on_test_commit:
+        out.append("acceptance has no step at a test-commit head")
+    elif any(str(s.get("uses", "")).startswith("actions/checkout@") for s in on_test_commit):
+        out.append("acceptance checks out at a test-commit head")
+    elif any("run" not in s or "uses" in s or "${{" in yaml.safe_dump(s) for s in on_test_commit):
+        out.append("acceptance at a test-commit head is not plain run steps")
+    else:
+        r = run_merge_group_steps(on_test_commit, "pull_request")
+        lines = r.stdout.strip().splitlines()
+        if r.returncode != 1 or not lines or lines[-1] != FAIL_LINE:
+            out.append(
+                f"acceptance at a test-commit head exits {r.returncode} (not 1) or does not end with"
+                f" {FAIL_LINE!r}: {r.stdout}{r.stderr}"
+            )
     return out
 
 
@@ -160,8 +206,8 @@ def _drop_merge_group(text):
 def _acceptance_pr_only(text):
     return _replace_once(
         text,
-        "    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'\n",
-        "    if: github.event_name == 'pull_request'\n",
+        "    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}\n",
+        "    if: ${{ !cancelled() && github.event_name == 'pull_request' }}\n",
     )
 
 
@@ -180,7 +226,8 @@ def _queue_step_reads_payload(text):
 def _checkout_runs_on_queue(text):
     return _replace_once(
         text,
-        "      - uses: actions/checkout@v4\n        if: github.event_name == 'pull_request'\n",
+        "      - uses: actions/checkout@v4\n"
+        "        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'\n",
         "      - uses: actions/checkout@v4\n",
     )
 
@@ -188,8 +235,22 @@ def _checkout_runs_on_queue(text):
 def _queue_step_on_every_event(text):
     return _replace_once(
         text,
+        "      - name: Merge queue - the declared test was judged at the pull request's head\n"
         "        if: github.event_name == 'merge_group'\n",
-        "",
+        "      - name: Merge queue - the declared test was judged at the pull request's head\n",
+    )
+
+
+def _test_commit_step_on_queue(text):
+    return _replace_once(
+        text,
+        "        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit == 'true'\n"
+        "        run: |\n"
+        '          echo "the head is the test commit alone',
+        "        if: github.event_name == 'merge_group' || (github.event_name == 'pull_request'"
+        " && needs.scope.outputs.test_commit == 'true')\n"
+        "        run: |\n"
+        '          echo "the head is the test commit alone',
     )
 
 
@@ -202,6 +263,7 @@ def _queue_step_on_every_event(text):
         _queue_step_reads_payload,
         _checkout_runs_on_queue,
         _queue_step_on_every_event,
+        _test_commit_step_on_queue,
     ],
 )
 def test_the_check_catches_a_broken_workflow(mutate):

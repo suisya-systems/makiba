@@ -11,7 +11,61 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
+  scope:
+    # Whether the head is its test commit alone (docs/design/test-commit-scoped-ci.md, 3.1; Issue 481).
+    # On pull_request the base's scripts/acceptance-check.sh --scope answers, so a pull request cannot
+    # choose its own scope; on every other event the answer is false and nothing is read. Only exit 0
+    # with the first line exactly `test-commit <head sha>` writes test_commit=true and the targets;
+    # anything else writes false (the full suite), and the step does not fail on the checker's answer.
+    # `tests`, `real-base` and `acceptance` read it as T: pull_request and test_commit == 'true'
+    # (docs/acceptance-check.md, At a test-commit head; tests/test_ci_test_commit_scope.py).
+    runs-on: ubuntu-latest
+    outputs:
+      test_commit: ${{ steps.scope.outputs.test_commit }}
+      rs: ${{ steps.scope.outputs.rs }}
+      py: ${{ steps.scope.outputs.py }}
+    steps:
+      - uses: actions/checkout@v4
+        if: github.event_name == 'pull_request'
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 0
+      - name: Is the head its test commit alone
+        id: scope
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        # The base's copy only, with no fallback to the pull request's. Names are kept only when they
+        # are made of [A-Za-z0-9_./-]; a line the step does not read gives the full suite.
+        run: |
+          full() { echo "test_commit=false" >> "$GITHUB_OUTPUT"; echo "full suite: $1"; exit 0; }
+          [ "$GITHUB_EVENT_NAME" = pull_request ] || full "event $GITHUB_EVENT_NAME"
+          git show "$BASE_SHA:scripts/acceptance-check.sh" > "$RUNNER_TEMP/scope-check.sh" 2>/dev/null \
+            || full "the base has no scripts/acceptance-check.sh"
+          status=0
+          out=$(bash "$RUNNER_TEMP/scope-check.sh" --scope "$BASE_SHA" "$HEAD_SHA" 2> "$RUNNER_TEMP/scope.err") || status=$?
+          printf '%s\n' "$out"
+          cat "$RUNNER_TEMP/scope.err"
+          [ "$status" -eq 0 ] || full "the base's checker exited $status on --scope"
+          [ "$(printf '%s\n' "$out" | head -n 1)" = "test-commit $HEAD_SHA" ] || full "the checker did not answer test-commit $HEAD_SHA"
+          rs=""; py=""
+          while IFS= read -r line; do
+            kind=${line%% *}; name=${line#* }
+            case "$name" in ""|*[!A-Za-z0-9_./-]*) full "a line the step does not read: $line" ;; esac
+            case "$kind" in
+              rs) rs="$rs $name" ;;
+              py) py="$py $name" ;;
+              *) full "a line the step does not read: $line" ;;
+            esac
+          done < <(printf '%s\n' "$out" | tail -n +2)
+          [ -n "$rs$py" ] || full "no declared test"
+          { echo "test_commit=true"; echo "rs=${rs# }"; echo "py=${py# }"; } >> "$GITHUB_OUTPUT"
+          echo "test commit: rs=${rs# } py=${py# }"
   tests:
+    # At a test-commit head (T) only the declared tests run, on the same checkout; under not T the
+    # whole suite, as before (docs/design/test-commit-scoped-ci.md, 3.2).
+    needs: scope
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -25,15 +79,39 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ github.job }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
-      # rustup installs the toolchain of rust-toolchain.toml on the first cargo call.
-      - run: cargo test --locked
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      # pyyaml: tests/test_ci_merge_group.py reads this file.
+      # pyyaml: tests/test_ci_merge_group.py and tests/test_ci_test_commit_scope.py read this file.
       - run: python3 -m pip install pytest pyyaml
+      - name: Test commit - only the declared tests
+        # One Cargo call for every declared target (--no-fail-fast, so each one runs), then pytest on
+        # the declared Python tests whatever Cargo returned; a kind with none declared is not run.
+        # The step fails when either failed. set -f: the names are split on spaces, never globbed.
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit == 'true'
+        env:
+          RS: ${{ needs.scope.outputs.rs }}
+          PY: ${{ needs.scope.outputs.py }}
+        run: |
+          set -f
+          echo "test commit: only the declared tests run (rs: $RS; py: $PY); the whole suite runs at the fix"
+          cargo_status=0; pytest_status=0
+          if [ -n "$RS" ]; then
+            args=(); for n in $RS; do args+=(--test "$n"); done
+            cargo test --locked --no-fail-fast "${args[@]}" || cargo_status=$?
+          fi
+          if [ -n "$PY" ]; then
+            # shellcheck disable=SC2086
+            python3 -m pytest -q $PY || pytest_status=$?
+          fi
+          echo "cargo exited $cargo_status, pytest exited $pytest_status"
+          [ "$cargo_status" -eq 0 ] && [ "$pytest_status" -eq 0 ]
+      # rustup installs the toolchain of rust-toolchain.toml on the first cargo call.
+      - run: cargo test --locked
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
       # The development tools' tests, and tests/db/ until M0-5 removes it.
       - run: python3 -m pytest -q tests
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
   real-base:
     # The whole suite again on the real base (M0-3, #5): `tests/common/mod.rs` starts `hc` in a place of
     # its own when MAKIBA_TEST_REAL_BASE=1. A required check (#81): `tests/real_base_wire.rs` holds the
@@ -41,11 +119,22 @@ jobs:
     # of its own (`makiba-test-{pid}-{n}`, `mk-{pid}-{n}`), so tests that run at once never share a
     # base (#477). The suite runs under cargo-nextest, one process per test across all binaries, with
     # the `ci` profile of .config/nextest.toml (#485, docs/design/real-base-speed.md option B1).
+    # At a test-commit head (T) it runs nothing and succeeds: the declared tests run in `tests`, and
+    # the real base runs at the fix (docs/design/test-commit-scoped-ci.md, 3.2). Every other step
+    # holds under not T, unchanged.
+    needs: scope
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     steps:
+      - name: Test commit - the real base runs at the fix
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit == 'true'
+        run: |
+          echo "test commit: the declared tests run in tests; the real base runs at the fix"
       - uses: actions/checkout@v4
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
       # The Rust build cache, one per job (#471).
       - uses: actions/cache@v4
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
         with:
           path: |
             ~/.cargo/registry
@@ -55,11 +144,14 @@ jobs:
           restore-keys: |
             ${{ runner.os }}-cargo-${{ github.job }}-
       - name: Install the pinned herdr-core
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
         run: bash scripts/install-base.sh "$HOME/.makiba-base"
       - name: Install the pinned cargo-nextest
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
         # Version and SHA-256 are pinned in the script; nothing is installed unless the digest matches.
         run: bash scripts/install-nextest.sh "$HOME/.cargo"
       - name: Suite on the real base
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
         # nextest runs no doctests, so `cargo test --doc` runs them (none today; a later one is not
         # dropped). Then the real base must have run: real_base_wire's events test takes 16 s or
         # more on it (two scripted terminal runs) and returns at once on the stand-in, so a duration
@@ -84,13 +176,14 @@ jobs:
               sys.exit("under 10 s: the suite did not run on the real base")
           EOF
       - name: Keep the JUnit report
-        if: always()
+        if: always() && (github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true')
         uses: actions/upload-artifact@v4
         with:
           name: real-base-junit
           path: target/nextest/ci/junit.xml
           if-no-files-found: warn
       - name: The real base is what ran (a missing hc must fail the fixture)
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
         # A pass is read as success, so a green run cannot tell the stand-in from the real base.
         # With HC_BIN pointing nowhere, only the real base can fail: the fixture's start-up
         # (tests/common/mod.rs, Real::start) panics when `hc --version` cannot run. This step
@@ -137,7 +230,11 @@ jobs:
     # the pull request's head, by this job on the pull request and by makiba's gate before the enqueue
     # (Issue 401, docs/design/merge-wait.md Q2). That step reads no pull request payload, only the
     # runner's environment; every other step runs on pull_request alone. tests/test_ci_merge_group.py.
-    if: github.event_name == 'pull_request' || github.event_name == 'merge_group'
+    # At a test-commit head (T, the scope job) it fails at once, with no checkout and no build, so a
+    # head that ran only its declared tests never reads as passed; the declared tests are judged here
+    # when the fix is pushed (docs/design/test-commit-scoped-ci.md, 3.2 and I2).
+    needs: scope
+    if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
     steps:
       - name: Merge queue - the declared test was judged at the pull request's head
@@ -145,22 +242,28 @@ jobs:
         run: |
           echo "queue commit $GITHUB_SHA on $GITHUB_REF"
           echo "ACCEPTANCE: judged at the pull request's head (the acceptance job on the pull request, makiba's gate before the enqueue); not run again here"
+      - name: Test commit - fails at once, judged when the fix is pushed
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit == 'true'
+        run: |
+          echo "the head is the test commit alone: the declared tests are judged by this job when the fix is pushed"
+          echo "ACCEPTANCE: fail"
+          exit 1
       - uses: actions/checkout@v4
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
       - name: Install the toolchain of rust-toolchain.toml
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         run: rustup toolchain install
       - uses: actions/setup-python@v5
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         with:
           python-version: "3.11"
       - run: python3 -m pip install pytest
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
       - name: Declared tests fail at the test commit, pass at head, stay unchanged
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         # The checker is taken from the base, so a PR cannot change the rules it is judged by.
         # The PR's own copy is used only while the base has none (the PR that adds it).
         run: |
