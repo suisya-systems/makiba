@@ -12,10 +12,16 @@
 //! 2. the run's project has a `prepare-commit-msg` or `commit-msg` hook of its own: it runs after
 //!    git wrote the commit's tree, so what it stages is in the index read here and not in the
 //!    commit (and a `commit-msg` hook may add the declaration itself);
-//! 3. a declared path names no file the commit adds or changes (nor a folder holding one); when
-//!    the index is HEAD's tree (a message-only `--amend`), what HEAD itself changes counts;
+//! 3. a declared path names no file the commit adds or changes against HEAD (nor a folder holding
+//!    one). Git tells the hook nothing of `--amend`, so an amend is judged against the commit it
+//!    amends: an amend that does not change the declared file again is refused, and the refusal
+//!    names the remedy (`git reset --soft HEAD~1`, then commit again);
 //! 4. a declared Rust test target, as the index holds it, starts makibad directly, as on pull
 //!    requests 315 and 316.
+//!
+//! Known limit: lines below a scissors line are not counted, but git keeps a scissors line
+//! written by hand, and what is below it, in a commit made with `-F`; such a key line passes here
+//! and is refused at the push (`daemon::gate::stray_trailer`).
 //!
 //! A message with no such line and no such trailer is not read further. What cannot be read
 //! refuses, as the scanner does.
@@ -220,16 +226,11 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
     }
 
     // 3. Every declared path is a file the commit adds or changes, or a folder holding one.
-    let mut changed: Vec<String> = staged()
+    let changed: Vec<String> = staged()
         .map_err(cannot)?
         .into_iter()
         .map(|(p, _)| p)
         .collect();
-    if changed.is_empty() {
-        // The index is HEAD's tree: a message-only `--amend` (or an empty commit). The commit
-        // amended is judged by what HEAD itself adds or changes.
-        changed = head_changes().map_err(cannot)?;
-    }
     let declared: Vec<String> = read.iter().map(|v| normalized(v)).collect();
     if let Some(d) = declared
         .iter()
@@ -239,7 +240,7 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
             LINE,
             format!("{KEY}: {d}"),
             format!(
-                "the commit declares {d}, which it neither adds nor changes: declare the test file this commit adds, or add it in this commit; {FINAL}"
+                "the commit declares {d}, which it neither adds nor changes: declare the test file this commit adds, or add it in this commit. The check reads the index against HEAD, so an amend that does not change the declared file again is refused: to change a test commit already made, run git reset --soft HEAD~1 and commit again; {FINAL}"
             ),
         ));
     }
@@ -263,30 +264,6 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
         }
     }
     Ok(())
-}
-
-/// The paths HEAD adds or changes against its first parent (all of them for a root commit);
-/// none before a first commit.
-fn head_changes() -> Result<Vec<String>, String> {
-    if git(&["rev-parse", "--verify", "-q", "HEAD"]).is_err() {
-        return Ok(Vec::new());
-    }
-    let out = git(&[
-        "diff-tree",
-        "--no-commit-id",
-        "--root",
-        "-r",
-        "-z",
-        "--name-only",
-        "--no-renames",
-        "--diff-filter=d",
-        "HEAD",
-    ])?;
-    Ok(text(out)
-        .split('\0')
-        .filter(|p| !p.is_empty())
-        .map(String::from)
-        .collect())
 }
 
 fn is_executable(path: &Path) -> bool {

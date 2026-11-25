@@ -1,8 +1,10 @@
-//! Issue 322, diff review round 1: two more cases of the commit-msg hook's check of a test
+//! Issue 322, diff review rounds 1 and 2: two more cases of the commit-msg hook's check of a test
 //! commit (line L-K9; the declared cases are in `tests/test_commit_hook.rs`).
 //!
-//! - A message-only `git commit --amend` of a valid test commit passes: the index equals HEAD's
-//!   tree, so the declared paths are judged by what HEAD itself changes, the commit being amended.
+//! - Git tells the hook nothing of `--amend`, so the declared paths are judged by the index
+//!   against HEAD, the commit amended: a message-only amend of a test commit is refused (the
+//!   approved design's known limit), and the remedy the refusal names, `git reset --soft HEAD~1`
+//!   and a new commit, passes.
 //! - A project `commit-msg` hook runs after git wrote the commit's tree, between the scanner's two
 //!   checks: it could add a declaration and stage its file, which the commit then does not hold.
 //!   A declaring commit is refused in such a run, as with a project `prepare-commit-msg`.
@@ -95,32 +97,32 @@ fn stderr(out: &Output) -> String {
 }
 
 #[test]
-fn a_message_only_amend_of_a_test_commit_passes() {
+fn a_message_only_amend_is_refused_and_the_named_remedy_passes() {
     let repo = Repo::new();
     std::fs::write(repo.wt.join("tests/t.rs"), "#[test]\nfn t() {}\n").unwrap();
     repo.git(&["add", "tests/t.rs"]);
     let out = repo.commit(MESSAGE, &[]);
     assert!(out.status.success(), "{}", stderr(&out));
     let made = repo.head();
-    let out = repo.commit(
-        &MESSAGE.replace("test: declare", "test: declare it"),
-        &["--amend"],
-    );
-    assert!(
-        out.status.success(),
-        "the amend was refused: {}",
-        stderr(&out)
-    );
-    assert_ne!(repo.head(), made);
-    // An amend that declares a path HEAD does not change is still refused.
-    let out = repo.commit(
-        &MESSAGE.replace("tests/t.rs", "tests/other.rs"),
-        &["--amend"],
-    );
+    let reworded = MESSAGE.replace("test: declare", "test: declare it");
+    // The amend changes no file against HEAD, the commit it amends: refused, naming the remedy.
+    let out = repo.commit(&reworded, &["--amend"]);
     let err = stderr(&out);
     assert!(!out.status.success(), "the amend passed: {err}");
     assert!(err.contains(REFUSED), "{err}");
-    assert!(err.contains("Acceptance-Test: tests/other.rs"), "{err}");
+    assert!(err.contains("Acceptance-Test: tests/t.rs"), "{err}");
+    assert!(err.contains("git reset --soft HEAD~1"), "{err}");
+    assert_eq!(repo.head(), made, "the commit was amended");
+    // The remedy: take the commit back into the index and commit again.
+    repo.git(&["reset", "-q", "--soft", "HEAD~1"]);
+    let out = repo.commit(&reworded, &[]);
+    assert!(
+        out.status.success(),
+        "the commit made again was refused: {}",
+        stderr(&out)
+    );
+    assert_ne!(repo.head(), made);
+    assert_eq!(repo.git(&["log", "-1", "--format=%s"]), "test: declare it");
 }
 
 #[test]
