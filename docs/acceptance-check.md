@@ -43,6 +43,18 @@ Rule 2 is held in one place: the function `refused_in_test_commit` of `scripts/a
 
 The merge gate in makibad (`src/daemon/gate.rs`, condition (a)) runs that mode from the copy of the script built into makibad, in the project's clone with git hooks off, and refuses a manifest commit with any such path ("also changes undeclared paths"). So a helper added to `tests/common/` in the test commit passes both, and a code change, a `pyproject.toml` or a workflow in the test commit is refused by both (Issue 361: PR 353 passed the checker and was refused by the gate). Every path the test commit changed is then protected by the gate as well, is part of the digest the gate pins at its first verdict (so a force push that rewrites only a helper is seen), and is not reported as a test edited after the test commit. A declaration of nothing but `.` segments fails both. The gate's copy is the one makibad was built with; CI takes the base's copy: they agree while makibad is built from the base it judges. Test: [`tests/acceptance_rule_shared.rs`](../tests/acceptance_rule_shared.rs).
 
+## Is the head its test commit alone (`--scope`)
+
+`bash scripts/acceptance-check.sh --scope <base> <head>` says whether the head is a test commit and nothing else, and which tests it declares ([`docs/design/test-commit-scoped-ci.md`](design/test-commit-scoped-ci.md), 3.1). It runs no test. It prints `test-commit <head sha>`, then one line per declared test, `rs <Cargo target name>` or `py <path>` (a declared folder: one `py` line per `test_*.py` under it; a declared helper: no line), exactly when all of these hold:
+
+1. the head's own commits (`git rev-list --first-parent <head> --not <base>`, as the main mode reads them) are exactly one, the head itself;
+2. it is not a merge;
+3. it declares `Acceptance-Test` paths;
+4. it changes nothing rule 2 refuses (`refused_in_test_commit`);
+5. every declared path is, at the head, a test target or a test helper by rule 3's classification, and at least one is a target.
+
+Otherwise it prints one line, `full: <reason>`: a head with more than one own commit (a fix, or a base merge after the test commit), a merge, no declaration, a test commit that also changes code, a declaration of only helpers, a missing declared path. It exits 0 in both cases, and 2 on a usage error, an unknown commit or a git error. Rule 3's classification is one function, `classify`, which the main mode (in the test commit's tree) and `--scope` (in the head's tree, a temporary worktree) both call, so they agree on what a test target is. CI is to run the base's copy of this mode to decide whether a pull request's head runs only its declared tests (build 2 of Issue 478). Test: [`tests/test_acceptance_scope.py`](../tests/test_acceptance_scope.py).
+
 ## The landing gate
 
 [`.github/acceptance-check`](../.github/acceptance-check) holds one line, `acceptance`: the name of the job above. When it is on the base branch, claude-org-ja's landing gate (`tools/acceptance_gate.py`) takes that job's success at head as the test-first evidence. Rename the job and the file together; `tests/test_acceptance_check.py` checks that they match.

@@ -19,6 +19,13 @@
 #   bash scripts/acceptance-check.sh --test-commit SHA
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
 # none, 1 some, 2 usage. The merge gate in makibad runs this mode, so both judge by one rule.
+#   bash scripts/acceptance-check.sh --scope BASE HEAD
+# says whether HEAD is its test commit alone (docs/design/test-commit-scoped-ci.md, 3.1): it prints
+# "test-commit <sha>" and one line per declared test ("rs <cargo target name>" or "py <path>") when
+# HEAD's own commits are HEAD alone, not a merge, declaring, changing nothing rule 2 refuses, and
+# its declared paths are test targets and helpers with at least one target (rule 3's
+# classification, at HEAD); otherwise "full: <reason>". Exit 0 either way, 2 on usage or git error.
+# It runs no test. CI runs the base's copy to decide whether a head runs only its declared tests.
 set -u
 # The declared paths, each trimmed and with empty and "." segments dropped, as the merge gate reads
 # them (src/daemon/gate.rs, find_manifest): "./tests/a.rs" and "tests//a.rs" declare tests/a.rs.
@@ -60,6 +67,68 @@ refused_in_test_commit() { # refused_in_test_commit <sha>; fails when git cannot
 # The refused paths of <sha> in $refused, kept whole: the trailing "x" stops the command
 # substitution from dropping a name made only of newlines. Fails as refused_in_test_commit does.
 read_refused() { refused=$(refused_in_test_commit "$1" && printf x) || return 2; refused=${refused%x}; }
+# Rule 3's classification of the declared paths ($paths) as they are in the tree <root>, one line
+# per result: "rs <path> <target name>", "py <path>", "helper <path>" or "bad <reason>". The main
+# mode (in the test commit's tree) and --scope (in HEAD's) both read it, so they cannot disagree on
+# what a test target is.
+classify() { # classify <root>
+  local p n found
+  while IFS= read -r p; do
+    p=${p%/}
+    if [ -f "$1/$p" ]; then
+      if n=$(rs_name "$p"); then echo "rs $p $n"
+      elif is_py "$p"; then echo "py $p"
+      elif is_helper "$p"; then echo "helper $p"
+      else echo "bad declared path $p is not a test target"
+      fi
+    elif [ -d "$1/$p" ]; then
+      found=
+      n=$(rs_name "$p/main.rs") && [ -f "$1/$p/main.rs" ] && found+="rs $p $n"$'\n'
+      found+=$(cd "$1" && find "$p" -type f -name 'test_*.py' | sort | while IFS= read -r f; do is_py "$f" && echo "py $f"; done)
+      if [ -n "$(printf '%s' "$found" | sed '/^$/d')" ]; then printf '%s\n' "$found" | sed '/^$/d'
+      elif is_helper "$p"; then echo "helper $p"
+      else echo "bad declared path $p is not a test target"
+      fi
+    else
+      echo "bad declared path $p does not exist at the test commit"
+    fi
+  done <<<"$paths"
+}
+if [ "${1:-}" = --scope ]; then
+  [ $# -eq 3 ] || { echo "usage: acceptance-check.sh --scope BASE_SHA HEAD_SHA" >&2; exit 2; }
+  git rev-parse --git-dir >/dev/null 2>&1 || { echo "acceptance-check: not in a git repository" >&2; exit 2; }
+  base=$(git rev-parse --verify "$2^{commit}" 2>/dev/null) || { echo "acceptance-check: unknown base $2" >&2; exit 2; }
+  head=$(git rev-parse --verify "$3^{commit}" 2>/dev/null) || { echo "acceptance-check: unknown head $3" >&2; exit 2; }
+  full() { echo "full: $*"; exit 0; }
+  # 1. the head's own commits, read as the main mode reads them, are exactly one: HEAD
+  commits=$(git rev-list --first-parent "$head" --not "$base") || { echo "acceptance-check: cannot list the commits of $3" >&2; exit 2; }
+  [ "$commits" = "$head" ] || full "the head has $(printf '%s\n' "$commits" | sed '/^$/d' | wc -l | tr -d ' ') own commits, not one"
+  # 2. not a merge (nor a commit without a parent)
+  [ "$(git rev-list --parents -n 1 "$head" | wc -w)" -eq 2 ] || full "the head $head is a merge or has no parent"
+  # 3. it declares
+  paths=$(declared "$head")
+  [ -n "$paths" ] || full "the head $head declares no Acceptance-Test path"
+  # 4. rule 2: it changes only declared paths and test helpers
+  read_refused "$head" || { echo "acceptance-check: cannot list the changes of commit $3" >&2; exit 2; }
+  [ -z "$refused" ] || full "the head $head also changes $(printf '%s' "$refused" | LC_ALL=C sort -u | tr '\n' ' ' | sed 's/ $//'), neither declared nor a test helper"
+  # 5. rule 3: every declared path is a target or a helper at HEAD, and at least one is a target
+  work=$(mktemp -d) || exit 2
+  trap 'git worktree remove --force "$work/h" >/dev/null 2>&1; rm -rf "$work"' EXIT
+  git worktree add -q --detach "$work/h" "$head" >/dev/null 2>&1 || { echo "acceptance-check: git worktree add failed" >&2; exit 2; }
+  out=
+  while IFS= read -r line; do
+    kind=${line%% *} rest=${line#* }
+    case $kind in
+      rs) out+="rs ${rest##* }"$'\n' ;;
+      py) out+="py $rest"$'\n' ;;
+      bad) full "$rest" ;;
+    esac
+  done < <(classify "$work/h")
+  [ -n "$out" ] || full "no declared path is a test target"
+  echo "test-commit $head"
+  printf '%s' "$out" | awk '!seen[$0]++'
+  exit 0
+fi
 if [ "${1:-}" = --test-commit ]; then
   [ $# -eq 2 ] || { echo "usage: acceptance-check.sh --test-commit SHA" >&2; exit 2; }
   sha=$(git rev-parse --verify "$2^{commit}" 2>/dev/null) || { echo "acceptance-check: unknown commit $2" >&2; exit 2; }
@@ -136,26 +205,14 @@ git worktree add -q --detach "$work/t" "$first" && git worktree add -q --detach 
   || { echo "acceptance-check: git worktree add failed" >&2; echo "ACCEPTANCE: fail"; exit 1; }
 # Each test is "py <path>" or "rs <path> <target name>".
 tests=
-while IFS= read -r p; do
-  p=${p%/}
-  if [ -f "$work/t/$p" ]; then
-    if n=$(rs_name "$p"); then tests+="rs $p $n"$'\n'
-    elif is_py "$p"; then tests+="py $p"$'\n'
-    elif is_helper "$p"; then echo "acceptance-check: $p is a declared test helper (protected, not run)"
-    else no "declared path $p is not a test target"
-    fi
-  elif [ -d "$work/t/$p" ]; then
-    found=
-    n=$(rs_name "$p/main.rs") && [ -f "$work/t/$p/main.rs" ] && found+="rs $p $n"$'\n'
-    found+=$(cd "$work/t" && find "$p" -type f -name 'test_*.py' | sort | while IFS= read -r f; do is_py "$f" && echo "py $f"; done)
-    if [ -n "$(printf '%s' "$found" | sed '/^$/d')" ]; then tests+=$found$'\n'
-    elif is_helper "$p"; then echo "acceptance-check: $p is a declared test helper (protected, not run)"
-    else no "declared path $p is not a test target"
-    fi
-  else
-    no "declared path $p does not exist at the test commit"
-  fi
-done <<<"$paths"
+while IFS= read -r line; do
+  kind=${line%% *} rest=${line#* }
+  case $kind in
+    rs | py) tests+="$line"$'\n' ;;
+    helper) echo "acceptance-check: $rest is a declared test helper (protected, not run)" ;;
+    bad) no "$rest" ;;
+  esac
+done < <(classify "$work/t")
 tests=$(printf '%s' "$tests" | sed '/^$/d')
 [ -n "$tests" ] || no "no declared path is a test target; declare at least one that fails at the test commit"
 
