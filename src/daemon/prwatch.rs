@@ -1104,12 +1104,7 @@ impl PrWatch {
         }
         // The merge queue (Issue 434): each open read, in order, before the merge state.
         for r in &fresh {
-            let noted = self
-                .dequeue_seen
-                .values()
-                .find(|(repo, pr, _)| *pr == r.f.pr && repo.eq_ignore_ascii_case(&r.f.repo))
-                .map(|n| n.2);
-            match apply_queue(w, r, noted, self.interval) {
+            match apply_queue(w, r, &self.dequeue_seen, self.interval) {
                 Ok(QueueStep::Nothing) => {}
                 Ok(QueueStep::Note(attempt)) => {
                     self.dequeue_seen
@@ -2119,14 +2114,14 @@ enum QueueStep {
 /// An open read of a pull request whose queue act awaits its landing (Issue 434), in one
 /// transaction: a read `act_holds` drops does nothing; a read at another head than the act's ends
 /// it (`head moved`); a read out of the queue at its head with a removal on its timeline after the
-/// attempt ends it (`left the queue`) only when `noted`, the start of such a read before it, is at
-/// least `interval` earlier (claim 6 of merge-act.md section 10 is [unverified]: a pull request
+/// attempt ends it (`left the queue`) only when the note of that attempt in `notes`, the start of
+/// such a read before it, is at least `interval` earlier (claim 6 of merge-act.md section 10 is [unverified]: a pull request
 /// leaving the queue to land may be read so for a moment). A read out of the queue with no removal
 /// never ends it: the act stays followed, and its landing is read.
 fn apply_queue(
     w: &StateWriter,
     r: &MergeRead,
-    noted: Option<Instant>,
+    notes: &HashMap<i64, (String, i64, Instant)>,
     interval: Duration,
 ) -> Result<QueueStep> {
     w.transaction(|w| {
@@ -2151,7 +2146,9 @@ fn apply_queue(
                 if !removed {
                     return Ok(QueueStep::Clear(a.attempt));
                 }
-                match noted {
+                // The note of this attempt only: one an earlier act of the pull request left
+                // never counts for a later one.
+                match notes.get(&a.attempt).map(|n| n.2) {
                     Some(t) if r.started >= t + interval => {
                         super::door::merge_dequeued(w, task, repo, pr, &a, "left the queue")?;
                         Ok(QueueStep::Ended(a.attempt))
@@ -4180,6 +4177,89 @@ esac"#,
             json!({"repo": "o/r", "pr": 5, "head_oid": head, "merged_via": "gate"}),
         );
         assert!(tasks(&w).is_empty(), "both landed");
+    }
+
+    /// The note of a read out of the queue belongs to its attempt: after that queue act ended and
+    /// another attempt was enqueued, the old note does not let one read end the new act; that read
+    /// is noted for the new attempt, and a second one an interval later ends it (Issue 434).
+    #[test]
+    fn a_dequeue_note_of_an_earlier_attempt_does_not_count_for_a_later_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        let last_id = |w: &StateWriter| -> i64 {
+            w.conn()
+                .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+                .unwrap()
+        };
+        let enqueue = |w: &StateWriter| -> i64 {
+            event(
+                w,
+                "merge_attempted",
+                "makibad",
+                Some("t"),
+                json!({"repo": "o/r", "pr": 5, "head": head}),
+            );
+            let attempt = last_id(w);
+            event(
+                w,
+                "merge_enqueued",
+                "makibad",
+                Some("t"),
+                json!({"attempt": attempt}),
+            );
+            attempt
+        };
+        let old = enqueue(&w);
+        event(
+            &w,
+            "merge_dequeued",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head": head, "attempt": old, "why": "left the queue"}),
+        );
+        let new = enqueue(&w);
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let interval = Duration::from_millis(50);
+        let read = |started: Instant| MergeRead {
+            started,
+            started_ms: now_ms() + 1000,
+            queued: Some(false),
+            timeline: Some(vec![(true, now_ms()), (false, now_ms())]),
+            ..merge_read(&f, &head, "CLEAN")
+        };
+        let t0 = Instant::now();
+        let mut notes = HashMap::new();
+        notes.insert(old, ("o/r".to_string(), 5, t0));
+        let later = t0 + interval * 2;
+        assert_eq!(
+            apply_queue(&w, &read(later), &notes, interval).unwrap(),
+            QueueStep::Note(new)
+        );
+        let dequeued = || {
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'merge_dequeued'
+                   AND json_extract(payload_json, '$.attempt') = ?1",
+                [new],
+            )
+            .unwrap()
+        };
+        assert_eq!(dequeued(), 0, "one read ends nothing");
+        notes.insert(new, ("o/r".to_string(), 5, later));
+        assert_eq!(
+            apply_queue(&w, &read(later + interval), &notes, interval).unwrap(),
+            QueueStep::Ended(new)
+        );
+        assert_eq!(dequeued(), 1);
     }
 
     /// Both forms of the state read name github.com, so an inherited `GH_HOST` cannot send the
