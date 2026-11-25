@@ -543,9 +543,10 @@ fn pr_watches(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 /// ledger and `pr_watches`; see `pull_request` for the fields. A pull request's merge is read
 /// from any run's `pr_merged`, so that a run not closed which still names a pull request another
 /// run merged does not list it as open and hide the merge; such an entry has the task of the
-/// merge's run (else the merge's `task_id`), as one listed from the merges of today has.
+/// merge's run (else the merge's `task_id`), as one listed from the merges of today has. Its
+/// close is read from any run too (Issue 491), in `pull_request`.
 fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
-    use crate::daemon::belt::{current_pr_sql, pr_closed_sql};
+    use crate::daemon::belt::current_pr_sql;
     let open = rows(
         conn,
         &format!(
@@ -553,8 +554,8 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
                     CASE WHEN m.id IS NULL THEN o.task_id
                          ELSE coalesce(mr.task_id, json_extract(m.payload_json, '$.task_id'),
                                        o.task_id) END AS task_id,
-                    o.repo, o.pr, o.closed, m.payload_json AS merged
-             FROM (SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr, {closed} AS closed,
+                    o.repo, o.pr, m.payload_json AS merged
+             FROM (SELECT r.id, r.task_id, {repo} AS repo, {pr} AS pr,
                           (SELECT e.id FROM events e WHERE e.kind = 'pr_merged'
                              AND lower(json_extract(e.payload_json, '$.repo')) = lower({repo})
                              AND json_extract(e.payload_json, '$.pr') = {pr}
@@ -567,7 +568,6 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
              ORDER BY o.id",
             repo = current_pr_sql("r", "repo"),
             pr = current_pr_sql("r", "pr"),
-            closed = pr_closed_sql("r"),
         ),
         [],
     )?;
@@ -575,7 +575,7 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
         conn,
         "SELECT e.run_id AS id, coalesce(r.task_id, json_extract(e.payload_json, '$.task_id'))
                 AS task_id, json_extract(e.payload_json, '$.repo') AS repo,
-                json_extract(e.payload_json, '$.pr') AS pr, 0 AS closed,
+                json_extract(e.payload_json, '$.pr') AS pr,
                 e.payload_json AS merged
          FROM events e LEFT JOIN runs r ON r.id = e.run_id
          WHERE e.kind = 'pr_merged'
@@ -646,9 +646,14 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
             .optional()?
             .flatten(),
     };
+    // Closed when the newest close, reopen or registration of this pull request, of any run, is
+    // a close (Issue 491): a close one run recorded is not hidden by another run listed first.
+    let closed = newest("'pr_closed', 'pr_reopened', 'pr_opened', 'fix_pushed'")?
+        .zip(newest("'pr_closed'")?)
+        .is_some_and(|((last, _), (close, _))| last == close);
     let state = if merged.is_some() {
         "merged"
-    } else if row["closed"] == json!(1) {
+    } else if closed {
         "closed"
     } else {
         "open"
