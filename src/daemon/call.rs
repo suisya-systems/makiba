@@ -237,8 +237,10 @@ fn setting(w: &StateWriter) -> Result<Option<(String, i64)>> {
         .optional()?)
 }
 
-/// What the events say of one entry under the setting `since`: called, failures, and whether
-/// the newest failure is younger than `retry`.
+/// What the events say of one entry under the setting `setting` (the id of its `config_set`):
+/// called, failures made under that setting (their payload's `setting`), and whether the newest
+/// of those is younger than `retry`. A call that started under an older setting and failed after
+/// the person set the command again does not count against the new one.
 #[derive(Default)]
 struct Record {
     called: bool,
@@ -246,10 +248,10 @@ struct Record {
     recent: bool,
 }
 
-fn records(w: &StateWriter, since: i64, retry: Duration) -> Result<HashMap<i64, Record>> {
+fn records(w: &StateWriter, setting: i64, retry: Duration) -> Result<HashMap<i64, Record>> {
     let mut out: HashMap<i64, Record> = HashMap::new();
     let mut q = w.conn().prepare(
-        "SELECT kind, id, payload_json,
+        "SELECT kind, payload_json,
                 (julianday('now') - julianday(occurred_at)) * 86400000.0
          FROM events WHERE kind IN ('notify_sent', 'notify_failed')
            AND json_extract(payload_json, '$.to') = ?1",
@@ -257,20 +259,19 @@ fn records(w: &StateWriter, since: i64, retry: Duration) -> Result<HashMap<i64, 
     let rows = q.query_map([TO], |r| {
         Ok((
             r.get::<_, String>(0)?,
-            r.get::<_, i64>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, f64>(3)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, f64>(2)?,
         ))
     })?;
     for row in rows {
-        let (kind, id, payload, age_ms) = row?;
+        let (kind, payload, age_ms) = row?;
         let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
         let ids = v["pending_ids"].as_array().cloned().unwrap_or_default();
         for p in ids.iter().filter_map(Value::as_i64) {
             let r = out.entry(p).or_default();
             if kind == "notify_sent" {
                 r.called = true;
-            } else if id > since {
+            } else if v["setting"].as_i64() == Some(setting) {
                 r.failures += 1;
                 if age_ms < retry.as_millis() as f64 {
                     r.recent = true;
@@ -303,6 +304,8 @@ struct Flight {
     pgid: i32,
     ids: Vec<i64>,
     command: String,
+    /// The id of the `config_set` the call was started under.
+    setting: i64,
     title: String,
     body: String,
     started: Instant,
@@ -373,17 +376,23 @@ impl Call {
         self.last_start = Some(Instant::now());
         let ids: Vec<i64> = due.iter().map(|e| e.id).collect();
         let mask = Mask::new(w.conn());
-        if let Err(why) = text_rule(&command).and_then(|()| disk_rule(&command, &self.state)) {
-            self.done = Some(Done {
-                kind: "notify_failed",
-                payload: json!({"to": TO, "pending_ids": ids, "command": command,
-                                "reason": format!("unsafe: {}", mask.text(&why)), "stderr": ""}),
-                files: Vec::new(),
-            });
-            return self.write(w);
-        }
+        // The resolved file is what runs: a link checked here cannot be pointed elsewhere
+        // between the check and the start.
+        let program = match text_rule(&command).and_then(|()| disk_rule(&command, &self.state)) {
+            Ok(p) => p,
+            Err(why) => {
+                self.done = Some(Done {
+                    kind: "notify_failed",
+                    payload: json!({"to": TO, "pending_ids": ids, "command": command,
+                                    "setting": since,
+                                    "reason": format!("unsafe: {}", mask.text(&why)), "stderr": ""}),
+                    files: Vec::new(),
+                });
+                return self.write(w);
+            }
+        };
         let (title, body) = texts(&mask, &due);
-        match self.spawn(&command, &title, &body) {
+        match self.spawn(&program, &title, &body) {
             Ok((child, files)) => {
                 let pgid = child.id() as i32;
                 self.flight = Some(Flight {
@@ -391,6 +400,7 @@ impl Call {
                     pgid,
                     ids,
                     command,
+                    setting: since,
                     title,
                     body,
                     started: Instant::now(),
@@ -402,6 +412,7 @@ impl Call {
                 self.done = Some(Done {
                     kind: "notify_failed",
                     payload: json!({"to": TO, "pending_ids": ids, "command": command,
+                                    "setting": since,
                                     "reason": format!("spawn: {e}"), "stderr": ""}),
                     files,
                 });
@@ -414,7 +425,7 @@ impl Call {
     #[allow(clippy::type_complexity)]
     fn spawn(
         &mut self,
-        command: &str,
+        program: &Path,
         title: &str,
         body: &str,
     ) -> std::result::Result<(Child, [PathBuf; 2]), (String, Vec<PathBuf>)> {
@@ -444,7 +455,7 @@ impl Call {
         }
         let stdin = File::open(&input).map_err(|e| fail(e, files.clone()))?;
         let stderr = open(&err).map_err(|e| fail(e, files.clone()))?;
-        let child = Command::new(command)
+        let child = Command::new(program)
             .arg(title)
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::null())
@@ -485,7 +496,7 @@ impl Call {
             None => Done {
                 kind: "notify_sent",
                 payload: json!({"to": TO, "pending_ids": f.ids, "command": f.command,
-                                "title": f.title, "body": f.body}),
+                                "setting": f.setting, "title": f.title, "body": f.body}),
                 files,
             },
             Some(reason) => {
@@ -493,7 +504,8 @@ impl Call {
                 Done {
                     kind: "notify_failed",
                     payload: json!({"to": TO, "pending_ids": f.ids, "command": f.command,
-                                    "reason": reason, "stderr": stderr_of(&mask, &f.files[1])}),
+                                    "setting": f.setting, "reason": reason,
+                                    "stderr": stderr_of(&mask, &f.files[1])}),
                     files,
                 }
             }
@@ -531,7 +543,7 @@ impl Call {
 
     /// One log line for each entry of `payload` that has now failed `TRIES` times.
     fn log_given_up(&self, w: &StateWriter, payload: &Value) -> Result<()> {
-        let Some((_, since)) = setting(w)? else {
+        let Some(since) = payload["setting"].as_i64() else {
             return Ok(());
         };
         let records = records(w, since, self.retry)?;
@@ -561,6 +573,19 @@ impl Call {
         }
         if let Err(e) = self.write(w) {
             eprintln!("makibad: the call's record is lost at the stop: {e}");
+        }
+    }
+}
+
+/// On every way out of `makibad`'s loop, a stop or an error return alike: a call still running
+/// is ended with its group, so no command outlives the process that bounds its time.
+impl Drop for Call {
+    fn drop(&mut self) {
+        if let Some(mut f) = self.flight.take() {
+            kill_group(&mut f);
+            for p in &f.files {
+                let _ = std::fs::remove_file(p);
+            }
         }
     }
 }
@@ -601,5 +626,123 @@ mod tests {
         assert_eq!(cut_bytes("aé", 2), "a");
         assert_eq!(cut_bytes("ab", 5), "ab");
         assert_eq!(plain("a\0b\tc\nd"), "a b c\nd");
+    }
+
+    /// A folder only the user can write, under the crate's `target/` (not under `/tmp`).
+    fn private_folder() -> tempfile::TempDir {
+        let base = Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+        std::fs::create_dir_all(&base).unwrap();
+        let d = tempfile::Builder::new()
+            .prefix("call-unit-")
+            .tempdir_in(&base)
+            .unwrap();
+        std::fs::set_permissions(d.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
+        d
+    }
+
+    /// The rule hands back the resolved file, which is what a call runs: a link checked once
+    /// cannot be pointed at another file before the start.
+    #[test]
+    fn the_rule_gives_the_resolved_file_that_is_run() {
+        let d = private_folder();
+        let dir = std::fs::canonicalize(d.path()).unwrap();
+        let real = dir.join("real");
+        std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let state = dir.join("state");
+        match disk_rule(&link.to_string_lossy(), &state) {
+            Ok(p) => assert_eq!(p, real),
+            // A sandbox that shows root's files as another user's refuses `/` itself.
+            Err(e) => assert!(
+                std::fs::metadata("/").unwrap().uid() != 0,
+                "refused where root owns /: {e}"
+            ),
+        }
+    }
+
+    /// A failure made under an older setting does not count against a newer one.
+    #[test]
+    fn failures_count_only_under_the_setting_they_ran_with() {
+        let d = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&d.path().join("state.db")).unwrap();
+        let set = |v: &str| {
+            w.append_event(&NewEvent {
+                kind: "config_set",
+                actor: Some("person"),
+                payload: Some(&json!({"project": "", "key": KEY, "value": v})),
+                ..Default::default()
+            })
+            .unwrap()
+        };
+        let old = set("/old");
+        let new = set("/new");
+        w.append_event(&NewEvent {
+            kind: "notify_failed",
+            actor: Some("makibad"),
+            payload: Some(&json!({"to": TO, "pending_ids": [5], "command": "/old",
+                                  "setting": old, "reason": "exit 1", "stderr": ""})),
+            ..Default::default()
+        })
+        .unwrap();
+        let retry = Duration::from_secs(60);
+        assert_eq!(records(&w, old, retry).unwrap()[&5].failures, 1);
+        let under_new = records(&w, new, retry).unwrap();
+        assert_eq!(under_new.get(&5).map_or(0, |r| r.failures), 0);
+        assert!(!under_new.get(&5).is_some_and(|r| r.recent));
+    }
+
+    /// Dropping the pass, as any return from the loop does, ends a running call's whole group.
+    #[test]
+    fn dropping_the_pass_ends_a_running_call_and_its_group() {
+        let d = tempfile::tempdir().unwrap();
+        let pid_file = d.path().join("pid");
+        let child = Command::new("/bin/sh")
+            .arg("-c")
+            .arg(format!(
+                "sleep 60 & echo $! > '{}'; wait",
+                pid_file.display()
+            ))
+            .stdout(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let until = Instant::now() + Duration::from_secs(10);
+        let pid: i32 = loop {
+            if let Some(p) = std::fs::read_to_string(&pid_file)
+                .ok()
+                .and_then(|s| s.trim().parse().ok())
+            {
+                break p;
+            }
+            assert!(Instant::now() < until, "the grandchild did not start");
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let mut call = Call::new(d.path());
+        call.flight = Some(Flight {
+            pgid: child.id() as i32,
+            child,
+            ids: vec![1],
+            command: "/bin/sh".into(),
+            setting: 1,
+            title: String::new(),
+            body: String::new(),
+            started: Instant::now(),
+            files: [d.path().join("a.in"), d.path().join("a.err")],
+        });
+        drop(call);
+        let until = Instant::now() + Duration::from_secs(5);
+        // SAFETY: signal 0 only checks that the process exists.
+        while unsafe { libc::kill(pid, 0) } == 0 && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        // SAFETY: as above.
+        let alive = unsafe { libc::kill(pid, 0) } == 0;
+        if alive {
+            // SAFETY: the grandchild this test started.
+            unsafe { libc::kill(pid, libc::SIGKILL) };
+        }
+        assert!(!alive, "the grandchild {pid} outlived the pass");
     }
 }
