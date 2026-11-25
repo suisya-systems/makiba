@@ -342,7 +342,12 @@ pub fn dependency_lines(text: &str) -> DepLines {
             let Some(span) = run_after(line, m.end()) else {
                 continue;
             };
-            if BLOCK_NEG.is_match(&line[..m.start()]) {
+            // Emphasis and code marks aside, as the run reads them (`not **blocked by** #5`).
+            let before: String = line[..m.start()]
+                .chars()
+                .filter(|c| !matches!(c, '*' | '_' | '~' | '`'))
+                .collect();
+            if BLOCK_NEG.is_match(&before) {
                 negated.push(span);
             } else if !runs.contains(&span) {
                 runs.push(span);
@@ -624,6 +629,9 @@ mod tests {
             "not blocked by #5",
             "Not blocked by #5",
             "no longer depends on #5",
+            "not **blocked by** #5",
+            "It is _not_ `blocked by` #5",
+            "This no longer __depends on__ #5.",
         ] {
             assert_eq!(dependency_lines(body), Default::default(), "{body:?}");
         }
