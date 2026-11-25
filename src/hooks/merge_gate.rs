@@ -106,7 +106,8 @@ fn mentions_merge(command: &str) -> bool {
         .collect();
     let op = regex::Regex::new(r"\$\{[^}]*[#%/:^,]|\$\{?\w*merge").expect("pattern");
     if op.is_match(&base) {
-        return plain.contains("merge");
+        // Any merge at all, and the names `merge_word` knows that hold no "merge" (an enqueue).
+        return plain.contains("merge") || merge_word(&plain);
     }
     // An expansion adds no text of its own (a word break), except the default word in `${A-x}`.
     let braces = regex::Regex::new(r"\$\{[^}]*\}?").expect("pattern");
@@ -675,6 +676,30 @@ mod tests {
 
     /// The word, kept out of this file's own command lines.
     const M: &str = "mer\x67e";
+
+    /// The Issue 433 diff review, round 2: a wrapped enqueue is read as naming merge also when
+    /// the line holds a `${...}` operation (the reading that takes any "merge" at all).
+    #[test]
+    fn a_wrapped_enqueue_beside_a_parameter_expansion_is_refused() {
+        let q = "mutation{enqueuePullRequest(input:{pullRequestId:\\\"x\\\"}){clientMutationId}}";
+        for cmd in [
+            format!(
+                "echo \"${{X:-}}\"; python3 -c 'import os; os.system(\"gh api graphql -f query={q}\")'"
+            ),
+            format!(
+                "echo ${{X#y}}; python3 -c 'import os; os.system(\"gh api graphql -f query={q}\")'"
+            ),
+            format!("echo ${{X:-}}; gh api graphql -f query=$(cat q.graphql) # {q}"),
+        ] {
+            let why = parse(&cmd).expect_err(&cmd);
+            assert!(why.contains("mcp__makiba__merge"), "{cmd}: {why}");
+        }
+        // A plain read beside an expansion still passes.
+        assert_eq!(
+            parse("echo \"${X:-}\"; gh pr view 7 --repo o/r --json state"),
+            Ok(())
+        );
+    }
 
     /// The Issue 433 diff review: a write to a `pulls/<n>/merge*` path that a runner or a
     /// substitution wraps is read as naming merge, as the plain word is.
