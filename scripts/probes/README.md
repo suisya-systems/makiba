@@ -108,8 +108,8 @@ Where the person's screen can run: M1 to M4 of `docs/design/screen.md` section 5
 
 - `m1-command`: the app runs `makiba status --json` and shows it, refreshed by itself (the owner's answer).
 - `m3-page`: the stand-in page shown beside the secretary's terminal (the owner's answer) and at least two reads of its `status.json` counted during a 15-second window. `m1-page` follows it.
-- `m2-act`: the app runs `makiba config get conversation_language` as the person. PASS = a new `commands` row by `person` with verb `config`, not rejected, and the answer shown in the app. The owner also names the way (`extension`, `terminal`, `none`).
-- `m2-answer`: only when a question already waits and the owner answers it from the app. PASS = the entry is `answered` by `person`. Otherwise NOT-RUN.
+- `m2-act`: the app runs `makiba config get conversation_language` as the person. PASS = a new `commands` row by `person` for `config get conversation_language`, not rejected, and the answer shown in the app. The owner also names the way (`extension`, `terminal`, `none`).
+- `m2-answer`: only when a question already waits and the owner answers it from the app after naming it (step 12) and the script's mark. PASS = the entry is `answered` by `person` and a new `answer` request by `person` for it is recorded. Otherwise NOT-RUN.
 - M4 is a paragraph the owner writes into probes.md; the script records the owner's one-line summary.
 
 ## TODO(confirm)

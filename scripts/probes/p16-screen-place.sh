@@ -202,14 +202,14 @@ WAITING=$(status_json | jfield '" ".join(str(p["id"]) for p in d.get("pending",[
 if [ -z "$WAITING" ]; then
   say "CASE m2-answer: NOT-RUN  no question waits for the person (the probe never makes one: an answer is delivered to a worker)"
 else
-  line "12. Questions waiting for you: $WAITING. To answer one of them from the app as you would anyway, give its id and answer it there (\`makiba answer <id> yes|no\`); or press Enter to skip:"
+  line "12. Questions waiting for you: $WAITING. To answer one of them from the app as you would anyway, type its id here and do not answer it yet (step 13 asks for that); or press Enter to skip:"
   ID=$LINE
   case "$ID" in ''|*[!0-9]*) ID="" ;; esac
   case " $WAITING " in *" $ID "*) ;; *) [ -n "$ID" ] && say "entry $ID is not one of the questions waiting: skipped"; ID="" ;; esac
   if [ -z "$ID" ]; then say "CASE m2-answer: NOT-RUN  skipped by the owner"
   else
     MARK2=$(db 'SELECT COALESCE(MAX(id),0) FROM commands')
-    step 13 "Answer entry $ID from the app, as at step 9."
+    step 13 "Now answer entry $ID from the app (\`makiba answer $ID yes|no\`), as at step 9."
     ENTRY=$(db 'SELECT status, answered_by FROM pending WHERE id = ?' "$ID")
     # The answer of this run: a new request by person, verb answer, for this entry, not rejected.
     NEWANS=$(db "SELECT COUNT(*) FROM commands WHERE id > ? AND actor = 'person' AND verb = 'answer'
