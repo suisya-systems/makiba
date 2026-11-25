@@ -639,56 +639,26 @@ EOF
   fi
 }
 
-# Check 4: the hook's answer, from a stand-in door that answers as the gate does (a head with no passed review, mode human).
-fd_check_gate_ask() {
-  say "== check 4: the landing gate's question (the hook's answer; nothing is landed, no pull request exists)"
-  local sha=0123456789abcdef0123456789abcdef01234567 cmd payload out rc
+# Check 4: the landing hook refuses the landing command with no door, naming the merge verb (Issue 433).
+fd_check_gate_refuse() {
+  say "== check 4: the landing hook refuses the landing command and names the merge verb (nothing is landed, no pull request exists)"
+  local sha=0123456789abcdef0123456789abcdef01234567 cmd payload out err rc
   cmd="gh pr merge 1 --repo $GH_REPO --squash --match-head-commit $sha"
   payload=$(python3 -I -c 'import json, sys; print(json.dumps({"tool_name": "Bash", "tool_input": {"command": sys.argv[1]}}))' "$cmd")
-  say "+ the payload of the secretary's allowed landing command: $cmd"
+  say "+ the payload of the landing command the hook once allowed: $cmd"
   if [ "$DRY" = 1 ]; then
-    plan "start a stand-in door in the scratch place that answers the gate's request with allow, warn and a reason with WARNING (a head with no diff review, mode human); run: $MK hook merge-gate with the payload and that door; read permissionDecision and WARNING"
-    plan "ask the scratch organization's real door once with the same command for a pull request that does not exist (expects a refusal that names the acceptance gate: shows the gate key and the door answer)"
-    plan "print the named step for the person"
+    plan "run: $MK hook merge-gate with the payload, with no door and no key (MAKIBA_DOOR and MAKIBA_GATE_KEY at absent paths in the scratch place); expect exit 2, nothing on stdout (no permissionDecision), and a refusal naming mcp__makiba__merge"
     return 0
   fi
-  cat > "$RUN/standin-door.py" <<'EOF'
-import json, os, socket, sys
-path, key = sys.argv[1], sys.argv[2]
-s = socket.socket(socket.AF_UNIX)
-s.bind(path)
-s.listen(1)
-c, _ = s.accept()
-req = json.loads(c.makefile().readline())
-ok = req.get("key") == key and req.get("verb") == "gate"
-head = req.get("args", {}).get("head", "")[:12]
-reason = "no declared acceptance test; WARNING review of %s: none (no diff review was run): the person decides this landing" % head
-res = {"verdict": "no_manifest", "allow": True, "warn": True, "reason": reason, "mode": "human"}
-out = {"ok": True, "result": res} if ok else {"ok": False, "error": {"message": "stand-in: wrong key or verb"}}
-c.sendall((json.dumps(out) + "\n").encode())
-EOF
-  printf 'stand-in-gate-key\n' > "$RUN/standin-gate.key"
-  python3 -I "$RUN/standin-door.py" "$RUN/standin-door.sock" stand-in-gate-key &
-  local sp=$! i=0
-  while [ ! -S "$RUN/standin-door.sock" ] && [ "$i" -lt 50 ]; do sleep 0.1; i=$((i + 1)); done
   rc=0
-  out=$(printf '%s' "$payload" | MAKIBA_DOOR="$RUN/standin-door.sock" MAKIBA_GATE_KEY="$RUN/standin-gate.key" "$MK" hook merge-gate 2>&1) || rc=$?
-  kill "$sp" 2>/dev/null || true
-  wait "$sp" 2>/dev/null || true
-  say "  the hook (stand-in door): exit $rc, output: $out"
-  if [ "$rc" -eq 0 ] && printf '%s' "$out" | python3 -I -c 'import json, sys; o = json.load(sys.stdin)["hookSpecificOutput"]; assert o["permissionDecision"] == "ask" and "WARNING" in o["permissionDecisionReason"]'; then
-    fd gate-ask PASS "the hook answered permissionDecision ask with a reason holding WARNING, for the allowed landing command under a stand-in door that answers as the gate does for a head with no review. This proves the hook's answer only: not the gate's decision on a real head, and not that Claude Code shows the question"
+  out=$(printf '%s' "$payload" | MAKIBA_DOOR="$RUN/absent-door.sock" MAKIBA_GATE_KEY="$RUN/absent-gate.key" "$MK" hook merge-gate 2>"$RUN/gate-refuse.err") || rc=$?
+  err=$(cat "$RUN/gate-refuse.err")
+  say "  the hook: exit $rc, stdout: $out, stderr: $err"
+  if [ "$rc" -eq 2 ] && [ -z "$out" ] && [[ "$err" == *mcp__makiba__merge* ]]; then
+    fd gate-refuse PASS "the hook refused the landing command it once allowed, with no door and no key, asked nobody and named mcp__makiba__merge: makibad runs the landing, the secretary cannot"
   else
-    fd gate-ask FAIL "the hook did not answer ask with WARNING (exit $rc): $out" "src/hooks/merge_gate.rs ask_gate; run the line again and read the output above"
+    fd gate-refuse FAIL "the hook did not refuse the landing command naming mcp__makiba__merge (exit $rc): $out $err" "src/hooks/merge_gate.rs; run the line again and read the output above"
   fi
-  rc=0
-  out=$(printf '%s' "$payload" | "$MK" hook merge-gate 2>&1) || rc=$?
-  say "  the hook (the scratch organization's real door, a pull request that does not exist): exit $rc, output: $out"
-  case "$out" in
-    *ACCEPTANCE_GATE*) fd gate-door INFO "the scratch door answered the hook with the gate key: ${out%%$'\n'*}" ;;
-    *) fd gate-door FAIL "the scratch door did not answer the gate request as a refusal of the gate (exit $rc): $out" "is makibad running, is MAKIBA_GATE_KEY read (spec section 3)? run the line again" ;;
-  esac
-  FD_GAPS+=("gate-ask: that Claude Code shows the question to the person is not shown by this script. Named step for the person: in the real secretary's session, when the first pull request of a code task is to be landed with a head that has no passed diff review, the secretary runs: gh pr merge <n> --repo $GH_REPO --squash --match-head-commit <full head sha> ; look for a question carrying WARNING review of <head>: none. If the command runs with no question, that is a failure of the hook's wiring: write it in the results")
 }
 
 stage_first_day() {
@@ -713,7 +683,7 @@ stage_first_day() {
     plan "wait for the worker's done or blocked report (up to $((${WAIT_CODE:-3000} / 60)) minutes); PASS only on BUILD=ok TEST=ok with DOWNLOADED above 0 and no refused host in its messages and events; a refused host is a FAIL that names it and the line that adds it"
     plan "read the stored answer of the worker's review and the codex_round events: PASS when passed (with the reader), FAIL when not-established with the whole reason copied"
     plan "when the reader was not the fresh session: $MK close $A --abandon; $MK down; MAKIBA_REVIEW_OTHER=<a path that does not exist> $MK up --no-secretary (this scratch organization only); dispatch $B (a README line and the trivial test, no cargo); expect passed by fresh-session"
-    fd_check_gate_ask
+    fd_check_gate_refuse
     plan "print one line per check, a NEXT line for each FAIL, the NOT SHOWN lines and one VERDICT line"
     return 0
   fi
@@ -752,7 +722,7 @@ stage_first_day() {
       else fd review-fresh-session FAIL "no review to read: the second worker did not get to its done report ($FD_OUTCOME): ${FD_BODY%%$'\n'*}" "$MK peek $B, then $MK close $B --abandon; run the line again" ; fi
       ;;
   esac
-  fd_check_gate_ask
+  fd_check_gate_refuse
   FD_DONE=1
 }
 

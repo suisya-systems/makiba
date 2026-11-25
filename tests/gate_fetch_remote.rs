@@ -14,15 +14,14 @@
 mod common;
 
 use makiba::base::stub::Stub;
-use makiba::daemon::door::Door;
+use makiba::daemon::door::{Door, issue_key};
 use makiba::daemon::gate;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
+use makiba::spec::Role;
 use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once, OnceLock};
-
-const GATE_KEY: &str = "198198198198198198198198198198198198198198198198198198198198ab12";
 
 /// `pr view <n> --repo o/<name> ...` prints `<name>/view.<n>`; any other call fails.
 const STAND_IN: &str = r#"#!/bin/sh
@@ -87,6 +86,7 @@ struct Case {
     clone: PathBuf,
     door: Door,
     head: String,
+    person: String,
 }
 
 impl Case {
@@ -160,8 +160,8 @@ impl Case {
             ..Default::default()
         })
         .unwrap();
+        let person = issue_key(&w, Role::Person, "person", None, None).unwrap();
         let door = Door::new(w, Arc::new(Stub::new()), "claude_code".into());
-        door.set_gate_key(GATE_KEY);
         Case {
             _tmp: tmp,
             name: name.into(),
@@ -169,13 +169,14 @@ impl Case {
             clone,
             door,
             head,
+            person,
         }
     }
 
     fn gate(&self) -> Value {
         self.door
             .handle(
-                Some(GATE_KEY),
+                Some(&self.person),
                 "gate",
                 json!({"repo": format!("o/{}", self.name), "pr": 7, "head": self.head}),
                 None,

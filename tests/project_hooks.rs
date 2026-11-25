@@ -569,8 +569,6 @@ fn a_hooks_path_under_the_home_is_expanded() {
 
 // ---- case 9b: the merge gate ---------------------------------------------------------------------
 
-const GATE_KEY: &str = "236236236236236236236236236236236236236236236236236236236236ab12";
-
 /// `pr view <n> --repo o/<name> ...` prints `<name>/view.<n>`; any other call fails.
 const STAND_IN: &str = r#"#!/bin/sh
 if [ "$1" = "pr" ] && [ "$2" = "view" ]; then
@@ -679,11 +677,11 @@ fn the_merge_gates_fetch_runs_no_project_hook() {
         ..Default::default()
     })
     .unwrap();
+    let person = issue_key(&w, Role::Person, "person", None, None).unwrap();
     let door = Door::new(w, Arc::new(Stub::new()), "claude_code".into());
-    door.set_gate_key(GATE_KEY);
     let v: Value = door
         .handle(
-            Some(GATE_KEY),
+            Some(person.as_str()),
             "gate",
             json!({"repo": format!("o/{name}"), "pr": 7, "head": pr_head}),
             None,

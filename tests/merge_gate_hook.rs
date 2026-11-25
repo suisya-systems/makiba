@@ -30,7 +30,7 @@ fn a_redirection_before_the_program_does_not_hide_a_merge() {
         assert!(parse(&cmd).is_err(), "not refused: {cmd:?}");
     }
     // A redirection after the program is still read as before.
-    assert_eq!(parse("gh pr view 7 --json mergedAt 2>/dev/null"), Ok(None));
+    assert_eq!(parse("gh pr view 7 --json mergedAt 2>/dev/null"), Ok(()));
 }
 
 #[test]
@@ -47,7 +47,7 @@ fn a_quoted_word_with_blanks_before_the_program_stays_one_word() {
     // A quoted argument with blanks is still one argument: a mention passes.
     assert_eq!(
         parse(&format!("git commit -m \"gh pr {M} 7 is gated\"")),
-        Ok(None)
+        Ok(())
     );
 }
 
@@ -58,7 +58,7 @@ fn a_ripgrep_pattern_is_a_mention_and_its_pre_option_is_not() {
         format!("rg -n \"gh pr {M}\" src docs"),
         format!("rg -l 'pulls/[0-9]+/{M}' ."),
     ] {
-        assert_eq!(parse(&cmd), Ok(None), "refused a search: {cmd:?}");
+        assert_eq!(parse(&cmd), Ok(()), "refused a search: {cmd:?}");
     }
     for cmd in [
         format!("rg --pre $X {M} f"),
