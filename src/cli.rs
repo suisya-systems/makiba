@@ -399,7 +399,7 @@ pub enum Command {
         #[arg(value_parser = ["approve", "refuse"])]
         action: String,
         /// The pending entry's id (`makiba status` lists it).
-        id: i64,
+        pending_id: i64,
         /// refuse: why, for the secretary.
         #[arg(long)]
         reason: Option<String>,
@@ -663,9 +663,12 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
         ),
         Command::Gate { repo, pr, head } => ("gate", json!({"repo": repo, "pr": pr, "head": head})),
         Command::Merge {
-            action, id, reason, ..
+            action,
+            pending_id,
+            reason,
+            ..
         } => {
-            let mut args = json!({"action": action, "id": id});
+            let mut args = json!({"action": action, "id": pending_id});
             if let Some(r) = reason {
                 args["reason"] = r.into();
             }
@@ -816,13 +819,11 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
 /// SHA-256 of the text printed goes with the approval, so an entry changed since is refused
 /// (`stale`) instead of approved unseen.
 fn merge_preview(id: i64, yes: bool) -> Result<String, String> {
-    let path = crate::daemon::state_dir().join("state.db");
-    let text = crate::status_local::merge_entry_text(&path, id)?;
+    let (text, shown) = crate::status_local::merge_entry_here(id)?;
     print!("{text}");
-    let status = crate::status_local::read(&path)?;
+    let status = crate::status_local::read_here()?;
     let mode = status["merge_approval_mode"].as_str().unwrap_or("unknown");
     println!("Merge approval mode: {mode} (makibad's)");
-    let shown = crate::daemon::door::sha256_hex(&text);
     if yes {
         return Ok(shown);
     }
@@ -843,8 +844,11 @@ fn merge_preview(id: i64, yes: bool) -> Result<String, String> {
 pub fn main(c: Command) -> ExitCode {
     let merge_preview_of = match &c {
         Command::Merge {
-            action, id, yes, ..
-        } if action == "approve" => Some((*id, *yes)),
+            action,
+            pending_id,
+            yes,
+            ..
+        } if action == "approve" => Some((*pending_id, *yes)),
         _ => None,
     };
     let preview = match &c {

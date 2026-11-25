@@ -80,6 +80,14 @@ pub fn merge_entry_text(path: &Path, id: i64) -> Result<String, String> {
         .ok_or_else(|| format!("pending merge entry {id} holds no text"))
 }
 
+/// `merge_entry_text` of this organization's `state.db`, and the SHA-256 of that text, which
+/// `makiba merge approve` sends as `shown` (Issue 432).
+pub fn merge_entry_here(id: i64) -> Result<(String, String), String> {
+    let text = merge_entry_text(&crate::daemon::state_dir().join("state.db"), id)?;
+    let sum = crate::daemon::door::sha256_hex(&text);
+    Ok((text, sum))
+}
+
 /// Who reads the status, which decides where `merge_approval_mode` comes from (Issue 383).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Reader {

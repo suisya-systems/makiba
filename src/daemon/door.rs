@@ -4055,17 +4055,31 @@ impl Door {
             return merge_finish(&w, actor, args, idem, "done", Ok(answer));
         }
         let approved_by = (role == Role::Person).then_some("person");
-        let attempted = merge_attempt(
+        // A pending merge of this pull request is superseded by the act that runs now: left open,
+        // it could be approved after this attempt ended, for a request nobody makes any more.
+        let attempted = withdraw_merge_entries(
             &w,
-            actor,
-            args,
-            idem,
-            &j,
-            (&repo, pr, &head, &method),
             &task,
-            approved_by,
+            &repo,
+            pr,
             None,
-        );
+            false,
+            "makibad's merge of the pull request was asked again and runs now without the entry",
+        )
+        .map_err(|e| e.to_string())
+        .and_then(|()| {
+            merge_attempt(
+                &w,
+                actor,
+                args,
+                idem,
+                &j,
+                (&repo, pr, &head, &method),
+                &task,
+                approved_by,
+                None,
+            )
+        });
         let answer = match attempted {
             Ok(a) => a,
             Err(e) => {
@@ -4181,6 +4195,34 @@ impl Door {
                 return fail(&w, Err(e));
             }
         };
+        // The entry read again with the lock: refused, withdrawn, approved or changed while the gate
+        // ran, it is no longer the one this approval names, whatever the gate said; nothing stands.
+        let now: rusqlite::Result<Option<(String, Option<String>)>> = w
+            .conn()
+            .query_row(
+                "SELECT status, json_extract(context_json, '$.text_sum') FROM pending
+                 WHERE id = ?1 AND kind = 'merge'",
+                [id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional();
+        match now {
+            Ok(Some((status, sum))) if status == "open" && sum.as_deref() == Some(&shown) => {}
+            Ok(_) => {
+                let _ = w.rollback();
+                return fail(
+                    &w,
+                    Err(merge_stale(
+                        id,
+                        "was answered or changed while the gate ran",
+                    )),
+                );
+            }
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+        }
         if !j.allow {
             // The entry stays open: the person may approve it again once the cause is dealt with.
             let told = notice(
