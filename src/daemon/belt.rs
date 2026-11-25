@@ -15,7 +15,9 @@
 //! - A run that waits only for the person (an escalated pending entry) counts in neither count.
 //! - The proof of a landing: the run's registered pull request read merged (`pr_merged`), which
 //!   the PR watch records (`prwatch.rs`, Issue 388); the belt only checks the project's clone.
-//! - The read surface's `ranges[]` (spec section 12, table "Range field").
+//! - The read surface's `ranges[]` (spec section 12, table "Range field"). Its `approves_under`
+//!   (the mode approving a draft would fix) is set by `status_local`, which owns the mode as each
+//!   reader knows it (Issue 326); `approve` refuses as `stale` a mode shown that is not makibad's.
 //!
 //! Step 2 (Issue 282): the stops `makibad` writes itself, each a pending entry escalated at once
 //! with `belt_stopped`, in the transaction of what caused it and before the fill there.
@@ -399,6 +401,25 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "look at the range again (makiba range approve shows it) and approve that",
         ));
     }
+    // Issue 326: the approval fixes the merge approval mode the person was shown, as it fixes the
+    // read; the mode in force is read once, compared and stored.
+    let shown_mode = str_arg(args, "approval_mode")?;
+    if !["human", "acceptance"].contains(&shown_mode) {
+        return Err(usage(format!(
+            "approval_mode is human or acceptance (the mode shown), not {shown_mode:?}"
+        )));
+    }
+    let mode = super::gate::merge_approval_mode();
+    if shown_mode != mode {
+        return Err(refuse(
+            ErrorKind::Stale,
+            format!(
+                "range {} was shown under merge_approval_mode {shown_mode} and makibad's mode now is {mode}",
+                g.id
+            ),
+            "look at the range again (makiba range approve shows it) and approve that",
+        ));
+    }
     if let Some(old) = g.replaces {
         let st = load(w, old)?.status;
         // A draft replaced by this draft was ended at the proposal: nothing is left to replace.
@@ -424,7 +445,6 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
             g.slug
         )));
     }
-    let mode = super::gate::merge_approval_mode();
     let store = || -> Result<()> {
         if let Some(old) = g.replaces {
             end_range(w, old, "replaced", actor)?;
@@ -2828,7 +2848,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 (SELECT count(*) FROM runs WHERE range_id = g.id),
                 g.budget_hours, g.budget_fixes,
                 round((julianday(coalesce(g.ended_at, 'now')) - julianday(g.approved_at)) * 24.0, 3),
-                g.follow_ups, g.design_ahead = 1
+                g.follow_ups, g.design_ahead = 1, g.replaces
          FROM ranges g JOIN projects p ON p.id = g.project_id WHERE g.id = ?1",
         [id],
         |r| {
@@ -2847,6 +2867,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 "used": {"tasks": r.get::<_, i64>(14)?, "hours": r.get::<_, Option<f64>>(17)?},
                 "follow_ups": r.get::<_, String>(18)?,
                 "design_ahead": r.get::<_, bool>(19)?,
+                "replaces": r.get::<_, Option<i64>>(20)?,
             }))
         },
     )?;
@@ -3238,7 +3259,8 @@ pub(in crate::daemon) mod tests {
             &w,
             "person",
             Role::Person,
-            &json!({"action": "approve", "id": second, "read": read}),
+            &json!({"action": "approve", "id": second, "read": read,
+                    "approval_mode": super::super::gate::merge_approval_mode()}),
         );
         assert_eq!(r.unwrap()["status"], json!("active"));
     }
