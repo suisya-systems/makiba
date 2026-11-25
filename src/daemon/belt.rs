@@ -3017,10 +3017,17 @@ fn items(
                     if let Some(at) = newest_event_at(c, run, "run_in_review")? {
                         it["since"] = json!(at);
                     }
+                    // The watch of its current pull request (Issue 357): a pull request
+                    // registered again keeps its older row, behind another's newer one.
                     let watch: Option<(String, Option<String>)> = c
                         .query_row(
-                            "SELECT status, conclusion FROM pr_watches WHERE run_id = ?1
-                             ORDER BY id DESC LIMIT 1",
+                            &format!(
+                                "SELECT w.status, w.conclusion FROM pr_watches w
+                                 JOIN runs r ON r.id = w.run_id
+                                 WHERE w.run_id = ?1 AND {}
+                                 ORDER BY w.id DESC LIMIT 1",
+                                is_current_pr_sql("r", "w.repo", "w.pr")
+                            ),
                             [run],
                             |r| Ok((r.get(0)?, r.get(1)?)),
                         )
@@ -3032,10 +3039,20 @@ fn items(
                     });
                 }
                 "completed" => {
+                    // A merge of its current pull request only (Issue 357): one of a pull
+                    // request it replaced is not its landing.
                     let merged: Option<String> = c
                         .query_row(
-                            "SELECT payload_json FROM events WHERE kind = 'pr_merged' AND run_id = ?1
-                             ORDER BY id LIMIT 1",
+                            &format!(
+                                "SELECT m.payload_json FROM events m JOIN runs r ON r.id = m.run_id
+                                 WHERE m.kind = 'pr_merged' AND m.run_id = ?1 AND {}
+                                 ORDER BY m.id DESC LIMIT 1",
+                                is_current_pr_sql(
+                                    "r",
+                                    "json_extract(m.payload_json, '$.repo')",
+                                    "json_extract(m.payload_json, '$.pr')"
+                                )
+                            ),
                             [run],
                             |r| r.get(0),
                         )

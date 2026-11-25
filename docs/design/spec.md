@@ -991,13 +991,13 @@ The ranges of `status --json` (Issue 257, section 5.8). `tests/belt.rs` compares
 | `ranges[].candidates[].design_only_waits` | `range_candidates.waits_json`: the Issues an admitted candidate waits for, admitted for its design only; else null |
 | `ranges[].items[].issue` | the whole range as a list: every Issue it dispatched (by its `belt_dispatched`) or skipped (by its `belt_skipped`), in event order, then the rest of its newest read in the read's order |
 | `ranges[].items[].title` | the run's title, else the candidate's |
-| `ranges[].items[].place` | `waiting_person` (an escalated entry), `in_work` (`queued`, `in_use`, `suspended`, `failed`), `review`, `landed` (`completed` with `pr_merged`), `closed` (`completed` with no merge recorded), `skipped` (skipped, or `abandoned`), `not_in` (no run) |
+| `ranges[].items[].place` | `waiting_person` (an escalated entry), `in_work` (`queued`, `in_use`, `suspended`, `failed`), `review`, `landed` (`completed` with a `pr_merged` of its current pull request, `belt::current_pr_sql`), `closed` (`completed` with no merge of its current pull request recorded), `skipped` (skipped, or `abandoned`), `not_in` (no run) |
 | `ranges[].items[].why` | the stop's line and question, the left-out reason, `no_slot`, `budget`, `no merge recorded`, the skip's reason |
-| `ranges[].items[].stage` | `launching`, `at_work`, `launch_failed`, `design_only` (a design-only run before its design report) in work; `no_pr`, `ci`, `to_land`, `waits_landing #<n>` (a design-only run that reported its design and waits for the landing) in review; `parked` waiting for the person with its terminal let go |
+| `ranges[].items[].stage` | `launching`, `at_work`, `launch_failed`, `design_only` (a design-only run before its design report) in work; `no_pr`, `ci`, `to_land` (from the watch of its current pull request), `waits_landing #<n>` (a design-only run that reported its design and waits for the landing) in review; `parked` waiting for the person with its terminal let go |
 | `ranges[].items[].since` | the dispatch (in work), the move into review (its newest `run_in_review`; for a design-only run waiting for its landing, its newest `design_reported`; a run moved into review before Issue 414 keeps the dispatch), the stop, the close or the skip |
 | `ranges[].items[].task_id` | `runs.task_id` |
-| `ranges[].items[].pr` | `pr_merged.pr` |
-| `ranges[].items[].pr_title` | `pr_merged.title` |
+| `ranges[].items[].pr` | `pr_merged.pr` of the current pull request's merge |
+| `ranges[].items[].pr_title` | `pr_merged.title` of the current pull request's merge |
 | `ranges[].places` | the items per place, every place named |
 | `ranges[].stops[].id` | `pending.id` of every entry of the range with `stop_line` `decision`, any status |
 | `ranges[].stops[].task_id` | `runs.task_id` |
