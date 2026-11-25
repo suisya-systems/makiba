@@ -910,8 +910,9 @@ impl After {
 
 /// Whether an order's B has landed, from the ledger only (docs/design/merge-order.md 6.2): for a
 /// pull request, a `pr_merged` of it (repository in any case) of any run; for an Issue, a
-/// `pr_merged` on a run of the order's project whose `issue_refs` names `<project>#<n>`, of that
-/// run's current pull request (a merge of one it has replaced since does not count).
+/// `pr_merged` of the order's repository (any case) on a run of the order's project whose
+/// `issue_refs` names `<project>#<n>`, of that run's current pull request (a merge of one it has
+/// replaced since does not count).
 pub fn order_landed(
     c: &rusqlite::Connection,
     repo: &str,
@@ -936,6 +937,7 @@ pub fn order_landed(
             "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
                JOIN projects p ON p.id = r.project_id
                WHERE e.kind = 'pr_merged' AND p.slug = ?1
+                 AND lower(json_extract(e.payload_json, '$.repo')) = lower(?3)
                  AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(r.issue_refs)
                                                      THEN r.issue_refs ELSE '[]' END) j
                              WHERE j.value = ?2)
@@ -946,7 +948,7 @@ pub fn order_landed(
                 "json_extract(e.payload_json, '$.pr')"
             )
         ),
-        rusqlite::params![project, super::belt::issue_ref(project, number)],
+        rusqlite::params![project, super::belt::issue_ref(project, number), repo],
         |r| r.get(0),
     )
 }
@@ -1282,4 +1284,67 @@ pub fn clone_of(
             super::triage::repo_of(slug, url.as_deref(), repos).as_deref() == Some(repo)
         })
         .map(|(slug, _)| repos.join(slug))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::writer::{NewEvent, RunUpsert, StateWriter};
+
+    fn writer() -> StateWriter {
+        StateWriter::new(crate::db::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn event(w: &StateWriter, kind: &str, task: &str, payload: Value) {
+        w.append_event(&NewEvent {
+            kind,
+            actor: Some("makibad"),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    /// Issue 338, diff review round 1: an Issue lands only through a merge in the order's
+    /// repository, even when the Issue's run made a pull request of another repository its current
+    /// one.
+    #[test]
+    fn an_issue_landing_in_another_repository_is_not_the_orders() {
+        let w = writer();
+        w.ensure_project("p", None, Some("https://github.com/o/p"))
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t332",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("review"),
+            issue_refs: Some(&["p#332"]),
+            ..Default::default()
+        })
+        .unwrap();
+        let other = json!({"repo": "o/elsewhere", "pr": 9, "head_oid": "a".repeat(40)});
+        event(&w, "pr_opened", "t332", other);
+        event(
+            &w,
+            "pr_merged",
+            "t332",
+            json!({"repo": "o/elsewhere", "pr": 9, "task_id": "t332"}),
+        );
+        let c = w.conn();
+        assert!(!order_landed(c, "o/p", "issue", 332, Some("p")).unwrap());
+        event(
+            &w,
+            "pr_opened",
+            "t332",
+            json!({"repo": "O/P", "pr": 10, "head_oid": "b".repeat(40)}),
+        );
+        event(
+            &w,
+            "pr_merged",
+            "t332",
+            json!({"repo": "O/P", "pr": 10, "task_id": "t332"}),
+        );
+        assert!(order_landed(c, "o/p", "issue", 332, Some("p")).unwrap());
+    }
 }

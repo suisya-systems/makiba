@@ -4877,14 +4877,28 @@ fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str
                 )?
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
                 .collect::<rusqlite::Result<_>>()?;
-            let found = projects.into_iter().find(|(_, url)| {
-                url.as_deref()
-                    .and_then(super::triage::owner_repo_from_url)
-                    .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
-            });
-            match found {
-                Some((slug, _)) => Some(slug),
-                None => {
+            let found: Vec<String> = projects
+                .into_iter()
+                .filter(|(_, url)| {
+                    url.as_deref()
+                        .and_then(super::triage::owner_repo_from_url)
+                        .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
+                })
+                .map(|(slug, _)| slug)
+                .collect();
+            match found.as_slice() {
+                [slug] => Some(slug.clone()),
+                [_, _, ..] => {
+                    return Ok(Err(refuse(
+                        ErrorKind::Conflict,
+                        format!(
+                            "more than one active project records {repo} ({}): the Issue's project cannot be told",
+                            found.join(", ")
+                        ),
+                        "tell the person; an order after a pull request (after_pr) needs no project",
+                    )));
+                }
+                [] => {
                     return Ok(Err(refuse(
                         ErrorKind::NotFound,
                         format!("no active project's recorded repository is {repo}"),
@@ -6189,5 +6203,40 @@ mod tests {
                 "{t}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod merge_order_tests {
+    use super::{ErrorKind, json, merge_order_set};
+
+    /// Issue 338, diff review round 1: when two active projects record the order's repository, the
+    /// Issue's project is not chosen silently; the order is refused and nothing is written.
+    #[test]
+    fn an_issue_order_whose_repository_two_projects_record_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        for slug in ["a", "b"] {
+            w.ensure_project(slug, None, Some("https://github.com/o/r"))
+                .unwrap();
+        }
+        let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_issue": 1,
+                          "reason": "the person's condition"});
+        let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Conflict, "{e:?}");
+        let n: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'merge_order_set'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+        // An order after a pull request needs no project.
+        let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_pr": 1,
+                          "reason": "the person's condition"});
+        let v = merge_order_set(&w, "secretary", &args, None).unwrap();
+        assert_eq!(v["status"], json!("recorded"), "{v}");
     }
 }
