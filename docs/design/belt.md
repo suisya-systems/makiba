@@ -426,7 +426,7 @@ Built: `belt[]` on the read surface (spec section 12, table `Belt field`; `belt:
 | `place`, `stage`, `since` | Those of the run's item in `ranges[].items[]`, by the one function that places it (`run_item`), so the belt and the list never disagree. |
 | `counts` | The rule the fill counts by (`counts_sql`, used by `range_count`): `queued`, `in_use` or `suspended`, and not waiting. |
 | The stop | The newest `belt_stopped` of the run whose entry is still `escalated`: `stop_line`, `stop_reason`, `pending_id`. |
-| `waits_for` | The Issues of the dispatch's wait less each one landed or let go, judged as `ahead::settle` judges them (`ahead::still_waits_for`, design review finding). |
+| `waits_for` | The Issues of the dispatch's wait less each one landed or let go, judged as `ahead::settle` judges them (`ahead::still_waits_for`, design review finding), whatever the waiting run's status: a failed one is on the belt too, so its landings are read from every run that may land the Issue (`ANY_LANDERS`), not only those `settle` acts on (diff review). |
 
 Departures from section 7, decided with the secretary's answer of 2026-11-26:
 
