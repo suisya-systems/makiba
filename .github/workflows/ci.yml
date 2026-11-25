@@ -69,7 +69,7 @@ jobs:
           export HC_BIN="$HOME/.makiba-base/bin/hc"
           "$HC_BIN" --version
           rm -f target/nextest/ci/junit.xml
-          cargo nextest run --locked --profile ci --no-fail-fast
+          MAKIBA_TEST_REAL_BASE=1 cargo nextest run --locked --profile ci --no-fail-fast
           cargo test --locked --doc
           python3 -I - target/nextest/ci/junit.xml <<'EOF'
           import sys, xml.etree.ElementTree as ET
