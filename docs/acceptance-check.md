@@ -4,7 +4,7 @@ Carried from paddock (`docs/design/acceptance-check.md`, `scripts/acceptance-che
 
 ## What runs
 
-The `acceptance` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every pull request. It installs the toolchain of `rust-toolchain.toml` and Python, then runs:
+The `acceptance` job in [`.github/workflows/ci.yml`](../.github/workflows/ci.yml) runs on every pull request. It installs the toolchain of `rust-toolchain.toml` and Python with pytest and pyyaml (as the `tests` job has them, so a declared test that reads `ci.yml` can be collected), then runs:
 
 ```sh
 bash scripts/acceptance-check.sh <base sha> <head sha>
@@ -53,7 +53,24 @@ The merge gate in makibad (`src/daemon/gate.rs`, condition (a)) runs that mode f
 4. it changes nothing rule 2 refuses (`refused_in_test_commit`);
 5. every declared path is, at the head, a test target or a test helper by rule 3's classification, and at least one is a target.
 
-Otherwise it prints one line, `full: <reason>`: a head with more than one own commit (a fix, or a base merge after the test commit), a merge, no declaration, a test commit that also changes code, a declaration of only helpers, a missing declared path. It exits 0 in both cases, and 2 on a usage error, an unknown commit or a git error. Rule 3's classification is one function, `classify`, which the main mode (in the test commit's tree) and `--scope` (in the head's tree, a temporary worktree) both call, so they agree on what a test target is. CI is to run the base's copy of this mode to decide whether a pull request's head runs only its declared tests (build 2 of Issue 478). Test: [`tests/test_acceptance_scope.py`](../tests/test_acceptance_scope.py).
+Otherwise it prints one line, `full: <reason>`: a head with more than one own commit (a fix, or a base merge after the test commit), a merge, no declaration, a test commit that also changes code, a declaration of only helpers, a missing declared path. It exits 0 in both cases, and 2 on a usage error, an unknown commit or a git error. Rule 3's classification is one function, `classify`, which the main mode (in the test commit's tree) and `--scope` (in the head's tree, a temporary worktree) both call, so they agree on what a test target is. CI runs the base's copy of this mode to decide whether a pull request's head runs only its declared tests (below). Test: [`tests/test_acceptance_scope.py`](../tests/test_acceptance_scope.py).
+
+## At a test-commit head
+
+A pull request's head that is its test commit alone runs only its declared tests (Issue 481, [`docs/design/test-commit-scoped-ci.md`](design/test-commit-scoped-ci.md) 3.2). The job `scope` of `ci.yml` decides, on every event:
+
+- On any event other than `pull_request` (`push` to main, `merge_group`) it writes `test_commit=false` and reads nothing.
+- On `pull_request` it checks out the head with full history and runs the **base's** `scripts/acceptance-check.sh` (`git show <base sha>:scripts/acceptance-check.sh`; no fallback to the pull request's copy) as `--scope <base sha> <head sha>`. It writes `test_commit=true`, and the target lists `rs` and `py`, only when that exits 0, its first line is exactly `test-commit <head sha>`, and every other line is `rs <name>` or `py <path>` with a name of `[A-Za-z0-9_./-]`. Anything else (no checker at the base, a base checker without `--scope`, exit 2, `full: <reason>`, any other line) writes `test_commit=false` and prints why. The step does not fail on the checker's answer.
+
+`tests`, `real-base` and `acceptance` take `needs: scope` and `if: ${{ !cancelled() && ... }}`, so a failed `scope` job does not skip them: its output is then empty, they run in full, and the failed `scope` check fails the run. `lint` has no `needs` and runs as before. With T = `github.event_name == 'pull_request' && needs.scope.outputs.test_commit == 'true'` (the exact string), every shortened step holds only under T and every full step only under its negation:
+
+| Job | At T | Otherwise |
+|---|---|---|
+| `tests` | the same checkout, cache and Python setup, then one step: `cargo test --locked --no-fail-fast --test <n> ...` for every declared Rust target, then `python3 -m pytest -q <paths>` for the declared Python tests whatever Cargo returned (a kind with none declared is not run); it fails when either failed | `cargo test --locked`, then `python3 -m pytest -q tests` |
+| `real-base` | one step that prints why and succeeds; no install, no build, no negative check | the whole suite on the real base, as above |
+| `acceptance` | one step that prints why, then `ACCEPTANCE: fail`, and exits 1; no checkout, no build | the checker on `pull_request`, the judged-at-head step on `merge_group` |
+
+`acceptance` fails at T, and is not skipped, so a head that ran only its declared tests never reads as passed: a skipped job reads as passing to branch protection and as `skipping` to makiba's PR watch. At M the checker could only fail anyway (head is the test commit). The declared tests are judged by `acceptance` when the fix is pushed, and that head, like every head past the test commit, runs in full. Tests: [`tests/test_ci_test_commit_scope.py`](../tests/test_ci_test_commit_scope.py) (the `scope` step and the shortened `tests` step run in temporary repositories) and [`tests/test_ci_merge_group.py`](../tests/test_ci_merge_group.py).
 
 ## The landing gate
 
@@ -71,3 +88,9 @@ Branch protection on `main`: require the checks `acceptance`, `tests` and `lint`
 - `rust-toolchain.toml` is not protected by rule 4; a change to it after the test commit is a review matter.
 - The checker is taken from the base revision, but the workflow file is read from the pull request, so a PR that edits the `acceptance` job itself is not stopped by the job. Review of `.github/` changes stays with the person.
 - A pull request that changes the checker or CI after its test commit fails rule 4 of its own `acceptance` job; the owner lifts the `acceptance` requirement of branch protection for it, and a person merges it.
+- At a test-commit head the other test targets are not run (`lint` only builds them), and nothing runs on the real base. A test helper that breaks them is found at the fix head, where rule 4 no longer lets it change.
+- The shortened `tests` runs on GitHub's merge of the head into the current base, as the full job does, while the checker builds the test commit itself. When the base has moved on, `tests` at the test commit can pass (the base already does what the test asserts; the checker then fails at the final head) or fail for the base's reason.
+- The scope is read from the payload's base. A pull request whose base changes after the run keeps that run's scope.
+- A pull request that edits `ci.yml` after its test commit changes what its later heads run (the limit above: the workflow is read from the pull request); rule 4 fails it.
+- The PR watch's notice at the test commit does not say whether the declared tests passed there; the `tests` job at that head does.
+- Every run, fix heads and the merge queue's commit included, waits for the `scope` job before `tests`, `real-base` and `acceptance` start.
