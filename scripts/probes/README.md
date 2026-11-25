@@ -102,6 +102,16 @@ The workplace is made a git repository with two untracked files (`out/draft.txt`
 
 The other outcomes: NEEDS-HUMAN when no call was logged for the step and no prompt was shown (the model did not make the call; it is not a pass), or when the hook answered as expected but its effect does not match (written or staged another way). FAIL when a prompt for the call was shown, or the call took effect, with no hook call logged (Claude Code did not call the hook); when the hook's exit code is not the one expected; when any hook exited with a code other than 0 or 2 (Claude Code takes it as a pass); or when another hook of the group refused a control. `<scratch>/outside` is inside the sandbox's write surface (`$TMPDIR`), so for the Write cases nothing but the hook can be what refuses. `PROBE_STEPS="2 5"` asks only the steps named (1 to 5); the others are NOT-RUN and the SUMMARY says the run was partial. The output also goes to `<result-dir>/hook-call-run.log`; the call log is printed in full, and the whole screen is kept as `<result-dir>/hook-call-screen.txt`. An OBSERVE line counts the screen lines naming `PreToolUse` or a hook. Written without a host run: that the model makes these calls when asked plainly, and the screen shape of a hook's refusal, are guesses until the first host run.
 
+## P16 `p16-screen-place.sh <dir>` (Issue 404)
+
+Where the person's screen can run: M1 to M4 of `docs/design/screen.md` section 5 (probes.md P16). The owner runs it in a login shell on the base's machine, with the real organization up, and does the app's side by hand: `MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p16-screen-place.sh ./results`. Unlike the other scripts it uses the person's own organization (the environment it was started with, not probe_init's scratch folders). It starts no core, no `makibad` and no agent. It reads `commands` and `pending` of the real `state.db` read-only. For the length of the run it serves a stand-in page on 127.0.0.1 under a random path (`P16_PORT` picks the port; 0, the default, lets the system choose). It never makes or answers a pending question itself.
+
+- `m1-command`: the app runs `makiba status --json` and shows it, refreshed by itself (the owner's answer).
+- `m3-page`: the stand-in page shown beside the secretary's terminal (the owner's answer) and at least two reads of its `status.json` counted during a 15-second window. `m1-page` follows it.
+- `m2-act`: the app runs `makiba config get conversation_language` as the person. PASS = a new `commands` row by `person` with verb `config`, not rejected, and the answer shown in the app. The owner also names the way (`extension`, `terminal`, `none`).
+- `m2-answer`: only when a question already waits and the owner answers it from the app. PASS = the entry is `answered` by `person`. Otherwise NOT-RUN.
+- M4 is a paragraph the owner writes into probes.md; the script records the owner's one-line summary.
+
 ## TODO(confirm)
 
 Lines that use an `hc` or Claude Code feature not shown in paddock's measured scripts or `hc --help`, each marked `TODO(confirm)` in the source:
