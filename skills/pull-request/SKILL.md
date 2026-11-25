@@ -55,7 +55,7 @@ When a check failed for a cause outside the change (a flaky test) and you rerun 
 
 The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
 
-- **`human`** (also when you do not know): once a queue-readiness notice says the head can be queued (for a pull request not followed, your own read as above and the rule in docs/design/queue-ready.md section 1), tell the person the pull request can be queued, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
+- **`human`** (also when you do not know): once a queue-readiness notice says the head can be queued (for a pull request not followed, or one whose notice says makibad cannot judge it: your own read as above and the rule in docs/design/queue-ready.md section 1), tell the person the pull request can be queued, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
 - **`acceptance`:** merge a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
 
 Stop lines:
@@ -67,7 +67,7 @@ Stop lines:
 5. The worker ran out of its review rounds or its time, or reported a blocker, or the task's last diff review did not read the head you would merge.
 6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
 7. The merge gate refused.
-8. No queue-readiness notice says the head can be queued (for a pull request not followed: your own read as above does not show it mergeable now, or the rule in docs/design/queue-ready.md section 1 is not met). Behind its base is not a stop and no reason to update.
+8. No queue-readiness notice says the head can be queued, and the head is not one where your own judgement stands for it: a pull request not followed, or a followed one whose notice says makibad cannot judge it ("cannot judge whether ... is ready for the queue"), where your own read as above shows it mergeable now and the rule in docs/design/queue-ready.md section 1 is met, which you tell the person with what you found. Behind its base is not a stop and no reason to update.
 
 The merge, in either mode, is this one command alone on one line, with the full 40-character head of the CI notice:
 

@@ -390,7 +390,8 @@ fn block_scalar(value: &str) -> bool {
 /// Whether a value cannot be read with certainty: an anchor or alias, a flow collection or a
 /// quoted scalar that does not end on its line.
 fn unreadable(value: &str) -> bool {
-    if value.starts_with(['&', '*']) || value.starts_with("<<") {
+    // An anchor, an alias, a merge key, or a tag (`!!str |` hides a block scalar).
+    if value.starts_with(['&', '*', '!']) || value.starts_with("<<") {
         return true;
     }
     let balanced = |open: char, close: char| {
@@ -829,6 +830,13 @@ jobs:
         let started = Instant::now();
         assert_eq!(cancelled.run(&["30"]).unwrap_err(), "cancelled");
         assert!(started.elapsed() < Duration::from_secs(10));
+    }
+
+    #[test]
+    fn a_tagged_scalar_is_not_read_so_it_counts() {
+        let base = "jobs:\n  t:\n    steps:\n      - run: !!str |\n          cat <<EOF\n          # data\n          EOF\n";
+        let changed = base.replace("          # data", "          # other data");
+        assert!(!only_scheduling(base, &changed));
     }
 
     #[test]

@@ -247,7 +247,23 @@ fn work(places: &Places, j: &Job) -> Outcome {
             before_ci(&repo, j, &base, &sent)?;
             push_head(&repo, &sent, &j.branch).map(|()| Done::Pushed(sent))
         }
-        Some(base) => update(&repo, j, base, &head).map(|d| judged_merge(&repo, j, base, d)),
+        Some(base) => {
+            judged_head(j, &head)?;
+            update(&repo, j, base, &head).map(|d| judged_merge(&repo, j, base, d))
+        }
+    }
+}
+
+/// A readiness update (Issue 475) merges only the head makibad judged: a worktree that has moved
+/// on since holds the worker's own commits, which go to origin with `push`, never with it.
+fn judged_head(j: &Job, head: &str) -> std::result::Result<(), String> {
+    match &j.readiness {
+        Some(r) if !r.head.eq_ignore_ascii_case(head) => Err(format!(
+            "the worktree of {} is at {head}, not at {}, the head makibad judged for the queue; \
+             nothing was merged or pushed (the worker's newer commits go to origin with push)",
+            j.task, r.head
+        )),
+        _ => Ok(()),
     }
 }
 
@@ -775,6 +791,35 @@ fn record_head(w: &StateWriter, j: &Job, head: &str, base_merge: bool) -> Result
     let Some(r) = &j.readiness else {
         return Ok(None);
     };
+    // Only while the run's current pull request is still the one judged, at the head judged: a
+    // head or a pull request recorded while the update ran is never overwritten by its result.
+    let current: Option<(Option<String>, Option<i64>)> = w
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT {}, {} FROM runs r WHERE r.task_id = ?1",
+                super::belt::current_pr_sql("r", "repo"),
+                super::belt::current_pr_sql("r", "pr")
+            ),
+            [&j.task],
+            |q| Ok((q.get(0)?, q.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+    let same_pr = matches!(&current, Some((Some(cr), Some(cp)))
+        if cr.eq_ignore_ascii_case(&r.repo) && *cp == r.pr);
+    let same_head = super::prwatch::newest_head(w.conn(), &j.task)?
+        .is_some_and(|h| h.eq_ignore_ascii_case(&r.head));
+    if !(same_pr && same_head) {
+        return Ok(Some(format!(
+            "makibad did not record it: {} no longer has {}#{} at {}, the head it judged, as its \
+             newest record; record it with pr pushed if it is still wanted.",
+            j.task, r.repo, r.pr, r.head
+        )));
+    }
     let args = json!({"state": "pushed", "repo": r.repo, "pr": r.pr, "head": head,
                       "task": j.task});
     Ok(Some(match super::door::pr(w, &args, base_merge) {
@@ -891,4 +936,74 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
         super::door::notice(w, AGENT_SECRETARY, &j.task, &body)?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::writer::RunUpsert;
+
+    fn job(task: &str, judged: Option<&str>) -> Job {
+        Job {
+            command: 1,
+            verb: "update".into(),
+            task: task.into(),
+            branch: format!("makiba/{task}"),
+            project: "p".into(),
+            worktree: None,
+            base: Some("main".into()),
+            head: None,
+            before: Before::default(),
+            readiness: judged.map(|h| Readiness {
+                repo: "o/r".into(),
+                pr: 5,
+                head: h.into(),
+            }),
+        }
+    }
+
+    /// Issue 475: a readiness update of a worktree the worker committed on since the judgement
+    /// merges and pushes nothing; any other update is not held to a head.
+    #[test]
+    fn a_readiness_update_merges_only_the_judged_head() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        assert!(judged_head(&job("t", Some(&a)), &a).is_ok());
+        let e = judged_head(&job("t", Some(&a)), &b).unwrap_err();
+        assert!(e.contains("nothing was merged or pushed"), "{e}");
+        assert!(judged_head(&job("t", None), &b).is_ok());
+    }
+
+    /// Issue 475: an update that ends after a newer head was recorded does not record its own
+    /// result over it; one that ends on the head it judged does.
+    #[test]
+    fn a_late_readiness_update_does_not_record_over_a_newer_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        super::super::prwatch::register(&w, "pr_opened", "t", "o/r", 5, &a).unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "t", "o/r", 5, &b).unwrap();
+        let said = record_head(&w, &job("t", Some(&a)), &c, true)
+            .unwrap()
+            .unwrap();
+        assert!(said.contains("did not record"), "{said}");
+        assert_eq!(
+            super::super::prwatch::newest_head(w.conn(), "t").unwrap(),
+            Some(b.clone())
+        );
+        let said = record_head(&w, &job("t", Some(&b)), &c, true)
+            .unwrap()
+            .unwrap();
+        assert!(said.contains("makibad recorded it"), "{said}");
+        assert_eq!(
+            super::super::prwatch::newest_head(w.conn(), "t").unwrap(),
+            Some(c)
+        );
+    }
 }

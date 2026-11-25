@@ -129,7 +129,10 @@ cannot run and the secretary has the worker merge the base. The `Push` pass runs
 The update thread, for a job whose args carry `readiness`, also computes `base_merge` for the head
 it ends with (`gate::pushed_base_merge` of the project's repository, the base, the args' `head` and
 that head: true only for a clean merge of the base), as the door computes it for `pr pushed`
-outside its lock. `push.rs` `finish`, for such a job:
+outside its lock. The job merges only the judged head: a worktree whose HEAD has moved past it (the worker committed
+since) fails with nothing merged or pushed. `push.rs` `finish`, for such a job, and only while the
+run's current pull request is still the one judged with the judged head its newest record (a head
+or pull request recorded while the update ran is never overwritten):
 
 - `Done::Updated`, and `Done::Current` naming a head other than the args' `head` (the restart case
   `update` already handles: the merge was pushed and not recorded): in the same transaction, the
