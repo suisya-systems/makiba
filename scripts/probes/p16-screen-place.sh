@@ -14,9 +14,10 @@
 # Cases (each line "CASE <name>: PASS|FAIL|NEEDS-HUMAN|NOT-RUN  <detail>"):
 #  m1-command  The app runs `makiba status --json` on the base's machine and shows its output, refreshed
 #              without the owner's hand (the owner's answer; the script prints the heartbeat to compare).
-#  m3-page     The app shows the stand-in page beside the secretary's terminal and it refreshes: the owner's
-#              answer and at least two reads of the page's status.json counted by the server since it was opened.
-#  m1-page     M1 by the other way, a request to 127.0.0.1 of the base's host: PASS when m3-page passed.
+#  m1-page     M1 by the other way, a request to 127.0.0.1 of the base's host: the app shows the stand-in page
+#              anywhere (a tab, a panel) and it refreshes: the owner's answer and at least two reads of the page's
+#              status.json counted by the server during a 15-second window.
+#  m3-page     The same page shown beside the secretary's terminal: m1-page's conditions and the owner's answer.
 #  m2-act      The app runs `makiba config get conversation_language` (a person-only verb that changes nothing):
 #              PASS when commands gains a row by actor person, verb config, not rejected, and the owner saw the
 #              result in the app. A row by another actor (unknown: no key reached the door) is FAIL.
@@ -64,8 +65,9 @@ print(eval(sys.argv[1]))' "$1"
 }
 db() { # db <sql> [params...]: one read-only query of the real state.db, rows tab-separated
   python3 - "$REAL_DB" "$@" <<'PY'
-import sqlite3, sys
-c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True, timeout=5)
+import pathlib, sqlite3, sys
+# as_uri escapes ?, # and %, so mode=ro is never cut off by the path
+c = sqlite3.connect(pathlib.Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True, timeout=5)
 # A parameter of digits is bound as an integer: SQLite never finds a text equal to an integer id.
 args = [int(a) if a.isdigit() else a for a in sys.argv[3:]]
 for row in c.execute(sys.argv[2], args):
@@ -161,20 +163,25 @@ i=0; while [ ! -s "$PAGE/ready" ] && [ "$i" -lt 20 ]; do sleep 0.5; i=$((i + 1))
 URL=$(cat "$PAGE/ready")
 say "stand-in page served (127.0.0.1 only, for this run; the URL's path is random and is not recorded)"
 printf '   The page: %s\n' "$URL" > /dev/tty
-step 6 "Open that page in the app, beside the secretary's terminal (as the app frames a web page, if it can). Leave it open for at least 15 seconds."
+step 6 "Open that page in the app (as the app frames a web page, if it can), beside the secretary's terminal if the app allows. Leave it open for at least 15 seconds."
 : > "$PAGE/reads"
 step 7 "Keep it open for another 15 seconds, then press Enter."
 READS=$(wc -l < "$PAGE/reads" | tr -d ' ')
-ask "8. Is the page shown beside the secretary's terminal, with its read count going up?"
-case $ANSWER in
-  y) if [ "$READS" -ge 2 ]; then record m3-page PASS "shown beside the terminal; $READS reads of status.json during step 7"
-     else record m3-page FAIL "the owner saw it, but the server counted $READS read(s) during step 7 (the page was not the one served here, or did not refresh)"; fi ;;
-  n) record m3-page FAIL "not shown beside the terminal ($READS reads during step 7)" ;;
-  s) say "CASE m3-page: NOT-RUN  skipped by the owner ($READS reads during step 7)" ;;
-esac
-if [ "$ANSWER" = s ]; then say "CASE m1-page: NOT-RUN  follows m3-page"
-elif [ "$ANSWER" = y ] && [ "$READS" -ge 2 ]; then record m1-page PASS "by a request to 127.0.0.1 of the base's host"
-else record m1-page FAIL "m3-page did not pass"; fi
+ask "8. Is the page shown inside the app (anywhere: a tab, a panel), with its read count going up?"
+SHOWN=$ANSWER
+if [ "$SHOWN" = s ]; then say "CASE m1-page: NOT-RUN  skipped by the owner ($READS reads during step 7)"
+elif [ "$SHOWN" = y ] && [ "$READS" -ge 2 ]; then record m1-page PASS "shown in the app, refreshed; $READS reads of status.json during step 7 (a request to 127.0.0.1 of the base's host)"
+elif [ "$SHOWN" = y ]; then record m1-page FAIL "the owner saw it, but the server counted $READS read(s) during step 7 (the page was not the one served here, or did not refresh)"
+else record m1-page FAIL "not shown in the app ($READS reads during step 7)"; fi
+if [ "$SHOWN" = s ]; then say "CASE m3-page: NOT-RUN  follows m1-page"
+elif [ "$SHOWN" = y ] && [ "$READS" -ge 2 ]; then
+  ask "8b. Is it beside the secretary's terminal, both in view at once?"
+  case $ANSWER in
+    y) record m3-page PASS "shown beside the secretary's terminal, refreshed" ;;
+    n) record m3-page FAIL "shown and refreshed, but not beside the secretary's terminal" ;;
+    s) say "CASE m3-page: NOT-RUN  skipped by the owner" ;;
+  esac
+else record m3-page FAIL "m1-page did not pass"; fi
 kill "$PAGE_PID" 2>/dev/null; PAGE_PID=""
 
 # ---- M2 acting as the person
