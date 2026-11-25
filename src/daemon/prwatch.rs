@@ -1663,6 +1663,38 @@ fn queue_items(v: &Value) -> Option<Vec<(bool, i64)>> {
         .collect()
 }
 
+/// The arguments of the state read of `f`: `gh pr view`, or, while it has a merge act awaiting
+/// its landing, `gh api graphql` (Issue 434). Both name github.com, whatever `GH_HOST` says.
+fn state_args(f: &Followed) -> Vec<String> {
+    if f.act {
+        let (owner, name) = f.repo.split_once('/').unwrap_or((&f.repo, ""));
+        vec![
+            "api".into(),
+            "graphql".into(),
+            "--hostname".into(),
+            "github.com".into(),
+            "-f".into(),
+            format!("query={STATE_QUERY}"),
+            "-f".into(),
+            format!("owner={owner}"),
+            "-f".into(),
+            format!("name={name}"),
+            "-F".into(),
+            format!("number={}", f.pr),
+        ]
+    } else {
+        vec![
+            "pr".into(),
+            "view".into(),
+            f.pr.to_string(),
+            "--repo".into(),
+            format!("github.com/{}", f.repo),
+            "--json".into(),
+            STATE_FIELDS.into(),
+        ]
+    }
+}
+
 /// Read the state of `f` each interval until it is merged, or read in the other state than the
 /// one it was followed in (`closed`): that read is sent to `states`. A failed read is read again,
 /// without bound; it returns when cancelled. Each read open of a pull request followed open is
@@ -1679,29 +1711,8 @@ fn poll_state(
     merges: &Sender<MergeRead>,
 ) {
     let closed = f.closed;
-    let (number, place) = (f.pr.to_string(), format!("github.com/{}", f.repo));
-    let (owner, name) = f.repo.split_once('/').unwrap_or((&f.repo, ""));
-    let (query, owner, name, num) = (
-        format!("query={STATE_QUERY}"),
-        format!("owner={owner}"),
-        format!("name={name}"),
-        format!("number={}", f.pr),
-    );
-    let args: Vec<&str> = if f.act {
-        vec![
-            "api", "graphql", "-f", &query, "-f", &owner, "-f", &name, "-F", &num,
-        ]
-    } else {
-        vec![
-            "pr",
-            "view",
-            &number,
-            "--repo",
-            &place,
-            "--json",
-            STATE_FIELDS,
-        ]
-    };
+    let owned = state_args(f);
+    let args: Vec<&str> = owned.iter().map(String::as_str).collect();
     loop {
         if cancel.load(Ordering::SeqCst) {
             return;
@@ -4094,6 +4105,36 @@ esac"#,
         assert_eq!(consumed().get(&11), Some(&2));
         assert!(!newer(&consumed(), 11, 2));
         assert!(newer(&consumed(), 11, 3));
+    }
+
+    /// Both forms of the state read name github.com, so an inherited `GH_HOST` cannot send the
+    /// read of a pull request with an act awaiting its landing to another server (Issue 434).
+    #[test]
+    fn both_state_reads_name_github_com() {
+        let mut f = Followed {
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            gen_reg: 1,
+            gen_close: 0,
+            closed: false,
+            act: false,
+        };
+        let view = state_args(&f);
+        assert_eq!(&view[..3], ["pr", "view", "5"]);
+        assert!(view.windows(2).any(|w| w == ["--repo", "github.com/o/r"]));
+        f.act = true;
+        let graphql = state_args(&f);
+        assert_eq!(&graphql[..2], ["api", "graphql"]);
+        assert!(
+            graphql
+                .windows(2)
+                .any(|w| w == ["--hostname", "github.com"]),
+            "{graphql:?}"
+        );
+        for a in ["owner=o", "name=r", "number=5"] {
+            assert!(graphql.iter().any(|g| g == a), "{a}: {graphql:?}");
+        }
     }
 
     /// A state read is held while makibad's attempt is open, and dropped when it began at or
