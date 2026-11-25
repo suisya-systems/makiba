@@ -2,7 +2,8 @@
 events.json, wherever the events of the page say it: next_work from the newest scan
 (status_local::next_work), the open anomalies raised in the page, the places and the tasks used of
 each range, the items in the order of their belt_dispatched and belt_skipped, a replacing proposal in
-the same project, every escalated stop named by a belt_stopped, and increasing event ids.
+the same project, every escalated stop named by a belt_stopped, increasing event ids, and (Issue 415)
+one left-out entry per project of its repository, as triage.rs `shown` writes it.
 Run from the repository root: python3 docs/design/screen-checks/fixcheck.py [fixture folder]
 Exit 1 on a mismatch."""
 import json, sys
@@ -54,6 +55,23 @@ stopped = {x["payload"]["pending_id"]: x["payload"] for x in ev if x["kind"] == 
 for pd in s["pending"]:
     if pd["status"] == "escalated" and pd["task_id"] is None and pd["id"] not in stopped:
         bad.append(f"pending {pd['id']}: an escalated entry with no task and no belt_stopped to name its range")
+# triage.rs `shown`: an entry with a repository is written once per project of that repository
+# (case aside), with project null only when none matches. Checked only when the list is whole and
+# the scan read as many repositories as status registers (a later registration would differ).
+if nw["left_out_not_recorded"] or p["repos"] != len({x["repo"].lower() for x in s["projects"] if x["repo"]}):
+    print("left-out per project: not checked (the list is cut, or the projects changed since the scan)")
+else:
+    owners = {}
+    for x in s["projects"]:
+        if x["repo"]: owners.setdefault(x["repo"].lower(), []).append(x["slug"])
+    groups = {}
+    for x in nw["left_out"] or []:
+        if x["repo"] is None: continue
+        groups.setdefault((x["repo"].lower(), x["issue"], x["kind"], x["reason"]), []).append(x["project"])
+    for (repo, issue, kind, _), got in groups.items():
+        want = owners.get(repo, [None])
+        if sorted(got, key=str) != sorted(want, key=str):
+            bad.append(f"left_out {repo}#{issue} {kind}: projects {got} != the projects of the repository {want}")
 ids = [x["id"] for x in ev]
 if ids != sorted(ids) or len(set(ids)) != len(ids): bad.append("event ids are not increasing")
 print("\n".join(bad) or "fixture consistent")

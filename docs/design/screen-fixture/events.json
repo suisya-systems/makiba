@@ -1051,6 +1051,13 @@
             "reason": "held by #14"
           },
           {
+            "project": "harbor-site",
+            "repo": "example-org/harbor",
+            "issue": 33,
+            "kind": "blocked",
+            "reason": "held by #14"
+          },
+          {
             "project": "atlas",
             "repo": null,
             "issue": null,
@@ -1216,6 +1223,30 @@
         "path": "/usr/local/bin/makiba",
         "running": "6f1c0e9a2b3d4c5e",
         "on_disk": "a83d2f17c4b5e6d7"
+      }
+    },
+    {
+      "id": 974,
+      "occurred_at": "2026-11-24T09:58:40.000Z",
+      "actor": "secretary",
+      "kind": "pr_opened",
+      "task_id": "site-search",
+      "payload": {
+        "repo": "example-org/harbor",
+        "pr": 129,
+        "head_oid": "129a5e0f1b2c3d4e5f60718293a4b5c6d7e8f901"
+      }
+    },
+    {
+      "id": 975,
+      "occurred_at": "2026-11-24T09:58:41.000Z",
+      "actor": "makibad",
+      "kind": "ci_watch_started",
+      "task_id": "site-search",
+      "payload": {
+        "repo": "example-org/harbor",
+        "pr": 129,
+        "head_oid": "129a5e0f1b2c3d4e5f60718293a4b5c6d7e8f901"
       }
     }
   ]
