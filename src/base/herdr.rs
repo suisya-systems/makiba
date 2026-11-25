@@ -69,6 +69,57 @@ pub fn server_process(_socket: &Path) -> Option<(u32, Option<PathBuf>)> {
     None
 }
 
+/// The `hc` that `start` runs (`$HC_BIN`, else `hc` on `PATH`), as a file, when it is found. On
+/// `PATH`, as the lookup that runs it: the first regular file with an execute bit.
+fn hc_file() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let hc = PathBuf::from(std::env::var_os("HC_BIN").unwrap_or_else(|| "hc".into()));
+    if hc.components().count() > 1 {
+        return Some(hc);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(&hc))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// The text of `base::started_other_version` (Issue 382). `server` is what `server_process` read.
+pub fn started_other_version(
+    session: &str,
+    found: &str,
+    exe: &str,
+    server: Option<(u32, Option<PathBuf>)>,
+) -> String {
+    let pinned = super::version::PINNED;
+    let hc = std::env::var("HC_BIN").unwrap_or_else(|_| "hc".into());
+    let named = match &server {
+        Some((pid, Some(f))) => format!("its server is {} (pid {pid})", f.display()),
+        Some((pid, None)) => format!("its server's file could not be read (pid {pid})"),
+        None => "its server's file could not be read".into(),
+    };
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    let is_hc = match (server.and_then(|(_, f)| f), hc_file()) {
+        (Some(f), Some(h)) => same(&f, &h),
+        _ => false,
+    };
+    let mut text = format!(
+        "`{hc} server start` started a base of session {session} that runs {found}, this makiba \
+         pins {pinned}; {named}. Stop it with `{exe} down --stop-base`, then install {pinned} with \
+         `bash scripts/install-base.sh PREFIX` and fix what it names until it exits 0 (it names a \
+         herdr-core or hc that HC_BIN or PATH finds before the installed one), then run `{exe} up` again"
+    );
+    if is_hc {
+        text.push_str(
+            "; HC_BIN or PATH names that file as hc: point HC_BIN at PREFIX/bin/hc or unset it",
+        );
+    }
+    text
+}
+
 /// `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`; `/tmp` when the variable is not set, as the base does.
 pub fn socket_path(runtime_dir: Option<&Path>, session: &str) -> PathBuf {
     runtime_dir

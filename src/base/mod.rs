@@ -49,11 +49,13 @@ pub fn app_register_command(session: &str) -> String {
     format!("hc.exe machine add wsl --name {session} --session {session}")
 }
 
-/// The process serving the real base of `session` (Issue 382, `makiba up`): its pid and, when it
-/// can be read, its file. Linux only; `None` elsewhere or when nothing listens.
-pub fn server_process_of_session(session: &str) -> Option<(u32, Option<PathBuf>)> {
+/// What `makiba up` says when the core that `Base::start` started for `session` runs `found`, not
+/// the pinned release (Issue 382): the versions, the file and pid of the process serving the
+/// socket (Linux), and the way out, naming makiba by `exe`.
+pub fn started_other_version(session: &str, found: &str, exe: &str) -> String {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
-    herdr::server_process(&herdr::socket_path(runtime.as_deref(), session))
+    let server = herdr::server_process(&herdr::socket_path(runtime.as_deref(), session));
+    herdr::started_other_version(session, found, exe, server)
 }
 
 /// The real base of `session`, which `Base::start` can start (`makiba up`).
