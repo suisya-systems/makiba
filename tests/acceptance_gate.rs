@@ -19,20 +19,17 @@
 mod common;
 
 use makiba::base::stub::Stub;
-use makiba::channel::Hub;
-use makiba::daemon::door::{self, Door, issue_key};
+use makiba::daemon::door::{Door, issue_key};
 use makiba::daemon::gate;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use makiba::hooks::merge_gate;
 use makiba::spec::Role;
 use rusqlite::Connection;
 use serde_json::{Value, json};
-use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once, OnceLock};
 
-const GATE_KEY: &str = "9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e";
 const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const D: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const T1: &str = "2026-11-05T01:00:00Z";
@@ -153,6 +150,8 @@ struct Case {
     db: PathBuf,
     door: Door,
     secretary: String,
+    /// The person's key: the gate is the person's verb (Issue 433 retired the gate key).
+    person: String,
     base: String,
 }
 
@@ -206,8 +205,8 @@ impl Case {
             )
             .unwrap();
         let secretary = issue_key(&w, Role::Secretary, "secretary", None, None).unwrap();
+        let person = issue_key(&w, Role::Person, "person", None, None).unwrap();
         let door = Door::new(w, Arc::new(Stub::new()), "claude_code".into());
-        door.set_gate_key(GATE_KEY);
         let mut c = Case {
             _tmp: tmp,
             name: name.into(),
@@ -217,6 +216,7 @@ impl Case {
             db,
             door,
             secretary,
+            person,
             base: String::new(),
         };
         c.base = c.commit("base", files);
@@ -356,11 +356,11 @@ impl Case {
         head
     }
 
-    /// The door's answer to `gate` for PR `pr` at `head`, asked with the merge gate's key.
+    /// The door's answer to `gate` for PR `pr` at `head`, asked with the person's key.
     fn gate_at(&self, pr: i64, head: &str) -> Value {
         self.door
             .handle(
-                Some(GATE_KEY),
+                Some(&self.person),
                 "gate",
                 json!({"repo": self.repo, "pr": pr, "head": head}),
                 None,
@@ -1486,9 +1486,9 @@ fn gh_failure_is_refused() {
 }
 
 #[test]
-fn only_the_gate_key_holder_and_the_person_ask_the_gate() {
+fn only_the_person_asks_the_gate() {
     let c = Case::new("keys");
-    // The secretary has no gate verb; the gate's key has no other verb.
+    // The secretary has no gate verb; a retired gate key (Issue 433) is a key the door does not know.
     let e = c
         .door
         .handle(
@@ -1500,15 +1500,22 @@ fn only_the_gate_key_holder_and_the_person_ask_the_gate() {
         )
         .unwrap_err();
     assert_eq!(e.kind.as_str(), "denied");
+    let retired = "9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e";
     let e = c
         .door
-        .handle(Some(GATE_KEY), "status", json!({}), None, false)
+        .handle(
+            Some(retired),
+            "gate",
+            json!({"repo": c.repo, "pr": 7, "head": C}),
+            None,
+            false,
+        )
         .unwrap_err();
     assert_eq!(e.kind.as_str(), "denied");
     let e = c
         .door
         .handle(
-            Some(GATE_KEY),
+            Some(&c.person),
             "gate",
             json!({"repo": c.repo, "pr": 7, "head": "abc"}),
             None,
@@ -1520,8 +1527,9 @@ fn only_the_gate_key_holder_and_the_person_ask_the_gate() {
 
 // ---- the hook: what it refuses and what it lets through -----------------------------------------
 
-/// `merge_gate::parse` for a command: `Ok(None)` passes, `Ok(Some(_))` asks the gate, `Err` refuses.
-fn parse(cmd: &str) -> Result<Option<(i64, String, String)>, String> {
+/// `merge_gate::parse` for a command: `Ok(())` passes, `Err` refuses (Issue 433: no form is
+/// allowed, the gate is never asked from the hook).
+fn parse(cmd: &str) -> Result<(), String> {
     merge_gate::parse(cmd)
 }
 
@@ -1544,7 +1552,7 @@ fn not_a_merge() {
         format!("grep -n {M} /x/y.md"),
         format!("git {M}-base a b"),
     ] {
-        assert_eq!(parse(&cmd), Ok(None), "{cmd}");
+        assert_eq!(parse(&cmd), Ok(()), "{cmd}");
     }
 }
 
@@ -1571,7 +1579,7 @@ fn the_issue_1229_and_allow_listed_commands_pass() {
         "sed -n 10,40p tools/acceptance_merge_hook.py".into(),
         format!("tail -n 5 $LOG/pr-{M}.log"),
     ] {
-        assert_eq!(parse(&cmd), Ok(None), "{cmd}");
+        assert_eq!(parse(&cmd), Ok(()), "{cmd}");
     }
 }
 
@@ -1598,28 +1606,28 @@ fn the_word_inside_a_longer_name_is_not_judged() {
             "G=$TMPDIR/guidance.txt\npython3 tools/gen_delegate_payload.py apply --task-id t --project-slug p \\\n  --target .hooks/gate-acceptance-before-{M}.sh --target tools/acceptance_{M}_hook.py \\\n  --description \"false positives on tools/run_complete_on_{M}.py, tools/{M}_approval_mode.py and gh pr view --json {M}dAt\" --impl-guidance \"$(cat $G)\""
         ),
     ] {
-        assert_eq!(parse(&cmd), Ok(None), "{cmd}");
+        assert_eq!(parse(&cmd), Ok(()), "{cmd}");
     }
 }
 
+/// Issue 433: the form the hook once let through is refused, naming the verb that lands now.
 #[test]
 fn the_allowed_form() {
-    for method in ["--squash", &format!("--{M}"), "--rebase"] {
-        assert_eq!(
-            parse(&merge_cmd("3", "o/r", method, &sha(), "")),
-            Ok(Some((3, "o/r".into(), sha())))
-        );
-    }
-    assert_eq!(
-        parse(&merge_cmd(
+    for cmd in [
+        merge_cmd("3", "o/r", "--squash", &sha(), ""),
+        merge_cmd("3", "o/r", &format!("--{M}"), &sha(), ""),
+        merge_cmd("3", "o/r", "--rebase", &sha(), ""),
+        merge_cmd(
             "12",
             "suisya-systems/makiba",
             "--squash",
             &sha(),
-            " --delete-branch\n"
-        )),
-        Ok(Some((12, "suisya-systems/makiba".into(), sha())))
-    );
+            " --delete-branch\n",
+        ),
+    ] {
+        let err = parse(&cmd).unwrap_err();
+        assert!(err.contains("mcp__makiba__merge"), "{cmd}: {err}");
+    }
 }
 
 /// Carried cases (`test_every_other_merge_is_denied`, `test_not_allow_listed_falls_back...`) that
@@ -1760,7 +1768,7 @@ fn other_ways_are_refused_and_mentions_pass() {
         "curl -s https://example.com/merge".into(),
     ];
     for cmd in &mentions {
-        assert_eq!(parse(cmd), Ok(None), "refused a mention: {cmd:?}");
+        assert_eq!(parse(cmd), Ok(()), "refused a mention: {cmd:?}");
     }
     // Through the hook's binary: refused without asking the gate (no door is there), a mention passes.
     let env = [
@@ -1770,7 +1778,7 @@ fn other_ways_are_refused_and_mentions_pass() {
     for cmd in &refused[..4] {
         let (code, err) = run_hook(&bash(cmd), &env);
         assert_eq!(code, 2, "{cmd}: {err}");
-        assert!(err.contains("merge with exactly"), "{err}");
+        assert!(err.contains("mcp__makiba__merge"), "{err}");
     }
     for cmd in &mentions[..4] {
         assert_eq!(run_hook(&bash(cmd), &env), (0, String::new()), "{cmd}");
@@ -1835,187 +1843,23 @@ fn broken_payloads_are_refused_and_other_tools_pass() {
 }
 
 #[test]
-fn the_allowed_form_without_makibad_is_refused() {
-    let tmp = tempfile::tempdir().unwrap();
-    let key = tmp.path().join("gate.key");
-    let sock = tmp.path().join("door.sock");
-    let cmd = merge_cmd("7", "o/r", "--squash", &sha(), "");
-    // No key file.
-    let (code, err) = run_hook(
-        &bash(&cmd),
-        &[
-            ("MAKIBA_GATE_KEY", key.to_str().unwrap()),
-            ("MAKIBA_DOOR", sock.to_str().unwrap()),
-        ],
-    );
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("gate's key"), "{err}");
-    // A key, nothing listening.
-    std::fs::write(&key, "k\n").unwrap();
-    let (code, err) = run_hook(
-        &bash(&cmd),
-        &[
-            ("MAKIBA_GATE_KEY", key.to_str().unwrap()),
-            ("MAKIBA_DOOR", sock.to_str().unwrap()),
-        ],
-    );
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("cannot reach makibad"), "{err}");
-    // An unrelated command asks nothing.
-    assert_eq!(
-        run_hook(
-            &bash("git status"),
-            &[("MAKIBA_DOOR", sock.to_str().unwrap())]
-        ),
-        (0, String::new())
-    );
-}
-
-// ---- the whole path through the door's socket (HookTest) -----------------------------------------
-
-/// The door listening on a Unix socket of its own, with the gate key written where the hook reads.
-struct Served {
-    _tmp: tempfile::TempDir,
-    _running: door::Running,
-    env: Vec<(String, String)>,
-}
-
-impl Served {
-    fn start(c: &Case) -> Served {
-        let tmp = tempfile::tempdir().unwrap();
-        let socket = tmp.path().join("d.sock");
-        let gate_key = tmp.path().join("cfg").join("gate.key");
-        let cfg = door::Config {
-            socket: Some(socket.clone()),
-            port: 0,
-            person_key: tmp.path().join("cfg").join("person.key"),
-            gate_key: gate_key.clone(),
-            agent: "claude_code".into(),
-        };
-        let running = door::start(&cfg, &c.db, Arc::new(Stub::new()), Hub::new(|_| None))
-            .unwrap_or_else(|e| {
-                panic!("the door's socket (this test needs a host that lets it create one): {e}")
-            });
-        let mode = std::fs::metadata(&gate_key).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o600, "the gate key is the person's alone");
-        Served {
-            env: vec![
-                ("MAKIBA_DOOR".into(), socket.display().to_string()),
-                ("MAKIBA_GATE_KEY".into(), gate_key.display().to_string()),
-            ],
-            _tmp: tmp,
-            _running: running,
-        }
-    }
-
-    fn hook(&self, cmd: &str) -> (i32, String) {
-        let env: Vec<(&str, &str)> = self
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        run_hook(&bash(cmd), &env)
-    }
-}
-
-#[test]
-fn hook_passing_pr_allowed_and_rejected_pr_refused() {
-    let c = Case::new("hkpass");
-    c.land();
-    let head = c.ci_all(7);
-    let served = Served::start(&c);
-    assert_eq!(
-        served.hook(&merge_cmd("7", &c.repo, "--squash", &head, "")),
-        (0, String::new())
-    );
-    c.commit(
-        "weaken",
-        &[("tests/test_calc.py", Some("def test_add():\n    pass\n"))],
-    );
-    let head = c.ci_all(7);
-    let (code, err) = served.hook(&merge_cmd("7", &c.repo, "--squash", &head, ""));
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("ACCEPTANCE_GATE rejected"), "{err}");
-    // The answer was recorded as the gate's key holder's.
-    let db = Connection::open(&c.db).unwrap();
-    let actors: i64 = db
-        .query_row(
-            "SELECT count(*) FROM commands WHERE verb = 'gate' AND actor = 'merge-gate'",
-            [],
-            |r| r.get(0),
-        )
-        .unwrap();
-    assert_eq!(actors, 2);
-}
-
-#[test]
-fn hook_push_after_ci_refused() {
-    let c = Case::new("hkpush");
-    c.commit("fix", &[("calc.py", Some(FIXED))]);
-    let first = c.ci_all(7);
-    c.commit("more", &[("x.py", Some("x = 1\n"))]);
-    let head = c.publish(7);
-    let served = Served::start(&c);
-    for sha in [&first, &head] {
-        let (code, err) = served.hook(&merge_cmd("7", &c.repo, "--squash", sha, ""));
-        assert_eq!(code, 2, "{err}");
-    }
-}
-
-#[test]
-fn hook_no_manifest_refused_in_acceptance_mode() {
-    if !in_mode("acceptance", "hook_no_manifest_refused_in_acceptance_mode") {
-        return;
-    }
-    let (c, head) = no_manifest_pr("hkacceptance", &[("tools/x.py", Some("x = 1\n"))]);
-    let served = Served::start(&c);
-    let (code, err) = served.hook(&merge_cmd("7", &c.repo, "--squash", &head, ""));
-    assert_eq!(code, 2, "{err}");
-    assert!(
-        err.contains("no_manifest") && err.contains("acceptance"),
-        "{err}"
-    );
-}
-
-#[test]
-fn hook_no_manifest_allowed_in_human_mode() {
-    if !in_mode("human", "hook_no_manifest_allowed_in_human_mode") {
-        return;
-    }
-    let (c, head) = no_manifest_pr("hkhuman", &[("tools/x.py", Some("x = 1\n"))]);
-    let served = Served::start(&c);
-    assert_eq!(
-        served.hook(&merge_cmd("7", &c.repo, "--squash", &head, "")),
-        (0, String::new())
-    );
-}
-
-#[test]
-fn hook_gh_failure_refused() {
-    let c = Case::new("hkghfail");
-    c.land();
-    let head = c.ci_all(7);
-    std::fs::write(c.gh.join("fail"), "").unwrap();
-    let served = Served::start(&c);
-    let (code, err) = served.hook(&merge_cmd("7", &c.repo, "--squash", &head, ""));
-    assert_eq!(code, 2, "{err}");
-    assert!(err.contains("gh pr view failed"), "{err}");
-}
-
-#[test]
 fn hook_other_form_refused_without_asking_and_a_read_passes() {
+    // Issue 433: the hook asks no door, so none is started.
     let c = Case::new("hkform");
-    let served = Served::start(&c);
+    let env = [
+        ("MAKIBA_DOOR", "/nonexistent/door.sock"),
+        ("MAKIBA_GATE_KEY", "/nonexistent/gate.key"),
+    ];
     for cmd in [
         format!("gh pr {M} 7 --squash"),
         format!("gh pr {} 7 --repo o/r --squash", M.to_uppercase()),
     ] {
-        let (code, err) = served.hook(&cmd);
+        let (code, err) = run_hook(&bash(&cmd), &env);
         assert_eq!(code, 2);
-        assert!(err.contains("merge with exactly"), "{err}");
+        assert!(err.contains("mcp__makiba__merge"), "{err}");
     }
     assert_eq!(
-        served.hook("gh pr view 7 --repo o/r --json state,mergedAt"),
+        run_hook(&bash("gh pr view 7 --repo o/r --json state,mergedAt"), &env),
         (0, String::new())
     );
     assert_eq!(c.calls(), "", "the gate was not asked");

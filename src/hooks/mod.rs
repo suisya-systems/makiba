@@ -158,12 +158,8 @@ pub fn main(args: &[String]) -> ExitCode {
         eprintln!("usage: makiba hook <{}>", names.join("|"));
         return ExitCode::from(2);
     };
-    // The merge gate waits for makibad's acceptance gate, which reads GitHub and git.
-    let budget = if name == Some("merge-gate") {
-        merge_gate::GATE_WAIT + std::time::Duration::from_secs(5)
-    } else {
-        CHECK_BUDGET
-    };
+    // Every hook, the merge gate too (Issue 433: it asks no door), answers within the same budget.
+    let budget = CHECK_BUDGET;
     let mut raw = Vec::new();
     let verdict = match std::io::stdin().read_to_end(&mut raw) {
         Err(e) => Err(payload_refused(format!(

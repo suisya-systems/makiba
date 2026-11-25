@@ -7,7 +7,7 @@
 //! The helpers are those of `tests/gate_review_state.rs`, copied (that file keeps its own). The
 //! gate runs in the door on real git repositories, `gh` is a stand-in script, and the merge
 //! approval mode is makibad's environment, so each case of a mode runs in a child process of this
-//! test binary. The hook case starts the door's Unix socket and needs a host that lets it.
+//! test binary.
 
 // Some copied helpers are not used here.
 #![allow(dead_code)]
@@ -15,8 +15,7 @@
 mod common;
 
 use makiba::base::stub::Stub;
-use makiba::channel::Hub;
-use makiba::daemon::door::{self, Door, issue_key};
+use makiba::daemon::door::{Door, issue_key};
 use makiba::daemon::gate;
 use makiba::db::writer::{NewEvent, RunUpsert, StateWriter};
 use makiba::spec::Role;
@@ -26,7 +25,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once, OnceLock};
 
-const GATE_KEY: &str = "9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e";
 const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const D: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const T1: &str = "2026-11-05T01:00:00Z";
@@ -147,6 +145,8 @@ struct Case {
     db: PathBuf,
     door: Door,
     secretary: String,
+    /// The person's key: the gate is the person's verb (Issue 433 retired the gate key).
+    person: String,
     base: String,
 }
 
@@ -200,8 +200,8 @@ impl Case {
             )
             .unwrap();
         let secretary = issue_key(&w, Role::Secretary, "secretary", None, None).unwrap();
+        let person = issue_key(&w, Role::Person, "person", None, None).unwrap();
         let door = Door::new(w, Arc::new(Stub::new()), "claude_code".into());
-        door.set_gate_key(GATE_KEY);
         let mut c = Case {
             _tmp: tmp,
             name: name.into(),
@@ -211,6 +211,7 @@ impl Case {
             db,
             door,
             secretary,
+            person,
             base: String::new(),
         };
         c.base = c.commit("base", files);
@@ -350,11 +351,11 @@ impl Case {
         head
     }
 
-    /// The door's answer to `gate` for PR `pr` at `head`, asked with the merge gate's key.
+    /// The door's answer to `gate` for PR `pr` at `head`, asked with the person's key.
     fn gate_at(&self, pr: i64, head: &str) -> Value {
         self.door
             .handle(
-                Some(GATE_KEY),
+                Some(&self.person),
                 "gate",
                 json!({"repo": self.repo, "pr": pr, "head": head}),
                 None,
@@ -526,47 +527,13 @@ fn run_hook(stdin: &str, env: &[(&str, &str)]) -> (i32, String, String) {
     )
 }
 
-/// The door on a Unix socket of its own, with the gate key written where the hook reads.
-struct Served {
-    _tmp: tempfile::TempDir,
-    _running: door::Running,
-    env: Vec<(String, String)>,
-}
-
-impl Served {
-    fn start(c: &Case) -> Served {
-        let tmp = tempfile::tempdir().unwrap();
-        let socket = tmp.path().join("d.sock");
-        let gate_key = tmp.path().join("cfg").join("gate.key");
-        let cfg = door::Config {
-            socket: Some(socket.clone()),
-            port: 0,
-            person_key: tmp.path().join("cfg").join("person.key"),
-            gate_key: gate_key.clone(),
-            agent: "claude_code".into(),
-        };
-        let running = door::start(&cfg, &c.db, Arc::new(Stub::new()), Hub::new(|_| None))
-            .unwrap_or_else(|e| {
-                panic!("the door's socket (this test needs a host that lets it create one): {e}")
-            });
-        Served {
-            env: vec![
-                ("MAKIBA_DOOR".into(), socket.display().to_string()),
-                ("MAKIBA_GATE_KEY".into(), gate_key.display().to_string()),
-            ],
-            _tmp: tmp,
-            _running: running,
-        }
-    }
-
-    fn hook(&self, head: &str, c: &Case) -> (i32, String, String) {
-        let env: Vec<(&str, &str)> = self
-            .env
-            .iter()
-            .map(|(k, v)| (k.as_str(), v.as_str()))
-            .collect();
-        run_hook(&bash(&merge_cmd("7", &c.repo, "--squash", head, "")), &env)
-    }
+/// The hook on the landing command for `head`, with makibad down (Issue 433: it asks no door).
+fn hook(head: &str, c: &Case) -> (i32, String, String) {
+    let env = [
+        ("MAKIBA_DOOR", "/nonexistent/door.sock"),
+        ("MAKIBA_GATE_KEY", "/nonexistent/gate.key"),
+    ];
+    run_hook(&bash(&merge_cmd("7", &c.repo, "--squash", head, "")), &env)
 }
 
 // ---- Issue 344 ----------------------------------------------------------------------------------
@@ -793,14 +760,20 @@ fn the_hook_refuses_a_stale_head_under_human_instead_of_asking() {
     }
     let (c, reviewed, later) = reviewed_then("rhhook", &[ROUND4]);
     let head = later[0].clone();
-    let served = Served::start(&c);
-    let (code, out, err) = served.hook(&head, &c);
+    // The gate (the person's, and the merge verb's) refuses the stale head under human.
+    let v = c.gate_at(7, &head);
+    assert_eq!(v["allow"], json!(false), "{v}");
+    assert!(v["verdict"] == json!("review_missing"), "{v}");
+    assert!(reason(&v).contains(&reviewed[..12]), "{v}");
+    // The hook asks nobody: it refuses the landing command and names the verb (Issue 433).
+    let (code, out, err) = hook(&head, &c);
     assert_eq!(code, 2, "{out} {err}");
     assert!(out.is_empty(), "{out}");
-    assert!(
-        err.contains("review_missing") && err.contains(&reviewed[..12]),
-        "{err}"
-    );
+    assert!(err.contains("mcp__makiba__merge"), "{err}");
+    // Reviewed at the head, the gate allows; the hook still lets nothing land.
     c.clean_review(&head);
-    assert_eq!(served.hook(&head, &c), (0, String::new(), String::new()));
+    assert_eq!(c.gate_at(7, &head)["allow"], json!(true));
+    let (code, out, err) = hook(&head, &c);
+    assert_eq!(code, 2, "{out} {err}");
+    assert!(out.is_empty(), "{out}");
 }

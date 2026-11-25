@@ -1,15 +1,10 @@
-//! `makiba hook merge-gate` (Issue 47): the secretary's `PreToolUse` hook on Bash, ported from
-//! claude-org-ja's `.hooks/gate-acceptance-before-merge.sh` and `tools/acceptance_merge_hook.py`.
+//! `makiba hook merge-gate` (Issue 47, Issue 433): the secretary's `PreToolUse` hook on Bash, ported
+//! from claude-org-ja's `.hooks/gate-acceptance-before-merge.sh` and `tools/acceptance_merge_hook.py`.
 //!
-//! The only merge it lets through is the one form
-//!
-//! ```text
-//! gh pr merge <number> --repo <OWNER/REPO> (--squash|--merge|--rebase) --match-head-commit <40-hex> [--delete-branch]
-//! ```
-//!
-//! as the whole command, and only when makibad's acceptance gate (the door verb `gate`) answers
-//! `allow`. It asks with the key makibad wrote for this hook alone (spec section 3); anything that
-//! keeps it from asking refuses.
+//! It lets no landing through (docs/design/merge-act.md section 8): makibad runs the landing itself
+//! when its acceptance gate allows it (the door verb `merge`), so every landing or enqueue written
+//! on the secretary's command line is refused, and the refusal names the verb. It asks no door and
+//! reads no key: it answers the same with makibad down.
 //!
 //! It reads each simple command of the line (after `eval` and `bash -c` are unwrapped) as the
 //! shell splits it into words. For a command whose program is the GitHub CLI, every word up to and
@@ -18,10 +13,11 @@
 //! of its own. Anything else there is refused, with a request to write the command plainly. Then
 //! it refuses:
 //!
-//! - `gh pr merge` in any other form, `gh alias set|import`, and a `gh` group it does not know (an
-//!   alias or an extension);
-//! - `gh api` with a writing method on a `pulls/<n>/merge` path, and `gh api graphql` carrying a
-//!   merge mutation or a body it cannot read;
+//! - `gh pr merge` in any form, `gh alias set|import`, and a `gh` group it does not know (an alias
+//!   or an extension);
+//! - `gh api` with a writing method on a `pulls/<n>/merge*` path (`merge`, `merge-async`, any
+//!   later sibling), and `gh api graphql` carrying a merge or enqueue mutation or a body it cannot
+//!   read;
 //! - `curl` or `wget` naming the GitHub API;
 //! - a program word it cannot read; the GitHub CLI among the words of a program that may run its
 //!   arguments (anything but a few text programs such as `echo`, `grep`, `git`); `xargs`, `find`
@@ -33,92 +29,57 @@
 //! the shell keywords before a command.
 //!
 //! A text program that only names one of these as an argument (`echo "gh pr merge"`, a commit
-//! message, a `grep` pattern) is not refused. This stops mistakes, not an adversary: a renamed
+//! message, a `grep` pattern) is not refused. Taking a pull request out of the merge queue
+//! (`dequeuePullRequest`) only narrows and passes. This stops mistakes, not an adversary: a renamed
 //! binary, a script on disk, other HTTP clients and the GitHub web UI are outside it. The bound
-//! against merging around the gate is GitHub's branch protection, not this hook.
+//! against landing around makibad is GitHub's branch protection, not this hook.
 
 use super::deny_push;
 use super::shell;
-use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
-use std::os::unix::net::UnixStream;
-use std::time::Duration;
+use serde_json::Value;
 
-/// How long the hook waits for the gate: below the 900 s the role settings give it.
-pub const GATE_WAIT: Duration = Duration::from_secs(840);
+/// What every refusal ends with: the way a landing goes now.
+const VERB: &str = "a merge or an enqueue goes through makibad: call mcp__makiba__merge with repo, pr and head (the full head of the CI notice); a merge it cannot run (under merge_approval_mode human, or with the gate's warning) the person does in the GitHub web UI";
 
-const FORM: &str = "merge with exactly: gh pr merge <number> --repo <OWNER/REPO> --squash|--merge|--rebase --match-head-commit <full head SHA> [--delete-branch], alone on one line, so the acceptance gate can read it. A PR this form cannot merge (for example a repository without CI) is merged by the person in the GitHub web UI";
-
-/// The line this hook holds; a gate that refuses for want of a passed review holds `REVIEW_LINE`.
+/// The line this hook holds.
 const LINE: &str = "L-K9";
-const REVIEW_LINE: &str = "L-K10";
 
 pub fn check(payload: &Value) -> Result<(), super::Refusal> {
     if super::field(payload, "/tool_name") != "Bash" {
         return Ok(());
     }
     let command = super::command(payload);
-    let refusal = |why: String| super::Refusal::new(LINE, command.trim(), why).at("gh pr merge");
-    match parse(&command).map_err(refusal)? {
-        None => Ok(()),
-        Some((pr, repo, head)) => ask_gate(&repo, pr, &head).map_err(|(verdict, why)| {
-            if verdict == "review_missing" {
-                super::Refusal::new(REVIEW_LINE, format!("gate verdict {verdict}"), why)
-            } else if verdict.is_empty() {
-                refusal(why)
-            } else {
-                super::Refusal::new(LINE, format!("gate verdict {verdict}"), why)
-            }
-        }),
-    }
+    parse(&command).map_err(|why| super::Refusal::new(LINE, command.trim(), why).at("gh pr merge"))
 }
 
-/// `(number, OWNER/REPO, head)` for the allowed form; `None` for a command that cannot merge; the
-/// reason for one the hook refuses.
-pub fn parse(command: &str) -> Result<Option<(i64, String, String)>, String> {
-    if let Some(m) = allowed_form(command.trim()) {
-        return Ok(Some(m));
-    }
+/// `Ok` for a command that cannot land or enqueue; the reason for one the hook refuses.
+pub fn parse(command: &str) -> Result<(), String> {
     match refused(command) {
-        Some(why) => Err(format!("{why}; {FORM}")),
-        None => Ok(None),
+        Some(why) => Err(format!("{why}; {VERB}")),
+        None => Ok(()),
     }
-}
-
-/// The allowed form, read exactly: single spaces, a lowercase full SHA, nothing before or after.
-fn allowed_form(c: &str) -> Option<(i64, String, String)> {
-    let w: Vec<&str> = c.split(' ').collect();
-    if !(9..=10).contains(&w.len()) || w[..3] != ["gh", "pr", "merge"] || w[4] != "--repo" {
-        return None;
-    }
-    let number = w[3]
-        .parse::<i64>()
-        .ok()
-        .filter(|_| w[3].bytes().all(|b| b.is_ascii_digit()))?;
-    let name_ok = |s: &str| {
-        !s.is_empty()
-            && s.bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
-    };
-    let (owner, name) = w[5].split_once('/')?;
-    let sha = w[8];
-    let ok = name_ok(owner)
-        && name_ok(name)
-        && ["--squash", "--merge", "--rebase"].contains(&w[6])
-        && w[7] == "--match-head-commit"
-        && sha.len() == 40
-        && sha
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-        && (w.len() == 9 || w[9] == "--delete-branch");
-    ok.then(|| (number, w[5].to_string(), sha.to_string()))
 }
 
 /// True when `s` has the word merge on its own (not inside a longer name such as
-/// `merge_approval_mode`, `mergedAt` or `before-merge.sh`), or a GraphQL merge mutation's name.
+/// `merge_approval_mode`, `mergedAt` or `before-merge.sh`), a GraphQL merge or enqueue
+/// mutation's name, or a `pulls/<n>/merge*` path (`merge-async` too, which the word alone misses).
 fn merge_word(s: &str) -> bool {
     let s = s.to_lowercase();
-    if s.contains("mergepullrequest") || s.contains("automerge") || s.contains("mergebranch") {
+    if regex::Regex::new(r"pulls/[^/]*/merge")
+        .expect("pattern")
+        .is_match(&s)
+    {
+        return true;
+    }
+    if [
+        "mergepullrequest",
+        "automerge",
+        "mergebranch",
+        "enqueuepullrequest",
+    ]
+    .iter()
+    .any(|m| s.contains(m))
+    {
         return true;
     }
     let b = s.as_bytes();
@@ -145,7 +106,8 @@ fn mentions_merge(command: &str) -> bool {
         .collect();
     let op = regex::Regex::new(r"\$\{[^}]*[#%/:^,]|\$\{?\w*merge").expect("pattern");
     if op.is_match(&base) {
-        return plain.contains("merge");
+        // Any merge at all, and the names `merge_word` knows that hold no "merge" (an enqueue).
+        return plain.contains("merge") || merge_word(&plain);
     }
     // An expansion adds no text of its own (a word break), except the default word in `${A-x}`.
     let braces = regex::Regex::new(r"\$\{[^}]*\}?").expect("pattern");
@@ -671,12 +633,14 @@ fn refused_gh(args: &[Tok], redirections_certain: bool) -> Option<String> {
             if verdicts.iter().any(|v| v.contains("undecidable")) {
                 return Some("gh api graphql with a body the hook cannot read".into());
             }
-            return merge_word(&line).then(|| "gh api graphql with a merge mutation".into());
+            return merge_word(&line)
+                .then(|| "gh api graphql with a merge mutation (an enqueue lands too)".into());
         }
         let path = endpoint.unwrap_or_default();
         let path = path.split('?').next().unwrap_or_default();
-        let merge_path =
-            regex::Regex::new(r"(^|/)repos/[^/]+/[^/]+/pulls/[^/]+/merge/?$").expect("pattern");
+        // `merge`, `merge-async`, and any later sibling whose name starts with merge.
+        let merge_path = regex::Regex::new(r"(^|/)repos/[^/]+/[^/]+/pulls/[^/]+/merge[^/]*/?$")
+            .expect("pattern");
         return (merge_path.is_match(path) && !verdicts.is_empty())
             .then(|| format!("gh api writing to {path}"));
     }
@@ -700,74 +664,69 @@ fn refused_gh(args: &[Tok], redirections_certain: bool) -> Option<String> {
         return Some(unsure(sub));
     }
     match (g.as_str(), sub.text.to_lowercase().as_str()) {
-        ("pr", "merge") => Some("gh pr merge in another form than the allowed one".into()),
+        ("pr", "merge") => Some("gh pr merge lands nothing from the command line".into()),
         ("alias", "set" | "import") => Some("gh alias set or import can define a merge".into()),
         _ => None,
     }
 }
 
-/// Ask makibad's gate; `Ok` only for an answer that allows the merge. A refusal carries the
-/// gate's verdict, or an empty one when the gate could not be asked.
-fn ask_gate(repo: &str, pr: i64, head: &str) -> Result<(), (String, String)> {
-    let r = gate_answer(repo, pr, head).map_err(|why| (String::new(), why))?;
-    if r["allow"] == json!(true) {
-        // Issue 263: allowed, but the head has no passed diff review: the person is asked, with
-        // the gate's words, before the command runs.
-        if r["warn"] == json!(true) {
-            println!(
-                "{}",
-                json!({"hookSpecificOutput": {"hookEventName": "PreToolUse",
-                    "permissionDecision": "ask",
-                    "permissionDecisionReason": r["reason"].as_str().unwrap_or("")}})
-            );
-        }
-        return Ok(());
-    }
-    let verdict = r["verdict"].as_str().unwrap_or("?");
-    Err((
-        verdict.to_string(),
-        format!(
-            "ACCEPTANCE_GATE {verdict} for {repo}#{pr} (merge_approval_mode {}): {}",
-            r["mode"].as_str().unwrap_or("?"),
-            r["reason"].as_str().unwrap_or("")
-        ),
-    ))
-}
+#[cfg(test)]
+mod tests {
+    use super::parse;
 
-/// The gate's result for the merge, or why it could not be had.
-fn gate_answer(repo: &str, pr: i64, head: &str) -> Result<Value, String> {
-    let key = std::fs::read_to_string(crate::cli::gate_key_path())
-        .map_err(|e| {
+    /// The word, kept out of this file's own command lines.
+    const M: &str = "mer\x67e";
+
+    /// The Issue 433 diff review, round 2: a wrapped enqueue is read as naming merge also when
+    /// the line holds a `${...}` operation (the reading that takes any "merge" at all).
+    #[test]
+    fn a_wrapped_enqueue_beside_a_parameter_expansion_is_refused() {
+        let q = "mutation{enqueuePullRequest(input:{pullRequestId:\\\"x\\\"}){clientMutationId}}";
+        for cmd in [
             format!(
-                "cannot read the merge gate's key {}: {e}; is makibad running?",
-                crate::cli::gate_key_path().display()
-            )
-        })?
-        .trim()
-        .to_string();
-    let path = crate::cli::door_path()
-        .filter(|_| !crate::cli::door_off())
-        .ok_or("no door to ask the acceptance gate (MAKIBA_DOOR)")?;
-    let req = json!({"v": 1, "key": key, "verb": "gate",
-                     "args": {"repo": repo, "pr": pr, "head": head}});
-    let mut s = UnixStream::connect(&path)
-        .map_err(|e| format!("cannot reach makibad at {}: {e}", path.display()))?;
-    let io = |e: std::io::Error| format!("the door: {e}");
-    s.set_read_timeout(Some(GATE_WAIT)).map_err(io)?;
-    writeln!(s, "{req}").map_err(io)?;
-    let mut line = String::new();
-    BufReader::new(s).read_line(&mut line).map_err(io)?;
-    let answer: Value =
-        serde_json::from_str(&line).map_err(|e| format!("the door answered {line:?}: {e}"))?;
-    if answer["ok"] != json!(true) {
-        // Issue 340: only the words of a refusal that already happened change.
-        let other = crate::build::other_build_line(&answer)
-            .map(|l| format!(" ({l})"))
-            .unwrap_or_default();
-        return Err(format!(
-            "the acceptance gate could not answer: {}{other}",
-            answer["error"]["message"].as_str().unwrap_or("no reason")
-        ));
+                "echo \"${{X:-}}\"; python3 -c 'import os; os.system(\"gh api graphql -f query={q}\")'"
+            ),
+            format!(
+                "echo ${{X#y}}; python3 -c 'import os; os.system(\"gh api graphql -f query={q}\")'"
+            ),
+            format!("echo ${{X:-}}; gh api graphql -f query=$(cat q.graphql) # {q}"),
+        ] {
+            let why = parse(&cmd).expect_err(&cmd);
+            assert!(why.contains("mcp__makiba__merge"), "{cmd}: {why}");
+        }
+        // A plain read beside an expansion still passes.
+        assert_eq!(
+            parse("echo \"${X:-}\"; gh pr view 7 --repo o/r --json state"),
+            Ok(())
+        );
     }
-    Ok(answer["result"].clone())
+
+    /// The Issue 433 diff review: a write to a `pulls/<n>/merge*` path that a runner or a
+    /// substitution wraps is read as naming merge, as the plain word is.
+    #[test]
+    fn a_wrapped_write_to_a_merge_path_is_refused() {
+        for cmd in [
+            format!(
+                "python3 -c 'import subprocess; subprocess.run([\"gh\",\"api\",\"-X\",\"POST\",\"repos/o/r/pulls/7/{M}-async\"])'"
+            ),
+            format!(
+                "python3 -c 'import os; os.system(\"gh api -X PUT repos/o/r/pulls/7/{M}-queue\")'"
+            ),
+            format!(
+                "perl -e 'system(\"gh\", \"api\", \"-X\", \"PUT\", \"repos/o/r/pulls/7/{M}-async\")'"
+            ),
+            format!("gh api -X PUT $(echo repos/o/r/pulls/7/{M}-async)"),
+            format!("echo repos/o/r/pulls/7/{M}-async | xargs gh api -X PUT"),
+        ] {
+            let why = parse(&cmd).expect_err(&cmd);
+            assert!(why.contains("mcp__makiba__merge"), "{cmd}: {why}");
+        }
+        // A mention, and a read, still pass.
+        for cmd in [
+            format!("grep -rn 'pulls/[0-9]*/{M}-async' src"),
+            format!("gh api repos/o/r/pulls/7/{M}-async"),
+        ] {
+            assert_eq!(parse(&cmd), Ok(()), "{cmd}");
+        }
+    }
 }

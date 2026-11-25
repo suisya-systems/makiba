@@ -29,7 +29,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Once, OnceLock};
 
-const GATE_KEY: &str = "9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e";
 const C: &str = "cccccccccccccccccccccccccccccccccccccccc";
 const D: &str = "dddddddddddddddddddddddddddddddddddddddd";
 const T1: &str = "2026-11-05T01:00:00Z";
@@ -150,6 +149,8 @@ struct Case {
     db: PathBuf,
     door: Door,
     secretary: String,
+    /// The person's key: the gate is the person's verb (Issue 433 retired the gate key).
+    person: String,
     base: String,
 }
 
@@ -203,8 +204,8 @@ impl Case {
             )
             .unwrap();
         let secretary = issue_key(&w, Role::Secretary, "secretary", None, None).unwrap();
+        let person = issue_key(&w, Role::Person, "person", None, None).unwrap();
         let door = Door::new(w, Arc::new(Stub::new()), "claude_code".into());
-        door.set_gate_key(GATE_KEY);
         let mut c = Case {
             _tmp: tmp,
             name: name.into(),
@@ -214,6 +215,7 @@ impl Case {
             db,
             door,
             secretary,
+            person,
             base: String::new(),
         };
         c.base = c.commit("base", files);
@@ -353,11 +355,11 @@ impl Case {
         head
     }
 
-    /// The door's answer to `gate` for PR `pr` at `head`, asked with the merge gate's key.
+    /// The door's answer to `gate` for PR `pr` at `head`, asked with the person's key.
     fn gate_at(&self, pr: i64, head: &str) -> Value {
         self.door
             .handle(
-                Some(GATE_KEY),
+                Some(&self.person),
                 "gate",
                 json!({"repo": self.repo, "pr": pr, "head": head}),
                 None,
