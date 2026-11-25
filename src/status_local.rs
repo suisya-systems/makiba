@@ -3,7 +3,7 @@
 //! command that opens the database. `--json` prints `read`'s object, which the secretary's `status`
 //! tool returns through the door.
 
-use rusqlite::{Connection, OpenFlags};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde_json::{Value, json};
 use std::path::Path;
 use std::process::ExitCode;
@@ -49,6 +49,35 @@ pub fn main(as_json: bool) -> ExitCode {
 /// `read` of this organization's `state.db` (the person's `range approve` shows a range from it).
 pub fn read_here() -> Result<Value, String> {
     read(&crate::daemon::state_dir().join("state.db"))
+}
+
+/// The text of the open pending merge entry `id` in the `state.db` at `path`, read-only (Issue
+/// 432): what `makiba merge approve` prints, and whose SHA-256 its approval carries.
+pub fn merge_entry_text(path: &Path, id: i64) -> Result<String, String> {
+    let conn = open(path)?;
+    let row: Option<(String, String, String)> = conn
+        .query_row(
+            "SELECT kind, status, context_json FROM pending WHERE id = ?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()
+        .map_err(|e| format!("cannot read pending entry {id}: {e}"))?;
+    let Some((kind, status, context)) = row else {
+        return Err(format!("no pending entry {id} in state.db"));
+    };
+    if kind != "merge" {
+        return Err(format!("pending entry {id} is a {kind}, not a merge"));
+    }
+    if status != "open" {
+        return Err(format!("pending merge entry {id} is {status}, not open"));
+    }
+    let context: Value = serde_json::from_str(&context)
+        .map_err(|e| format!("pending merge entry {id} holds no readable context: {e}"))?;
+    context["text"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| format!("pending merge entry {id} holds no text"))
 }
 
 /// Who reads the status, which decides where `merge_approval_mode` comes from (Issue 383).

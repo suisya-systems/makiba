@@ -392,6 +392,21 @@ pub enum Command {
         #[arg(long)]
         head: String,
     },
+    /// A pending merge (Issue 432): approve prints the entry (the pull request, head and method,
+    /// the gate's reason and each warning) and asks before the person's key lets it land; refuse
+    /// ends it.
+    Merge {
+        #[arg(value_parser = ["approve", "refuse"])]
+        action: String,
+        /// The pending entry's id (`makiba status` lists it).
+        id: i64,
+        /// refuse: why, for the secretary.
+        #[arg(long)]
+        reason: Option<String>,
+        /// approve without asking (the entry is still printed).
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 fn read(path: &Path) -> Result<String, String> {
@@ -647,6 +662,15 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             json!({"action": action, "key": key, "value": none(value), "project": none(project)}),
         ),
         Command::Gate { repo, pr, head } => ("gate", json!({"repo": repo, "pr": pr, "head": head})),
+        Command::Merge {
+            action, id, reason, ..
+        } => {
+            let mut args = json!({"action": action, "id": id});
+            if let Some(r) = reason {
+                args["reason"] = r.into();
+            }
+            ("merge", args)
+        }
     })
 }
 
@@ -787,8 +811,42 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
     }
 }
 
+/// Before `merge approve` (Issue 432): print the pending merge entry's text as `makibad` wrote it,
+/// read from `state.db`, and `makibad`'s mode beside it, and ask on the terminal unless `yes`. The
+/// SHA-256 of the text printed goes with the approval, so an entry changed since is refused
+/// (`stale`) instead of approved unseen.
+fn merge_preview(id: i64, yes: bool) -> Result<String, String> {
+    let path = crate::daemon::state_dir().join("state.db");
+    let text = crate::status_local::merge_entry_text(&path, id)?;
+    print!("{text}");
+    let status = crate::status_local::read(&path)?;
+    let mode = status["merge_approval_mode"].as_str().unwrap_or("unknown");
+    println!("Merge approval mode: {mode} (makibad's)");
+    let shown = crate::daemon::door::sha256_hex(&text);
+    if yes {
+        return Ok(shown);
+    }
+    print!("Approve the merge of entry {id}? [y/N] ");
+    let _ = std::io::stdout().flush();
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|e| format!("cannot read the answer: {e}"))?;
+    if answer.trim().eq_ignore_ascii_case("y") {
+        Ok(shown)
+    } else {
+        Err("not approved".into())
+    }
+}
+
 /// A verb that goes over the door: send it and print the answer.
 pub fn main(c: Command) -> ExitCode {
+    let merge_preview_of = match &c {
+        Command::Merge {
+            action, id, yes, ..
+        } if action == "approve" => Some((*id, *yes)),
+        _ => None,
+    };
     let preview = match &c {
         Command::Range {
             action,
@@ -805,6 +863,15 @@ pub fn main(c: Command) -> ExitCode {
             return exit(ErrorKind::Usage.exit_code());
         }
     };
+    if let Some((id, yes)) = merge_preview_of {
+        match merge_preview(id, yes) {
+            Ok(shown) => request["shown"] = shown.into(),
+            Err(e) => {
+                eprintln!("makiba: {e}");
+                return exit(ErrorKind::Conflict.exit_code());
+            }
+        }
+    }
     if let Some((id, yes)) = preview {
         match id
             .map_err(String::from)
@@ -939,5 +1006,24 @@ mod tests {
             let flag = format!("--budget-hours={bad}");
             assert!(propose(&[&flag]).is_err(), "{bad}");
         }
+    }
+
+    /// `merge` (Issue 432) sends the action and the entry's id, and refuse its reason; an action
+    /// other than approve and refuse, or no id, is refused here.
+    #[test]
+    fn merge_sends_its_action_and_the_entrys_id() {
+        assert_eq!(
+            req(&["merge", "approve", "4", "--yes"]).unwrap(),
+            ("merge", json!({"action": "approve", "id": 4}))
+        );
+        assert_eq!(
+            req(&["merge", "refuse", "4", "--reason", "not now"]).unwrap(),
+            (
+                "merge",
+                json!({"action": "refuse", "id": 4, "reason": "not now"})
+            )
+        );
+        assert!(req(&["merge", "request", "4"]).is_err());
+        assert!(req(&["merge", "approve"]).is_err());
     }
 }

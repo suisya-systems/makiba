@@ -4,8 +4,9 @@
 //! is the tables of spec section 5. Both are embedded here and are the only place the DDL is written.
 //! `schema_v5.sql` adds the launch identity to `agents`, `schema_v6.sql` the triggers that keep a
 //! `worker_spawn_verified` to its evidence, `schema_v7.sql` the launch without a run, `schema_v8.sql` the ranges of the belt, `schema_v9.sql` their budgets, `schema_v10.sql`
-//! the status `parked` of a run, `schema_v11.sql` a range's `follow_ups` and `design_ahead`. `open`
-//! opens a database with the project's pragmas and `migrate` brings it to v11.
+//! the status `parked` of a run, `schema_v11.sql` a range's `follow_ups` and `design_ahead`,
+//! `schema_v12.sql` the pending kind `merge`. `open` opens a database with the project's pragmas
+//! and `migrate` brings it to v12.
 
 use std::fmt;
 use std::path::Path;
@@ -39,6 +40,9 @@ pub const SCHEMA_V10: &str = include_str!("schema_v10.sql");
 /// v11: `ranges.follow_ups`, `ranges.design_ahead` and `range_candidates.waits_json` (Issue 284).
 /// Columns are only added: every row is kept.
 pub const SCHEMA_V11: &str = include_str!("schema_v11.sql");
+/// v12: `pending.kind` `merge`, a landing the person approves (Issue 432). The table is made again
+/// with every row kept.
+pub const SCHEMA_V12: &str = include_str!("schema_v12.sql");
 
 /// A row as a map of column name to value (what the carried Python returned as a dict).
 pub type Row = serde_json::Map<String, Value>;
@@ -154,12 +158,12 @@ fn is_current(conn: &Connection) -> Result<bool> {
         }
     }
     let (versions, session): (i64, i64) = conn.query_row(
-        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 11),
+        "SELECT (SELECT COUNT(DISTINCT version) FROM schema_migrations WHERE version BETWEEN 1 AND 12),
                 (SELECT COUNT(*) FROM org_sessions WHERE id = 1)",
         [],
         |r| Ok((r.get(0)?, r.get(1)?)),
     )?;
-    Ok(versions == 11 && session == 1)
+    Ok(versions == 12 && session == 1)
 }
 
 /// Bring a database to v9: apply v3 to an empty one, upgrade an older one in place, then add v4 to v9.
@@ -300,6 +304,20 @@ pub fn migrate(conn: &mut Connection) -> Result<()> {
         }
         return Err(e.into());
     }
+    // v12 makes `pending` again (Issue 432), in a transaction of its own.
+    let done: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM schema_migrations WHERE version = 12",
+        [],
+        |r| r.get(0),
+    )?;
+    if done == 0
+        && let Err(e) = conn.execute_batch(SCHEMA_V12)
+    {
+        if !conn.is_autocommit() {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+        return Err(e.into());
+    }
     Ok(())
 }
 
@@ -360,7 +378,7 @@ mod tests {
         );
         assert!(!is_current(&conn).unwrap());
         migrate(&mut conn).unwrap();
-        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 11);
+        assert_eq!(n(&conn, "SELECT MAX(version) FROM schema_migrations"), 12);
         assert_eq!(
             n(
                 &conn,
@@ -398,7 +416,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         migrate(&mut conn).unwrap();
         let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 11);
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 12);
         assert_eq!(n("PRAGMA foreign_keys"), 1);
         assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
         let row: (String, i64, i64, String, String, Option<f64>, i64) = conn
@@ -500,7 +518,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         assert!(is_current(&conn).unwrap());
         let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 11);
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 12);
         assert_eq!(n("PRAGMA foreign_keys"), 1);
         assert_eq!(n("SELECT count(*) FROM pragma_foreign_key_check"), 0);
         assert_eq!(n("SELECT count(*) FROM run_launch WHERE run_id = 7"), 1);
@@ -583,7 +601,7 @@ mod tests {
         migrate(&mut conn).unwrap();
         assert!(is_current(&conn).unwrap());
         let n = |sql: &str| -> i64 { conn.query_row(sql, [], |r| r.get(0)).unwrap() };
-        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 11);
+        assert_eq!(n("SELECT MAX(version) FROM schema_migrations"), 12);
         assert_eq!(n("SELECT count(*) FROM ranges"), 1);
         assert_eq!(n("SELECT count(*) FROM range_candidates"), 1);
         let (follow, ahead, waits): (String, i64, Option<String>) = conn
