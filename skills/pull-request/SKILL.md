@@ -73,6 +73,7 @@ Stop lines:
 To merge, in either mode, call mcp__makiba__merge with `repo` (`<owner>/<name>`), `pr`, `head` (the full 40-character head of the CI notice) and `method` `squash`. You never run `gh pr merge` or any other merge or enqueue command: the merge gate hook refuses them all. `makibad` runs the acceptance gate (below); on a refusal it answers the verdict and nothing runs.
 
 - `accepted`: `makibad` merges (or, on a branch that requires the merge queue, enqueues) the pull request at that head itself. End your turn; its notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: on a refusal or an unknown outcome, deal with the cause and call merge again.
+- `unavailable`: the gate could not read GitHub, even after `makibad` tried again (gh's message is in the reason); nothing was judged and nothing ran. Call merge again later. For a range task the stop already went to the person; an answer that allows withdraws it.
 - `pending` (under `human`, or when the gate warns): tell the person the pull request, its link and the warnings, and that they approve it in their shell with `makiba merge approve <id>`. A word in the conversation does not merge it. End your turn; a notice follows the approval.
 
 On `merge_order` (stop line 7): merge the pull requests it names first; once their landing notices came, call merge again for this one. When the reason says the two hold each other (both may add a check), or the person wants another order, stop on it and tell the person, with the link and the reason.

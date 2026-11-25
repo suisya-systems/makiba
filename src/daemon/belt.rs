@@ -880,6 +880,9 @@ pub(super) struct GateStop<'a> {
     pub allow: bool,
     /// The gate refused (line `gate`), or it reports only edited tests (line `tests`).
     pub refused: bool,
+    /// The gate could not read GitHub after its tries (Issue 512): a stop of line `gate` that
+    /// says so, and no refusal for the pause.
+    pub unavailable: bool,
     pub reason: &'a str,
     pub edited_tests: &'a [String],
     /// The gate's Issue 513 warnings (helpers changed, declared tests merged from the base,
@@ -915,7 +918,69 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    let made = if let Some(question) = language.filter(|_| s.refused) {
+    // One question per head (Issue 512): a stop on the content (a refusal, line `gate`, also one
+    // for the language check, or edited tests and Issue 513's test helpers, line `tests`) still
+    // escalated stands over a read of GitHub that failed later, and a stop on the content
+    // replaces the question a failed read asked, marked as makibad's own withdrawal.
+    let read_key = format!("gate-read:{subject}@{}", s.head);
+    if s.unavailable {
+        let standing: Option<i64> = w
+            .conn()
+            .query_row(
+                "SELECT id FROM pending WHERE status = 'escalated'
+                   AND json_extract(context_json, '$.range_id') = ?1
+                   AND (json_extract(context_json, '$.key') IN (?2, ?3, ?4)
+                        OR substr(json_extract(context_json, '$.key'), 1, length(?5)) = ?5)
+                 ORDER BY id DESC LIMIT 1",
+                params![
+                    range,
+                    format!("gate:{subject}@{}", s.head),
+                    format!("tests:{subject}@{}", s.head),
+                    format!("language:{subject}@{}", s.head),
+                    // A stop of Issue 513's warnings: its key carries their sum.
+                    format!("tests:{subject}@{}#", s.head)
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if standing.is_some() {
+            return Ok(standing);
+        }
+    } else {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.key') = ?2",
+            params![range, read_key],
+        )?;
+    }
+    let made = if s.unavailable {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: read_key,
+            question: format!(
+                "The merge gate could not read GitHub for {}#{} at {short}: {} Should the secretary ask the merge again later?",
+                s.repo,
+                s.pr,
+                sentence(s.reason)
+            ),
+            background: format!(
+                "makibad's merge gate tried to read GitHub for the pull request of task {} and every try failed; this says nothing about the pull request: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The secretary asks merge again; an answer that allows withdraws this stop."
+                .into(),
+            if_no: "It waits; you merge it yourself in the GitHub web UI or close it.".into(),
+            recommend: "Yes: ask again once GitHub answers.",
+            why: "A failed read is not a judgement of the pull request.",
+            recommend_answer: "yes",
+            more: json!({"pr": subject, "head": s.head, "unavailable": true}),
+        }
+    } else if let Some(question) = language.filter(|_| s.refused) {
         Stop {
             range,
             task: Some(s.task),
@@ -1036,8 +1101,10 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
         )?;
     }
     let (id, _) = stop(w, &made)?;
-    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
+    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing,
+    // and neither does a read of GitHub that failed (Issue 512).
     if !s.allow
+        && !s.unavailable
         && let Some((acting, status)) = acting(w, range)?
         && status == "active"
     {
@@ -1052,6 +1119,8 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
                     AND json_extract(e.payload_json, '$.allow') = 0
+                    AND coalesce(json_extract(e.payload_json, '$.verdict'),
+                                 json_extract(e.payload_json, '$.result'), '') != 'unavailable'
                     AND json_extract(e.payload_json, '$.head') = coalesce(
                       (SELECT json_extract(p.payload_json, '$.head_oid') FROM events p
                        WHERE p.kind IN ('pr_opened', 'fix_pushed') AND p.id < e.id
@@ -4034,6 +4103,7 @@ pub(in crate::daemon) mod tests {
                 head,
                 allow: false,
                 refused: true,
+                unavailable: false,
                 reason: "no passed CI",
                 edited_tests: &[],
                 helpers: &[],
@@ -4245,6 +4315,7 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: true,
                 refused: false,
+                unavailable: false,
                 reason: "passed",
                 edited_tests: &tests,
                 helpers: &[],
@@ -4311,6 +4382,7 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: false,
                 refused: false,
+                unavailable: false,
                 reason: "tests edited",
                 edited_tests: &tests,
                 helpers: &[],
@@ -4357,6 +4429,7 @@ pub(in crate::daemon) mod tests {
                     head: &h,
                     allow: true,
                     refused: false,
+                    unavailable: false,
                     reason: "passed",
                     edited_tests: &tests,
                     helpers,
