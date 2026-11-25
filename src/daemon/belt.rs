@@ -4280,6 +4280,11 @@ pub(in crate::daemon) mod tests {
         assert_eq!(dependencies(body, "o/r"), Ok(vec![3, 4, 5, 6, 9, 10]));
         assert_eq!(admitted_dependencies(body), vec![3, 4, 5, 6, 9, 10]);
         assert!(dependencies("Depends on other/x#5", "o/r").is_err());
+        assert!(dependencies("Depends on https://GITHUB.COM/o/r/issues/30", "o/r").is_err());
+        assert_eq!(
+            dependencies("Depends on https://github.com/O/R/issues/30", "o/r"),
+            Ok(vec![30])
+        );
         assert_eq!(
             dependencies("- Depends on the previous step.", "o/r"),
             Err("- Depends on the previous step.".to_string())

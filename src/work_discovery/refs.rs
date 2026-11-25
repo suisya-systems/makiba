@@ -320,7 +320,8 @@ fn run_after(line: &str, at: usize) -> Option<(usize, usize)> {
 /// inside a line and on a line that cannot be read whole. A **dependency line** starts with a
 /// keyword after an optional quote, heading, list marker, task box and emphasis or code marks
 /// (`DEP_LINE_START`); it is read whole when its keyword is followed by a run and every ref token
-/// on it lies in the run of one of its keywords (a negated one's names nothing, and is no stray).
+/// on it lies in the run of one of its keywords and names a ref read from it (a negated keyword's
+/// run names nothing, and is no stray).
 /// Any other dependency line (the dependency in words, its number only on the next line, in prose,
 /// or after the run) is `unreadable`: the Issue is left out for its author to rewrite.
 pub fn dependency_lines(text: &str) -> DepLines {
@@ -351,11 +352,17 @@ pub fn dependency_lines(text: &str) -> DepLines {
             home.extend(home_refs(&line[s..e]));
             cross.extend(cross_tokens(&line[s..e]));
         }
+        let inside = |spans: &[(usize, usize)], t: &regex::Match| {
+            spans.iter().any(|&(s, e)| s <= t.start() && t.end() <= e)
+        };
+        // Every ref token lies in a negated run, or in a run and names a ref that is read (a
+        // token the run accepts but no ref is read from, as `https://GITHUB.COM/...`, is not).
         let whole = lead_run.is_some()
             && REF_TOKEN.find_iter(line).all(|t| {
-                runs.iter()
-                    .chain(&negated)
-                    .any(|&(s, e)| s <= t.start() && t.end() <= e)
+                inside(&negated, &t)
+                    || (inside(&runs, &t)
+                        && !(home_refs(t.as_str()).is_empty()
+                            && cross_tokens(t.as_str()).is_empty()))
             });
         if unreadable.is_none() && lead.is_some() && !whole {
             unreadable = Some(shown_line(line));
@@ -597,6 +604,17 @@ mod tests {
             let d = dependency_lines(&numbered);
             assert_eq!((d.home, d.unreadable), (vec![30], None), "{numbered:?}");
         }
+    }
+
+    /// A ref token the run accepts but no ref is read from leaves the line unreadable (review
+    /// round 2): `GITHUB.COM` is matched by the run, not by the cross ref.
+    #[test]
+    fn a_token_naming_no_readable_ref_is_unreadable() {
+        let d = dependency_lines("Depends on https://GITHUB.COM/o/r/issues/30");
+        assert!(d.unreadable.is_some(), "{d:?}");
+        let d = dependency_lines("Depends on https://github.com/o/r/issues/30");
+        assert_eq!(d.cross, vec![("o/r".to_string(), 30)]);
+        assert_eq!(d.unreadable, None);
     }
 
     /// A negated keyword names nothing, and a line it starts is no dependency line.
