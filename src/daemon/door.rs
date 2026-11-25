@@ -3184,9 +3184,11 @@ fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
     Ok((repo.to_string(), pr, head.to_string()))
 }
 
-/// What the gate found outside the door's lock: refused before the git checks, or their verdict.
+/// What the gate found outside the door's lock: refused before the git checks, a read of GitHub
+/// that still failed after its tries (Issue 512: nothing about the pull request), or the verdict.
 enum Found {
     Before(String),
+    Unavailable(String),
     Ran(Box<super::gate::Verdict>, bool, Value),
 }
 
@@ -3366,9 +3368,10 @@ fn merge_order_line(repo: &str, pr: i64, m: &super::gate::MergeOrder) -> String 
 fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
     use super::gate;
     let program = super::gh::program();
-    let (_url, base_branch, view_head) = match gate::pr_view(&program, repo, pr) {
+    let (_url, base_branch, view_head) = match gate::pr_view_read(&program, repo, pr) {
         Ok(v) => v,
-        Err(e) => return Found::Before(e.0),
+        Err(gate::Fault::Refused(why)) => return Found::Before(why),
+        Err(gate::Fault::Unavailable(why)) => return Found::Unavailable(why),
     };
     if view_head != head {
         return Found::Before(format!(
@@ -3401,9 +3404,10 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
             repos.display()
         ));
     };
-    let (base, fetched) = match gate::fetch(&clone, repo, pr, &base_branch) {
+    let (base, fetched) = match gate::fetch_read(&clone, repo, pr, &base_branch) {
         Ok(ids) => ids,
-        Err(e) => return Found::Before(e.0),
+        Err(gate::Fault::Refused(why)) => return Found::Before(why),
+        Err(gate::Fault::Unavailable(why)) => return Found::Unavailable(why),
     };
     if fetched != head {
         return Found::Before(format!(
@@ -3429,6 +3433,10 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         &failed,
         &mut v,
     ) {
+        // A read of GitHub that still failed is the cause of the error: not a refusal (Issue 512).
+        if ci.unavailable().is_some() {
+            return Found::Unavailable(e.0);
+        }
         v.result = "rejected".into();
         v.reason = e.0;
     }
@@ -3454,6 +3462,14 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         .filter(|(_, n)| seen.insert(*n))
         .collect();
     match gate::merge_order(&program, &clone, repo, &base, &base_branch, head, &others) {
+        // The order is not known while another pull request could not be read from GitHub and
+        // none is known to hold this one (Issue 512); a known hold stays the merge order.
+        Ok(m) if m.waits_for.is_empty() && m.unavailable.is_some() => {
+            return Found::Unavailable(format!(
+                "the gate could not read an open pull request it must order this one after: {}",
+                m.unavailable.unwrap_or_default()
+            ));
+        }
         Ok(m) => v.merge_order = m,
         Err(e) if v.result != "rejected" => {
             v.result = "rejected".into();
@@ -3548,6 +3564,12 @@ impl Door {
         let mut warnings: Vec<String> = Vec::new();
         let (mut verdict, reason, mut allow, event) = match found {
             Found::Before(why) => ("rejected".to_string(), why, false, None),
+            Found::Unavailable(why) => (
+                "unavailable".to_string(),
+                format!("GitHub could not be read: {why}"),
+                false,
+                None,
+            ),
             Found::Ran(mut v, docs, rv) => {
                 // What changed while the gate ran: a new CI result, or a first pin of another test.
                 if now.latest_ci != rows.latest_ci {
@@ -3691,7 +3713,7 @@ impl Door {
                 "reason": v.reason, "mode": mode, "allow": allow,
             }),
             None => json!({
-                "repo": repo, "pr": pr, "base": null, "head": head, "result": "rejected",
+                "repo": repo, "pr": pr, "base": null, "head": head, "result": verdict,
                 "reason": reason, "mode": mode, "allow": allow,
             }),
         };
@@ -3759,6 +3781,7 @@ impl Door {
                 head: &head,
                 allow,
                 refused: !allow && verdict != "tests_edited",
+                unavailable: verdict == "unavailable",
                 reason: &reason,
                 edited_tests: &edited,
             };
@@ -4307,6 +4330,17 @@ fn merge_attempt(
     Ok(answer)
 }
 
+/// The answer's `status` and the command's status of a `merge` the gate did not allow: a read of
+/// GitHub that still failed is `unavailable`, recorded `failed` (Issue 512); any other verdict is
+/// `refused`, recorded `rejected`.
+fn merge_refusal(verdict: &str) -> (&'static str, &'static str) {
+    if verdict == "unavailable" {
+        ("unavailable", "failed")
+    } else {
+        ("refused", "rejected")
+    }
+}
+
 /// A refusal of a merge entry that is no longer the one shown, or no longer open.
 fn merge_stale(id: i64, why: &str) -> DoorError {
     refuse(
@@ -4411,12 +4445,19 @@ impl Door {
             }
         };
         if !j.allow {
-            let mut answer = json!({"status": "refused", "verdict": j.verdict, "allow": false, "reason": j.reason,
+            let (status, recorded) = merge_refusal(&j.verdict);
+            let mut answer = json!({"status": status, "verdict": j.verdict, "allow": false, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head});
             if let Some(rv) = &j.review {
                 answer["review"] = rv.clone();
             }
-            return merge_finish(&w, actor, args, idem, "rejected", Ok(answer));
+            // The stop a read that failed made for the person (Issue 512).
+            if j.verdict == "unavailable"
+                && let Some(id) = j.answer.get("pending_id")
+            {
+                answer["pending_id"] = id.clone();
+            }
+            return merge_finish(&w, actor, args, idem, recorded, Ok(answer));
         }
         if j.warn || (j.mode != "acceptance" && role != Role::Person) {
             // Issue 432: the person's key decides. The same request again is the same entry; one
@@ -4635,12 +4676,17 @@ impl Door {
         }
         if !j.allow {
             // The entry stays open: the person may approve it again once the cause is dealt with.
+            let what = if j.verdict == "unavailable" {
+                "GitHub could not be read, so the gate could not judge"
+            } else {
+                "The gate refused"
+            };
             let told = notice(
                 &w,
                 crate::spec::AGENT_SECRETARY,
                 &task,
                 &format!(
-                    "The gate refused the person's approval of pending merge entry {id} ({repo}#{pr} at {}): {}. The entry stays open; deal with the cause, then the person approves it again.",
+                    "{what} the person's approval of pending merge entry {id} ({repo}#{pr} at {}): {}. The entry stays open; deal with the cause, then the person approves it again.",
                     &head[..head.len().min(12)],
                     j.reason
                 ),
@@ -4649,13 +4695,14 @@ impl Door {
                 let _ = w.rollback();
                 return Err(internal(e));
             }
-            let mut answer = json!({"status": "refused", "verdict": j.verdict, "allow": false, "reason": j.reason,
+            let (status, recorded) = merge_refusal(&j.verdict);
+            let mut answer = json!({"status": status, "verdict": j.verdict, "allow": false, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head,
                                     "pending_id": id});
             if let Some(rv) = &j.review {
                 answer["review"] = rv.clone();
             }
-            return merge_finish(&w, actor, args, idem, "rejected", Ok(answer));
+            return merge_finish(&w, actor, args, idem, recorded, Ok(answer));
         }
         if j.warnings.iter().any(|x| !shown_warnings.contains(x)) {
             // A warning the person was not shown: the entry takes the new reading, and the person

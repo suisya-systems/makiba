@@ -72,6 +72,101 @@ fn reject<T>(why: impl Into<String>) -> Result<T, Reject> {
     Err(Reject(why.into()))
 }
 
+/// Why a read of the gate gave no answer (Issue 512): a refusal on what was read, or a read of
+/// GitHub that failed (gh's non-zero exit, a timeout, no program, a failed fetch), which says
+/// nothing about the pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fault {
+    Refused(String),
+    Unavailable(String),
+}
+
+impl From<Reject> for Fault {
+    fn from(r: Reject) -> Fault {
+        Fault::Refused(r.0)
+    }
+}
+
+impl From<Fault> for Reject {
+    fn from(f: Fault) -> Reject {
+        match f {
+            Fault::Refused(why) | Fault::Unavailable(why) => Reject(why),
+        }
+    }
+}
+
+/// The most tries of one read of GitHub (Issue 512).
+const READ_TRIES: u32 = 3;
+/// No new try of a read starts this long after its first began: a timed-out read is not tripled.
+const READ_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// The wait between two tries, unless `$MAKIBA_GATE_READ_WAIT_MS` (the test seam) says otherwise.
+const READ_WAIT_MS: u64 = 5000;
+pub const READ_WAIT_ENV: &str = "MAKIBA_GATE_READ_WAIT_MS";
+
+/// One try of a read: its answer, a fault that no other try changes, or a failed read of GitHub
+/// that may answer on another try.
+enum Try<T> {
+    Done(Result<T, Fault>),
+    Again(String),
+}
+
+/// A read of GitHub tried up to `READ_TRIES` times, `$MAKIBA_GATE_READ_WAIT_MS` apart, while
+/// `READ_WINDOW` has not passed since the first try began; a read that still fails is
+/// `Fault::Unavailable` with its last message and the number of tries.
+fn with_tries<T>(mut read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
+    let wait = std::env::var(READ_WAIT_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(READ_WAIT_MS);
+    let started = std::time::Instant::now();
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let why = match read() {
+            Try::Done(r) => return r,
+            Try::Again(why) => why,
+        };
+        if tries >= READ_TRIES || started.elapsed() >= READ_WINDOW {
+            let n = if tries == 1 {
+                "1 try".to_string()
+            } else {
+                format!("{tries} tries")
+            };
+            return Err(Fault::Unavailable(format!("{why} (after {n})")));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(wait));
+    }
+}
+
+/// A failed gh call as one line: its message, and the first line of what it wrote on stderr (the
+/// error GitHub answered); and whether another try may answer.
+fn gh_failure(program: &str, e: GhError) -> (String, bool) {
+    match e {
+        GhError::Missing => (format!("no program {program}"), false),
+        GhError::Cancelled => ("cancelled".into(), false),
+        GhError::Failed(f) => {
+            let first = f.stderr.lines().map(str::trim).find(|l| !l.is_empty());
+            match first {
+                Some(l) => (format!("{}: {l}", f.message), true),
+                None => (f.message, true),
+            }
+        }
+    }
+}
+
+/// One try of a gh read: a failure that another try may change is `Again`, one that it will not
+/// (no program, cancelled) is unavailable at once.
+fn gh_try(program: &str, args: &[&str], what: &str) -> Try<String> {
+    let never = AtomicBool::new(false);
+    match gh::run_gh(program, args, &never) {
+        Ok(out) => Try::Done(Ok(out)),
+        Err(e) => match gh_failure(program, e) {
+            (why, true) => Try::Again(format!("{what}: {why}")),
+            (why, false) => Try::Done(Err(Fault::Unavailable(format!("{what}: {why}")))),
+        },
+    }
+}
+
 /// The merge approval mode, and a warning for a value that is neither: `human` unless the setting
 /// says `acceptance` (as `tools/merge_approval_mode.py`: trimmed, any case, the whole value).
 pub fn mode_of(value: Option<&str>) -> (&'static str, Option<String>) {
@@ -638,27 +733,21 @@ fn clean_base_merge(repo: &Path, base: &str, c: &str, parents: &[&str]) -> Resul
 
 // ---- GitHub --------------------------------------------------------------------------------------
 
-/// One JSON value per line of `gh api --paginate <path> --jq <jq>`.
-pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Reject> {
-    let never = AtomicBool::new(false);
-    let out =
-        gh::run_gh(program, &["api", "--paginate", path, "--jq", jq], &never).map_err(|e| {
-            Reject(format!(
-                "cannot read {path} from GitHub: {}",
-                match e {
-                    GhError::Missing => format!("no program {program}"),
-                    GhError::Cancelled => "cancelled".into(),
-                    GhError::Failed(f) => f.message,
-                }
-            ))
-        })?;
+/// One JSON value per line of `gh api --paginate <path> --jq <jq>`. A failed read is tried again
+/// (Issue 512) and, if it still fails, is `Fault::Unavailable`; an answer that is not JSON is
+/// `Fault::Refused`.
+pub fn gh_lines_read(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Fault> {
+    let what = format!("cannot read {path} from GitHub");
+    let out = with_tries(|| gh_try(program, &["api", "--paginate", path, "--jq", jq], &what))?;
     out.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            serde_json::from_str(l)
-                .map_err(|e| Reject(format!("cannot read {path} from GitHub: {e}")))
-        })
+        .map(|l| serde_json::from_str(l).map_err(|e| Fault::Refused(format!("{what}: {e}"))))
         .collect()
+}
+
+/// `gh_lines_read`, either fault as a `Reject`.
+pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Reject> {
+    gh_lines_read(program, path, jq).map_err(Reject::from)
 }
 
 /// (check suite, workflow, base SHAs) of the latest `pull_request` run per workflow at `sha`.
@@ -666,14 +755,32 @@ pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Rejec
 pub struct Ci {
     program: String,
     runs: BTreeMap<String, Vec<(i64, i64, Vec<String>)>>,
+    /// A read of GitHub that still failed after its tries (Issue 512): the refusal it caused is
+    /// not one on the pull request.
+    unavailable: Option<String>,
 }
 
 impl Ci {
     pub fn new(program: &str) -> Ci {
         Ci {
             program: program.to_string(),
-            runs: BTreeMap::new(),
+            ..Default::default()
         }
+    }
+
+    /// The message of a read of GitHub that still failed after its tries, if one did.
+    pub fn unavailable(&self) -> Option<&str> {
+        self.unavailable.as_deref()
+    }
+
+    /// `gh_lines_read`, keeping a read that stayed unavailable.
+    fn lines(&mut self, path: &str, jq: &str) -> Result<Vec<Value>, Reject> {
+        gh_lines_read(&self.program, path, jq).map_err(|f| {
+            if let Fault::Unavailable(why) = &f {
+                self.unavailable = Some(why.clone());
+            }
+            Reject::from(f)
+        })
     }
 
     /// The latest run per workflow; a latest run that names no base is dropped, not replaced.
@@ -686,8 +793,7 @@ impl Ci {
             return Ok(r.clone());
         }
         let mut latest: BTreeMap<i64, Value> = BTreeMap::new();
-        for r in gh_lines(
-            &self.program,
+        for r in self.lines(
             &format!("repos/{repo}/actions/runs?head_sha={sha}&event=pull_request&per_page=100"),
             ".workflow_runs[] | {wf: .workflow_id, suite: .check_suite_id, created: .created_at, bases: [.pull_requests[].base.sha]}",
         )? {
@@ -736,8 +842,7 @@ impl Ci {
             .collect();
         let mut latest: BTreeMap<(i64, String, i64), (String, String)> = BTreeMap::new();
         // filter=all: the default keeps one run per name, and a push run can hide the PR's.
-        for r in gh_lines(
-            &self.program,
+        for r in self.lines(
             &format!("repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100"),
             ".check_runs[] | {app: .app.id, name, conclusion, completed_at, suite: .check_suite.id}",
         )? {
@@ -863,6 +968,9 @@ pub struct MergeOrder {
     pub waits_for: Vec<Waiting>,
     /// `(pr, task, why)` of an open pull request that could not be read: it holds as one waiting.
     pub not_read: Vec<(i64, String, String)>,
+    /// A read of GitHub for another pull request that still failed after its tries (Issue 512):
+    /// with nothing in `waits_for`, the order is not known and the gate answers `unavailable`.
+    pub unavailable: Option<String>,
 }
 
 impl MergeOrder {
@@ -894,11 +1002,11 @@ pub fn merge_order(
         return Ok(m);
     }
     for (task, pr) in others {
-        let read = pr_view(program, repo, *pr).and_then(|(_, branch, _)| {
+        let read = pr_view_read(program, repo, *pr).and_then(|(_, branch, _)| {
             if branch != base_branch {
                 return Ok(None);
             }
-            let (b, h) = fetch(clone, repo, *pr, &branch)?;
+            let (b, h) = fetch_read(clone, repo, *pr, &branch)?;
             Ok(Some((find_manifest(clone, &b, &h)?, b, h)))
         });
         match read {
@@ -910,7 +1018,11 @@ pub fn merge_order(
                 check_adding: check_paths(clone, &b, &h).is_ok_and(|p| !p.is_empty()),
             }),
             Ok(_) => {}
-            Err(e) => m.not_read.push((*pr, task.clone(), e.0)),
+            Err(Fault::Refused(why)) => m.not_read.push((*pr, task.clone(), why)),
+            Err(Fault::Unavailable(why)) => {
+                m.unavailable = Some(format!("#{pr}: {why}"));
+                m.not_read.push((*pr, task.clone(), why));
+            }
         }
     }
     Ok(m)
@@ -1031,57 +1143,62 @@ pub fn evaluate(
 
 // ---- the PR ------------------------------------------------------------------------------------
 
-/// `gh pr view` of the PR: (number, url, base branch, head).
-pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, String), Reject> {
-    let never = AtomicBool::new(false);
+/// `gh pr view` of the PR: (url, base branch, head). A failed read is tried again (Issue 512) and,
+/// if it still fails, is `Fault::Unavailable`; an answer that is not what was asked is
+/// `Fault::Refused`.
+pub fn pr_view_read(program: &str, repo: &str, pr: i64) -> Result<(String, String, String), Fault> {
     let n = pr.to_string();
-    let out = gh::run_gh(
-        program,
-        &[
-            "pr",
-            "view",
-            &n,
-            "--repo",
-            repo,
-            "--json",
-            "number,url,baseRefName,headRefOid",
-        ],
-        &never,
-    )
-    .map_err(|e| {
-        Reject(format!(
-            "gh pr view failed: {}",
-            match e {
-                GhError::Missing => format!("no program {program}"),
-                GhError::Cancelled => "cancelled".into(),
-                GhError::Failed(f) => f.message,
-            }
-        ))
-    })?;
+    let args = [
+        "pr",
+        "view",
+        &n,
+        "--repo",
+        repo,
+        "--json",
+        "number,url,baseRefName,headRefOid",
+    ];
+    let out = with_tries(|| gh_try(program, &args, "gh pr view failed"))?;
     let v: Value = serde_json::from_str(out.trim())
-        .map_err(|e| Reject(format!("gh pr view answered no JSON: {e}")))?;
+        .map_err(|e| Fault::Refused(format!("gh pr view answered no JSON: {e}")))?;
     let field = |k: &str| v[k].as_str().map(String::from);
     match (field("url"), field("baseRefName"), field("headRefOid")) {
         (Some(url), Some(base), Some(head)) => Ok((url, base, head)),
-        _ => reject(format!("gh pr view answered {v}")),
+        _ => Err(Fault::Refused(format!("gh pr view answered {v}"))),
     }
+}
+
+/// `pr_view_read`, either fault as a `Reject`.
+pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, String), Reject> {
+    pr_view_read(program, repo, pr).map_err(Reject::from)
 }
 
 /// Fetch the PR's head and base into `clone` under `refs/makiba/gate/<repo>/<n>/`, through the
 /// clone's own `origin` (Issue 198), which must name `repo`; their ids. The configured URL is
 /// compared, not the one `url.<x>.insteadOf` rewrites it to; git applies the person's rewrites and
-/// ssh configuration when it fetches. Nothing is fetched from an origin that names another one.
+/// ssh configuration when it fetches. Nothing is fetched from an origin that names another one. A
+/// failed fetch is tried again (Issue 512) and, if it still fails, is `Fault::Unavailable`.
+pub fn fetch_read(
+    clone: &Path,
+    repo: &str,
+    pr: i64,
+    base_branch: &str,
+) -> Result<(String, String), Fault> {
+    let never = AtomicBool::new(false);
+    with_tries(|| fetch_try(clone, repo, pr, base_branch, &never))
+}
+
+/// `fetch_read`, either fault as a `Reject`.
 pub fn fetch(
     clone: &Path,
     repo: &str,
     pr: i64,
     base_branch: &str,
 ) -> Result<(String, String), Reject> {
-    fetch_with(clone, repo, pr, base_branch, &AtomicBool::new(false))
+    fetch_read(clone, repo, pr, base_branch).map_err(Reject::from)
 }
 
-/// As `fetch`; the git child is killed when `cancel` is set (a pass's thread at makibad's stop,
-/// Issue 461).
+/// As `fetch`, one try; the git child is killed when `cancel` is set (a pass's thread at makibad's
+/// stop, Issue 461).
 pub fn fetch_with(
     clone: &Path,
     repo: &str,
@@ -1089,10 +1206,28 @@ pub fn fetch_with(
     base_branch: &str,
     cancel: &AtomicBool,
 ) -> Result<(String, String), Reject> {
-    let origin = origin_of(clone, repo)?;
+    match fetch_try(clone, repo, pr, base_branch, cancel) {
+        Try::Done(r) => r.map_err(Reject::from),
+        Try::Again(why) => Err(Reject(why)),
+    }
+}
+
+/// One try of the fetch: a refusal of the clone's origin, or a failed git fetch, which another try
+/// may change.
+fn fetch_try(
+    clone: &Path,
+    repo: &str,
+    pr: i64,
+    base_branch: &str,
+    cancel: &AtomicBool,
+) -> Try<(String, String)> {
+    let origin = match origin_of(clone, repo) {
+        Ok(o) => o,
+        Err(e) => return Try::Done(Err(e.into())),
+    };
     let r = format!("refs/makiba/gate/{repo}/{pr}");
     let dir = clone.display().to_string();
-    gh::run_gh(
+    let fetched = gh::run_gh(
         "git",
         &[
             "-C",
@@ -1108,12 +1243,16 @@ pub fn fetch_with(
             &format!("+refs/heads/{base_branch}:{r}/base"),
         ],
         cancel,
-    )
-    .map_err(|_| {
-        Reject(format!(
-            "git fetch of the PR through origin ({origin}) failed"
-        ))
-    })?;
+    );
+    if let Err(e) = fetched {
+        let (why, again) = gh_failure("git", e);
+        let why = format!("git fetch of the PR through origin ({origin}) failed: {why}");
+        return if again {
+            Try::Again(why)
+        } else {
+            Try::Done(Err(Fault::Unavailable(why)))
+        };
+    }
     let id = |end: &str| -> Result<String, Reject> {
         Ok(
             git(clone, &["rev-parse", &format!("{r}/{end}^{{commit}}")])?
@@ -1121,7 +1260,11 @@ pub fn fetch_with(
                 .to_string(),
         )
     };
-    Ok((id("base")?, id("head")?))
+    Try::Done(
+        id("base")
+            .and_then(|b| Ok((b, id("head")?)))
+            .map_err(Fault::from),
+    )
 }
 
 /// The clone's one origin URL, when it names `repo` (as configured, before `insteadOf`); the

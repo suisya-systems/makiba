@@ -859,6 +859,9 @@ pub(super) struct GateStop<'a> {
     pub allow: bool,
     /// The gate refused (line `gate`), or it reports only edited tests (line `tests`).
     pub refused: bool,
+    /// The gate could not read GitHub after its tries (Issue 512): a stop of line `gate` that
+    /// says so, and no refusal for the pause.
+    pub unavailable: bool,
     pub reason: &'a str,
     pub edited_tests: &'a [String],
 }
@@ -879,7 +882,31 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    let made = if s.refused {
+    let made = if s.unavailable {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: format!("gate-read:{subject}@{}", s.head),
+            question: format!(
+                "The merge gate could not read GitHub for {}#{} at {short}: {} Should the secretary ask the merge again later?",
+                s.repo,
+                s.pr,
+                sentence(s.reason)
+            ),
+            background: format!(
+                "makibad's merge gate tried to read GitHub for the pull request of task {} and every try failed; this says nothing about the pull request: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The secretary asks merge again; an answer that allows withdraws this stop."
+                .into(),
+            if_no: "It waits; you merge it yourself in the GitHub web UI or close it.".into(),
+            recommend: "Yes: ask again once GitHub answers.",
+            why: "A failed read is not a judgement of the pull request.",
+            recommend_answer: "yes",
+            more: json!({"pr": subject, "head": s.head, "unavailable": true}),
+        }
+    } else if s.refused {
         Stop {
             range,
             task: Some(s.task),
@@ -926,8 +953,10 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
         }
     };
     let (id, _) = stop(w, &made)?;
-    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
+    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing,
+    // and neither does a read of GitHub that failed (Issue 512).
     if !s.allow
+        && !s.unavailable
         && let Some((acting, status)) = acting(w, range)?
         && status == "active"
     {
@@ -942,6 +971,7 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
                     AND json_extract(e.payload_json, '$.allow') = 0
+                    AND coalesce(json_extract(e.payload_json, '$.result'), '') != 'unavailable'
                     AND json_extract(e.payload_json, '$.head') = coalesce(
                       (SELECT json_extract(p.payload_json, '$.head_oid') FROM events p
                        WHERE p.kind IN ('pr_opened', 'fix_pushed') AND p.id < e.id
@@ -3858,6 +3888,7 @@ pub(in crate::daemon) mod tests {
                 head,
                 allow: false,
                 refused: true,
+                unavailable: false,
                 reason: "no passed CI",
                 edited_tests: &[],
             },
@@ -4068,6 +4099,7 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: true,
                 refused: false,
+                unavailable: false,
                 reason: "passed",
                 edited_tests: &tests,
             },
@@ -4133,6 +4165,7 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: false,
                 refused: false,
+                unavailable: false,
                 reason: "tests edited",
                 edited_tests: &tests,
             },
