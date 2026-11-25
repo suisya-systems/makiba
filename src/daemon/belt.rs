@@ -882,9 +882,10 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    // One question per head (Issue 512): a refusal on the content still escalated stands over a
-    // read of GitHub that failed later, and a refusal on the content replaces the question a
-    // failed read asked, marked as makibad's own withdrawal.
+    // One question per head (Issue 512): a stop on the content (a refusal, line `gate`, or edited
+    // tests, line `tests`) still escalated stands over a read of GitHub that failed later, and a
+    // stop on the content replaces the question a failed read asked, marked as makibad's own
+    // withdrawal.
     let read_key = format!("gate-read:{subject}@{}", s.head);
     if s.unavailable {
         let standing: Option<i64> = w
@@ -892,16 +893,20 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
             .query_row(
                 "SELECT id FROM pending WHERE status = 'escalated'
                    AND json_extract(context_json, '$.range_id') = ?1
-                   AND json_extract(context_json, '$.key') = ?2
+                   AND json_extract(context_json, '$.key') IN (?2, ?3)
                  ORDER BY id DESC LIMIT 1",
-                params![range, format!("gate:{subject}@{}", s.head)],
+                params![
+                    range,
+                    format!("gate:{subject}@{}", s.head),
+                    format!("tests:{subject}@{}", s.head)
+                ],
                 |r| r.get(0),
             )
             .optional()?;
         if standing.is_some() {
             return Ok(standing);
         }
-    } else if s.refused {
+    } else {
         w.conn().execute(
             "UPDATE pending SET status = 'withdrawn',
                context_json = json_set(context_json, '$.withdrawn_by', 'makibad')

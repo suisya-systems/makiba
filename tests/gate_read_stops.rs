@@ -34,6 +34,8 @@ const ACTIONS: i64 = 15368;
 const BUGGY: &str = "def add(a, b):\n    return a - b\n";
 const FIXED: &str = "def add(a, b):\n    return a + b\n";
 const TEST: &str = "from calc import add\n\n\ndef test_add():\n    assert add(2, 2) == 4\n";
+const OTHER: &str = "def test_other():\n    assert 1 == 1\n";
+const OTHER_EDITED: &str = "def test_other():\n    assert True\n";
 const TRAILER: &str = "\n\nAcceptance-Test: tests/test_calc.py";
 
 /// The stand-in for `gh`. The case's folder is named by the repository in the arguments
@@ -201,6 +203,8 @@ impl Case {
                 ("calc.py", Some(BUGGY)),
                 ("pyproject.toml", Some("[project]\nname = 'x'\n")),
                 (".github/workflows/ci.yml", Some("on: push\n")),
+                // A test that was there before the test commit (`edits_a_test`).
+                ("tests/test_other.py", Some(OTHER)),
             ],
         );
         let clone = home.join("repos").join(name);
@@ -577,4 +581,46 @@ fn a_refusal_on_the_content_is_not_hidden_by_another_pull_request_that_cannot_be
     assert!(reason.contains("#8"), "{v}");
     let verdicts = c.events("acceptance_gate");
     assert_eq!(verdicts.last().unwrap()["result"], json!("rejected"));
+}
+
+/// PR 7 whose fix also edits `tests/test_other.py`, a test that was there before its test commit
+/// and is not declared: under `acceptance` the gate answers `tests_edited`, a stop of line `tests`.
+fn edits_a_test(name: &str) -> Case {
+    Case::with(name, &[("tests/test_other.py", Some(OTHER_EDITED))])
+}
+
+#[test]
+fn edited_tests_after_a_failed_read_are_the_one_question() {
+    let c = edits_a_test("readthentests");
+    c.fail("view", "always");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["status"], json!("unavailable"), "{v}");
+    let first = c.escalated();
+    assert_eq!(first.len(), 1, "{first:?}");
+
+    c.heal("view");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["verdict"], json!("tests_edited"), "{v}");
+    let now = c.escalated();
+    assert_eq!(now.len(), 1, "{now:?}");
+    assert!(now[0].1.contains("edits tests"), "{now:?}");
+    let stops = c.stops();
+    let read = stops.iter().find(|s| s.0 == first[0].0).unwrap();
+    assert_eq!(read.2, "withdrawn", "{stops:?}");
+}
+
+#[test]
+fn a_failed_read_after_edited_tests_leaves_that_stop_as_the_one_question() {
+    let c = edits_a_test("teststhenread");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["verdict"], json!("tests_edited"), "{v}");
+    let first = c.escalated();
+    assert_eq!(first.len(), 1, "{first:?}");
+
+    c.fail("view", "always");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["status"], json!("unavailable"), "{v}");
+    assert_eq!(v["pending_id"], json!(first[0].0), "{v}");
+    assert_eq!(c.escalated(), first);
+    assert_eq!(c.stops().len(), 1, "{:?}", c.stops());
 }
