@@ -50,7 +50,7 @@ Two lines follow from this table and are tested (Issues M4-1, M4-2, M3-3):
 | Knowledge folder | `$MAKIBA_KNOWLEDGE_DIR`, default `~/makiba-knowledge` | Raw notes in `raw/`, `raw/archive/`, `curated/`, `skill-candidates.md`. The curator starts in it and writes only there (section 5.3). |
 | The base's own place | `HC_SESSION=makiba`. | Tests use their own (`makiba-test-<pid>`) with scratch folders. |
 
-Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-process stand-in, whose first `Resync` comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`; any other value uses the real base (session `$MAKIBA_BASE_SESSION`, default `makiba`). The test agent `fake` (M3-4) is launched only when `MAKIBA_FAKE_AGENT` holds its command line as a JSON array (program, record file, steps); without it a `fake` launch stays at `settings_ready`.
+Test seam of `makiba daemon` (M2-1): with `MAKIBA_BASE=stub` it runs on the in-process stand-in, whose first `Resync` comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS` and which appends each launch's name and argv as a JSON line to the file `MAKIBA_STUB_LAUNCHES` names, when set (Issue 352); any other value uses the real base (session `$MAKIBA_BASE_SESSION`, default `makiba`). The test agent `fake` (M3-4) is launched only when `MAKIBA_FAKE_AGENT` holds its command line as a JSON array (program, record file, steps); without it a `fake` launch stays at `settings_ready`.
 
 Test seam of verification (M3-6): `MAKIBA_VERIFY_TIMEOUT_MS`, read by `makibad` at start, is the time a launch has to be verified in milliseconds (section 5.3; default 180 s); nothing in the role files, `makiba up` or any launch sets it.
 

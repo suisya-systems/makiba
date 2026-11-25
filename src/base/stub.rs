@@ -7,6 +7,8 @@ use super::{
     Status, Terminal, TerminalEvent, TerminalRef,
 };
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Sender, channel};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
@@ -54,6 +56,8 @@ pub struct Stub {
     version: String,
     organization: Option<String>,
     subscribe_delay: Duration,
+    /// The file each launch is recorded in (`with_launch_record`), if any.
+    launch_record: Option<PathBuf>,
     inner: Mutex<Inner>,
 }
 
@@ -76,6 +80,7 @@ impl Stub {
             version: PINNED.to_string(),
             organization: None,
             subscribe_delay: Duration::ZERO,
+            launch_record: None,
             inner: Mutex::new(Inner::default()),
         }
     }
@@ -96,6 +101,13 @@ impl Stub {
     /// to answer would.
     pub fn with_subscribe_delay(mut self, delay: Duration) -> Stub {
         self.subscribe_delay = delay;
+        self
+    }
+
+    /// Each `launch` appends a line to `file`: its spec's name and argv as JSON (Issue 352). The
+    /// argv carries the door's token: a test's file only.
+    pub fn with_launch_record(mut self, file: &Path) -> Stub {
+        self.launch_record = Some(file.to_path_buf());
         self
     }
 
@@ -153,6 +165,20 @@ impl Base for Stub {
     }
 
     fn launch(&self, spec: &LaunchSpec) -> Result<TerminalRef, BaseError> {
+        if let Some(file) = &self.launch_record {
+            let line = serde_json::json!({"name": spec.name, "argv": spec.argv});
+            let written = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(file)
+                .and_then(|mut f| writeln!(f, "{line}"));
+            if let Err(e) = written {
+                eprintln!(
+                    "makibad: the stand-in cannot record a launch in {}: {e}",
+                    file.display()
+                );
+            }
+        }
         let mut inner = self.lock();
         if inner.terminals.contains_key(&spec.name) {
             return Err(error(
