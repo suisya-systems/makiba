@@ -1289,7 +1289,7 @@ struct Landed {
 }
 
 /// A run of a project whose `issue_refs` names a dependency, with its current pull request
-/// recorded and not read closed unmerged.
+/// recorded, and either not read closed unmerged or read merged since.
 struct DepRun {
     task: String,
     repo: String,
@@ -1298,18 +1298,25 @@ struct DepRun {
     merged: bool,
     /// That merge's commit (none for a merge recorded before Issue 284).
     merge: Option<String>,
-    /// A `landed_in_clone` of the run names that commit.
-    in_clone: bool,
+    /// The merge commit of a `landed_in_clone` of the run for that merge: by its commit, or, for
+    /// a merge recorded without one, by the pull request the clone check wrote (as `clone_checks`).
+    seen: Option<String>,
 }
 
 /// The runs of the project `slug` that name the Issue `d` (Issue 490): not abandoned or failed,
-/// with a current pull request (`current_pr_sql`) not read closed unmerged.
+/// with a current pull request (`current_pr_sql`) not read closed unmerged, or read merged after
+/// a closure (a merge read with no read of it open between).
 fn dep_runs(c: &Connection, slug: &str, d: i64) -> Result<Vec<DepRun>> {
     let mut q = c.prepare(&format!(
         "SELECT r.task_id, {repo}, {pr}, m.run_id IS NOT NULL, m.merge,
-                m.merge IS NOT NULL AND EXISTS (
-                    SELECT 1 FROM events x WHERE x.run_id = r.id AND x.kind = 'landed_in_clone'
-                      AND json_extract(x.payload_json, '$.merge_commit') = m.merge)
+                CASE WHEN m.run_id IS NOT NULL THEN (
+                    SELECT json_extract(x.payload_json, '$.merge_commit') FROM events x
+                    WHERE x.run_id = r.id AND x.kind = 'landed_in_clone'
+                      AND (json_extract(x.payload_json, '$.merge_commit') = m.merge
+                           OR (m.merge IS NULL
+                               AND lower(json_extract(x.payload_json, '$.repo')) = lower(m.repo)
+                               AND json_extract(x.payload_json, '$.pr') = m.pr))
+                    ORDER BY x.id LIMIT 1) END
          FROM runs r
          JOIN projects p ON p.id = r.project_id
          LEFT JOIN (SELECT run_id, json_extract(payload_json, '$.repo') AS repo,
@@ -1322,7 +1329,8 @@ fn dep_runs(c: &Connection, slug: &str, d: i64) -> Result<Vec<DepRun>> {
            AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(r.issue_refs)
                                                     THEN r.issue_refs ELSE '[]' END) j
                        WHERE j.value = ?2)
-           AND {repo} IS NOT NULL AND {pr} IS NOT NULL AND NOT {closed}
+           AND {repo} IS NOT NULL AND {pr} IS NOT NULL
+           AND (NOT {closed} OR m.run_id IS NOT NULL)
          ORDER BY r.id",
         repo = current_pr_sql("r", "repo"),
         pr = current_pr_sql("r", "pr"),
@@ -1337,7 +1345,7 @@ fn dep_runs(c: &Connection, slug: &str, d: i64) -> Result<Vec<DepRun>> {
                 pr: r.get(2)?,
                 merged: r.get(3)?,
                 merge: r.get(4)?,
-                in_clone: r.get(5)?,
+                seen: r.get(5)?,
             })
         })?
         .collect::<std::result::Result<_, _>>()?;
@@ -1346,26 +1354,24 @@ fn dep_runs(c: &Connection, slug: &str, d: i64) -> Result<Vec<DepRun>> {
 
 /// The landings a ready candidate with the body `body` is dispatched on (Issue 490), or `None`
 /// while one of its `Depends on` Issues is held: a run naming it has a merge recorded that the
-/// project's clone does not hold yet (`landed_in_clone`), or has no merge recorded while the PR
-/// watch still reads its pull request (`prwatch::followed`). A dependency no such run names, or
-/// whose run the watch no longer reads, holds nothing.
+/// project's clone has not been seen to hold (`landed_in_clone`), or has no merge recorded while
+/// the PR watch still reads its pull request (`prwatch::followed`). A dependency no such run
+/// names, or whose run the watch no longer reads, holds nothing.
 fn landings(c: &Connection, slug: &str, body: &str) -> Result<Option<Vec<Landed>>> {
     let mut out = Vec::new();
     for d in refs_on_lines(body, "depends on") {
         for r in dep_runs(c, slug, d)? {
-            match (r.merged, r.merge) {
-                (true, Some(merge)) if r.in_clone => out.push(Landed {
+            if r.merged {
+                let Some(merge) = r.seen else {
+                    return Ok(None);
+                };
+                out.push(Landed {
                     issue: d,
                     task: r.task,
                     merge,
-                }),
-                (true, Some(_)) => return Ok(None),
-                (true, None) => {}
-                (false, _) => {
-                    if !super::prwatch::followed(c, Some(&r.task))?.is_empty() {
-                        return Ok(None);
-                    }
-                }
+                });
+            } else if !super::prwatch::followed(c, Some(&r.task))?.is_empty() {
+                return Ok(None);
             }
         }
     }
@@ -1373,7 +1379,8 @@ fn landings(c: &Connection, slug: &str, body: &str) -> Result<Option<Vec<Landed>
 }
 
 /// The clone checks of the held ready candidates of the active ranges (Issue 490): each run a
-/// dependency names whose merge is recorded and not yet seen in the project's clone.
+/// dependency names whose merge is recorded and not yet seen in the project's clone. A merge
+/// recorded without its commit is checked by its pull request, read again (`check_clone`).
 fn held_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
     let rows: Vec<(String, String, String)> = w
         .conn()
@@ -1392,20 +1399,17 @@ fn held_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
     for (slug, branch, body) in rows {
         for d in refs_on_lines(&body, "depends on") {
             for r in dep_runs(w.conn(), &slug, d)? {
-                let Some(merge) = r.merge.filter(|_| r.merged && !r.in_clone) else {
+                if !r.merged || r.seen.is_some() {
                     continue;
-                };
-                if out
-                    .iter()
-                    .any(|c| c.task == r.task && c.merge.as_deref() == Some(merge.as_str()))
-                {
+                }
+                if out.iter().any(|c| c.task == r.task && c.merge == r.merge) {
                     continue;
                 }
                 out.push(CloneCheck {
                     task: r.task,
                     slug: slug.clone(),
                     branch: branch.clone(),
-                    merge: Some(merge),
+                    merge: r.merge,
                     pr: Some((r.repo, r.pr)),
                 });
             }
@@ -4291,5 +4295,130 @@ pub(in crate::daemon) mod tests {
         )
         .unwrap();
         assert_eq!(settled, 1, "the wait settles");
+    }
+
+    /// A run `task` of the project naming Issue 1, at work, with its pull request 7 registered.
+    fn dependency(w: &StateWriter, task: &str) {
+        w.upsert_run(&RunUpsert {
+            task_id: task,
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("in_use"),
+            issue_refs: Some(&["p#1"]),
+            ..Default::default()
+        })
+        .unwrap();
+        event(
+            w,
+            "pr_opened",
+            "secretary",
+            Some(task),
+            json!({"repo": "o/p", "pr": 7, "task_id": task}),
+        )
+        .unwrap();
+    }
+
+    fn landed_of(w: &StateWriter) -> Option<Vec<(i64, String, String)>> {
+        landings(w.conn(), "p", "On top.\n\nDepends on #1\n")
+            .unwrap()
+            .map(|l| l.into_iter().map(|l| (l.issue, l.task, l.merge)).collect())
+    }
+
+    /// Issue 490, review round 1: a merge recorded without its commit (before Issue 284) holds
+    /// the candidate, is checked in the clone by its pull request, and lands on the commit the
+    /// clone check found.
+    #[test]
+    fn a_merge_recorded_without_its_commit_holds_until_the_clone_check_finds_it() {
+        let (_dir, w) = org();
+        dependency(&w, "d");
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("d"),
+            json!({"repo": "o/p", "pr": 7, "task_id": "d"}),
+        )
+        .unwrap();
+        assert_eq!(
+            landed_of(&w),
+            None,
+            "held while the clone check has not seen it"
+        );
+        let id = active_range(&w, None);
+        let read = event(
+            &w,
+            "range_read",
+            "makibad",
+            None,
+            json!({"range_id": id, "complete": true}),
+        )
+        .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO range_candidates (range_id, read_id, position, issue, title, body,
+                   admitted) VALUES (?1, ?2, 0, 2, 'On top', 'On top.\n\nDepends on #1\n', 1)",
+                params![id, read],
+            )
+            .unwrap();
+        let checks = held_checks(&w).unwrap();
+        assert_eq!(checks.len(), 1);
+        assert_eq!(checks[0].task, "d");
+        assert_eq!(checks[0].merge, None);
+        assert_eq!(checks[0].pr, Some(("o/p".to_string(), 7)));
+        event(
+            &w,
+            "landed_in_clone",
+            "makibad",
+            Some("d"),
+            json!({"task_id": "d", "merge_commit": "m1", "repo": "o/p", "pr": 7}),
+        )
+        .unwrap();
+        assert_eq!(
+            landed_of(&w),
+            Some(vec![(1, "d".to_string(), "m1".to_string())])
+        );
+        assert!(held_checks(&w).unwrap().is_empty());
+    }
+
+    /// Issue 490, review round 1: a pull request read closed, then merged with no read of it
+    /// open between, holds the candidate until its merge is in the clone.
+    #[test]
+    fn a_merge_read_after_a_closure_still_holds_until_it_is_in_the_clone() {
+        let (_dir, w) = org();
+        dependency(&w, "d");
+        event(
+            &w,
+            "pr_closed",
+            "makibad",
+            Some("d"),
+            json!({"repo": "o/p", "pr": 7, "task_id": "d"}),
+        )
+        .unwrap();
+        assert_eq!(
+            landed_of(&w),
+            Some(vec![]),
+            "a closed pull request holds nothing"
+        );
+        event(
+            &w,
+            "pr_merged",
+            "makibad",
+            Some("d"),
+            json!({"repo": "o/p", "pr": 7, "task_id": "d", "merge_commit": "m2"}),
+        )
+        .unwrap();
+        assert_eq!(landed_of(&w), None, "held while the clone does not hold m2");
+        event(
+            &w,
+            "landed_in_clone",
+            "makibad",
+            Some("d"),
+            json!({"task_id": "d", "merge_commit": "m2", "repo": "o/p", "pr": 7}),
+        )
+        .unwrap();
+        assert_eq!(
+            landed_of(&w),
+            Some(vec![(1, "d".to_string(), "m2".to_string())])
+        );
     }
 }
