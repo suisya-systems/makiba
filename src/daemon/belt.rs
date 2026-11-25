@@ -865,6 +865,18 @@ pub(super) struct GateStop<'a> {
 /// the pause rule: two refusals in a row of different pull requests pause the range. The caller
 /// fills after this, so the refusal that pauses puts nothing in. Returns the entry's id.
 pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
+    gate_stop_asking(w, s, None)
+}
+
+/// A refusal for a change to the language check (Issue 339) as a stop of line `gate` that asks
+/// `question`, the gate's question word for word, under a key of its own (`language:`), so that
+/// the person's yes to it, with their own key, is the approval the gate reads; then the pause
+/// rule as for any refusal.
+pub(super) fn language_stop(w: &StateWriter, s: &GateStop, question: &str) -> Result<Option<i64>> {
+    gate_stop_asking(w, s, Some(question))
+}
+
+fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Result<Option<i64>> {
     let Some(range) = range_of(w, s.task)? else {
         return Ok(None);
     };
@@ -875,7 +887,25 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    let made = if s.refused {
+    let made = if let Some(question) = language.filter(|_| s.refused) {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: format!("language:{subject}@{}", s.head),
+            question: question.to_string(),
+            background: format!(
+                "makibad's merge gate refused the pull request of task {}: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The gate lets this change to the language check land; the merge still follows the merge approval mode. Answer with your own makiba answer <id> yes: an answer the secretary relays does not count.".into(),
+            if_no: "The secretary sends the worker back to take the change to the language check out.".into(),
+            recommend: "No: the language check gets no new exception.",
+            why: "On 2026-11-22 the person said the language check gets no new exception; only the person makes one.",
+            recommend_answer: "no",
+            more,
+        }
+    } else if s.refused {
         Stop {
             range,
             task: Some(s.task),
