@@ -134,6 +134,8 @@ struct Launch {
     stage: String,
     worktree: String,
     spawn: String,
+    /// The `landed` of the run's `belt_dispatched` (Issue 490): the merges its start must hold.
+    landed: Option<String>,
 }
 
 impl Prepare {
@@ -151,7 +153,10 @@ impl Prepare {
             let mut st = w.conn().prepare(
                 "SELECT l.id, r.task_id, l.role, COALESCE(p.slug, ''),
                         COALESCE(p.default_branch, 'main'),
-                        r.branch, l.kind, l.agent, l.stage, l.worktree, l.spawn_id
+                        r.branch, l.kind, l.agent, l.stage, l.worktree, l.spawn_id,
+                        (SELECT json_extract(b.payload_json, '$.landed') FROM events b
+                         WHERE b.run_id = r.id AND b.kind = 'belt_dispatched'
+                         ORDER BY b.id DESC LIMIT 1)
                  FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
                  LEFT JOIN projects p ON p.id = r.project_id
                  WHERE l.stage IN ('planned', 'worktree_ready')
@@ -173,6 +178,7 @@ impl Prepare {
                     stage: r.get(8)?,
                     worktree: r.get(9)?,
                     spawn: r.get(10)?,
+                    landed: r.get(11)?,
                 })
             })?
             .collect::<std::result::Result<_, _>>()?
@@ -500,17 +506,52 @@ impl Prepare {
             }
             run_repo::remove_under(&self.places.workers, path)?;
         }
+        let start = start_of(&repo, &l.default_branch, l.landed.as_deref())?;
         std::fs::create_dir_all(&git_root).map_err(|e| format!("{}: {e}", git_root.display()))?;
         run_repo::remove_under(&git_root, &gitdir)?;
-        run_repo::create(
-            &repo,
-            &gitdir,
-            path,
-            &branch,
-            &l.default_branch,
-            &self.hooks_dir()?,
-        )
+        run_repo::create(&repo, &gitdir, path, &branch, &start, &self.hooks_dir()?)
     }
+}
+
+/// Where a run's branch starts in the clone `repo`: the default branch `branch`; for a range task
+/// dispatched on its dependencies' landings (`landed`, Issue 490), the commit the clone's
+/// `refs/remotes/origin/<branch>` names, which the belt's fetch moved and which must hold each
+/// landed merge. Resolved once, so a fetch that moves the ref meanwhile cannot change the start.
+fn start_of(
+    repo: &Path,
+    branch: &str,
+    landed: Option<&str>,
+) -> std::result::Result<String, String> {
+    let landed: Vec<serde_json::Value> = landed
+        .and_then(|j| serde_json::from_str(j).ok())
+        .unwrap_or_default();
+    if landed.is_empty() {
+        return Ok(branch.to_string());
+    }
+    let git = |args: &[&str]| {
+        let mut c = Command::new("git");
+        c.arg("-C")
+            .arg(repo)
+            .args(["-c", run_repo::HOOKS_OFF])
+            .args(args)
+            .stdin(std::process::Stdio::null());
+        run_repo::out(c, &format!("git {}", args.join(" ")))
+    };
+    let start = git(&[
+        "rev-parse",
+        "--verify",
+        &format!("refs/remotes/origin/{branch}^{{commit}}"),
+    ])?;
+    for l in &landed {
+        let merge = l["merge_commit"].as_str().unwrap_or_default();
+        if merge.is_empty() || git(&["merge-base", "--is-ancestor", merge, &start]).is_err() {
+            return Err(format!(
+                "the clone's origin/{branch} ({start}) does not hold the merge {merge} of #{}",
+                l["issue"]
+            ));
+        }
+    }
+    Ok(start)
 }
 
 /// Say in the log which of the project's own hooks the run's scanner scripts run (Issue 236): the
@@ -643,6 +684,7 @@ mod tests {
             stage: "planned".into(),
             worktree: other.to_string_lossy().into(),
             spawn: "s".into(),
+            landed: None,
         };
         let why = Prepare::new(places, BaseDenies::default())
             .add_worktree(&l, &other)
@@ -728,6 +770,7 @@ mod tests {
             stage: "worktree_ready".into(),
             worktree: dir.path().join("docs/t").to_string_lossy().into(),
             spawn: "s".into(),
+            landed: None,
         };
         Prepare::new(places, denies).prepare(&w, &l).unwrap();
         let text = std::fs::read_to_string(dir.path().join("settings/t.json")).unwrap();
