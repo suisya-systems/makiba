@@ -1056,7 +1056,10 @@ impl PrWatch {
         let follows = followed(w.conn(), None)?;
         let mut fresh = Vec::new();
         while let Ok(r) = self.merge_rx.try_recv() {
-            if follows.contains(&r.f) {
+            // A read held by makibad's merge act (Issue 434: the attempt open, or the read begun
+            // before its outcome was recorded) is used for nothing: not cached for the CI notice,
+            // not recorded (`pr_read`), not told as a merge state, not read for the queue.
+            if follows.contains(&r.f) && !act_holds(w.conn(), &r.f.repo, r.f.pr, r.started_ms)? {
                 self.merges.insert(r.f.task.clone(), r.clone());
                 fresh.push(r);
             }
@@ -2129,11 +2132,12 @@ enum QueueStep {
 
 /// An open read of a pull request whose queue act awaits its landing (Issue 434), in one
 /// transaction: a read `act_holds` drops does nothing; a read at another head than the act's ends
-/// it (`head moved`); a read out of the queue at its head with a removal on its timeline after the
-/// attempt ends it (`left the queue`) only when the note of that attempt in `notes`, the start of
-/// such a read before it, is at least `interval` earlier (claim 6 of merge-act.md section 10 is [unverified]: a pull request
-/// leaving the queue to land may be read so for a moment). A read out of the queue with no removal
-/// never ends it: the act stays followed, and its landing is read.
+/// it (`head moved`); a read out of the queue at its head whose newest queue item on the timeline
+/// after the attempt is a removal ends it (`left the queue`) only when the note of that attempt in
+/// `notes`, the start of such a read before it, is at least `interval` earlier (claim 6 of
+/// merge-act.md section 10 is [unverified]: a pull request leaving the queue to land may be read
+/// so for a moment). A read out of the queue with no such removal never ends it: the act stays
+/// followed, and its landing is read.
 fn apply_queue(
     w: &StateWriter,
     r: &MergeRead,
@@ -2155,8 +2159,14 @@ fn apply_queue(
         match r.queued {
             Some(true) => Ok(QueueStep::Clear(a.attempt)),
             Some(false) => {
+                // Evidence of leaving the queue: the newest queue item in the window (the
+                // timeline lists them oldest first) is a removal; one followed by another
+                // addition is not, since the pull request was queued again.
                 let removed = match (boundary_of(w.conn(), a.attempt)?, &r.timeline) {
-                    (Some(b), Some(items)) => items.iter().any(|(added, t)| !added && *t >= b),
+                    (Some(b), Some(items)) => items
+                        .iter()
+                        .rfind(|(_, t)| *t >= b)
+                        .is_some_and(|(added, _)| !added),
                     _ => false,
                 };
                 if !removed {
@@ -4246,6 +4256,148 @@ esac"#,
             json!({"repo": "o/r", "pr": 5, "head_oid": head, "merged_via": "gate"}),
         );
         assert!(tasks(&w).is_empty(), "both landed");
+    }
+
+    /// A removal from the queue followed by another addition is no evidence that the pull request
+    /// left it: two reads out of the queue then end nothing (it may be landing); a removal that is
+    /// the newest queue item does end the act (Issue 434).
+    #[test]
+    fn a_removal_followed_by_another_addition_does_not_end_a_queue_act() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head": head}),
+        );
+        let attempt: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        event(
+            &w,
+            "merge_enqueued",
+            "makibad",
+            Some("t"),
+            json!({"attempt": attempt}),
+        );
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let (interval, t0, at) = (Duration::from_millis(50), Instant::now(), now_ms());
+        let read = |started: Instant, timeline: Vec<(bool, i64)>| MergeRead {
+            started,
+            started_ms: now_ms() + 1000,
+            queued: Some(false),
+            timeline: Some(timeline),
+            ..merge_read(&f, &head, "CLEAN")
+        };
+        let again = vec![(true, at), (false, at + 1000), (true, at + 2000)];
+        let mut notes = HashMap::new();
+        assert_eq!(
+            apply_queue(&w, &read(t0, again.clone()), &notes, interval).unwrap(),
+            QueueStep::Clear(attempt)
+        );
+        notes.insert(attempt, ("o/r".to_string(), 5, t0));
+        assert_eq!(
+            apply_queue(&w, &read(t0 + interval * 2, again), &notes, interval).unwrap(),
+            QueueStep::Clear(attempt),
+            "queued again after its removal: not evidence"
+        );
+        let dequeued = || {
+            count(
+                &w,
+                "SELECT count(*) FROM events WHERE kind = 'merge_dequeued'",
+                [],
+            )
+            .unwrap()
+        };
+        assert_eq!(dequeued(), 0);
+        let removed = vec![(true, at), (false, at + 1000)];
+        assert_eq!(
+            apply_queue(&w, &read(t0 + interval * 3, removed), &notes, interval).unwrap(),
+            QueueStep::Ended(attempt),
+            "removed last: evidence"
+        );
+        assert_eq!(dequeued(), 1);
+    }
+
+    /// An open read begun while makibad's attempt is open is used for nothing: no `pr_read`, no
+    /// merge-state notice; one begun after the outcome is recorded is (Issue 434).
+    #[test]
+    fn an_open_read_held_by_the_act_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let head = "1".repeat(40);
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        event(
+            &w,
+            "ci_completed",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"}),
+        );
+        event(
+            &w,
+            "merge_attempted",
+            "makibad",
+            Some("t"),
+            json!({"repo": "o/r", "pr": 5, "head": head}),
+        );
+        let attempt: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let mut watch = PrWatch::from_env();
+        let f = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let reads = |w: &StateWriter| {
+            count(w, "SELECT count(*) FROM events WHERE kind = 'pr_read'", []).unwrap()
+        };
+        let told = |w: &StateWriter| {
+            count(
+                w,
+                "SELECT count(*) FROM messages WHERE body LIKE 'The merge state of o/r#5%'",
+                [],
+            )
+            .unwrap()
+        };
+        let mut early = merge_read(&f, &head, "CLEAN");
+        early.started_ms = 0;
+        watch.merge_tx.send(early.clone()).unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!((reads(&w), told(&w)), (0, 0), "attempt open: held");
+        event(
+            &w,
+            "merge_done",
+            "makibad",
+            Some("t"),
+            json!({"attempt": attempt}),
+        );
+        watch.merge_tx.send(early).unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!((reads(&w), told(&w)), (0, 0), "begun before the outcome");
+        let mut late = merge_read(&f, &head, "CLEAN");
+        late.started_ms = now_ms() + 1000;
+        watch.merge_tx.send(late).unwrap();
+        watch.pass(&w).unwrap();
+        assert_eq!(reads(&w), 1, "begun after the outcome: recorded");
+        assert_eq!(told(&w), 1, "and its merge state told");
     }
 
     /// The note of a read out of the queue belongs to its attempt: after that queue act ended and
