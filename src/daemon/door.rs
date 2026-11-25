@@ -176,11 +176,12 @@ fn status_of(r: &Response) -> Option<&'static str> {
     }
 }
 
-/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`, `gate`).
+/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `base`, `config`,
+/// `gate`, `events`).
 pub fn has_tool(v: Verb) -> bool {
     !matches!(
         v,
-        Verb::Up | Verb::Down | Verb::Config | Verb::Gate | Verb::Events
+        Verb::Up | Verb::Down | Verb::Base | Verb::Config | Verb::Gate | Verb::Events
     )
 }
 
