@@ -1037,7 +1037,8 @@ impl Member {
 struct Membership {
     repo: String,
     mark: i64,
-    reads: Vec<(i64, Value)>,
+    /// Each pull request with the follow (task and generation) it was read for.
+    reads: Vec<(Followed, Value)>,
 }
 
 impl PrWatch {
@@ -1323,16 +1324,16 @@ impl PrWatch {
     /// open stay (`Followed::act` false) is in the merge queue. A pull request followed with an
     /// act or a stay is read by its own state poller, which alone decides its leaving.
     fn memberships(&mut self, w: &StateWriter) -> Result<()> {
-        let mut groups: Vec<(String, String, Vec<i64>)> = Vec::new();
+        let mut groups: Vec<(String, String, Vec<Followed>)> = Vec::new();
         for f in followed(w.conn(), None)? {
             if f.closed || f.act {
                 continue;
             }
             let key = f.repo.to_lowercase();
             match groups.iter_mut().find(|g| g.0 == key) {
-                Some(g) if !g.2.contains(&f.pr) => g.2.push(f.pr),
+                Some(g) if !g.2.iter().any(|o| o.pr == f.pr) => g.2.push(f),
                 Some(_) => {}
-                None => groups.push((key, f.repo.clone(), vec![f.pr])),
+                None => groups.push((key, f.repo.clone(), vec![f])),
             }
         }
         for m in self.members.values_mut() {
@@ -1349,7 +1350,7 @@ impl PrWatch {
         let mark: i64 = w
             .conn()
             .query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?;
-        for (key, repo, prs) in groups {
+        for (key, repo, follows) in groups {
             if self.members.contains_key(&key) {
                 continue;
             }
@@ -1358,10 +1359,17 @@ impl PrWatch {
                 let (gh, tx, cancel) =
                     (self.gh.clone(), self.member_tx.clone(), Arc::clone(&cancel));
                 std::thread::spawn(move || {
+                    let prs: Vec<i64> = follows.iter().map(|f| f.pr).collect();
                     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         read_membership(&gh, &repo, &prs, &cancel)
                     }));
-                    if let Ok(Some(reads)) = read {
+                    if let Ok(Some(answers)) = read {
+                        let reads = answers
+                            .into_iter()
+                            .filter_map(|(pr, v)| {
+                                Some((follows.iter().find(|f| f.pr == pr)?.clone(), v))
+                            })
+                            .collect();
                         let _ = tx.send(Membership { repo, mark, reads });
                     }
                 })
@@ -1918,21 +1926,26 @@ fn read_membership(
 }
 
 /// Write what a membership read found (Issue 476), in one transaction: for each pull request read
-/// open and in the merge queue that is still followed open with no act awaiting its landing and no
-/// open stay, and of which no queue record was written since the read was started (`mark`: such a
-/// record may say the pull request's stay already ended or is an act's), one
+/// open and in the merge queue that is still followed open, by the same task at the same
+/// generation as it was read for (a new head recorded, a close or a reopen, or another run's
+/// follow since makes the read stale), with no act awaiting its landing and no open stay, and of
+/// which no queue record was written since the read was started (`mark`: such a record may say
+/// the pull request's stay already ended or is an act's), one
 /// `merge_queue_entered` with `attempt` null. Nothing else is written, and no notice.
 fn apply_entered(w: &StateWriter, m: &Membership) -> Result<()> {
     w.transaction(|w| {
         let follows = followed(w.conn(), None)?;
-        for (pr, v) in &m.reads {
+        for (read_for, v) in &m.reads {
             if v["state"].as_str() != Some("OPEN") || v["isInMergeQueue"].as_bool() != Some(true) {
                 continue;
             }
-            let Some(f) = follows
-                .iter()
-                .find(|f| f.pr == *pr && f.repo.eq_ignore_ascii_case(&m.repo))
-            else {
+            let Some(f) = follows.iter().find(|f| {
+                f.task == read_for.task
+                    && f.pr == read_for.pr
+                    && f.repo.eq_ignore_ascii_case(&read_for.repo)
+                    && f.gen_reg == read_for.gen_reg
+                    && f.gen_close == read_for.gen_close
+            }) else {
                 continue;
             };
             if f.closed || f.act || super::door::act_awaiting(w.conn(), &f.repo, f.pr)?.is_some() {
@@ -4983,5 +4996,60 @@ esac"#,
             !act_holds(c, "o/r", 6, at - 1).unwrap(),
             "another pull request"
         );
+    }
+
+    /// A membership read is written only for the follow it was read for (Issue 476): one begun
+    /// before a new head of the pull request was recorded is stale and writes nothing; one of the
+    /// current follow writes one `merge_queue_entered`.
+    #[test]
+    fn a_membership_read_of_an_older_follow_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        register(&w, "pr_opened", "t", "o/r", 5, &"1".repeat(40)).unwrap();
+        let old = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let mark: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let queued = |head: &str| {
+            json!({"number": 5, "state": "OPEN", "headRefOid": head, "isInMergeQueue": true,
+                   "mergeQueueEntry": {"id": "MQE_1", "state": "QUEUED", "position": 1}})
+        };
+        register(&w, "fix_pushed", "t", "o/r", 5, &"2".repeat(40)).unwrap();
+        let entries = |w: &StateWriter| -> i64 {
+            count(
+                w,
+                "SELECT count(*) FROM events WHERE kind = 'merge_queue_entered'",
+                [],
+            )
+            .unwrap()
+        };
+        let stale = Membership {
+            repo: "o/r".into(),
+            mark,
+            reads: vec![(old, queued(&"1".repeat(40)))],
+        };
+        apply_entered(&w, &stale).unwrap();
+        assert_eq!(entries(&w), 0, "a read of the older follow");
+
+        let now = followed(w.conn(), Some("t")).unwrap().remove(0);
+        let mark: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let fresh = Membership {
+            repo: "o/r".into(),
+            mark,
+            reads: vec![(now, queued(&"2".repeat(40)))],
+        };
+        apply_entered(&w, &fresh).unwrap();
+        assert_eq!(entries(&w), 1, "a read of the current follow");
     }
 }
