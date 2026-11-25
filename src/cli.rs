@@ -62,7 +62,8 @@ pub fn person_key_path() -> PathBuf {
     })
 }
 
-/// How long `makiba gate` waits for the door's acceptance gate, which reads GitHub and git.
+/// How long `makiba gate` and `makiba merge` wait for the door's acceptance gate, which reads
+/// GitHub and git.
 const GATE_WAIT: Duration = Duration::from_secs(840);
 
 /// `$MAKIBA_GATE_KEY`, default `gate.key` beside the person key (by default
@@ -730,6 +731,16 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
     })
 }
 
+/// How long a request waits for the door's answer. The gate reads GitHub and git, trying a failed
+/// read again (Issue 512): it may take minutes, and `merge` (the person's `merge approve`) runs it.
+fn wait_for(verb: &str) -> Duration {
+    if verb == "gate" || verb == "merge" {
+        GATE_WAIT
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
 /// Send one request to the door and read its answer line.
 fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let unavailable = |e: String| (ErrorKind::Unavailable, e);
@@ -748,13 +759,7 @@ fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let mut s = UnixStream::connect(&path)
         .map_err(|e| unavailable(format!("makibad is not running ({}: {e})", path.display())))?;
     let io = |e: std::io::Error| unavailable(format!("the door: {e}"));
-    // The gate reads GitHub and git: it may take minutes.
-    let wait = if verb == "gate" {
-        GATE_WAIT
-    } else {
-        Duration::from_secs(30)
-    };
-    s.set_read_timeout(Some(wait)).map_err(io)?;
+    s.set_read_timeout(Some(wait_for(verb))).map_err(io)?;
     writeln!(s, "{req}").map_err(io)?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(io)?;
@@ -1000,6 +1005,15 @@ mod tests {
         let m = Makiba::try_parse_from(std::iter::once("makiba").chain(a.iter().copied()))
             .map_err(|e| e.to_string())?;
         request(m.verb)
+    }
+
+    /// Issue 512: `merge` runs the gate, which tries a failed read of GitHub again, so the
+    /// person's `merge approve` waits as long as `gate` does; other verbs keep the short wait.
+    #[test]
+    fn merge_waits_as_long_as_the_gate() {
+        assert_eq!(wait_for("merge"), GATE_WAIT);
+        assert_eq!(wait_for("gate"), GATE_WAIT);
+        assert_eq!(wait_for("status"), Duration::from_secs(30));
     }
 
     /// `dispatch` reads the brief file itself and sends its content as `brief`.
