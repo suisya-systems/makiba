@@ -269,6 +269,12 @@ fn behind_head_passed_notice_names_it_behind() {
     for c in &calls {
         if c.starts_with("pr view") {
             assert!(c.contains(FIELDS), "the state read lacks the fields: {c}");
+        } else if c.starts_with("api graphql") {
+            // The membership read of the merge queue (Issue 476).
+            assert!(
+                c.contains("isInMergeQueue"),
+                "a GraphQL call other than it: {c}"
+            );
         } else {
             assert!(
                 c.starts_with("api --paginate repos/")
