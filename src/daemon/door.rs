@@ -5886,7 +5886,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone (approve: id, read and approval_mode, the read and the merge approval mode shown; one that is no longer the newest read or makibad's mode is stale). makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -5913,6 +5913,10 @@ fn tool(v: Verb) -> Value {
                 ("issue".into(), json!({"type": "integer"})),
                 ("reason".into(), text.clone()),
                 ("read".into(), json!({"type": "integer"})),
+                (
+                    "approval_mode".into(),
+                    json!({"type": "string", "enum": ["human", "acceptance"]}),
+                ),
             ]),
             &["action"],
         ),
