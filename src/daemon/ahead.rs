@@ -100,6 +100,23 @@ pub fn open_wait(c: &Connection, task: &str) -> rusqlite::Result<Option<Wait>> {
     Ok(p.as_deref().map(wait_of))
 }
 
+/// The Issues the open wait of `task` still waits for (`belt[].waits_for`, belt.md 7): those of
+/// its dispatch, less each one landed or let go (`ahead_released`) as `settle` judges them. Empty
+/// for a run not dispatched for its design only, or whose wait was settled.
+pub fn still_waits_for(c: &Connection, task: &str) -> rusqlite::Result<Vec<i64>> {
+    let Some(wait) = open_wait(c, task)? else {
+        return Ok(Vec::new());
+    };
+    let mut left = Vec::new();
+    for (issue, waited) in wait.issues.iter().zip(&wait.tasks) {
+        let d = dep(c, task, *issue, waited)?;
+        if !d.released && !d.landed() {
+            left.push(*issue);
+        }
+    }
+    Ok(left)
+}
+
 fn event(w: &StateWriter, kind: &str, task: &str, payload: Value) -> Result<i64> {
     w.append_event(&NewEvent {
         kind,
