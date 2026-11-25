@@ -1007,6 +1007,30 @@ fn program_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<Pa
     (!wide).then(|| root.to_path_buf())
 }
 
+/// The empty file at `rel` in a reader's new home on which its login is bound: its folder is
+/// made new or is a real folder (never a link), and the file is made new (`O_EXCL`), so nothing
+/// already there (a link, a pipe) is followed or opened.
+fn place_login(round_home: &Path, rel: &str) -> Result<PathBuf, String> {
+    let dst = round_home.join(rel);
+    if let Some(d) = dst.parent()
+        && d != round_home
+    {
+        // A folder this call made for another login file is a real folder; anything else is not
+        // used.
+        match d.symlink_metadata() {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(format!("{}: not a folder", d.display())),
+            Err(_) => std::fs::create_dir(d).map_err(|e| format!("{}: {e}", d.display()))?,
+        }
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dst)
+        .map_err(|e| format!("{}: {e}", dst.display()))?;
+    Ok(dst)
+}
+
 /// The reader `program` started inside the boundary (Issue 262): a command of the boundary
 /// program whose arguments end with `--` and the program; the caller adds the reader's own.
 /// Nothing is visible but the system folders, the program's own folders, the round's tree
@@ -1022,10 +1046,15 @@ fn bounded_reader(
     let home = person_home();
     let deny = denied(places, home.as_deref());
     let scratch = snap.dir.join("scratch");
-    let round_home = snap.dir.join("home");
+    // Each reader gets a home of its own, made new here: what a first reader left in its home
+    // (a link, a pipe) is never opened by makibad for the fallback.
+    let round_home = snap.dir.join(match reader {
+        Reader::Other => "home",
+        Reader::Same => "home-fallback",
+    });
     let mkdir = |d: &Path| std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()));
     mkdir(&scratch)?;
-    mkdir(&round_home)?;
+    std::fs::create_dir(&round_home).map_err(|e| format!("{}: {e}", round_home.display()))?;
     let s = |p: &Path| p.to_string_lossy().into_owned();
     let mut a: Vec<String> = [
         "--unshare-pid",
@@ -1133,16 +1162,7 @@ fn bounded_reader(
         if !src.is_file() {
             continue;
         }
-        let dst = round_home.join(rel);
-        if let Some(d) = dst.parent() {
-            mkdir(d)?;
-        }
-        std::fs::OpenOptions::new()
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&dst)
-            .map_err(|e| format!("{}: {e}", dst.display()))?;
+        let dst = place_login(&round_home, rel)?;
         let opt = if rw { "--bind" } else { "--ro-bind" };
         a.extend([opt.into(), s(&src), s(&dst)]);
     }
@@ -1482,6 +1502,102 @@ mod tests {
         assert_eq!(
             resolve(Path::new("/bin/sh")),
             Some(PathBuf::from("/bin/sh"))
+        );
+    }
+
+    /// The fallback's home is not the first reader's (the review of Issue 262): a link and a pipe
+    /// the first reader leaves in its home are not opened when the fallback is prepared, and the
+    /// fallback's home is made new.
+    #[test]
+    fn the_fallback_gets_a_home_of_its_own() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let state = t.join("state");
+        let dir = state.join("tmp/review-x");
+        std::fs::create_dir_all(dir.join("tree")).unwrap();
+        let places = Places {
+            workers: t.join("workers"),
+            docs: t.join("docs"),
+            repos: t.join("repos"),
+            settings: state.join("settings"),
+            state_db: state.join("state.db"),
+        };
+        let snap = std::sync::Arc::new(Snapshot {
+            tree: dir.join("tree"),
+            dir: dir.clone(),
+            base: String::new(),
+            head: String::new(),
+            changed: vec![],
+            top: state.join("tmp"),
+        });
+        let home_of = |c: &Command| {
+            c.get_envs()
+                .find(|(k, _)| *k == "HOME")
+                .and_then(|(_, v)| v.map(PathBuf::from))
+                .unwrap()
+        };
+        let first = bounded_reader(
+            Path::new("bwrap"),
+            Path::new("/bin/sh"),
+            Reader::Other,
+            &places,
+            &snap,
+        )
+        .unwrap();
+        let first_home = home_of(&first);
+        // What a first reader could leave: its .claude a link out of the round, a pipe in it.
+        let outside = t.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let _ = std::fs::remove_dir_all(first_home.join(".claude"));
+        std::os::unix::fs::symlink(&outside, first_home.join(".claude")).unwrap();
+        let fifo = std::ffi::CString::new(
+            outside
+                .join(".credentials.json")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        // SAFETY: a path this test owns, made a pipe.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // Placed again in that home, the login refuses at once and opens nothing.
+        let (ptx, prx) = std::sync::mpsc::channel();
+        let again = first_home.clone();
+        std::thread::spawn(move || {
+            let _ = ptx.send(place_login(&again, ".claude/.credentials.json"));
+        });
+        assert!(
+            prx.recv_timeout(Duration::from_secs(10))
+                .expect("placing a login blocked on a pipe")
+                .is_err()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (places2, snap2) = (places.clone(), snap.clone());
+        std::thread::spawn(move || {
+            let r = bounded_reader(
+                Path::new("bwrap"),
+                Path::new("/bin/sh"),
+                Reader::Same,
+                &places2,
+                &snap2,
+            )
+            .map(|c| {
+                c.get_envs()
+                    .find(|(k, _)| *k == "HOME")
+                    .and_then(|(_, v)| v.map(PathBuf::from))
+                    .unwrap()
+            });
+            let _ = tx.send(r);
+        });
+        let second_home = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("preparing the fallback blocked")
+            .unwrap();
+        assert_ne!(second_home, first_home);
+        assert!(second_home.starts_with(&dir), "{}", second_home.display());
+        assert!(
+            !second_home
+                .join(".claude")
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
         );
     }
 
