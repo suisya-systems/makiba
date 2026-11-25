@@ -882,12 +882,41 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
+    // One question per head (Issue 512): a refusal on the content still escalated stands over a
+    // read of GitHub that failed later, and a refusal on the content replaces the question a
+    // failed read asked, marked as makibad's own withdrawal.
+    let read_key = format!("gate-read:{subject}@{}", s.head);
+    if s.unavailable {
+        let standing: Option<i64> = w
+            .conn()
+            .query_row(
+                "SELECT id FROM pending WHERE status = 'escalated'
+                   AND json_extract(context_json, '$.range_id') = ?1
+                   AND json_extract(context_json, '$.key') = ?2
+                 ORDER BY id DESC LIMIT 1",
+                params![range, format!("gate:{subject}@{}", s.head)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if standing.is_some() {
+            return Ok(standing);
+        }
+    } else if s.refused {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.key') = ?2",
+            params![range, read_key],
+        )?;
+    }
     let made = if s.unavailable {
         Stop {
             range,
             task: Some(s.task),
             line: "gate",
-            key: format!("gate-read:{subject}@{}", s.head),
+            key: read_key,
             question: format!(
                 "The merge gate could not read GitHub for {}#{} at {short}: {} Should the secretary ask the merge again later?",
                 s.repo,

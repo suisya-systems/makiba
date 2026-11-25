@@ -110,14 +110,24 @@ enum Try<T> {
     Again(String),
 }
 
-/// A read of GitHub tried up to `READ_TRIES` times, `$MAKIBA_GATE_READ_WAIT_MS` apart, while
-/// `READ_WINDOW` has not passed since the first try began; a read that still fails is
+/// A read of GitHub tried up to `READ_TRIES` times, `$MAKIBA_GATE_READ_WAIT_MS` apart, each try
+/// starting before `READ_WINDOW` has passed since the first began; a read that still fails is
 /// `Fault::Unavailable` with its last message and the number of tries.
-fn with_tries<T>(mut read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
+fn with_tries<T>(read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
     let wait = std::env::var(READ_WAIT_ENV)
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
         .unwrap_or(READ_WAIT_MS);
+    with_tries_in(std::time::Duration::from_millis(wait), READ_WINDOW, read)
+}
+
+/// `with_tries` with its wait and window: no try is started once `window` has passed, so a wait
+/// that would end after it ends the read instead.
+fn with_tries_in<T>(
+    wait: std::time::Duration,
+    window: std::time::Duration,
+    mut read: impl FnMut() -> Try<T>,
+) -> Result<T, Fault> {
     let started = std::time::Instant::now();
     let mut tries = 0;
     loop {
@@ -126,7 +136,7 @@ fn with_tries<T>(mut read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
             Try::Done(r) => return r,
             Try::Again(why) => why,
         };
-        if tries >= READ_TRIES || started.elapsed() >= READ_WINDOW {
+        if tries >= READ_TRIES || started.elapsed() + wait >= window {
             let n = if tries == 1 {
                 "1 try".to_string()
             } else {
@@ -134,7 +144,7 @@ fn with_tries<T>(mut read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
             };
             return Err(Fault::Unavailable(format!("{why} (after {n})")));
         }
-        std::thread::sleep(std::time::Duration::from_millis(wait));
+        std::thread::sleep(wait);
     }
 }
 
@@ -1304,4 +1314,52 @@ pub fn clone_of(
             super::triage::repo_of(slug, url.as_deref(), repos).as_deref() == Some(repo)
         })
         .map(|(slug, _)| repos.join(slug))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Fault, Try, with_tries_in};
+    use std::time::{Duration, Instant};
+
+    /// Issue 512: a failed read is tried again up to three times; one that answers on a later try
+    /// is its answer.
+    #[test]
+    fn a_failed_read_is_tried_again_at_most_three_times() {
+        let mut n = 0;
+        let r: Result<u8, Fault> = with_tries_in(Duration::ZERO, Duration::from_secs(60), || {
+            n += 1;
+            Try::Again(format!("fail {n}"))
+        });
+        assert_eq!(n, 3);
+        assert_eq!(r, Err(Fault::Unavailable("fail 3 (after 3 tries)".into())));
+        let mut m = 0;
+        let r = with_tries_in(Duration::ZERO, Duration::from_secs(60), || {
+            m += 1;
+            if m < 2 {
+                Try::Again("once".into())
+            } else {
+                Try::Done(Ok(m))
+            }
+        });
+        assert_eq!(r, Ok(2));
+    }
+
+    /// Issue 512: no try starts once the window has passed: a wait that would end after it ends
+    /// the read instead.
+    #[test]
+    fn no_try_starts_after_the_window() {
+        let started = Instant::now();
+        let mut starts = Vec::new();
+        let r: Result<u8, Fault> =
+            with_tries_in(Duration::from_millis(30), Duration::from_millis(50), || {
+                starts.push(started.elapsed());
+                Try::Again("down".into())
+            });
+        assert_eq!(starts.len(), 2, "{starts:?}");
+        assert!(
+            starts.iter().all(|s| *s < Duration::from_millis(50)),
+            "{starts:?}"
+        );
+        assert_eq!(r, Err(Fault::Unavailable("down (after 2 tries)".into())));
+    }
 }

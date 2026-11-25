@@ -3463,8 +3463,9 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         .collect();
     match gate::merge_order(&program, &clone, repo, &base, &base_branch, head, &others) {
         // The order is not known while another pull request could not be read from GitHub and
-        // none is known to hold this one (Issue 512); a known hold stays the merge order.
-        Ok(m) if m.waits_for.is_empty() && m.unavailable.is_some() => {
+        // none is known to hold this one (Issue 512); a known hold stays the merge order, and a
+        // refusal already made stays that refusal, with the pull request not read named.
+        Ok(m) if v.result != "rejected" && m.waits_for.is_empty() && m.unavailable.is_some() => {
             return Found::Unavailable(format!(
                 "the gate could not read an open pull request it must order this one after: {}",
                 m.unavailable.unwrap_or_default()
