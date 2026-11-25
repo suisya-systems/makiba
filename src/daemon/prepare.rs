@@ -346,6 +346,8 @@ impl Prepare {
         // `CLAUDE_CODE_TMPDIR` name it in the settings and in the launch's environment.
         let tmp = make_tmp_dir(&self.places.settings, l.id)?;
         write_dirs.push(tmp.clone());
+        // Claude Code's own shared folder, which its sandbox adds to the write surface itself.
+        deny_write_dirs.extend(agents::CLAUDE_SHARED_TMP.map(PathBuf::from));
         // No credential to push with or to write to GitHub (Issue 140, line L-K2).
         let (cred_dirs, cred_files) = if role == Role::Secretary {
             (vec![], vec![])
@@ -565,13 +567,14 @@ fn start_of(
 /// executable ones named by the run's `git_hook::PROJECT_KEY`, a relative folder read in the
 /// workplace as git would.
 fn say_project_hooks(task: &str, gitdir: &Path, workplace: &Path) {
-    use crate::hooks::git_hook::{FORWARDED, NAMES, PROJECT_KEY};
+    use crate::hooks::git_hook::{FLAG_HOOK, FORWARDED, NAMES, PROJECT_KEY};
     use std::os::unix::fs::PermissionsExt;
     let Ok(dir) = run_repo::read(gitdir, workplace, &["config", "--get", PROJECT_KEY]) else {
         return;
     };
     let names: Vec<&str> = NAMES
         .iter()
+        .chain([FLAG_HOOK].iter())
         .chain(FORWARDED.iter())
         .copied()
         .filter(|n| {

@@ -24,8 +24,9 @@ use crate::db::writer::{NewEvent, StateWriter};
 use rusqlite::{Connection, OptionalExtension};
 use serde_json::{Value, json};
 
-/// The SQL of `LANDERS`, as a literal so that `AWAITED` can be one constant.
-macro_rules! landers {
+/// The SQL of the runs that may land what a design-only run `o` waits for, whatever the status of
+/// `o`: the part `LANDERS` and `ANY_LANDERS` share, as a literal.
+macro_rules! landers_of_any {
     () => {
         "SELECT o.task_id AS waiting, CAST(i.value AS INTEGER) AS issue, d.task_id AS task,
                 d.id AS run
@@ -41,9 +42,18 @@ macro_rules! landers {
                        AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(d.issue_refs)
                                                           THEN d.issue_refs ELSE '[]' END) k
                                    WHERE k.value = lp.slug || '#' || i.value)))
-         WHERE o.status IN ('queued', 'in_use', 'suspended', 'parked')
-           AND NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = o.id
+         WHERE NOT EXISTS (SELECT 1 FROM events s WHERE s.run_id = o.id
                            AND s.kind = 'ahead_settled')"
+    };
+}
+
+/// The SQL of `LANDERS`, as a literal so that `AWAITED` can be one constant.
+macro_rules! landers {
+    () => {
+        concat!(
+            landers_of_any!(),
+            " AND o.status IN ('queued', 'in_use', 'suspended', 'parked')"
+        )
     };
 }
 
@@ -53,6 +63,11 @@ macro_rules! landers {
 /// (a one-off dispatched with `issue`, a redo, a task of another range). The landing (`settle`),
 /// the clone check (`belt::clone_checks`) and the PR watch (`AWAITED`) read this one set.
 pub(super) const LANDERS: &str = landers!();
+
+/// `LANDERS` of every open wait, whatever the waiting run's status (a failed one included): what
+/// `dep` reads, so that a wait's landings are judged alike by `settle` (which takes only the runs
+/// `LANDERS` takes) and by the read surface (`still_waits_for`, which shows every open run).
+const ANY_LANDERS: &str = landers_of_any!();
 
 /// The tasks open design-only runs wait for (Issue 284), or that may land what they wait for
 /// (Issue 488): their landings and closures are read whatever their status.
@@ -98,6 +113,23 @@ pub fn open_wait(c: &Connection, task: &str) -> rusqlite::Result<Option<Wait>> {
         )
         .optional()?;
     Ok(p.as_deref().map(wait_of))
+}
+
+/// The Issues the open wait of `task` still waits for (`belt[].waits_for`, belt.md 7): those of
+/// its dispatch, less each one landed or let go (`ahead_released`) as `settle` judges them. Empty
+/// for a run not dispatched for its design only, or whose wait was settled.
+pub fn still_waits_for(c: &Connection, task: &str) -> rusqlite::Result<Vec<i64>> {
+    let Some(wait) = open_wait(c, task)? else {
+        return Ok(Vec::new());
+    };
+    let mut left = Vec::new();
+    for (issue, waited) in wait.issues.iter().zip(&wait.tasks) {
+        let d = dep(c, task, *issue, waited)?;
+        if !d.released && !d.landed() {
+            left.push(*issue);
+        }
+    }
+    Ok(left)
 }
 
 fn event(w: &StateWriter, kind: &str, task: &str, payload: Value) -> Result<i64> {
@@ -231,11 +263,11 @@ fn dep(c: &Connection, waiting: &str, issue: i64, task: &str) -> rusqlite::Resul
             |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    // The Issue lands through the first run that may land it (`LANDERS`, oldest first) closed
+    // The Issue lands through the first run that may land it (`ANY_LANDERS`, oldest first) closed
     // `completed` with its merge in the clone: the task waited for, or another run naming it.
     let landers: Vec<(String, String)> = c
         .prepare(&format!(
-            "SELECT l.task, d.status FROM ({LANDERS}) l JOIN runs d ON d.id = l.run
+            "SELECT l.task, d.status FROM ({ANY_LANDERS}) l JOIN runs d ON d.id = l.run
              WHERE l.waiting = ?1 AND l.issue = ?2 ORDER BY d.id"
         ))?
         .query_map(rusqlite::params![waiting, issue], |r| {
@@ -1127,5 +1159,43 @@ mod tests {
         assert_eq!(place(&w), (json!("review"), json!("waits_landing #1")));
         set(&w, "r1-2", "abandoned");
         assert_eq!(place(&w).0, json!("skipped"));
+    }
+
+    /// `belt[].waits_for` (`still_waits_for`, Issue 248): a dependency leaves it only when it has
+    /// landed (closed, merged and the merge in the clone), whatever the waiting run's status, a
+    /// failed one included.
+    #[test]
+    fn still_waits_for_drops_a_landed_dependency_also_for_a_failed_waiting_run() {
+        let (_d, w) = org();
+        report_design(&w);
+        let left = |w: &StateWriter| still_waits_for(w.conn(), "r1-2").unwrap();
+        assert_eq!(left(&w), vec![1]);
+        set(&w, "r1-1", "completed");
+        ev(
+            &w,
+            "pr_merged",
+            "r1-1",
+            json!({"repo": "o/p", "pr": 11, "merge_commit": "m1", "task_id": "r1-1"}),
+        );
+        assert_eq!(left(&w), vec![1], "merged, not yet in the clone");
+        set(&w, "r1-2", "failed");
+        assert_eq!(left(&w), vec![1], "failed, still not in the clone");
+        ev(
+            &w,
+            "landed_in_clone",
+            "r1-1",
+            json!({"task_id": "r1-1", "merge_commit": "m1", "base": "main", "base_head": "h9"}),
+        );
+        assert_eq!(
+            left(&w),
+            Vec::<i64>::new(),
+            "landed, the waiting run failed"
+        );
+        set(&w, "r1-2", "in_use");
+        assert_eq!(
+            left(&w),
+            Vec::<i64>::new(),
+            "landed, the waiting run at work"
+        );
     }
 }

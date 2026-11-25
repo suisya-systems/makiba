@@ -38,6 +38,11 @@
 //! `person_orders` reads, from the ledger only, each such order of a pull request and whether its
 //! B has landed, and the door refuses A under either mode while one has not.
 //!
+//! The language check (Issue 339): a pull request whose own changes touch `LANGUAGE_CHECK` (the
+//! language check's allowlist, or its checker, which holds its scope) lands only with the
+//! person's yes to a question naming each file's mode and object id at head; `language_change`
+//! reads them, git only, and the door decides.
+//!
 //! Pin: the first verdict that saw a manifest records a digest of the declared files and of the
 //! other paths the test commit changed (its test helpers); a later
 //! verdict for the same PR whose digest differs, or that finds no manifest, is rejected.
@@ -790,6 +795,8 @@ pub struct Verdict {
     pub edited_tests: Vec<String>,
     /// The merge order (Issue 331); the door decides what it means under the mode.
     pub merge_order: MergeOrder,
+    /// The language check's files the PR's own changes touch (Issue 339); the door decides.
+    pub language_change: Vec<LanguageEntry>,
 }
 
 /// A file under a folder `tests`: what the gate reports when a pull request edits it without
@@ -832,6 +839,74 @@ pub fn edited_tests(
         .filter(|(p, e)| th.get(*p) != Some(*e) && th.get(*p) != tb.get(*p))
         .map(|(p, _)| p.clone())
         .collect())
+}
+
+// ---- the language check (Issue 339) -----------------------------------------------------------
+
+/// The files of the language check: its exceptions, and its checker, whose scope is not read
+/// (any change to it counts; a reading of the Python would be a hand parse of a safety rule).
+pub const LANGUAGE_CHECK: [&str; 2] = ["tools/language-allowlist.txt", "tools/check_language.py"];
+
+/// One file of `LANGUAGE_CHECK` the PR's own changes touch, as `git ls-tree` reads it at head:
+/// `None` for both when the PR deletes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageEntry {
+    pub path: String,
+    pub mode: Option<String>,
+    pub oid: Option<String>,
+}
+
+impl LanguageEntry {
+    /// A regular file (or a deletion): only such a change can be approved by the person's word.
+    pub fn approvable(&self) -> bool {
+        self.mode
+            .as_deref()
+            .is_none_or(|m| m == "100644" || m == "100755")
+    }
+
+    /// `<path> at <mode> <oid>`, or `<path> deleted`: the words of the person's question.
+    pub fn words(&self) -> String {
+        match (&self.mode, &self.oid) {
+            (Some(m), Some(o)) => format!("{} at {m} {o}", self.path),
+            _ => format!("{} deleted", self.path),
+        }
+    }
+}
+
+/// The files of `LANGUAGE_CHECK` the PR's own changes (from the merge base of `base` and `head`
+/// to `head`, as `check_paths` reads them) touch, the path itself or under it, in that order.
+/// A change only the base made is not the PR's.
+pub fn language_change(repo: &Path, base: &str, head: &str) -> Result<Vec<LanguageEntry>, Reject> {
+    let mb = git(repo, &["merge-base", base, head])?;
+    let changed = git(
+        repo,
+        &["diff", "--no-renames", "--name-only", "-z", mb.trim(), head],
+    )?;
+    let mut out = Vec::new();
+    for c in LANGUAGE_CHECK {
+        if !changed.split('\0').any(|p| !p.is_empty() && under(p, c)) {
+            continue;
+        }
+        let line = git(repo, &["ls-tree", "-z", head, "--", c])?;
+        let line = line.trim_end_matches('\0');
+        let (mode, oid) = match line.split_once('\t') {
+            None if line.is_empty() => (None, None),
+            None => return reject(format!("git ls-tree {c}: cannot read {line:?}")),
+            Some((meta, _)) => {
+                let words: Vec<&str> = meta.split(' ').collect();
+                let [mode, _, oid] = words[..] else {
+                    return reject(format!("git ls-tree {c}: cannot read {line:?}"));
+                };
+                (Some(mode.to_string()), Some(oid.to_string()))
+            }
+        };
+        out.push(LanguageEntry {
+            path: c.to_string(),
+            mode,
+            oid,
+        });
+    }
+    Ok(out)
 }
 
 // ---- the merge order (Issue 331) ---------------------------------------------------------------

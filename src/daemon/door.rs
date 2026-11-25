@@ -3470,6 +3470,18 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         }
         Err(_) => {}
     }
+    // The language check (Issue 339): a read that fails is never read as "no change".
+    match gate::language_change(&clone, &base, head) {
+        Ok(l) => v.language_change = l,
+        Err(e) if v.result != "rejected" => {
+            v.result = "rejected".into();
+            v.reason = format!(
+                "the gate could not read whether this pull request changes the language check: {}",
+                e.0
+            );
+        }
+        Err(_) => {}
+    }
     let docs = gate::docs_only(&clone, &base, head);
     let review = gate_review(rows, &clone, &base, head, docs);
     let docs_pass = v.result == "no_manifest" && docs;
@@ -3698,6 +3710,49 @@ impl Door {
                 reason = format!("{reason}; {line}");
             }
         }
+        // Issue 339: a change to the language check lands, under either mode, only with the
+        // person's own yes to the question naming each file at head, the newest answer of that
+        // question on the run deciding; a file that is not a regular one is never approved. An
+        // earlier refusal keeps its verdict and has the line appended.
+        let language: Vec<super::gate::LanguageEntry> = event
+            .as_ref()
+            .map(|v| v.language_change.clone())
+            .unwrap_or_default();
+        let mut language_q: Option<String> = None;
+        let mut language_ok: Option<i64> = None;
+        if !language.is_empty() {
+            let paths: Vec<&str> = language.iter().map(|e| e.path.as_str()).collect();
+            let line = if language.iter().all(|e| e.approvable()) {
+                let q = language_question(&repo, pr, &language);
+                language_ok = match language_approval(w, now.task.as_deref(), &q) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = w.rollback();
+                        return Err(internal(e));
+                    }
+                };
+                let line = format!(
+                    "the pull request changes the language check ({}) and the person has not approved it: the person answers yes to the question {q:?} with their own makiba answer <id> yes (a range task's stop asks it; else add it with mcp__makiba__pending for the task and escalate it), then ask merge again",
+                    paths.join(", ")
+                );
+                language_q = Some(q);
+                line
+            } else {
+                format!(
+                    "the pull request changes the language check ({}) and one of them at head is not a regular file, which no answer approves: the person lands it in the GitHub web UI",
+                    paths.join(", ")
+                )
+            };
+            if language_ok.is_none() {
+                if allow {
+                    allow = false;
+                    verdict = "language_check".into();
+                    reason = format!("{line} ({reason})");
+                } else {
+                    reason = format!("{reason}; {line}");
+                }
+            }
+        }
         // Issue 282: a range task's pull request lands without the person only when the range was
         // approved under acceptance and the mode read now is acceptance too. The checks above are
         // those of the mode read now; a pair that is not both only adds the question to the person.
@@ -3744,6 +3799,12 @@ impl Door {
         }
         if !edited.is_empty() {
             payload["edited_tests"] = json!(edited);
+        }
+        if !language.is_empty() {
+            payload["language_check"] = json!({
+                "paths": language.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+                "question": language_q, "approved": language_ok,
+            });
         }
         if order.holds() || order.person_holds() {
             payload["merge_order"] = json!({
@@ -3812,8 +3873,16 @@ impl Door {
                 reason: &reason,
                 edited_tests: &edited,
             };
-            let stopped = super::belt::gate_stop(w, &stop)
-                .and_then(|id| super::belt::fill(w, &self.agent).map(|_| id));
+            // A refusal for the language check asks the gate's own question (Issue 339), so the
+            // person's answer to the stop is the approval.
+            let asked = match language_q
+                .as_deref()
+                .filter(|_| verdict == "language_check")
+            {
+                Some(q) => super::belt::language_stop(w, &stop, q),
+                None => super::belt::gate_stop(w, &stop),
+            };
+            let stopped = asked.and_then(|id| super::belt::fill(w, &self.agent).map(|_| id));
             match stopped {
                 Ok(id) => pending_id = id,
                 Err(e) => {
@@ -3857,6 +3926,47 @@ impl Door {
             event: event_id,
         })
     }
+}
+
+/// The question the person answers for a change to the language check of `repo`#`pr` (Issue
+/// 339), word for word: each file of `language` with its mode and object id at head. The
+/// repository is written in lower case, as the gate matches repositories in any case, so that
+/// one approval holds however the repository was named.
+fn language_question(repo: &str, pr: i64, language: &[super::gate::LanguageEntry]) -> String {
+    let words: Vec<String> = language.iter().map(|e| e.words()).collect();
+    format!(
+        "Approve the change to the language check of {}#{pr}: {}",
+        repo.to_lowercase(),
+        words.join(", ")
+    )
+}
+
+/// The pending entry that approves `question` on the run of `task` (Issue 339): the newest
+/// answered entry of that question there decides, and it approves only when the person answered
+/// it yes with their own key (a relayed answer is the secretary's).
+fn language_approval(
+    w: &StateWriter,
+    task: Option<&str>,
+    question: &str,
+) -> rusqlite::Result<Option<i64>> {
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    let newest: Option<(i64, Option<String>, Option<String>)> = w
+        .conn()
+        .query_row(
+            "SELECT p.id, p.answer, p.answered_by FROM pending p JOIN runs r ON r.id = p.run_id
+             WHERE r.task_id = ?1 AND p.kind = 'question' AND p.status = 'answered'
+               AND p.question = ?2
+             ORDER BY p.answered_at DESC, p.id DESC LIMIT 1",
+            params![task, question],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(newest.and_then(|(id, answer, by)| {
+        (answer.as_deref() == Some("yes") && by.as_deref() == Some(crate::spec::AGENT_PERSON))
+            .then_some(id)
+    }))
 }
 
 /// What `Door::judge` decided and recorded (the `acceptance_gate` row `event`), in the open
@@ -5989,7 +6099,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone (approve: id, read and approval_mode, the read and the merge approval mode shown; one that is no longer the newest read or makibad's mode is stale). makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -6016,6 +6126,10 @@ fn tool(v: Verb) -> Value {
                 ("issue".into(), json!({"type": "integer"})),
                 ("reason".into(), text.clone()),
                 ("read".into(), json!({"type": "integer"})),
+                (
+                    "approval_mode".into(),
+                    json!({"type": "string", "enum": ["human", "acceptance"]}),
+                ),
             ]),
             &["action"],
         ),
