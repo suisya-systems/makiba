@@ -29,6 +29,7 @@ mod project;
 mod prompts;
 pub mod prwatch;
 mod push;
+pub mod ready;
 mod recover;
 mod resume;
 pub mod review;

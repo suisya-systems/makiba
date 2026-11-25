@@ -57,6 +57,7 @@ use crate::spec::AGENT_SECRETARY;
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Value, json};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, Sender, channel};
@@ -983,16 +984,38 @@ pub struct PrWatch {
     /// When the loop received the passed CI result of a head, by the same key: a read that began
     /// before it is not that head's state after its CI passed.
     ci_seen: HashMap<(String, i64, String), Instant>,
+    /// The repositories folder (`$MAKIBA_REPOS_DIR`), where the readiness readers run git (Issue
+    /// 475).
+    repos: PathBuf,
+    /// The readiness readers, by task (Issue 475).
+    readers: HashMap<String, Reader>,
+    ready_tx: Sender<ReadDone>,
+    ready_rx: Receiver<ReadDone>,
+    /// Readings not written yet: kept until their transaction commits.
+    ready_queued: Vec<ReadDone>,
+    /// The base tip a watching reader last found nothing in, by `told_key`.
+    covered: HashMap<(String, i64, String), String>,
+    /// When the first failed reading of a head came back, by `told_key`.
+    read_failing: HashMap<(String, i64, String), Instant>,
 }
 
 impl PrWatch {
-    /// `$MAKIBA_GH` (default `gh`), `$MAKIBA_PRWATCH_INTERVAL_MS` and `$MAKIBA_PRWATCH_BUDGET_MS`.
+    /// `$MAKIBA_GH` (default `gh`), `$MAKIBA_PRWATCH_INTERVAL_MS`, `$MAKIBA_PRWATCH_BUDGET_MS`
+    /// and the repositories folder as `Places` reads it.
     pub fn from_env() -> PrWatch {
         let (tx, rx) = channel();
         let (state_tx, state_rx) = channel();
         let (merge_tx, merge_rx) = channel();
         let (seen_tx, seen_rx) = channel();
+        let (ready_tx, ready_rx) = channel();
         PrWatch {
+            repos: super::prepare::repos_from_env(),
+            readers: HashMap::new(),
+            ready_tx,
+            ready_rx,
+            ready_queued: Vec::new(),
+            covered: HashMap::new(),
+            read_failing: HashMap::new(),
             gh: super::gh::program(),
             interval: millis_env("MAKIBA_PRWATCH_INTERVAL_MS", DEFAULT_INTERVAL),
             budget: millis_env("MAKIBA_PRWATCH_BUDGET_MS", DEFAULT_BUDGET),
@@ -1115,6 +1138,10 @@ impl PrWatch {
                     r.f.repo, r.f.pr
                 ),
             }
+        }
+        // Queue readiness (Issue 475), on the CI results and merge reads written above.
+        if let Err(e) = self.readiness(w) {
+            eprintln!("makibad: pr watch: cannot judge queue readiness: {e}");
         }
         end_merged(w)?;
         let mut stmt = w.conn().prepare(
@@ -1355,6 +1382,14 @@ impl Drop for PrWatch {
         }
         for s in self.scouts.values() {
             s.cancel.store(true, Ordering::SeqCst);
+        }
+        for r in self.readers.values() {
+            r.cancel.store(true, Ordering::SeqCst);
+        }
+        for r in self.readers.values_mut() {
+            if let Some(h) = r.handle.take() {
+                let _ = h.join();
+            }
         }
         for p in self.pollers.values_mut() {
             p.stop();
@@ -1941,7 +1976,7 @@ fn merge_sentence(seen: MergeSeen, repo: &str, pr: i64) -> String {
     match merge_class(status, draft).as_str() {
         "draft" => " It is a draft and cannot merge (DRAFT).".into(),
         "ready" => format!(" GitHub reads it as mergeable now ({status})."),
-        "behind" => " It is behind its base and cannot merge until it is updated (BEHIND): update it with the update-branch skill and record the new head before telling anyone it is ready.".into(),
+        "behind" => " It is behind its base (BEHIND); that alone is no reason to update it: makibad tells you when it is ready for the queue, or updates it itself (docs/design/queue-ready.md).".into(),
         "conflict" => " It conflicts with its base and cannot merge (DIRTY): the base must be merged in and the conflict resolved.".into(),
         "blocked" => " GitHub blocks its merge (BLOCKED): find what blocks it (reviews, required checks, rules) before telling anyone it is ready.".into(),
         "unknown" => " Whether it can merge is not known yet (UNKNOWN); makibad tells you once GitHub has computed it.".into(),
@@ -1978,23 +2013,7 @@ fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<
             return Ok(None);
         }
         let (repo, pr, task) = (r.f.repo.as_str(), r.f.pr, r.f.task.as_str());
-        // The head of the run's current pull request, as `current_pr_sql` finds its number: the
-        // newest registration, else the newest watch of the run (a watch with no registration).
-        let newest: Option<String> = w
-            .conn()
-            .query_row(
-                "SELECT coalesce(
-                   (SELECT json_extract(e.payload_json, '$.head_oid') FROM events e
-                    WHERE e.run_id = u.id AND e.kind IN ('pr_opened', 'fix_pushed')
-                    ORDER BY e.id DESC LIMIT 1),
-                   (SELECT p.head_oid FROM pr_watches p WHERE p.run_id = u.id
-                    ORDER BY p.id DESC LIMIT 1))
-                 FROM runs u WHERE u.task_id = ?1",
-                [task],
-                |q| q.get(0),
-            )
-            .optional()?
-            .flatten();
+        let newest = newest_head(w.conn(), task)?;
         if !newest.is_some_and(|h| h.eq_ignore_ascii_case(&r.head)) {
             return Ok(None);
         }
@@ -2047,6 +2066,552 @@ fn apply_merge(w: &StateWriter, r: &MergeRead, told: Option<&String>) -> Result<
             ),
         )?;
         Ok(Some(class))
+    })
+}
+
+// ---- queue readiness (Issue 475, docs/design/queue-ready.md) ------------------------------------
+
+/// The head of the run's current pull request, as `current_pr_sql` finds its number: the newest
+/// registration, else the newest watch of the run (a watch with no registration).
+pub(super) fn newest_head(c: &Connection, task: &str) -> Result<Option<String>> {
+    Ok(c.query_row(
+        "SELECT coalesce(
+           (SELECT json_extract(e.payload_json, '$.head_oid') FROM events e
+            WHERE e.run_id = u.id AND e.kind IN ('pr_opened', 'fix_pushed')
+            ORDER BY e.id DESC LIMIT 1),
+           (SELECT p.head_oid FROM pr_watches p WHERE p.run_id = u.id
+            ORDER BY p.id DESC LIMIT 1))
+         FROM runs u WHERE u.task_id = ?1",
+        [task],
+        |q| q.get(0),
+    )
+    .optional()?
+    .flatten())
+}
+
+/// A `queue_readiness` as recorded: its event id, verdict, reason and base tip.
+pub(super) struct Recorded {
+    pub id: i64,
+    pub verdict: String,
+    pub reason: Option<String>,
+    pub base_tip: Option<String>,
+}
+
+/// The newest `queue_readiness` of `repo#pr` at `head`.
+pub(super) fn newest_readiness(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+    head: &str,
+) -> Result<Option<Recorded>> {
+    Ok(c.query_row(
+        "SELECT id, json_extract(payload_json, '$.verdict'), json_extract(payload_json, '$.reason'),
+                json_extract(payload_json, '$.base_tip')
+         FROM events WHERE kind = 'queue_readiness'
+           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+           AND json_extract(payload_json, '$.pr') = ?2
+           AND lower(json_extract(payload_json, '$.head_oid')) = lower(?3)
+         ORDER BY id DESC LIMIT 1",
+        params![repo, pr, head],
+        |q| {
+            Ok(Recorded {
+                id: q.get(0)?,
+                verdict: q.get(1)?,
+                reason: q.get(2)?,
+                base_tip: q.get(3)?,
+            })
+        },
+    )
+    .optional()?)
+}
+
+/// The `update` command of `task` still `accepted`, if any.
+pub(super) fn update_running(c: &Connection, task: &str) -> Result<Option<i64>> {
+    Ok(c.query_row(
+        "SELECT id FROM commands WHERE verb = 'update' AND status = 'accepted'
+           AND json_extract(args_json, '$.task') = ?1 ORDER BY id LIMIT 1",
+        [task],
+        |q| q.get(0),
+    )
+    .optional()?)
+}
+
+/// A followed pull request whose head is judged for the queue (queue-ready.md section 3.1).
+#[derive(Debug, Clone)]
+struct ReadyCand {
+    f: Followed,
+    head: String,
+    /// The project's default branch.
+    base: String,
+    branch: String,
+    /// The project's repository.
+    dir: PathBuf,
+    has_worktree: bool,
+    /// When the head's newest `queue_readiness` is `ready` (watched): its base tip.
+    ready: Option<Option<String>>,
+}
+
+/// The candidates (of `task` only, when given): a followed pull request, open, of a run whose
+/// project has a git repository in `repos`, at the run's newest recorded head, whose newest
+/// `ci_completed` is `passed`, with no merge act awaiting its landing and no `update` of the task
+/// `accepted`, and whose head has no `queue_readiness` yet or a `ready` one newest.
+fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<Vec<ReadyCand>> {
+    let mut out = Vec::new();
+    for f in followed(c, task)? {
+        if f.closed {
+            continue;
+        }
+        let row: Option<(String, Option<String>, String, Option<String>)> = c
+            .query_row(
+                "SELECT COALESCE(r.branch, 'makiba/' || r.task_id), p.slug,
+                        COALESCE(p.default_branch, 'main'),
+                        (SELECT worktree FROM run_launch WHERE run_id = r.id AND kind = 'code'
+                         ORDER BY id DESC LIMIT 1)
+                 FROM runs r LEFT JOIN projects p ON p.id = r.project_id WHERE r.task_id = ?1",
+                [&f.task],
+                |q| Ok((q.get(0)?, q.get(1)?, q.get(2)?, q.get(3)?)),
+            )
+            .optional()?;
+        let Some((branch, Some(slug), base, worktree)) = row else {
+            continue;
+        };
+        let dir = repos.join(&slug);
+        if slug.is_empty() || !dir.join(".git").exists() {
+            continue;
+        }
+        let Some(head) = newest_head(c, &f.task)? else {
+            continue;
+        };
+        let ci: Option<String> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.status') FROM events
+                 WHERE kind = 'ci_completed'
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                   AND lower(json_extract(payload_json, '$.head_oid')) = lower(?3)
+                 ORDER BY id DESC LIMIT 1",
+                params![f.repo, f.pr, head],
+                |q| q.get(0),
+            )
+            .optional()?
+            .flatten();
+        if ci.as_deref() != Some("passed")
+            || super::door::act_awaiting(c, &f.repo, f.pr)?.is_some()
+            || update_running(c, &f.task)?.is_some()
+        {
+            continue;
+        }
+        let ready = match newest_readiness(c, &f.repo, f.pr, &head)? {
+            None => None,
+            Some(r) if r.verdict == "ready" => Some(r.base_tip),
+            Some(_) => continue,
+        };
+        out.push(ReadyCand {
+            f,
+            head,
+            base,
+            branch,
+            dir,
+            has_worktree: worktree.is_some(),
+            ready,
+        });
+    }
+    Ok(out)
+}
+
+/// A readiness reader: one per task, of one head, first judgement or watching a `ready` head.
+struct Reader {
+    head: String,
+    watch: bool,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+/// What a reader read, for the head and mode it was started for.
+struct ReadDone {
+    task: String,
+    repo: String,
+    pr: i64,
+    head: String,
+    watch: bool,
+    /// The merge class the reader was started on.
+    class: String,
+    result: std::result::Result<super::ready::Reading, String>,
+}
+
+/// What the loop decides for a head.
+enum Decision {
+    Ready {
+        base_tip: String,
+        ci_base: String,
+    },
+    Update {
+        reason: &'static str,
+        base_tip: Option<String>,
+        ci_base: Option<String>,
+        landings: Vec<super::ready::Landing>,
+    },
+    Unknown {
+        reason: String,
+    },
+}
+
+/// A reader's thread: read until a reading decides (a first judgement's reading, a watched one
+/// that counts), sending each reading the loop needs; a failure is sent and read again.
+fn read_ready(
+    c: ReadyCand,
+    class: String,
+    mut covered: Option<String>,
+    interval: Duration,
+    cancel: &AtomicBool,
+    tx: &Sender<ReadDone>,
+) {
+    use super::ready::Reading;
+    let watch = c.ready.is_some();
+    loop {
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            super::ready::read(
+                &c.dir,
+                &c.f.task,
+                &c.base,
+                &c.branch,
+                &c.head,
+                covered.as_deref(),
+            )
+        }))
+        .unwrap_or_else(|_| Err("the reading crashed".into()));
+        if cancel.load(Ordering::SeqCst) {
+            return;
+        }
+        let stop = match &result {
+            Ok(Reading::Unchanged | Reading::Stale) => None,
+            Ok(Reading::Read {
+                base_tip, landings, ..
+            }) => {
+                if watch && landings.is_empty() {
+                    covered = Some(base_tip.clone());
+                    Some(false)
+                } else {
+                    Some(true)
+                }
+            }
+            Err(_) => Some(false),
+        };
+        if let Some(stop) = stop {
+            let _ = tx.send(ReadDone {
+                task: c.f.task.clone(),
+                repo: c.f.repo.clone(),
+                pr: c.f.pr,
+                head: c.head.clone(),
+                watch,
+                class: class.clone(),
+                result,
+            });
+            if stop {
+                return;
+            }
+        }
+        sleep_unless(cancel, interval);
+    }
+}
+
+impl PrWatch {
+    /// Write the readings that came back, decide each conflicting candidate, and give every other
+    /// candidate whose merge state is read one reader (queue-ready.md section 3).
+    fn readiness(&mut self, w: &StateWriter) -> Result<()> {
+        while let Ok(d) = self.ready_rx.try_recv() {
+            self.ready_queued.push(d);
+        }
+        for d in std::mem::take(&mut self.ready_queued) {
+            if let Err(e) = self.ready_done(w, &d) {
+                eprintln!(
+                    "makibad: pr watch {}#{}: cannot record its queue readiness: {e}",
+                    d.repo, d.pr
+                );
+                self.ready_queued.push(d);
+            }
+        }
+        let candidates = ready_candidates(w.conn(), &self.repos, None)?;
+        // What is kept of a head that is no longer a candidate goes with it.
+        let still = |k: &(String, i64, String)| {
+            candidates
+                .iter()
+                .any(|c| told_key(&c.f.repo, c.f.pr, &c.head) == *k)
+        };
+        self.covered.retain(|k, _| still(k));
+        self.read_failing.retain(|k, _| still(k));
+        let mut wanted: Vec<(ReadyCand, String)> = Vec::new();
+        for c in candidates {
+            let key = told_key(&c.f.repo, c.f.pr, &c.head);
+            let Some(r) = self.merges.get(&c.f.task).filter(|r| {
+                r.f == c.f
+                    && r.head.eq_ignore_ascii_case(&c.head)
+                    && !began_before_ci(r, self.ci_seen.get(&key))
+            }) else {
+                continue;
+            };
+            let class = merge_class(&r.status, r.draft);
+            if class == "unknown" || class == "draft" {
+                continue;
+            }
+            if class == "conflict" {
+                let tip = self
+                    .covered
+                    .get(&key)
+                    .cloned()
+                    .or_else(|| c.ready.clone().flatten());
+                let d = Decision::Update {
+                    reason: "conflict",
+                    base_tip: tip,
+                    ci_base: None,
+                    landings: Vec::new(),
+                };
+                decide(
+                    w,
+                    &self.repos,
+                    &c.f.task,
+                    &c.head,
+                    c.ready.is_some(),
+                    &class,
+                    &d,
+                )?;
+                continue;
+            }
+            wanted.push((c, class));
+        }
+        let tasks: Vec<String> = self.readers.keys().cloned().collect();
+        for task in tasks {
+            let keep = self.readers.get(&task).is_some_and(|r| {
+                !r.handle.as_ref().is_none_or(JoinHandle::is_finished)
+                    && wanted.iter().any(|(c, _)| {
+                        c.f.task == task
+                            && c.head.eq_ignore_ascii_case(&r.head)
+                            && c.ready.is_some() == r.watch
+                    })
+            });
+            // A reader no longer wanted is told to stop and let go: it may be in a fetch, which
+            // the loop does not wait for; what it still sends is checked again when written.
+            if !keep && let Some(r) = self.readers.remove(&task) {
+                r.cancel.store(true, Ordering::SeqCst);
+            }
+        }
+        for (c, class) in wanted {
+            if self.readers.contains_key(&c.f.task) {
+                continue;
+            }
+            let key = told_key(&c.f.repo, c.f.pr, &c.head);
+            let covered = c
+                .ready
+                .as_ref()
+                .and_then(|tip| self.covered.get(&key).cloned().or_else(|| tip.clone()));
+            let cancel = Arc::new(AtomicBool::new(false));
+            let (task, head, watch) = (c.f.task.clone(), c.head.clone(), c.ready.is_some());
+            let handle = {
+                let (tx, cancel, interval) =
+                    (self.ready_tx.clone(), Arc::clone(&cancel), self.interval);
+                std::thread::spawn(move || read_ready(c, class, covered, interval, &cancel, &tx))
+            };
+            self.readers.insert(
+                task,
+                Reader {
+                    head,
+                    watch,
+                    cancel,
+                    handle: Some(handle),
+                },
+            );
+        }
+        Ok(())
+    }
+
+    /// One reading, decided: a failure counts against the budget, a watched reading that finds
+    /// nothing moves `covered`, anything else is decided.
+    fn ready_done(&mut self, w: &StateWriter, d: &ReadDone) -> Result<()> {
+        use super::ready::Reading;
+        let key = told_key(&d.repo, d.pr, &d.head);
+        let decision = match &d.result {
+            Err(why) => {
+                let first = *self
+                    .read_failing
+                    .entry(key.clone())
+                    .or_insert_with(Instant::now);
+                if first.elapsed() < self.budget {
+                    eprintln!(
+                        "makibad: pr watch {}#{}: queue readiness not read: {why}",
+                        d.repo, d.pr
+                    );
+                    return Ok(());
+                }
+                Decision::Unknown {
+                    reason: why.clone(),
+                }
+            }
+            Ok(Reading::Read {
+                base_tip,
+                ci_base,
+                landings,
+            }) => {
+                self.read_failing.remove(&key);
+                if !landings.is_empty() {
+                    Decision::Update {
+                        reason: "checks_changed",
+                        base_tip: Some(base_tip.clone()),
+                        ci_base: Some(ci_base.clone()),
+                        landings: landings.clone(),
+                    }
+                } else if d.watch {
+                    self.covered.insert(key, base_tip.clone());
+                    return Ok(());
+                } else {
+                    Decision::Ready {
+                        base_tip: base_tip.clone(),
+                        ci_base: ci_base.clone(),
+                    }
+                }
+            }
+            Ok(_) => return Ok(()),
+        };
+        let class = self
+            .merges
+            .get(&d.task)
+            .filter(|r| r.head.eq_ignore_ascii_case(&d.head))
+            .map_or_else(|| d.class.clone(), |r| merge_class(&r.status, r.draft));
+        if decide(w, &self.repos, &d.task, &d.head, d.watch, &class, &decision)? {
+            self.read_failing.remove(&key);
+        }
+        Ok(())
+    }
+}
+
+/// Write one decision for `task` at `head` (queue-ready.md section 3.3): the `queue_readiness`
+/// event, for `update` the `update` command (when the run has a code worktree), and one notice,
+/// in one transaction, only while `head` is still a candidate in the same mode (`watched`).
+/// Whether it was written.
+fn decide(
+    w: &StateWriter,
+    repos: &Path,
+    task: &str,
+    head: &str,
+    watched: bool,
+    class: &str,
+    d: &Decision,
+) -> Result<bool> {
+    w.transaction(|w| {
+        let Some(c) = ready_candidates(w.conn(), repos, Some(task))?
+            .into_iter()
+            .find(|c| c.head.eq_ignore_ascii_case(head))
+        else {
+            return Ok(false);
+        };
+        if c.ready.is_some() != watched {
+            return Ok(false);
+        }
+        let (repo, pr, base) = (c.f.repo.as_str(), c.f.pr, c.base.as_str());
+        let (verdict, reason, base_tip, ci_base, landings) = match d {
+            Decision::Ready { base_tip, ci_base } => (
+                "ready",
+                Value::Null,
+                Some(base_tip.clone()),
+                Some(ci_base.clone()),
+                Vec::new(),
+            ),
+            Decision::Update {
+                reason,
+                base_tip,
+                ci_base,
+                landings,
+            } => (
+                "update",
+                json!(reason),
+                base_tip.clone(),
+                ci_base.clone(),
+                landings.clone(),
+            ),
+            Decision::Unknown { reason } => ("unknown", json!(reason), None, None, Vec::new()),
+        };
+        let listed: Vec<Value> = landings
+            .iter()
+            .map(|l| json!({"sha": l.sha, "paths": l.paths}))
+            .collect();
+        let payload = json!({
+            "repo": repo, "pr": pr, "head_oid": c.head, "task_id": task, "base": base,
+            "base_tip": base_tip, "ci_base": ci_base, "merge_state": class, "verdict": verdict,
+            "reason": reason, "landings": listed, "watched": watched, "command": Value::Null,
+        });
+        let event = w.append_event(&NewEvent {
+            kind: "queue_readiness",
+            actor: Some("makibad"),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })?;
+        let short = |h: &str| h[..h.len().min(7)].to_string();
+        let at = short(&c.head);
+        let link = format!("https://github.com/{repo}/pull/{pr}");
+        let body = match d {
+            Decision::Ready { ci_base, .. } => format!(
+                "{repo}#{pr} at {at} can be queued: its CI passed, the head holds {base} at {}, and no landing since changed what the checks check (docs/design/queue-ready.md). {link}",
+                short(ci_base)
+            ),
+            Decision::Update {
+                reason, landings, ..
+            } => {
+                let why = if *reason == "conflict" {
+                    "it conflicts with its base (DIRTY)".to_string()
+                } else {
+                    let named: Vec<String> = landings
+                        .iter()
+                        .map(|l| {
+                            let mut paths: Vec<&str> =
+                                l.paths.iter().take(3).map(String::as_str).collect();
+                            if l.paths.len() > 3 {
+                                paths.push("...");
+                            }
+                            format!("{} ({})", short(&l.sha), paths.join(", "))
+                        })
+                        .collect();
+                    format!(
+                        "landings since {base} at {}, which the head holds, changed what the checks check: {}",
+                        ci_base.as_deref().map(short).unwrap_or_default(),
+                        named.join(", ")
+                    )
+                };
+                let lead = if watched {
+                    format!("{repo}#{pr} at {at} is no longer ready for the queue: ")
+                } else {
+                    String::new()
+                };
+                if c.has_worktree {
+                    let args = json!({"task": task, "base": base, "repo": repo, "pr": pr,
+                                      "head": c.head, "readiness": event});
+                    w.conn().execute(
+                        "INSERT INTO commands (actor, verb, args_json) VALUES ('makibad', 'update', ?1)",
+                        [args.to_string()],
+                    )?;
+                    let command = w.conn().last_insert_rowid();
+                    w.conn().execute(
+                        "UPDATE events SET payload_json = json_set(payload_json, '$.command', ?1)
+                         WHERE id = ?2",
+                        params![command, event],
+                    )?;
+                    format!(
+                        "{lead}makibad is updating {repo}#{pr} at {at} with {base} (update command {command}): {why}. It is not to be queued at this head; makibad records and watches the new head. {link}"
+                    )
+                } else {
+                    format!(
+                        "{lead}{repo}#{pr} at {at} needs {base} merged in ({why}), and its run has no code worktree, so makibad cannot update it: have the branch take {base} in, then record the new head. {link}"
+                    )
+                }
+            }
+            Decision::Unknown { reason } => format!(
+                "makibad cannot judge whether {repo}#{pr} at {at} is ready for the queue: {reason}. Judge it by hand by the rule of docs/design/queue-ready.md section 1. {link}"
+            ),
+        };
+        super::door::notice(w, AGENT_SECRETARY, task, &body)?;
+        Ok(true)
     })
 }
 
