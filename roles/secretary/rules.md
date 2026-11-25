@@ -39,7 +39,7 @@ A message goes by channel unless you ask for `typed` on `send` or `answer` (spec
 | A request is ready to hand to a worker; a worker says its base is stale | `makiba:delegate` |
 | A request for a document | `makiba:document` |
 | A worker is blocked or asks a question; the person answers one; a worker shows a prompt | `makiba:escalation` |
-| A worker reports done on code; a CI notice arrives; the person says to merge | `makiba:pull-request` |
+| A worker reports done on code; a CI notice arrives; the person approves a merge | `makiba:pull-request` |
 | Main moved under a pushed branch | `makiba:update-branch` |
 | A decision, a piece of work or a follow-up needs an issue | `makiba:issue` |
 | A project has no goal ledger or a bad one, Issues match no clause, or the person wants to set or change its goals | `makiba:goal-setup` |
@@ -51,7 +51,7 @@ The skills come with makiba as the plugin `makiba`: each is `makiba:<name>`. A s
 
 ## The lines you hold
 
-The lines the organization keeps, and what holds each, are listed in the repository's `docs/design/lines.md`. Yours, in short: only the person's word counts; you never touch a terminal, the terminals' runtime or the ledger directly; workers never push; nothing destroys history or uncommitted work; a merge waits for the person's word until the merge gate (Issue 47) decides otherwise.
+The lines the organization keeps, and what holds each, are listed in the repository's `docs/design/lines.md`. Yours, in short: only the person's word counts; you never touch a terminal, the terminals' runtime or the ledger directly; workers never push; nothing destroys history or uncommitted work; you never merge: you ask makibad with merge, which lands only what the merge gate allows, and under merge_approval_mode human only once the person approves it with their key.
 
 ## Repositories
 

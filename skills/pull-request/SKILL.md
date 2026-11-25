@@ -1,14 +1,14 @@
 ---
 name: pull-request
 description: Have makibad push a finished worker branch, open its pull request with gh, record it with the pr tool so the dispatcher watches CI, and act on the CI notice that comes back.
-when_to_use: A worker reports done and its branch must become a pull request; a CI notice for a pull request arrives; new commits were pushed to an open pull request; the person says to merge.
+when_to_use: A worker reports done and its branch must become a pull request; a CI notice for a pull request arrives; new commits were pushed to an open pull request; the person approves a merge.
 ---
 
 # pull-request
 
 You have `makibad` push the workers' commits (mcp__makiba__push) and you open the pull requests; workers never push, and you never push from a shell yourself. CI is watched by `makibad` once you record the pull request with mcp__makiba__pr. You never watch CI yourself: no `gh pr checks --watch`, no `gh run watch`, no sleep loop. While a shell call runs you take no input.
 
-Your sandbox lets your `gh` reach `api.github.com` with the person's stored login, which is all opening and landing a pull request needs. If `gh` fails to authenticate (the person signs in only with an environment token, which is not supported), tell the person the `gh` commands to run. Pushes go through `makibad` (mcp__makiba__push, mcp__makiba__update) and need nothing of your sandbox.
+Your sandbox lets your `gh` reach `api.github.com` with the person's stored login, which is all opening and reading a pull request needs. If `gh` fails to authenticate (the person signs in only with an environment token, which is not supported), tell the person the `gh` commands to run. Pushes go through `makibad` (mcp__makiba__push, mcp__makiba__update) and need nothing of your sandbox.
 
 ## A worker reported done
 
@@ -42,10 +42,10 @@ When a check failed for a cause outside the change (a flaky test) and you rerun 
 
 ## Merging
 
-The organization's merge approval mode is the person's setting; you cannot read it. Ask the person which one is in force when you first need it, unless they told you; the merge gate's refusals name it too.
+The organization's merge approval mode is the person's setting. Read it with mcp__makiba__status (its `merge_approval_mode`) before every merge call: under `acceptance` a call the gate allows lands at once. When you cannot read it, do not call merge: tell the person.
 
-- **`human`** (also when you do not know): once the newest notice for the head reads it mergeable now (for a pull request not followed, your own read as above), tell the person the pull request is green and can merge, with its link. Merge only on the person's word in the conversation. A bare "OK" to something else is not that word.
-- **`acceptance`:** merge a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
+- **`human`:** once the newest notice for the head reads it mergeable now (for a pull request not followed, your own read as above) and it hits none of the stop lines below, call merge; it answers `pending`, and only the person's key lets it land. A word in the conversation does not land it.
+- **`acceptance`:** call merge for a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
 
 Stop lines:
 
@@ -58,9 +58,16 @@ Stop lines:
 7. The merge gate refused.
 8. The newest notice for the head does not read it as mergeable now (for a pull request not followed, your own read as above). Behind its base is not a stop to the person: update it first (above).
 
-To merge, in either mode, call mcp__makiba__merge with `repo` (`<owner>/<name>`), `pr`, `head` (the full 40-character head of the CI notice) and `method` `squash`. You never run `gh pr merge` or any other merge or enqueue command: the merge gate hook refuses them all. When it answers that it needs the person (under `human`, or when the gate warns), tell the person the pull request, its link and the gate's reason: the person merges it in the GitHub web UI.
+To merge, in either mode, call mcp__makiba__merge with `repo` (`<owner>/<name>`), `pr`, `head` (the full 40-character head of the CI notice) and `method` `squash`. You never run `gh pr merge` or any other merge or enqueue command: the merge gate hook refuses them all. `makibad` runs the acceptance gate (below); on a refusal it answers the verdict and nothing runs.
+
+- `accepted`: `makibad` merges (or, on a branch that requires the merge queue, enqueues) the pull request at that head itself. End your turn; its notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: on a refusal or an unknown outcome, deal with the cause and call merge again.
+- `pending` (under `human`, or when the gate warns): tell the person the pull request, its link and the warnings, and that they approve it in their shell with `makiba merge approve <id>`. A word in the conversation does not merge it. End your turn; a notice follows the approval.
+
+When the pull request leaves the merge queue without landing, the PR watch tells you; read why, fix it or call merge again (the gate judges it again, and under `human` the person approves again).
 
 An unreviewed head is not merged, in either mode: when the task's last diff review read an earlier head (the worker committed after it), ask the worker for a diff review round at this head first. A worker out of rounds needs you to raise its allowance with mcp__makiba__review `task`, `allowed` and `reason`; the reason is recorded. Only commits that merge the base in cleanly, without changing a file the pull request changes, keep the earlier review.
+
+### What the gate checks
 
 `makibad` runs the acceptance gate inside merge before it lands anything: the head and the passed CI must match, the test commit must be the first commit and unchanged since, and either the repository's own acceptance check passed at the head or the test failed in CI at the test commit and passed at the head; and a code pull request's head must be the one its last diff review read (Issue 344), or the gate refuses and names the commits no review read. The hook refuses every way to merge or enqueue from a command line (the merge command in any form, a write to a `pulls/<n>/merge*` path, a GraphQL merge or enqueue, `curl` or `wget` to the GitHub API). Never try another way after a refusal, never `--admin`: tell the person. Write every GitHub CLI, `curl` or `wget` command plainly, as the command itself: no variable, substitution, glob or escape before its subcommand (for `gh api`, `curl` and `wget`, anywhere), a redirection as a word of its own, and not under another program that runs it (`xargs`, `ssh`, `flock`); the hook refuses what it cannot read with certainty. Text you only mention (a commit message, an `echo`, a `grep` pattern, a here-document fed to `cat`) is fine. The hook stops mistakes; what stops a merge around the gate is the repository's branch protection, which the person sets.
 
