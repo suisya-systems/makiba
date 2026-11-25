@@ -1066,10 +1066,22 @@ pub struct MergeOrder {
     pub waits_for: Vec<Waiting>,
     /// `(pr, task, why)` of an open pull request that could not be read: it holds as one waiting.
     pub not_read: Vec<(i64, String, String)>,
-    /// A read of GitHub for another pull request that still failed after its tries (Issue 512):
-    /// with nothing in `waits_for`, the order is not known, and the gate answers `unavailable`
-    /// when no rule on the content refused the pull request.
-    pub unavailable: Option<String>,
+    /// Each read of GitHub for another pull request that still failed after its tries (Issue 512),
+    /// one per entry of `not_read` that failed so. With nothing in `waits_for` and every entry of
+    /// `not_read` such a read, the order is not known, and the gate answers `unavailable` when no
+    /// rule on the content refused the pull request; a read refused on what it answered holds.
+    pub unavailable: Vec<String>,
+}
+
+impl MergeOrder {
+    /// Why the order is not known (Issue 512): every pull request that holds it could not be read
+    /// from GitHub, and none is known to hold it.
+    pub fn not_known(&self) -> Option<String> {
+        (self.waits_for.is_empty()
+            && !self.unavailable.is_empty()
+            && self.unavailable.len() == self.not_read.len())
+        .then(|| self.unavailable.join("; "))
+    }
 }
 
 impl MergeOrder {
@@ -1119,7 +1131,7 @@ pub fn merge_order(
             Ok(_) => {}
             Err(Fault::Refused(why)) => m.not_read.push((*pr, task.clone(), why)),
             Err(Fault::Unavailable(why)) => {
-                m.unavailable = Some(format!("#{pr}: {why}"));
+                m.unavailable.push(format!("#{pr}: {why}"));
                 m.not_read.push((*pr, task.clone(), why));
             }
         }

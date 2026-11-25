@@ -729,3 +729,36 @@ fn a_change_to_the_language_check_is_not_hidden_by_another_pull_request_that_can
         "{v}"
     );
 }
+
+impl Case {
+    /// A third task `t3` (outside the range) with PR 9 at the head of PR 7, whose `gh pr view`
+    /// answers text that is not JSON: a read that is refused, not one that failed.
+    fn third_task_answering_no_json(&self) {
+        let w = StateWriter::open(&self.db).unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t3",
+            project_slug: &self.name,
+            title: Some("T3"),
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        drop(w);
+        self.publish_at(9, &self.head);
+        std::fs::write(self.gh.join("view.9"), "not json\n").unwrap();
+        self.tie("t3", 9, &self.head);
+    }
+}
+
+#[test]
+fn a_refused_read_of_another_pull_request_is_not_hidden_by_an_unavailable_one() {
+    let c = ordered_after_an_unreadable_pull_request("mixedorder");
+    c.third_task_answering_no_json();
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["verdict"], json!("merge_order"), "{v}");
+    assert_eq!(v["allow"], json!(false), "{v}");
+    let reason = v["reason"].as_str().unwrap_or_default();
+    assert!(reason.contains("#8") && reason.contains("#9"), "{v}");
+    let verdicts = c.events("acceptance_gate");
+    assert_eq!(verdicts.last().unwrap()["verdict"], json!("merge_order"));
+}

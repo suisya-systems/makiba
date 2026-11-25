@@ -3685,13 +3685,9 @@ impl Door {
             let line = merge_order_line(&repo, pr, &order);
             // Issue 512: with nothing known to hold it, an order that could not be read from
             // GitHub is not known; after every rule on the content, that is all that stands.
-            let unread = order
-                .unavailable
-                .as_ref()
-                .filter(|_| order.waits_for.is_empty());
-            if allow && let Some(why) = unread {
+            if allow && let Some(why) = order.not_known() {
                 // Decided after the last rule on the content, below; the line names it meanwhile.
-                order_unread = Some(why.clone());
+                order_unread = Some(why);
                 reason = format!("{reason}; {line}");
             } else if allow && mode == "acceptance" {
                 allow = false;
