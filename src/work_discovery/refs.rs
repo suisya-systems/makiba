@@ -303,19 +303,26 @@ fn shown_line(line: &str) -> String {
 }
 
 /// `line` with its emphasis and code marks (`*`, `_`, `~`, backtick) taken out, except a mark
-/// between two letters or digits (`my_repo`).
+/// between two letters or digits (`my_repo`) and any mark inside a repository ref
+/// (`o/repo_#30`, `o/_repo#30`).
 fn without_marks(line: &str) -> String {
-    let chars: Vec<char> = line.chars().collect();
+    let kept: Vec<(usize, usize)> = CROSS_REF_TOKEN
+        .find_iter(line)
+        .map(|m| (m.start(), m.end()))
+        .collect();
+    let chars: Vec<(usize, char)> = line.char_indices().collect();
     let inner = |i: usize| {
-        i > 0
-            && chars[i - 1].is_alphanumeric()
-            && chars.get(i + 1).is_some_and(|c| c.is_alphanumeric())
+        let at = chars[i].0;
+        kept.iter().any(|&(s, e)| s <= at && at < e)
+            || (i > 0
+                && chars[i - 1].1.is_alphanumeric()
+                && chars.get(i + 1).is_some_and(|c| c.1.is_alphanumeric()))
     };
     chars
         .iter()
         .enumerate()
-        .filter(|&(i, c)| !matches!(c, '*' | '_' | '~' | '`') || inner(i))
-        .map(|(_, c)| *c)
+        .filter(|&(i, (_, c))| !matches!(c, '*' | '_' | '~' | '`') || inner(i))
+        .map(|(_, (_, c))| *c)
         .collect()
 }
 
@@ -542,6 +549,21 @@ mod tests {
         assert_eq!(d.home, vec![8]);
         assert_eq!(d.cross, vec![("other/my_repo".to_string(), 7)]);
         assert_eq!(d.unreadable, None);
+    }
+
+    /// A mark inside a repository name stays, wherever it stands in the name (review round 5).
+    #[test]
+    fn a_mark_inside_a_repository_ref_stays() {
+        for (body, repo) in [
+            ("Depends on o/repo_#30", "o/repo_"),
+            ("Depends on o/_repo#30", "o/_repo"),
+            ("Depends on o/re__po#30", "o/re__po"),
+            ("**Depends on o/repo_#30**", "o/repo_"),
+        ] {
+            let d = dependency_lines(body);
+            assert_eq!(d.cross, vec![(repo.to_string(), 30)], "{body:?}");
+            assert_eq!((d.home, d.unreadable), (vec![], None), "{body:?}");
+        }
     }
 
     /// A keyword in prose with no ref is no dependency line.
