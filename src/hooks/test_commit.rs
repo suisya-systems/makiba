@@ -17,7 +17,8 @@
 //!    amends: an amend that does not change the declared file again is refused, and the refusal
 //!    names the remedy (`git reset --soft HEAD~1`, then commit again);
 //! 4. a declared Rust test target, as the index holds it, starts makibad directly, as on pull
-//!    requests 315 and 316.
+//!    requests 315 and 316. Only a test that names makiba (its crate or binary) is scanned: the
+//!    rule is makiba's own, and another project's test may well say "daemon".
 //!
 //! Known limit: lines below a scissors line are not counted, but git keeps a scissors line
 //! written by hand, and what is below it, in a commit made with `-F`; such a key line passes here
@@ -231,6 +232,22 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
         .into_iter()
         .map(|(p, _)| p)
         .collect();
+    // A declaration the merge gate rejects (`gate::find_manifest`) is refused before it is
+    // normalized: an absolute path, a `..` segment, a backslash, a leading `-`.
+    if let Some(v) = read.iter().find(|v| {
+        v.starts_with('/')
+            || v.split('/').any(|s| s == "..")
+            || v.contains('\\')
+            || v.starts_with('-')
+    }) {
+        return Err(Refusal::new(
+            LINE,
+            format!("{KEY}: {v}"),
+            format!(
+                "the commit declares {v:?}, a path the merge gate rejects (absolute, with a .. segment, a backslash or a leading -): declare the test file by its path from the repository's root, such as tests/<name>.rs; {FINAL}"
+            ),
+        ));
+    }
     let declared: Vec<String> = read.iter().map(|v| normalized(v)).collect();
     if let Some(d) = declared
         .iter()
@@ -245,7 +262,9 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
         ));
     }
 
-    // 4. No declared Rust test starts makibad directly, as the index holds it.
+    // 4. No declared Rust test starts makibad directly, as the index holds it. The rule is
+    // makiba's own: only a test that names the makiba crate or binary is scanned, so a test of
+    // another project that says "daemon" is not refused.
     let index = git(&["ls-files", "-z"]).map_err(cannot)?;
     let index = text(index);
     for path in index
@@ -253,7 +272,11 @@ pub fn check(file: &str, message: &[u8]) -> Result<(), Refusal> {
         .filter(|p| is_test_target(p) && declared.iter().any(|d| under(p, d)))
     {
         let source = git(&["cat-file", "blob", &format!(":{path}")]).map_err(cannot)?;
-        if let Some((n, code)) = direct_starts(&text(source)).into_iter().next() {
+        let source = text(source);
+        if !source.contains("makiba") {
+            continue;
+        }
+        if let Some((n, code)) = direct_starts(&source).into_iter().next() {
             return Err(Refusal::new(
                 LINE,
                 format!("{path}:{n}: {code}"),

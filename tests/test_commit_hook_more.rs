@@ -156,3 +156,41 @@ fn a_project_commit_msg_hook_refuses_a_test_commit() {
     assert!(out.status.success(), "{}", stderr(&out));
     assert_ne!(repo.head(), before);
 }
+
+/// Diff review round 3: the makibad-start rule is makiba's own. A declared test of another
+/// project, which names no makiba, is not scanned, even when it says "daemon".
+#[test]
+fn another_projects_test_that_says_daemon_passes() {
+    let repo = Repo::new();
+    std::fs::write(
+        repo.wt.join("tests/t.rs"),
+        format!(
+            "#[test]\nfn t() {{ assert_eq!(mode(), \"{}{}\"); }}\n",
+            "dae", "mon"
+        ),
+    )
+    .unwrap();
+    repo.git(&["add", "tests/t.rs"]);
+    let before = repo.head();
+    let out = repo.commit(MESSAGE, &[]);
+    assert!(out.status.success(), "refused: {}", stderr(&out));
+    assert_ne!(repo.head(), before);
+}
+
+/// Diff review round 3: a declaration the merge gate rejects is refused as written, not
+/// normalized into a path the commit changes.
+#[test]
+fn a_declared_path_the_gate_rejects_is_refused() {
+    let repo = Repo::new();
+    std::fs::write(repo.wt.join("tests/t.rs"), "#[test]\nfn t() {}\n").unwrap();
+    repo.git(&["add", "tests/t.rs"]);
+    let before = repo.head();
+    for bad in ["/tests/t.rs", "tests/../tests/t.rs"] {
+        let out = repo.commit(&MESSAGE.replace("tests/t.rs", bad), &[]);
+        let err = stderr(&out);
+        assert!(!out.status.success(), "{bad} passed: {err}");
+        assert!(err.contains(REFUSED), "{err}");
+        assert!(err.contains(&format!("Acceptance-Test: {bad}")), "{err}");
+        assert_eq!(repo.head(), before, "a commit was made");
+    }
+}
