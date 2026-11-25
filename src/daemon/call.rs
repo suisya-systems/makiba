@@ -52,6 +52,10 @@ const CUT: usize = 120;
 const STDERR_KEEP: usize = 500;
 /// Bytes of stderr read.
 const STDERR_READ: u64 = 64 * 1024;
+/// The largest file the command (and what it starts) may write, its stderr file included:
+/// `RLIMIT_FSIZE`, so a noisy command cannot fill the state folder's file system. A write past it
+/// fails, and the default action of `SIGXFSZ` ends the writer.
+const FILE_LIMIT: u64 = 1024 * 1024;
 /// The longest value of the setting.
 const VALUE_MAX: usize = 4096;
 
@@ -481,14 +485,27 @@ impl Call {
         }
         let stdin = File::open(&input).map_err(|e| fail(e, files.clone()))?;
         let stderr = open(&err).map_err(|e| fail(e, files.clone()))?;
-        let child = Command::new(program)
-            .arg(title)
+        let mut cmd = Command::new(program);
+        cmd.arg(title)
             .stdin(Stdio::from(stdin))
             .stdout(Stdio::null())
             .stderr(Stdio::from(stderr))
-            .process_group(0)
-            .spawn()
-            .map_err(|e| fail(e, files.clone()))?;
+            .process_group(0);
+        // SAFETY: between fork and exec only `setrlimit`, which is async-signal-safe, is called,
+        // and no memory is allocated.
+        unsafe {
+            cmd.pre_exec(|| {
+                let limit = libc::rlimit {
+                    rlim_cur: FILE_LIMIT as libc::rlim_t,
+                    rlim_max: FILE_LIMIT as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_FSIZE, &limit) != 0 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let child = cmd.spawn().map_err(|e| fail(e, files.clone()))?;
         Ok((child, [input, err]))
     }
 
@@ -717,6 +734,26 @@ mod tests {
         let under_new = records(&w, new, retry).unwrap();
         assert_eq!(under_new.get(&5).map_or(0, |r| r.failures), 0);
         assert!(!under_new.get(&5).is_some_and(|r| r.recent));
+    }
+
+    /// A command that writes without end to stderr is stopped at the file limit, so the state
+    /// folder's file system is not filled.
+    #[test]
+    fn a_noisy_command_cannot_write_past_the_file_limit() {
+        let d = tempfile::tempdir().unwrap();
+        let script = d.path().join("noisy");
+        std::fs::write(&script, "head -c 5000000 /dev/zero >&2\n").unwrap();
+        let mut call = Call::new(d.path());
+        let (mut child, files) = call
+            .spawn(Path::new("/bin/sh"), &script.to_string_lossy(), "")
+            .unwrap_or_else(|(e, _)| panic!("cannot start: {e}"));
+        let status = child.wait().unwrap();
+        let size = std::fs::metadata(&files[1]).unwrap().len();
+        assert!(
+            size <= FILE_LIMIT,
+            "stderr grew to {size} bytes ({status:?})"
+        );
+        assert!(!status.success(), "{status:?}");
     }
 
     /// Dropping the pass, as any return from the loop does, ends a running call's whole group.

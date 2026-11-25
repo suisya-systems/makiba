@@ -18,7 +18,7 @@ Where the Issue's text and the code disagree:
 Option A (approved by the person): the person sets one organization setting, `notify_command`, the absolute path of an executable. makibad runs it with no shell as `<path> <title>` (one argument: the title, which holds only a count), in a process group of its own, with:
 - stdin: a file holding the body (`<state>/tmp/call/<n>.in`, mode 0600), so the body is not in `/proc/<pid>/cmdline`, which other local users may read, and writing it can never block;
 - stdout: /dev/null;
-- stderr: a file (`<state>/tmp/call/<n>.err`, mode 0600), never a pipe, so nothing makibad reads can block on a grandchild holding it or on a full pipe;
+- stderr: a file (`<state>/tmp/call/<n>.err`, mode 0600), never a pipe, so nothing makibad reads can block on a grandchild holding it or on a full pipe; the command and what it starts may write no file larger than 1 MiB (`RLIMIT_FSIZE`), so a noisy command cannot fill the state folder's file system;
 - makibad's own environment.
 
 The folder `<state>/tmp/call/` is made with mode 0700; a call's two files are removed once its event is written.
