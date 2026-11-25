@@ -95,3 +95,32 @@ The world of `tests/gate_review_head.rs` (helpers copied into the file, none und
 - The path list is fixed: a check over `tests/` added without touching those paths (a new test target that scans `tests/` alone, `Cargo.toml`, a `build.rs`) is not seen. A check-adding PR whose check lives in a new top-level test target and no helper passes.
 - Only pull requests makibad follows count: one opened outside makiba, or of a run closed more than a day ago, is not seen.
 - Tightening a check that lives in a test file outside those folders is not seen either; and a pull request that only removes a check is held as one that adds it.
+
+## 6. A merge order the person sets (Issue 338)
+
+Goal clause G5: what must not happen is stopped by something outside the agent. On 2026-11-23 the person approved a design on the condition that its pull request merges only after another Issue has landed; that condition was held only by the secretary's memory and a line in the pull request's body.
+
+### 6.1 Recording
+
+`merge` action `order` (secretary or person; no new verb or tool): `repo`, `pr` (A, the pull request that waits), exactly one of `after_pr` or `after_issue` (B, in the same repository) and `reason` (the person's decision, not blank). The Issue suggested `pr`, which records heads and needs a head and a task; an order has neither, and `merge` is the verb that owns merges. For an Issue, the order's project is the active project whose recorded repository is `repo`. In one transaction with its command: refused (`conflict`) while A has a merge act of makibad awaiting its landing (`door::act_awaiting`), since an accepted or enqueued act runs without a new judgement; otherwise `merge_order_set` (`repo`, `pr`, `after`, `number`, `project`, `reason`, `by`), or nothing for the same order again. No action lifts an order: it ends when B lands, or the person merges A in the GitHub web UI.
+
+### 6.2 When B has landed
+
+From the ledger only (`gate::person_orders`, `gate::order_landed`): a pull request B has landed with a `pr_merged` of it (repository in any case), of any run; an Issue B with a `pr_merged` on a run of the order's project whose `issue_refs` names `<project>#<n>`, of that run's current pull request (`belt::is_current_pr_sql`: a merge of a pull request the run has since replaced does not count). A landing makibad did not record is never read as one.
+
+### 6.3 The gate
+
+`gate_rows` reads the orders; `judge` uses the copy read again inside its `BEGIN IMMEDIATE` transaction, so an order or a landing recorded while the gate read GitHub and git is judged. `MergeOrder.after` holds the orders not landed (`person_holds`); `holds` keeps the meaning of section 3. After the block of section 3.3: with an order not landed, an answer that would allow becomes `allow` false with verdict `merge_order` under either mode, the reason naming each B, the order's event and its reason; an earlier refusal keeps its verdict and has the line appended. Under `human` it is a refusal, not a warning: the person decided already, and `merge approve` judges again, so neither a later secretary nor an approval with the key that forgets the order passes it. The payload field `merge_order` gains `after` (each `event_id`, `after`, `number`, `reason`, `by`) only then; with no order recorded nothing changes.
+
+### 6.4 Status, state
+
+`pull_requests[].merge_order` lists each order of the pull request with `landed`. No state in memory beside the ledger; a restart changes nothing.
+
+### 6.5 Known limits
+
+- A landing makibad did not record is not seen: A stays held until the person merges it by hand.
+- An Issue is matched only through `issue_refs` of runs dispatched with that Issue, in a project whose repository is recorded.
+- No lift; B must be in A's repository.
+- An order refused for an act awaiting its landing leaves that act to land.
+
+Test: `tests/merge_order_person.rs`.

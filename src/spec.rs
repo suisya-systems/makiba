@@ -81,6 +81,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "belt_dispatched",
     "belt_skipped",
     "belt_stopped",
+    "merge_order_set",
 ];
 
 /// The exit code of a request that was done or accepted.

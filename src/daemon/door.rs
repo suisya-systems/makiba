@@ -2923,6 +2923,9 @@ struct GateRows {
     /// The other open pull requests of the repository (Issue 331), as `prwatch::followed` reads
     /// them; read again when the verdict is recorded, a difference there is "ask again".
     others: Vec<OpenPr>,
+    /// The merge orders the person set on the PR (Issue 338); the copy read again inside the
+    /// verdict's transaction is the one judged.
+    orders: Vec<super::gate::After>,
 }
 
 /// One other open pull request of the repository (Issue 331, merge-order.md 3.3): its task,
@@ -3030,6 +3033,8 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
             gen_close: f.gen_close,
         })
         .collect();
+    // Issue 338: the merge orders the person set on this pull request, from the ledger only.
+    let orders = super::gate::person_orders(c, repo, pr)?;
     Ok(GateRows {
         latest_ci: ci
             .last()
@@ -3040,6 +3045,7 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         task,
         review,
         others,
+        orders,
     })
 }
 
@@ -3640,10 +3646,13 @@ impl Door {
         // check over tests/ waits while other open pull requests have test commits, whose declared
         // tests cannot change. Under acceptance no person is asked, so it is refused; under human
         // the person decides. An earlier refusal keeps its verdict and has the line appended.
-        let order = event
+        let mut order = event
             .as_ref()
             .map(|v| v.merge_order.clone())
             .unwrap_or_default();
+        // Issue 338: the orders the person set, as read inside this transaction, whose pull
+        // request or Issue has not landed.
+        order.after = now.orders.iter().filter(|o| !o.landed).cloned().collect();
         if order.holds() {
             let line = merge_order_line(&repo, pr, &order);
             if allow && mode == "acceptance" {
@@ -3656,6 +3665,35 @@ impl Door {
                 warn = true;
                 warnings.push(line.clone());
                 reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
+        // Issue 338 (docs/design/merge-order.md section 6): an order the person set holds the pull
+        // request until its pull request or Issue has landed, under either mode: the person
+        // decided already, so neither a later secretary nor an approval with the key passes it.
+        // An earlier refusal keeps its verdict and has the line appended.
+        if order.person_holds() {
+            let clauses: Vec<String> = order
+                .after
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{repo}#{pr} merges only after {} has landed (order {}, recorded by {}: {})",
+                        o.named(),
+                        o.event_id,
+                        o.by,
+                        o.reason
+                    )
+                })
+                .collect();
+            let line = format!("the person set a merge order: {}", clauses.join("; "));
+            if allow {
+                allow = false;
+                verdict = "merge_order".into();
+                reason = format!(
+                    "{line}; it has not landed, so this one waits; no check makes an exception: if the person decides otherwise, they merge it in the GitHub web UI ({reason})"
+                );
             } else {
                 reason = format!("{reason}; {line}");
             }
@@ -3707,7 +3745,7 @@ impl Door {
         if !edited.is_empty() {
             payload["edited_tests"] = json!(edited);
         }
-        if order.holds() {
+        if order.holds() || order.person_holds() {
             payload["merge_order"] = json!({
                 "paths": order.paths,
                 "waits_for": order.waits_for.iter().map(|w| json!({
@@ -3718,6 +3756,18 @@ impl Door {
                     "pr": n, "task": t, "why": why,
                 })).collect::<Vec<_>>(),
             });
+            if order.person_holds() {
+                payload["merge_order"]["after"] = json!(
+                    order
+                        .after
+                        .iter()
+                        .map(|o| json!({
+                            "event_id": o.event_id, "after": o.after, "number": o.number,
+                            "reason": o.reason, "by": o.by,
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         if let Some(t) = &now.task {
             payload["task"] = json!(t);
@@ -4339,11 +4389,13 @@ impl Door {
         let action = match args.get("action") {
             None | Some(Value::Null) => "request",
             Some(a) => match a.as_str() {
-                Some(a @ ("request" | "approve" | "refuse" | "withdraw")) => a,
+                Some(a @ ("request" | "order" | "approve" | "refuse" | "withdraw")) => a,
                 _ => {
                     return fail(
                         &w,
-                        Err(usage("action is request, approve, refuse or withdraw")),
+                        Err(usage(
+                            "action is request, order, approve, refuse or withdraw",
+                        )),
                     );
                 }
             },
@@ -4361,6 +4413,7 @@ impl Door {
         match action {
             "approve" => return self.merge_approve(w, actor, args, idem),
             "refuse" | "withdraw" => return merge_end(&w, actor, role, action, args, idem),
+            "order" => return merge_order_set(&w, actor, args, idem),
             _ => {}
         }
         let parsed = (|| -> Result<_, DoorError> {
@@ -4742,6 +4795,152 @@ impl Door {
             return Err(internal(e));
         }
         Ok(answer)
+    }
+}
+
+/// `merge` action `order` (Issue 338, docs/design/merge-order.md section 6): the person's order
+/// "`repo#pr` merges only after `after_pr` or `after_issue` has landed", relayed by the secretary
+/// or given by the person, recorded as `merge_order_set` in one transaction with its command. The
+/// same order again is the first one. Refused (`conflict`) while the pull request has a merge act
+/// of makibad awaiting its landing: that act runs without a new judgement, so the order could not
+/// hold it.
+fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str>) -> Response {
+    let fail = |r: Response| {
+        let _ = record(w, actor, "merge", args, idem, &r);
+        r
+    };
+    let parsed = (|| -> Result<(String, i64, &'static str, i64, String), DoorError> {
+        let repo = str_arg(args, "repo")?;
+        if repo
+            .split_once('/')
+            .is_none_or(|(o, n)| o.is_empty() || n.is_empty() || n.contains('/'))
+        {
+            return Err(usage(format!("repo is owner/name, not {repo:?}")));
+        }
+        let number = |k: &str| -> Result<Option<i64>, DoorError> {
+            match args.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => v
+                    .as_i64()
+                    .filter(|n| *n > 0)
+                    .map(Some)
+                    .ok_or_else(|| usage(format!("{k} is a positive number"))),
+            }
+        };
+        let pr = number("pr")?
+            .ok_or_else(|| usage("the argument pr (a pull request number) is missing"))?;
+        let (after, n) = match (number("after_pr")?, number("after_issue")?) {
+            (Some(n), None) => ("pr", n),
+            (None, Some(n)) => ("issue", n),
+            _ => {
+                return Err(usage(
+                    "an order names exactly one of after_pr (a pull request) and after_issue (an Issue) of the same repository",
+                ));
+            }
+        };
+        if after == "pr" && n == pr {
+            return Err(usage("a pull request cannot wait for itself"));
+        }
+        let reason = args
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| {
+                usage("the argument reason (the person's decision, as text) is missing")
+            })?;
+        Ok((repo.to_string(), pr, after, n, reason.to_string()))
+    })();
+    let (repo, pr, after, number, reason) = match parsed {
+        Ok(p) => p,
+        Err(e) => return fail(Err(e)),
+    };
+    if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+        return Err(internal(e));
+    }
+    let done = (|| -> Result<Response, rusqlite::Error> {
+        if let Some(a) = act_awaiting(w.conn(), &repo, pr)? {
+            return Ok(Err(refuse(
+                ErrorKind::Conflict,
+                format!(
+                    "{repo}#{pr} has a merge act of makibad awaiting its landing (attempt {}); an order cannot hold it",
+                    a.attempt
+                ),
+                "tell the person: the merge was already sent",
+            )));
+        }
+        let project = if after == "issue" {
+            let projects: Vec<(String, Option<String>)> = w
+                .conn()
+                .prepare(
+                    "SELECT slug, origin_url FROM projects WHERE status = 'active' ORDER BY slug",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let found = projects.into_iter().find(|(_, url)| {
+                url.as_deref()
+                    .and_then(super::triage::owner_repo_from_url)
+                    .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
+            });
+            match found {
+                Some((slug, _)) => Some(slug),
+                None => {
+                    return Ok(Err(refuse(
+                        ErrorKind::NotFound,
+                        format!("no active project's recorded repository is {repo}"),
+                        "an Issue is matched through the runs of its project",
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        let existing = super::gate::person_orders(w.conn(), &repo, pr)?
+            .into_iter()
+            .find(|o| o.after == after && o.number == number);
+        let (event_id, landed) = match existing {
+            Some(o) => (o.event_id, o.landed),
+            None => {
+                let task: Option<String> = w
+                    .conn()
+                    .query_row(
+                        "SELECT r.task_id FROM pr_watches p JOIN runs r ON r.id = p.run_id
+                         WHERE lower(p.repo) = lower(?1) AND p.pr = ?2 ORDER BY p.id DESC LIMIT 1",
+                        params![repo, pr],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let payload = json!({"repo": repo, "pr": pr, "after": after, "number": number,
+                                     "project": project, "reason": reason, "by": actor});
+                let id = w
+                    .append_event(&NewEvent {
+                        kind: "merge_order_set",
+                        actor: Some(actor),
+                        payload: Some(&payload),
+                        run_task_id: task.as_deref(),
+                        ..Default::default()
+                    })
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                let landed =
+                    super::gate::order_landed(w.conn(), &repo, after, number, project.as_deref())?;
+                (id, landed)
+            }
+        };
+        Ok(Ok(
+            json!({"status": "recorded", "event_id": event_id, "repo": repo, "pr": pr,
+                     "after": after, "number": number, "landed": landed}),
+        ))
+    })();
+    match done {
+        Ok(Ok(v)) => merge_finish(w, actor, args, idem, "done", Ok(v)),
+        Ok(Err(e)) => {
+            let _ = w.rollback();
+            fail(Err(e))
+        }
+        Err(e) => {
+            let _ = w.rollback();
+            Err(internal(e))
+        }
     }
 }
 
@@ -5821,12 +6020,14 @@ fn tool(v: Verb) -> Value {
             &[],
         ),
         Verb::Merge => (
-            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing.",
+            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing. action order records a merge order the person decided: repo, pr (the pull request that waits), exactly one of after_pr or after_issue (what must land first, in the same repository) and reason (the person's decision); the gate then refuses that pull request under either mode until the other has landed. The same order again is the first one; no action lifts it.",
             Map::from_iter([
                 (
                     "action".into(),
-                    json!({"type": "string", "enum": ["request", "withdraw"]}),
+                    json!({"type": "string", "enum": ["request", "order", "withdraw"]}),
                 ),
+                ("after_pr".into(), json!({"type": "integer"})),
+                ("after_issue".into(), json!({"type": "integer"})),
                 ("repo".into(), text.clone()),
                 ("pr".into(), json!({"type": "integer"})),
                 ("head".into(), text.clone()),
@@ -5837,7 +6038,8 @@ fn tool(v: Verb) -> Value {
                 ("id".into(), json!({"type": "integer"})),
                 ("reason".into(), text.clone()),
             ]),
-            // Each action checks its own (request: repo, pr, head; withdraw: id).
+            // Each action checks its own (request: repo, pr, head; order: repo, pr, after_pr or
+            // after_issue, reason; withdraw: id).
             &[],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
