@@ -15,11 +15,12 @@ use std::process::{Command, Stdio};
 const ROLES: [&str; 3] = ["secretary", "worker", "curator"];
 
 /// Every hook a role's settings may name; `deny-base` is M4-1's.
-const HOOKS: [&str; 7] = [
+const HOOKS: [&str; 8] = [
     "deny-base",
     "deny-push",
     "deny-dangerous-git",
     "deny-no-verify",
+    "deny-no-verify-code-run",
     "deny-workers-delete",
     "worker-boundary",
     "deny-foreground-subagent",
