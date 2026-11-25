@@ -70,7 +70,7 @@ How stage 1's decisions serve the later stages:
 | Decided now | Used later |
 | --- | --- |
 | The dispatcher is a resident process. | Stage 2 starts it at boot; it can own sending notifications. |
-| Terminal events go through a delivery ledger. | Stage 2 adds a recipient to the same ledger. |
+| Terminal events go through a delivery ledger. | Stage 2 adds a recipient to the same ledger. The person's call (Issue 272) is recorded instead as events with `to` `person` (`notify_sent`, `notify_failed`), outside that ledger: the person has no box. |
 | Pending decisions live in a table and are answered with `makiba answer`. | Stage 3's remote approval calls the same command. |
 | Models touch neither the base nor `state.db`. | Stage 3 adds an entry without adding a boundary. |
 | History is in `state.db`. | Stage 4 searches it. |

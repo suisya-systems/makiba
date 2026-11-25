@@ -1,0 +1,605 @@
+//! Calling the person back (Issue 272, docs/design/person-call.md): the one owner of telling the
+//! person that something waits for them.
+//!
+//! What waits for the person: every `pending` entry `escalated` (by the secretary, or a stop
+//! `makibad` wrote), and every entry of kind `merge` still `open` (it waits for the person's key).
+//! An `open` question is the secretary's, so a worker never reaches the person through here: the
+//! call stays the secretary's, and the contact stays one.
+//!
+//! The channel is a command of the person's: the organization setting `notify_command`, the
+//! absolute path of an executable, run with no shell as `<path> <title>` in a process group of its
+//! own, the body on stdin from a file, stderr into a file, stdout to /dev/null. A path an agent
+//! could write is refused at the set and again before every call (`check`), since `makibad` runs
+//! outside every sandbox.
+//!
+//! The ledger is the events: `notify_sent` and `notify_failed` with `to` `person` (outside the
+//! delivery ledger: the person has no box). Whether an entry was called is read from them each
+//! tick, never kept as a latch. An entry is called at most once on success; a failure counts only
+//! against the setting it was made with (events after the setting's newest `config_set`), three
+//! at most, `RETRY` apart.
+//!
+//! In memory beside the ledger: the one call in flight (or its result not yet written) and the
+//! start of the last call (`GAP`). The process is polled, never waited on, so a command cannot
+//! hold the tick; at `TIMEOUT` its whole group is killed. A call not recorded when `makibad`
+//! stops is made again after the restart (at least once).
+
+use crate::db::writer::NewEvent;
+use crate::db::{Result, StateWriter};
+use crate::status_local::Mask;
+use serde_json::{Value, json};
+use std::collections::HashMap;
+use std::fs::{File, OpenOptions};
+use std::io::Read;
+use std::os::unix::fs::{MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+/// The setting's key (`config`, the organization's).
+pub const KEY: &str = "notify_command";
+/// The recipient written in the events.
+pub const TO: &str = "person";
+/// The last line of every body.
+pub const LAST_LINE: &str = "Answer in the secretary's conversation, or see makiba status.";
+/// Tries per entry under one setting.
+const TRIES: usize = 3;
+/// Entry lines in one body; the rest are counted.
+const LINES: usize = 5;
+/// Characters of a question's first line kept.
+const CUT: usize = 120;
+/// Bytes of stderr kept, after masking.
+const STDERR_KEEP: usize = 500;
+/// Bytes of stderr read.
+const STDERR_READ: u64 = 64 * 1024;
+/// The longest value of the setting.
+const VALUE_MAX: usize = 4096;
+
+/// Milliseconds from `var`, else `default`.
+fn ms(var: &str, default: u64) -> Duration {
+    Duration::from_millis(
+        std::env::var(var)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(default),
+    )
+}
+
+/// Rule 2 of design section 2.1: the text of a value, before anything is looked at on disk.
+fn text_rule(value: &str) -> std::result::Result<(), String> {
+    if !value.starts_with('/') {
+        return Err(format!("{KEY} is an absolute path (it starts with /)"));
+    }
+    if value.contains(['\0', '\n', '\r']) {
+        return Err(format!("{KEY} holds no NUL, newline or carriage return"));
+    }
+    if value.len() > VALUE_MAX {
+        return Err(format!("{KEY} is at most {VALUE_MAX} bytes"));
+    }
+    Ok(())
+}
+
+/// `path` resolved, when it exists.
+fn resolved(path: &Path) -> PathBuf {
+    std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
+}
+
+/// The places an agent writes (spec section 2) and the system's temporary folders, resolved.
+fn agent_places(state: &Path) -> Vec<(PathBuf, &'static str)> {
+    let p = super::prepare::Places::from_env(state);
+    let mut out = vec![
+        (resolved(state), "the state folder"),
+        (resolved(&p.workers), "the worktrees"),
+        (resolved(&p.docs), "the document folders"),
+        (resolved(&p.repos), "the repositories"),
+        (
+            resolved(&super::curator::knowledge_dir()),
+            "the knowledge folder",
+        ),
+    ];
+    for t in [
+        PathBuf::from("/tmp"),
+        PathBuf::from("/private/tmp"),
+        PathBuf::from("/var/tmp"),
+        std::env::temp_dir(),
+    ] {
+        out.push((resolved(&t), "a temporary folder"));
+    }
+    out
+}
+
+/// Rules 3 to 5 of design section 2.1, on a value that passed rule 2: the resolved file exists,
+/// is a regular file, is under no place an agent writes, and it and every folder above it are
+/// the user's or root's and writable by nobody else (a sticky folder excepted).
+fn disk_rule(value: &str, state: &Path) -> std::result::Result<PathBuf, String> {
+    let file =
+        std::fs::canonicalize(value).map_err(|e| format!("{value} cannot be resolved: {e}"))?;
+    let meta = std::fs::metadata(&file).map_err(|e| format!("{}: {e}", file.display()))?;
+    if !meta.is_file() {
+        return Err(format!("{} is not a regular file", file.display()));
+    }
+    for (place, what) in agent_places(state) {
+        if !place.as_os_str().is_empty() && file.starts_with(&place) {
+            return Err(format!(
+                "{} is under {what} ({}), which an agent may write",
+                file.display(),
+                place.display()
+            ));
+        }
+    }
+    // SAFETY: geteuid has no preconditions.
+    let uid = unsafe { libc::geteuid() };
+    let mut at = Some(file.as_path());
+    while let Some(p) = at {
+        let m = std::fs::metadata(p).map_err(|e| format!("{}: {e}", p.display()))?;
+        if m.uid() != uid && m.uid() != 0 {
+            return Err(format!(
+                "{} is owned by another user (uid {})",
+                p.display(),
+                m.uid()
+            ));
+        }
+        let mode = m.permissions().mode();
+        let sticky_dir = m.is_dir() && mode & 0o1000 != 0;
+        if mode & 0o022 != 0 && !sticky_dir {
+            return Err(format!(
+                "{} is writable by group or others (mode {:o})",
+                p.display(),
+                mode & 0o7777
+            ));
+        }
+        at = p.parent();
+    }
+    Ok(file)
+}
+
+/// The rule of a set: empty is off; anything else passes every rule of design section 2.1.
+pub fn check_set(value: &str, state: &Path) -> std::result::Result<(), String> {
+    if value.is_empty() {
+        return Ok(());
+    }
+    text_rule(value)?;
+    disk_rule(value, state).map(|_| ())
+}
+
+/// Every control character but newline as a space.
+fn plain(s: &str) -> String {
+    s.chars()
+        .map(|c| if c.is_control() && c != '\n' { ' ' } else { c })
+        .collect()
+}
+
+/// `s` cut to at most `n` bytes, at a character boundary.
+fn cut_bytes(s: &str, n: usize) -> &str {
+    if s.len() <= n {
+        return s;
+    }
+    let mut end = n;
+    while !s.is_char_boundary(end) {
+        end -= 1;
+    }
+    &s[..end]
+}
+
+/// One entry that waits for the person.
+struct Waiting {
+    id: i64,
+    merge: bool,
+    question: String,
+}
+
+/// The line of an entry: masked whole, control characters replaced, its first line, then cut.
+fn entry_line(mask: &Mask, e: &Waiting) -> String {
+    if e.merge {
+        return format!(
+            "#{} a merge waits for your key: makiba merge approve {}",
+            e.id, e.id
+        );
+    }
+    let text = plain(&mask.text(&e.question));
+    let first = text.lines().next().unwrap_or_default();
+    let shown = if first.chars().count() > CUT {
+        format!("{}...", first.chars().take(CUT).collect::<String>())
+    } else {
+        first.to_string()
+    };
+    format!("#{} {shown}", e.id)
+}
+
+/// The title and the body of a call over `entries` (oldest first).
+fn texts(mask: &Mask, entries: &[Waiting]) -> (String, String) {
+    let title = format!("makiba secretary: {} waiting for you", entries.len());
+    let mut body = String::new();
+    for e in entries.iter().take(LINES) {
+        body.push_str(&entry_line(mask, e));
+        body.push('\n');
+    }
+    if entries.len() > LINES {
+        body.push_str(&format!("and {} more\n", entries.len() - LINES));
+    }
+    body.push_str(LAST_LINE);
+    body.push('\n');
+    (mask.text(&title), body)
+}
+
+/// The setting as stored: its value and the id of its `config_set`; `None` when never set.
+fn setting(w: &StateWriter) -> Result<Option<(String, i64)>> {
+    use rusqlite::OptionalExtension;
+    Ok(w.conn()
+        .query_row(
+            "SELECT COALESCE(json_extract(payload_json, '$.value'), ''), id FROM events
+             WHERE kind = 'config_set' AND json_extract(payload_json, '$.project') = ''
+               AND json_extract(payload_json, '$.key') = ?1
+             ORDER BY id DESC LIMIT 1",
+            [KEY],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?)
+}
+
+/// What the events say of one entry under the setting `since`: called, failures, and whether
+/// the newest failure is younger than `retry`.
+#[derive(Default)]
+struct Record {
+    called: bool,
+    failures: usize,
+    recent: bool,
+}
+
+fn records(w: &StateWriter, since: i64, retry: Duration) -> Result<HashMap<i64, Record>> {
+    let mut out: HashMap<i64, Record> = HashMap::new();
+    let mut q = w.conn().prepare(
+        "SELECT kind, id, payload_json,
+                (julianday('now') - julianday(occurred_at)) * 86400000.0
+         FROM events WHERE kind IN ('notify_sent', 'notify_failed')
+           AND json_extract(payload_json, '$.to') = ?1",
+    )?;
+    let rows = q.query_map([TO], |r| {
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, i64>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, f64>(3)?,
+        ))
+    })?;
+    for row in rows {
+        let (kind, id, payload, age_ms) = row?;
+        let v: Value = serde_json::from_str(&payload).unwrap_or(Value::Null);
+        let ids = v["pending_ids"].as_array().cloned().unwrap_or_default();
+        for p in ids.iter().filter_map(Value::as_i64) {
+            let r = out.entry(p).or_default();
+            if kind == "notify_sent" {
+                r.called = true;
+            } else if id > since {
+                r.failures += 1;
+                if age_ms < retry.as_millis() as f64 {
+                    r.recent = true;
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// The entries that wait for the person, oldest first.
+fn waiting(w: &StateWriter) -> Result<Vec<Waiting>> {
+    let mut q = w.conn().prepare(
+        "SELECT id, kind, question FROM pending
+         WHERE status = 'escalated' OR (kind = 'merge' AND status = 'open') ORDER BY id",
+    )?;
+    let rows = q.query_map([], |r| {
+        Ok(Waiting {
+            id: r.get(0)?,
+            merge: r.get::<_, String>(1)? == "merge",
+            question: r.get(2)?,
+        })
+    })?;
+    Ok(rows.collect::<rusqlite::Result<_>>()?)
+}
+
+/// A call whose process runs.
+struct Flight {
+    child: Child,
+    pgid: i32,
+    ids: Vec<i64>,
+    command: String,
+    title: String,
+    body: String,
+    started: Instant,
+    files: [PathBuf; 2],
+}
+
+/// A finished call whose event is not yet written.
+struct Done {
+    kind: &'static str,
+    payload: Value,
+    files: Vec<PathBuf>,
+}
+
+/// The call pass of `makibad`'s loop.
+pub struct Call {
+    state: PathBuf,
+    gap: Duration,
+    retry: Duration,
+    timeout: Duration,
+    flight: Option<Flight>,
+    done: Option<Done>,
+    last_start: Option<Instant>,
+    seq: u64,
+}
+
+impl Call {
+    /// The test seams are read here, when `makibad` starts.
+    pub fn new(state: &Path) -> Call {
+        Call {
+            state: state.to_path_buf(),
+            gap: ms("MAKIBA_CALL_GAP_MS", 30_000),
+            retry: ms("MAKIBA_CALL_RETRY_MS", 60_000),
+            timeout: ms("MAKIBA_CALL_TIMEOUT_MS", 10_000),
+            flight: None,
+            done: None,
+            last_start: None,
+            seq: 0,
+        }
+    }
+
+    /// One tick: write a finished call, poll the one in flight, or start one.
+    pub fn pass(&mut self, w: &StateWriter) -> Result<()> {
+        self.write(w)?;
+        if self.flight.is_some() {
+            self.poll(w)?;
+            return self.write(w);
+        }
+        let Some((command, since)) = setting(w)? else {
+            return Ok(());
+        };
+        if command.is_empty() {
+            return Ok(());
+        }
+        if self.last_start.is_some_and(|t| t.elapsed() < self.gap) {
+            return Ok(());
+        }
+        let records = records(w, since, self.retry)?;
+        let due: Vec<Waiting> = waiting(w)?
+            .into_iter()
+            .filter(|e| {
+                let r = records.get(&e.id);
+                r.is_none_or(|r| !r.called && r.failures < TRIES && !r.recent)
+            })
+            .collect();
+        if due.is_empty() {
+            return Ok(());
+        }
+        self.last_start = Some(Instant::now());
+        let ids: Vec<i64> = due.iter().map(|e| e.id).collect();
+        let mask = Mask::new(w.conn());
+        if let Err(why) = text_rule(&command).and_then(|()| disk_rule(&command, &self.state)) {
+            self.done = Some(Done {
+                kind: "notify_failed",
+                payload: json!({"to": TO, "pending_ids": ids, "command": command,
+                                "reason": format!("unsafe: {}", mask.text(&why)), "stderr": ""}),
+                files: Vec::new(),
+            });
+            return self.write(w);
+        }
+        let (title, body) = texts(&mask, &due);
+        match self.spawn(&command, &title, &body) {
+            Ok((child, files)) => {
+                let pgid = child.id() as i32;
+                self.flight = Some(Flight {
+                    child,
+                    pgid,
+                    ids,
+                    command,
+                    title,
+                    body,
+                    started: Instant::now(),
+                    files,
+                });
+                Ok(())
+            }
+            Err((e, files)) => {
+                self.done = Some(Done {
+                    kind: "notify_failed",
+                    payload: json!({"to": TO, "pending_ids": ids, "command": command,
+                                    "reason": format!("spawn: {e}"), "stderr": ""}),
+                    files,
+                });
+                self.write(w)
+            }
+        }
+    }
+
+    /// The call's two files, in `<state>/tmp/call/` (mode 0700), and its process started.
+    #[allow(clippy::type_complexity)]
+    fn spawn(
+        &mut self,
+        command: &str,
+        title: &str,
+        body: &str,
+    ) -> std::result::Result<(Child, [PathBuf; 2]), (String, Vec<PathBuf>)> {
+        let folder = super::prepare::tmp_root(&self.state.join("settings")).join("call");
+        let fail = |e: std::io::Error, files: Vec<PathBuf>| (e.to_string(), files);
+        std::fs::create_dir_all(&folder).map_err(|e| fail(e, Vec::new()))?;
+        std::fs::set_permissions(&folder, std::fs::Permissions::from_mode(0o700))
+            .map_err(|e| fail(e, Vec::new()))?;
+        self.seq += 1;
+        let stem = format!("{}-{}", std::process::id(), self.seq);
+        let input = folder.join(format!("{stem}.in"));
+        let err = folder.join(format!("{stem}.err"));
+        let files = vec![input.clone(), err.clone()];
+        let open = |p: &Path| {
+            OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o600)
+                .open(p)
+        };
+        {
+            use std::io::Write;
+            let mut f = open(&input).map_err(|e| fail(e, files.clone()))?;
+            f.write_all(body.as_bytes())
+                .map_err(|e| fail(e, files.clone()))?;
+        }
+        let stdin = File::open(&input).map_err(|e| fail(e, files.clone()))?;
+        let stderr = open(&err).map_err(|e| fail(e, files.clone()))?;
+        let child = Command::new(command)
+            .arg(title)
+            .stdin(Stdio::from(stdin))
+            .stdout(Stdio::null())
+            .stderr(Stdio::from(stderr))
+            .process_group(0)
+            .spawn()
+            .map_err(|e| fail(e, files.clone()))?;
+        Ok((child, [input, err]))
+    }
+
+    /// The call in flight, once: ended, timed out, or still running.
+    fn poll(&mut self, w: &StateWriter) -> Result<()> {
+        let Some(f) = self.flight.as_mut() else {
+            return Ok(());
+        };
+        let reason = match f.child.try_wait() {
+            Ok(Some(status)) => match (status.code(), status.signal()) {
+                (Some(0), _) => None,
+                (Some(n), _) => Some(format!("exit {n}")),
+                (None, Some(s)) => Some(format!("signal {s}")),
+                (None, None) => Some("exit unknown".to_string()),
+            },
+            Ok(None) if f.started.elapsed() < self.timeout => return Ok(()),
+            Ok(None) => {
+                kill_group(f);
+                Some("timeout".to_string())
+            }
+            Err(e) => {
+                kill_group(f);
+                Some(format!("wait: {e}"))
+            }
+        };
+        let Some(f) = self.flight.take() else {
+            return Ok(());
+        };
+        let files = f.files.to_vec();
+        self.done = Some(match reason {
+            None => Done {
+                kind: "notify_sent",
+                payload: json!({"to": TO, "pending_ids": f.ids, "command": f.command,
+                                "title": f.title, "body": f.body}),
+                files,
+            },
+            Some(reason) => {
+                let mask = Mask::new(w.conn());
+                Done {
+                    kind: "notify_failed",
+                    payload: json!({"to": TO, "pending_ids": f.ids, "command": f.command,
+                                    "reason": reason, "stderr": stderr_of(&mask, &f.files[1])}),
+                    files,
+                }
+            }
+        });
+        Ok(())
+    }
+
+    /// The finished call's event, written once; its files removed after.
+    fn write(&mut self, w: &StateWriter) -> Result<()> {
+        let Some(d) = self.done.as_ref() else {
+            return Ok(());
+        };
+        w.append_event(&NewEvent {
+            kind: d.kind,
+            actor: Some("makibad"),
+            payload: Some(&d.payload),
+            ..Default::default()
+        })?;
+        let Some(d) = self.done.take() else {
+            return Ok(());
+        };
+        for f in &d.files {
+            let _ = std::fs::remove_file(f);
+        }
+        if d.kind == "notify_failed" {
+            eprintln!(
+                "makibad: the call to the person failed ({}): {}",
+                d.payload["reason"].as_str().unwrap_or_default(),
+                d.payload["command"].as_str().unwrap_or_default()
+            );
+            self.log_given_up(w, &d.payload)?;
+        }
+        Ok(())
+    }
+
+    /// One log line for each entry of `payload` that has now failed `TRIES` times.
+    fn log_given_up(&self, w: &StateWriter, payload: &Value) -> Result<()> {
+        let Some((_, since)) = setting(w)? else {
+            return Ok(());
+        };
+        let records = records(w, since, self.retry)?;
+        for id in payload["pending_ids"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(Value::as_i64)
+        {
+            if records.get(&id).is_some_and(|r| r.failures == TRIES) {
+                eprintln!(
+                    "makibad: pending entry {id} failed to reach the person {TRIES} times; it is not called again until {KEY} is set again"
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// At a stop: a call still running is ended with its group and not recorded; a finished one
+    /// not yet written is tried once more.
+    pub fn stop(&mut self, w: &StateWriter) {
+        if let Some(mut f) = self.flight.take() {
+            kill_group(&mut f);
+            for p in &f.files {
+                let _ = std::fs::remove_file(p);
+            }
+        }
+        if let Err(e) = self.write(w) {
+            eprintln!("makibad: the call's record is lost at the stop: {e}");
+        }
+    }
+}
+
+/// Kill the call's whole process group and reap its child.
+fn kill_group(f: &mut Flight) {
+    // SAFETY: a negative pid names the process group the call was started in (its own).
+    unsafe { libc::kill(-f.pgid, libc::SIGKILL) };
+    let _ = f.child.kill();
+    let _ = f.child.wait();
+}
+
+/// stderr from its file: masked whole, control characters but newline replaced, then cut.
+fn stderr_of(mask: &Mask, path: &Path) -> String {
+    let mut raw = Vec::new();
+    if let Ok(f) = File::open(path) {
+        let _ = f.take(STDERR_READ).read_to_end(&mut raw);
+    }
+    let text = plain(&mask.text(&String::from_utf8_lossy(&raw)));
+    cut_bytes(&text, STDERR_KEEP).to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_text_rule_refuses_relative_and_control_characters() {
+        assert!(text_rule("relative").is_err());
+        assert!(text_rule("/a\nb").is_err());
+        assert!(text_rule("/a\0b").is_err());
+        assert!(text_rule(&format!("/{}", "a".repeat(VALUE_MAX))).is_err());
+        assert!(text_rule("/usr/bin/notify").is_ok());
+    }
+
+    #[test]
+    fn cutting_keeps_a_character_whole() {
+        assert_eq!(cut_bytes("aé", 2), "a");
+        assert_eq!(cut_bytes("ab", 5), "ab");
+        assert_eq!(plain("a\0b\tc\nd"), "a b c\nd");
+    }
+}

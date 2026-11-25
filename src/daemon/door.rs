@@ -38,13 +38,14 @@ const IO_LIMIT: Duration = Duration::from_secs(5);
 /// MCP protocol versions answered as asked; any other gets the first.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// The settings `config` knows (spec section 12).
-const CONFIG_KEYS: [&str; 6] = [
+const CONFIG_KEYS: [&str; 7] = [
     "max_concurrent_workers",
     "merge_approval_mode",
     "conversation_language",
     "artifact_language",
     super::project::OWNERS_KEY,
     super::project::HOSTS_KEY,
+    super::call::KEY,
 ];
 
 /// What a request comes to: the response's `result`, or its `error`.
@@ -2783,6 +2784,9 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     if key == super::project::HOSTS_KEY {
         return network_hosts(w, actor, action, args);
     }
+    if key == super::call::KEY {
+        return notify_command(w, actor, action, args);
+    }
     let Some((kind, per_project)) = super::language::kind_of(key) else {
         return match action {
             "get" => Ok(json!({"key": key, "value": null})),
@@ -2875,6 +2879,40 @@ fn allowed_owners(w: &StateWriter, actor: &str, action: &str, args: &Value) -> R
     })
     .map_err(internal)?;
     Ok(shown(Some(&value)))
+}
+
+/// `config get|set notify_command` (Issue 272): the organization's, the absolute path of the
+/// person's command that calls the person back (docs/design/person-call.md); empty is off. A path
+/// an agent could write is refused (`call::check_set`). Stored as `config_set`.
+fn notify_command(w: &StateWriter, actor: &str, action: &str, args: &Value) -> Response {
+    let key = super::call::KEY;
+    if args
+        .get("project")
+        .and_then(Value::as_str)
+        .is_some_and(|p| !p.is_empty())
+    {
+        return Err(usage(format!("{key} is the organization's: no --project")));
+    }
+    let shown = |v: Option<&str>| json!({"key": key, "project": "", "value": v});
+    if action == "get" {
+        let v = super::language::get(w.conn(), "", key).map_err(internal)?;
+        return Ok(shown(v.as_deref()));
+    }
+    let value = str_arg(args, "value")?;
+    let state = w
+        .conn()
+        .path()
+        .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    super::call::check_set(value, &state).map_err(usage)?;
+    w.append_event(&NewEvent {
+        kind: "config_set",
+        actor: Some(actor),
+        payload: Some(&json!({"project": "", "key": key, "value": value})),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    Ok(shown(Some(value)))
 }
 
 /// `config get|set network_hosts --project <slug>` (Issue 244): the hosts a project's workers may

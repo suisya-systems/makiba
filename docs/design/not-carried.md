@@ -42,8 +42,8 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 **N3. Attention notifications.**
 - Does: an OS notification and a sound when a worker needs the person (approval, decision, CI failed, done), so the person is called back without watching.
 - In claude-org-ja: `docs/design/attention-notification.md`, `.claude/skills/org-attention-start/`, `.claude/skills/org-attention-stop/`, `tools/templates/attention.example.json`, `docs/operations/attention-watch.md`, `tools/secretary_queue_watcher.py`.
-- Nearest in makiba: none. plan.md section 4 lists "notifications" as out, "each a later plan". The base sends no notices of its own, so the contact stays the secretary.
-- Mark: **later**, after #169; Issue #272.
+- Nearest in makiba: the person's call (Issue 272, [person-call.md](person-call.md)): `makibad` runs the person's `notify_command` for the pending entries that wait for the person. The base sends no notices of its own, so the contact stays the secretary.
+- Mark: **build**, the owner having withdrawn "later" for it (2026-11-26); Issue #272.
 - Reason: wanted, but it must be fed by `makibad`'s pending entries and sent as the secretary's call, not as a worker's, to keep one contact; that needs its own design.
 
 **N4. Metrics report.**
@@ -261,9 +261,9 @@ An entry is: what it does for the person; where it lives in claude-org-ja; what 
 
 | Mark | Entries |
 | --- | --- |
-| build | N13, N18, N19 (3) |
+| build | N3, N13, N18, N19 (4) |
 | drop | N2, N6, N8, N9, N10, N11, N12, N14, N15, N20, N21, N22, N23, N24, N25, N26, N29, N30 (18) |
-| later | N1, N3, N4, N5, N7, N16, N17, N27, N28 (9) |
+| later | N1, N4, N5, N7, N16, N17, N27, N28 (8) |
 
 
 ## Appendix: carried, and where
