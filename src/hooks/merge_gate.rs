@@ -61,10 +61,16 @@ pub fn parse(command: &str) -> Result<(), String> {
 }
 
 /// True when `s` has the word merge on its own (not inside a longer name such as
-/// `merge_approval_mode`, `mergedAt` or `before-merge.sh`), or a GraphQL merge or enqueue
-/// mutation's name.
+/// `merge_approval_mode`, `mergedAt` or `before-merge.sh`), a GraphQL merge or enqueue
+/// mutation's name, or a `pulls/<n>/merge*` path (`merge-async` too, which the word alone misses).
 fn merge_word(s: &str) -> bool {
     let s = s.to_lowercase();
+    if regex::Regex::new(r"pulls/[^/]*/merge")
+        .expect("pattern")
+        .is_match(&s)
+    {
+        return true;
+    }
     if [
         "mergepullrequest",
         "automerge",
@@ -660,5 +666,42 @@ fn refused_gh(args: &[Tok], redirections_certain: bool) -> Option<String> {
         ("pr", "merge") => Some("gh pr merge lands nothing from the command line".into()),
         ("alias", "set" | "import") => Some("gh alias set or import can define a merge".into()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse;
+
+    /// The word, kept out of this file's own command lines.
+    const M: &str = "mer\x67e";
+
+    /// The Issue 433 diff review: a write to a `pulls/<n>/merge*` path that a runner or a
+    /// substitution wraps is read as naming merge, as the plain word is.
+    #[test]
+    fn a_wrapped_write_to_a_merge_path_is_refused() {
+        for cmd in [
+            format!(
+                "python3 -c 'import subprocess; subprocess.run([\"gh\",\"api\",\"-X\",\"POST\",\"repos/o/r/pulls/7/{M}-async\"])'"
+            ),
+            format!(
+                "python3 -c 'import os; os.system(\"gh api -X PUT repos/o/r/pulls/7/{M}-queue\")'"
+            ),
+            format!(
+                "perl -e 'system(\"gh\", \"api\", \"-X\", \"PUT\", \"repos/o/r/pulls/7/{M}-async\")'"
+            ),
+            format!("gh api -X PUT $(echo repos/o/r/pulls/7/{M}-async)"),
+            format!("echo repos/o/r/pulls/7/{M}-async | xargs gh api -X PUT"),
+        ] {
+            let why = parse(&cmd).expect_err(&cmd);
+            assert!(why.contains("mcp__makiba__merge"), "{cmd}: {why}");
+        }
+        // A mention, and a read, still pass.
+        for cmd in [
+            format!("grep -rn 'pulls/[0-9]*/{M}-async' src"),
+            format!("gh api repos/o/r/pulls/7/{M}-async"),
+        ] {
+            assert_eq!(parse(&cmd), Ok(()), "{cmd}");
+        }
     }
 }
