@@ -1424,3 +1424,166 @@ pub fn clone_of(
         })
         .map(|(slug, _)| repos.join(slug))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A repository in a temporary folder; `git` runs there with no hook and a fixed author.
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        run(&path, &["init", "-q", "-b", "main"]);
+        (dir, path)
+    }
+
+    fn run(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() || args.first() == Some(&"mer\x67e"),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(dir: &Path, msg: &str, files: &[(&str, &str)]) -> String {
+        for (p, text) in files {
+            let f = dir.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, text).unwrap();
+        }
+        run(dir, &["add", "--all"]);
+        run(dir, &["commit", "-q", "-m", msg]);
+        run(dir, &["rev-parse", "HEAD"])
+    }
+
+    const LINES: &str = "one\ntwo\nthree\nfour\nfive\nsix\n";
+
+    /// The test commit changes the first line of both declared tests; the base changes the first
+    /// line of `tests/a.py` (a conflict) and the last of `tests/b.py` (clean). The branch merges
+    /// the base, keeping in `tests/a.py` what `git merge-tree` wrote for the conflict (its
+    /// markers), and in `tests/b.py` git's clean merge. Returns (dir, test commit, base, head).
+    fn conflicted() -> (tempfile::TempDir, PathBuf, String, String, String) {
+        let (tmp, dir) = repo();
+        commit(
+            &dir,
+            "base",
+            &[("tests/test_a.py", LINES), ("tests/test_b.py", LINES)],
+        );
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        let first = LINES.replace("one", "ONE");
+        let m = commit(
+            &dir,
+            "test\n\nAcceptance-Test: tests/test_a.py\nAcceptance-Test: tests/test_b.py",
+            &[("tests/test_a.py", &first), ("tests/test_b.py", &first)],
+        );
+        run(&dir, &["checkout", "-q", "main"]);
+        let base = commit(
+            &dir,
+            "base moves",
+            &[
+                ("tests/test_a.py", &LINES.replace("one", "uno")),
+                ("tests/test_b.py", &LINES.replace("six", "SIX")),
+            ],
+        );
+        run(&dir, &["checkout", "-q", "feature"]);
+        // A merge that stops on the conflict; the conflicted file is kept as merge-tree writes it.
+        run(&dir, &["mer\x67e", "-q", "--no-edit", "main"]);
+        let (mt, conflicts) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            vec!["tests/test_a.py".to_string()]
+        );
+        let blob = &mt["tests/test_a.py"].1;
+        let text = run(&dir, &["cat-file", "blob", blob]);
+        std::fs::write(dir.join("tests/test_a.py"), format!("{text}\n")).unwrap();
+        run(&dir, &["add", "--all"]);
+        run(&dir, &["commit", "-q", "--no-edit"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        (tmp, dir, m, base, head)
+    }
+
+    /// Diff review (Issue 513): a declared test git conflicted on stays a condition (a) refusal,
+    /// even when head holds exactly the tree entry `git merge-tree` wrote for it.
+    #[test]
+    fn a_conflicted_declared_test_is_refused_even_as_merge_tree_wrote_it() {
+        let (_tmp, dir, m, base, head) = conflicted();
+        let (mt, _) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            tree(&dir, &head).unwrap().get("tests/test_a.py"),
+            mt.get("tests/test_a.py"),
+            "head holds merge-tree's entry of the conflicted file"
+        );
+        let paths = vec!["tests/test_a.py".to_string(), "tests/test_b.py".to_string()];
+        let why = check_protected(&dir, &m, &base, &head, &paths)
+            .expect_err("a conflicted declared test is refused")
+            .0;
+        assert!(
+            why.contains("protected paths changed after the test commit")
+                && why.contains("tests/test_a.py")
+                && !why.contains("tests/test_b.py"),
+            "{why}"
+        );
+    }
+
+    /// Diff review (Issue 513): a declared test git merged cleanly is listed in `merged_tests`
+    /// while `git merge-tree` of the test commit and the base conflicted on another path (a helper
+    /// the test commit changed, which head keeps as the test commit left it).
+    #[test]
+    fn a_clean_declared_test_beside_another_conflict_is_listed() {
+        let (_tmp, dir) = repo();
+        commit(
+            &dir,
+            "base",
+            &[("tests/common/h.py", LINES), ("tests/test_b.py", LINES)],
+        );
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        let mine = LINES.replace("one", "ONE");
+        let m = commit(
+            &dir,
+            "test\n\nAcceptance-Test: tests/test_b.py",
+            &[("tests/common/h.py", &mine), ("tests/test_b.py", &mine)],
+        );
+        run(&dir, &["checkout", "-q", "main"]);
+        let base = commit(
+            &dir,
+            "base moves",
+            &[
+                ("tests/common/h.py", &LINES.replace("one", "uno")),
+                ("tests/test_b.py", &LINES.replace("six", "SIX")),
+            ],
+        );
+        run(&dir, &["checkout", "-q", "feature"]);
+        let (_, conflicts) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            vec!["tests/common/h.py".to_string()]
+        );
+        run(&dir, &["mer\x67e", "-q", "--no-edit", "main"]);
+        std::fs::write(dir.join("tests/common/h.py"), &mine).unwrap();
+        run(&dir, &["add", "--all"]);
+        run(&dir, &["commit", "-q", "--no-edit"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        let merged = check_protected(&dir, &m, &base, &head, &["tests/test_b.py".to_string()])
+            .expect("a clean merge of the declared test is no refusal");
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].path, "tests/test_b.py");
+        let id = |rev: &str| run(&dir, &["rev-parse", &format!("{rev}:tests/test_b.py")]);
+        assert_eq!(merged[0].ids, vec![id(&m), id(&base), id(&head)]);
+    }
+}
