@@ -68,7 +68,9 @@ repository and touches no database. With `<b>` the project's default branch
 (`projects.default_branch`, the base `update` judges against, `push.rs` `judged_base`), a reading
 is:
 
-1. Fetch from `origin`, with `--no-write-fetch-head --no-auto-gc`, `+refs/heads/<b>` into
+1. Fetch from `origin`, with `--no-write-fetch-head --no-auto-gc --refmap=` (no opportunistic
+   update of `refs/remotes/origin/*`; every git call bounded at 120 s and stopped by the reader's
+   cancel), `+refs/heads/<b>` into
    `refs/makiba/ready/<task>/base` and `+refs/heads/<branch>` into `refs/makiba/ready/<task>/head`.
    Refs of its own: the `update` job fetches into `refs/remotes/origin/*`, and two fetches of one
    ref collide on git's ref lock (Issue 369). A branch at origin not at the candidate's head: the

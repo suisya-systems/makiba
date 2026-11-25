@@ -13,6 +13,8 @@
 use super::run_repo::HOOKS_OFF;
 use std::path::Path;
 use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 /// The paths whose change by a landing makes a head not ready (docs/design/queue-ready.md
 /// section 1). `.github/` counts only for what `scheduling_only` cannot clear.
@@ -41,27 +43,94 @@ pub enum Reading {
     },
 }
 
-/// `git -C <dir> <args>` with no hook, prompt or replace object: its trimmed output, or git's
-/// message.
-fn git(dir: &Path, args: &[&str]) -> Result<String, String> {
-    let out = Command::new("git")
-        .arg("-C")
-        .arg(dir)
-        .args(["-c", HOOKS_OFF])
-        .args(args)
-        .env("GIT_TERMINAL_PROMPT", "0")
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run git: {e}"))?;
-    if out.status.success() {
-        Ok(String::from_utf8_lossy(&out.stdout).trim_end().to_string())
-    } else {
-        Err(format!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ))
+/// How long one git call may run before it is stopped (as `gh.rs` bounds a gh call).
+const GIT_TIMEOUT: Duration = Duration::from_secs(120);
+
+/// git in one repository, every call bounded by a timeout and stopped by `cancel`: a stalled
+/// fetch ends as a failure, which counts against the reader's budget, and never holds a stop.
+pub struct Git<'a> {
+    dir: &'a Path,
+    cancel: &'a AtomicBool,
+    program: &'a str,
+    timeout: Duration,
+}
+
+impl<'a> Git<'a> {
+    pub fn new(dir: &'a Path, cancel: &'a AtomicBool) -> Git<'a> {
+        Git {
+            dir,
+            cancel,
+            program: "git",
+            timeout: GIT_TIMEOUT,
+        }
+    }
+
+    /// `git -C <dir> <args>` with no hook, prompt or replace object, in a process group of its
+    /// own (a stop kills what it started too): its trimmed output, or git's message.
+    fn run(&self, args: &[&str]) -> Result<String, String> {
+        use std::io::Read;
+        use std::os::unix::process::CommandExt;
+        let mut cmd = Command::new(self.program);
+        if self.program == "git" {
+            cmd.arg("-C").arg(self.dir).args(["-c", HOOKS_OFF]);
+        }
+        let mut child = cmd
+            .args(args)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .env("GIT_NO_REPLACE_OBJECTS", "1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .process_group(0)
+            .spawn()
+            .map_err(|e| format!("cannot run git: {e}"))?;
+        let drain = |mut r: Box<dyn Read + Send>| {
+            std::thread::spawn(move || {
+                let mut b = Vec::new();
+                let _ = r.read_to_end(&mut b);
+                b
+            })
+        };
+        let out = child.stdout.take().map(|o| drain(Box::new(o)));
+        let err = child.stderr.take().map(|e| drain(Box::new(e)));
+        let started = Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(s)) => break s,
+                Ok(None) => {}
+                Err(e) => return Err(format!("git {}: {e}", args.join(" "))),
+            }
+            let cancelled = self.cancel.load(Ordering::SeqCst);
+            if cancelled || started.elapsed() >= self.timeout {
+                // SAFETY: the group is the child's own (`process_group(0)`).
+                unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                let _ = child.wait();
+                // The readers are let go: a descendant may still hold the output open.
+                return Err(if cancelled {
+                    "cancelled".to_string()
+                } else {
+                    format!(
+                        "git {} did not end within {} s and was stopped",
+                        args.join(" "),
+                        self.timeout.as_secs()
+                    )
+                });
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        };
+        let take = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
+            h.and_then(|h| h.join().ok()).unwrap_or_default()
+        };
+        let (stdout, stderr) = (take(out), take(err));
+        if status.success() {
+            Ok(String::from_utf8_lossy(&stdout).trim_end().to_string())
+        } else {
+            Err(format!(
+                "git {}: {}",
+                args.join(" "),
+                String::from_utf8_lossy(&stderr).trim()
+            ))
+        }
     }
 }
 
@@ -83,26 +152,27 @@ pub fn read(
     branch: &str,
     head: &str,
     covered: Option<&str>,
+    cancel: &AtomicBool,
 ) -> Result<Reading, String> {
+    let g = Git::new(repo, cancel);
     let (base_ref, head_ref) = refs(task);
     for r in [&base_ref, &head_ref] {
-        git(repo, &["check-ref-format", r])
+        g.run(&["check-ref-format", r])
             .map_err(|_| format!("{r} is not a ref name git takes"))?;
     }
-    git(
-        repo,
-        &[
-            "fetch",
-            "-q",
-            "--no-write-fetch-head",
-            "--no-auto-gc",
-            "--no-tags",
-            "origin",
-            &format!("+refs/heads/{base}:{base_ref}"),
-            &format!("+refs/heads/{branch}:{head_ref}"),
-        ],
-    )?;
-    let id = |r: &str| git(repo, &["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
+    g.run(&[
+        "fetch",
+        "-q",
+        "--no-write-fetch-head",
+        "--no-auto-gc",
+        "--no-tags",
+        // No opportunistic update of `refs/remotes/origin/*` from origin's configured refspec.
+        "--refmap=",
+        "origin",
+        &format!("+refs/heads/{base}:{base_ref}"),
+        &format!("+refs/heads/{branch}:{head_ref}"),
+    ])?;
+    let id = |r: &str| g.run(&["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
     let at = id(&head_ref)?;
     if !at.eq_ignore_ascii_case(head) {
         return Ok(Reading::Stale);
@@ -111,19 +181,16 @@ pub fn read(
     if covered.is_some_and(|c| c.eq_ignore_ascii_case(&base_tip)) {
         return Ok(Reading::Unchanged);
     }
-    let ci_base = git(repo, &["merge-base", head, &base_tip])?;
+    let ci_base = g.run(&["merge-base", head, &base_tip])?;
     let mut landings = Vec::new();
-    let list = git(
-        repo,
-        &[
-            "rev-list",
-            "--first-parent",
-            "--reverse",
-            &format!("{ci_base}..{base_tip}"),
-        ],
-    )?;
+    let list = g.run(&[
+        "rev-list",
+        "--first-parent",
+        "--reverse",
+        &format!("{ci_base}..{base_tip}"),
+    ])?;
     for sha in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let paths = landing_paths(repo, sha)?;
+        let paths = landing_paths(&g, sha)?;
         if !paths.is_empty() {
             landings.push(Landing {
                 sha: sha.to_string(),
@@ -139,30 +206,27 @@ pub fn read(
 }
 
 /// The paths of the landing `sha` (against its first parent) that count.
-fn landing_paths(repo: &Path, sha: &str) -> Result<Vec<String>, String> {
-    let parents = git(repo, &["rev-list", "--parents", "-n", "1", sha])?;
+fn landing_paths(g: &Git, sha: &str) -> Result<Vec<String>, String> {
+    let parents = g.run(&["rev-list", "--parents", "-n", "1", sha])?;
     let Some(parent) = parents.split_whitespace().nth(1) else {
         // A root commit on the base's line: every path is new.
-        let all = git(repo, &["ls-tree", "-r", "-z", "--name-only", sha])?;
+        let all = g.run(&["ls-tree", "-r", "-z", "--name-only", sha])?;
         return Ok(all
             .split('\0')
             .filter(|p| !p.is_empty() && checked(p))
             .map(String::from)
             .collect());
     };
-    let changed = git(
-        repo,
-        &[
-            "diff-tree",
-            "-r",
-            "-z",
-            "--no-renames",
-            "--no-commit-id",
-            "--name-status",
-            parent,
-            sha,
-        ],
-    )?;
+    let changed = g.run(&[
+        "diff-tree",
+        "-r",
+        "-z",
+        "--no-renames",
+        "--no-commit-id",
+        "--name-status",
+        parent,
+        sha,
+    ])?;
     let fields: Vec<&str> = changed.split('\0').collect();
     let mut out = Vec::new();
     for pair in fields.chunks(2) {
@@ -170,7 +234,7 @@ fn landing_paths(repo: &Path, sha: &str) -> Result<Vec<String>, String> {
         if path.is_empty() {
             continue;
         }
-        if counts(repo, parent, sha, status, path)? {
+        if counts(g, parent, sha, status, path)? {
             out.push(path.to_string());
         }
     }
@@ -189,30 +253,27 @@ fn workflow(path: &str) -> bool {
 }
 
 /// Whether the change of `path` (git's name status `status`) from `parent` to `sha` counts.
-fn counts(repo: &Path, parent: &str, sha: &str, status: &str, path: &str) -> Result<bool, String> {
+fn counts(g: &Git, parent: &str, sha: &str, status: &str, path: &str) -> Result<bool, String> {
     if !checked(path) {
         return Ok(false);
     }
     if !path.starts_with(".github/") || !workflow(path) || status != "M" {
         return Ok(true);
     }
-    let old = git(repo, &["show", &format!("{parent}:{path}")])?;
-    let new = git(repo, &["show", &format!("{sha}:{path}")])?;
-    let diff = git(
-        repo,
-        &[
-            "diff",
-            "-U0",
-            "--text",
-            "--no-color",
-            "--no-ext-diff",
-            "--no-textconv",
-            parent,
-            sha,
-            "--",
-            path,
-        ],
-    )?;
+    let old = g.run(&["show", &format!("{parent}:{path}")])?;
+    let new = g.run(&["show", &format!("{sha}:{path}")])?;
+    let diff = g.run(&[
+        "diff",
+        "-U0",
+        "--text",
+        "--no-color",
+        "--no-ext-diff",
+        "--no-textconv",
+        parent,
+        sha,
+        "--",
+        path,
+    ])?;
     let (removed, added) = hunk_lines(&diff);
     // Contents that differ with no hunk read (an attribute that hides the diff, a form of
     // output not read): the change counts.
@@ -691,7 +752,83 @@ jobs:
         std::fs::write(d.join(path), AFTER_483).unwrap();
         git_t(d, &["commit", "-q", "-am", "two"]);
         let sha = git_t(d, &["rev-parse", "HEAD"]);
-        assert!(counts(d, &parent, &sha, "M", path).unwrap());
+        assert!(
+            counts(
+                &Git::new(d, &AtomicBool::new(false)),
+                &parent,
+                &sha,
+                "M",
+                path
+            )
+            .unwrap()
+        );
+    }
+
+    #[test]
+    fn a_reading_fetches_into_its_own_refs_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, clone) = (dir.path().join("origin"), dir.path().join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_t(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a"), "a").unwrap();
+        git_t(&origin, &["add", "a"]);
+        git_t(&origin, &["commit", "-q", "-m", "a"]);
+        git_t(&origin, &["branch", "b"]);
+        let head = git_t(&origin, &["rev-parse", "b"]);
+        git_t(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+        let tracked = git_t(&clone, &["rev-parse", "refs/remotes/origin/main"]);
+        std::fs::write(origin.join("t"), "t").unwrap();
+        git_t(&origin, &["add", "t"]);
+        git_t(&origin, &["commit", "-q", "-m", "t"]);
+        let main = git_t(&origin, &["rev-parse", "main"]);
+        let cancel = AtomicBool::new(false);
+        let r = read(&clone, "t1", "main", "b", &head, None, &cancel).unwrap();
+        assert!(
+            matches!(r, Reading::Read { ref base_tip, .. } if *base_tip == main),
+            "{r:?}"
+        );
+        assert_eq!(
+            git_t(&clone, &["rev-parse", "refs/remotes/origin/main"]),
+            tracked,
+            "the remote-tracking ref moved"
+        );
+        assert_eq!(
+            git_t(&clone, &["rev-parse", "refs/makiba/ready/t1/base"]),
+            main
+        );
+    }
+
+    #[test]
+    fn a_stalled_or_cancelled_call_is_stopped() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let slow = Git {
+            dir: dir.path(),
+            cancel: &cancel,
+            program: "sleep",
+            timeout: Duration::from_millis(200),
+        };
+        let started = Instant::now();
+        let e = slow.run(&["30"]).unwrap_err();
+        assert!(e.contains("did not end"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(10));
+        let stopped = AtomicBool::new(true);
+        let cancelled = Git {
+            cancel: &stopped,
+            timeout: Duration::from_secs(60),
+            ..slow
+        };
+        let started = Instant::now();
+        assert_eq!(cancelled.run(&["30"]).unwrap_err(), "cancelled");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]

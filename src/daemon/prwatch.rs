@@ -2265,6 +2265,9 @@ fn read_ready(
 ) {
     use super::ready::Reading;
     let watch = c.ready.is_some();
+    // The last reading sent was a failure: the next reading that succeeds is sent too, so the
+    // loop's failure budget starts again.
+    let mut failing = false;
     loop {
         if cancel.load(Ordering::SeqCst) {
             return;
@@ -2277,6 +2280,7 @@ fn read_ready(
                 &c.branch,
                 &c.head,
                 covered.as_deref(),
+                cancel,
             )
         }))
         .unwrap_or_else(|_| Err("the reading crashed".into()));
@@ -2284,7 +2288,7 @@ fn read_ready(
             return;
         }
         let stop = match &result {
-            Ok(Reading::Unchanged | Reading::Stale) => None,
+            Ok(Reading::Unchanged | Reading::Stale) => failing.then_some(false),
             Ok(Reading::Read {
                 base_tip, landings, ..
             }) => {
@@ -2298,6 +2302,7 @@ fn read_ready(
             Err(_) => Some(false),
         };
         if let Some(stop) = stop {
+            failing = result.is_err();
             let _ = tx.send(ReadDone {
                 task: c.f.task.clone(),
                 repo: c.f.repo.clone(),
@@ -2468,7 +2473,10 @@ impl PrWatch {
                     }
                 }
             }
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                self.read_failing.remove(&key);
+                return Ok(());
+            }
         };
         // A reading decides only on the head's merge state now, read after its CI result: a draft
         // or a state not computed waits (the reader is started again once it is), and a conflict
@@ -3731,6 +3739,30 @@ esac"#,
                 .unwrap();
             assert_eq!(written, 0);
         }
+    }
+
+    /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two
+    /// failures far apart never make a healthy head `unknown`.
+    #[test]
+    fn a_reading_that_succeeds_clears_the_failure_budget() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let mut p = PrWatch::from_env();
+        p.budget = Duration::from_secs(3600);
+        let reading = |result| ReadDone {
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            head: "a".repeat(40),
+            watch: true,
+            result,
+        };
+        p.ready_done(&w, &reading(Err("fetch failed".into())))
+            .unwrap();
+        assert_eq!(p.read_failing.len(), 1);
+        p.ready_done(&w, &reading(Ok(super::super::ready::Reading::Unchanged)))
+            .unwrap();
+        assert!(p.read_failing.is_empty());
     }
 
     /// A read that began before the head's passed CI result was received is not acted on; one
