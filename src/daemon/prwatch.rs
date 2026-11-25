@@ -2219,16 +2219,40 @@ fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<
     Ok(out)
 }
 
-/// A readiness reader: one per task, of one head, first judgement or watching a `ready` head.
-struct Reader {
+/// What a reader and its readings are for: the pull request as followed (its generation
+/// included), the head, the base and branch read, and the mode (watching a `ready` head or a first
+/// judgement). A reading is written only while the candidate has this same key.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ReadKey {
+    f: Followed,
     head: String,
+    base: String,
+    branch: String,
     watch: bool,
+}
+
+impl ReadyCand {
+    fn key(&self) -> ReadKey {
+        ReadKey {
+            f: self.f.clone(),
+            head: self.head.clone(),
+            base: self.base.clone(),
+            branch: self.branch.clone(),
+            watch: self.ready.is_some(),
+        }
+    }
+}
+
+/// A readiness reader: one per task, of one key.
+struct Reader {
+    key: ReadKey,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
 
 /// What a reader read, for the head and mode it was started for.
 struct ReadDone {
+    key: ReadKey,
     task: String,
     repo: String,
     pr: i64,
@@ -2304,6 +2328,7 @@ fn read_ready(
         if let Some(stop) = stop {
             failing = result.is_err();
             let _ = tx.send(ReadDone {
+                key: c.key(),
                 task: c.f.task.clone(),
                 repo: c.f.repo.clone(),
                 pr: c.f.pr,
@@ -2370,15 +2395,7 @@ impl PrWatch {
                     ci_base: None,
                     landings: Vec::new(),
                 };
-                decide(
-                    w,
-                    &self.repos,
-                    &c.f.task,
-                    &c.head,
-                    c.ready.is_some(),
-                    &class,
-                    &d,
-                )?;
+                decide(w, &self.repos, &c.key(), &class, &d)?;
                 continue;
             }
             wanted.push(c);
@@ -2387,11 +2404,7 @@ impl PrWatch {
         for task in tasks {
             let keep = self.readers.get(&task).is_some_and(|r| {
                 !r.handle.as_ref().is_none_or(JoinHandle::is_finished)
-                    && wanted.iter().any(|c| {
-                        c.f.task == task
-                            && c.head.eq_ignore_ascii_case(&r.head)
-                            && c.ready.is_some() == r.watch
-                    })
+                    && wanted.iter().any(|c| c.key() == r.key)
             });
             // A reader no longer wanted is told to stop and let go: it may be in a fetch, which
             // the loop does not wait for; what it still sends is checked again when written.
@@ -2409,7 +2422,7 @@ impl PrWatch {
                 .as_ref()
                 .and_then(|tip| self.covered.get(&key).cloned().or_else(|| tip.clone()));
             let cancel = Arc::new(AtomicBool::new(false));
-            let (task, head, watch) = (c.f.task.clone(), c.head.clone(), c.ready.is_some());
+            let (task, read_key) = (c.f.task.clone(), c.key());
             let handle = {
                 let (tx, cancel, interval) =
                     (self.ready_tx.clone(), Arc::clone(&cancel), self.interval);
@@ -2418,8 +2431,7 @@ impl PrWatch {
             self.readers.insert(
                 task,
                 Reader {
-                    head,
-                    watch,
+                    key: read_key,
                     cancel,
                     handle: Some(handle),
                 },
@@ -2492,7 +2504,7 @@ impl PrWatch {
             return Ok(());
         };
         let decision = on_merge_state(decision, &class, self.covered.get(&key).cloned());
-        if decide(w, &self.repos, &d.task, &d.head, d.watch, &class, &decision)? {
+        if decide(w, &self.repos, &d.key, &class, &decision)? {
             self.read_failing.remove(&key);
         }
         Ok(())
@@ -2525,25 +2537,15 @@ fn on_merge_state(d: Decision, class: &str, covered: Option<String>) -> Decision
 /// event, for `update` the `update` command (when the run has a code worktree), and one notice,
 /// in one transaction, only while `head` is still a candidate in the same mode (`watched`).
 /// Whether it was written.
-fn decide(
-    w: &StateWriter,
-    repos: &Path,
-    task: &str,
-    head: &str,
-    watched: bool,
-    class: &str,
-    d: &Decision,
-) -> Result<bool> {
+fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decision) -> Result<bool> {
+    let (task, watched) = (key.f.task.as_str(), key.watch);
     w.transaction(|w| {
         let Some(c) = ready_candidates(w.conn(), repos, Some(task))?
             .into_iter()
-            .find(|c| c.head.eq_ignore_ascii_case(head))
+            .find(|c| c.key() == *key)
         else {
             return Ok(false);
         };
-        if c.ready.is_some() != watched {
-            return Ok(false);
-        }
         let (repo, pr, base) = (c.f.repo.as_str(), c.f.pr, c.base.as_str());
         let (verdict, reason, base_tip, ci_base, landings) = match d {
             Decision::Ready { base_tip, ci_base } => (
@@ -3715,6 +3717,13 @@ esac"#,
         };
         let head = "a".repeat(40);
         let reading = || ReadDone {
+            key: ReadKey {
+                f: f.clone(),
+                head: head.clone(),
+                base: "main".into(),
+                branch: "makiba/t".into(),
+                watch: false,
+            },
             task: "t".into(),
             repo: "o/r".into(),
             pr: 5,
@@ -3780,6 +3789,56 @@ esac"#,
         ));
     }
 
+    /// Issue 475: a decision is written only for the context its reading was for: the same head
+    /// read for another base (or pull request, generation or branch) writes nothing.
+    #[test]
+    fn a_reading_of_another_context_decides_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let repos = dir.path().join("repos");
+        std::fs::create_dir_all(repos.join("p/.git")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "a".repeat(40);
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        w.append_event(&NewEvent {
+            kind: "ci_completed",
+            actor: Some("makibad"),
+            payload: Some(&json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"})),
+            run_task_id: Some("t"),
+            ..Default::default()
+        })
+        .unwrap();
+        let key = ready_candidates(w.conn(), &repos, Some("t")).unwrap()[0].key();
+        let ready = Decision::Ready {
+            base_tip: "b".repeat(40),
+            ci_base: "c".repeat(40),
+        };
+        let mut other = key.clone();
+        other.base = "release".into();
+        assert!(!decide(&w, &repos, &other, "ready", &ready).unwrap());
+        let mut moved = key.clone();
+        moved.f.gen_reg += 1;
+        assert!(!decide(&w, &repos, &moved, "ready", &ready).unwrap());
+        let written = |w: &StateWriter| -> i64 {
+            w.conn()
+                .query_row(
+                    "SELECT count(*) FROM events WHERE kind = 'queue_readiness'",
+                    [],
+                    |q| q.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(written(&w), 0);
+        assert!(decide(&w, &repos, &key, "ready", &ready).unwrap());
+        assert_eq!(written(&w), 1);
+    }
+
     /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two
     /// failures far apart never make a healthy head `unknown`.
     #[test]
@@ -3789,6 +3848,20 @@ esac"#,
         let mut p = PrWatch::from_env();
         p.budget = Duration::from_secs(3600);
         let reading = |result| ReadDone {
+            key: ReadKey {
+                f: Followed {
+                    task: "t".into(),
+                    repo: "o/r".into(),
+                    pr: 5,
+                    gen_reg: 1,
+                    gen_close: 0,
+                    closed: false,
+                },
+                head: "a".repeat(40),
+                base: "main".into(),
+                branch: "makiba/t".into(),
+                watch: true,
+            },
             task: "t".into(),
             repo: "o/r".into(),
             pr: 5,

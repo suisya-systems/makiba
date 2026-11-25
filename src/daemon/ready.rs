@@ -83,12 +83,15 @@ impl<'a> Git<'a> {
             .process_group(0)
             .spawn()
             .map_err(|e| format!("cannot run git: {e}"))?;
+        // Each pipe is read on a thread of its own, which sends what it read once the pipe closes.
         let drain = |mut r: Box<dyn Read + Send>| {
+            let (tx, rx) = std::sync::mpsc::channel();
             std::thread::spawn(move || {
                 let mut b = Vec::new();
                 let _ = r.read_to_end(&mut b);
-                b
-            })
+                let _ = tx.send(b);
+            });
+            rx
         };
         let out = child.stdout.take().map(|o| drain(Box::new(o)));
         let err = child.stderr.take().map(|e| drain(Box::new(e)));
@@ -117,10 +120,35 @@ impl<'a> Git<'a> {
             }
             std::thread::sleep(Duration::from_millis(20));
         };
-        let take = |h: Option<std::thread::JoinHandle<Vec<u8>>>| {
-            h.and_then(|h| h.join().ok()).unwrap_or_default()
+        // The output under the same deadline and cancel: a descendant that keeps a pipe open
+        // after git exited is killed with the group, and the call fails.
+        let take = |rx: Option<std::sync::mpsc::Receiver<Vec<u8>>>| {
+            let Some(rx) = rx else {
+                return Ok(Vec::new());
+            };
+            loop {
+                match rx.recv_timeout(Duration::from_millis(20)) {
+                    Ok(b) => return Ok(b),
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return Ok(Vec::new()),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                let cancelled = self.cancel.load(Ordering::SeqCst);
+                if cancelled || started.elapsed() >= self.timeout {
+                    // SAFETY: the group is the child's own (`process_group(0)`).
+                    unsafe { libc::kill(-(child.id() as i32), libc::SIGKILL) };
+                    return Err(if cancelled {
+                        "cancelled".to_string()
+                    } else {
+                        format!(
+                            "git {}: its output was still open {} s after it began; it was stopped",
+                            args.join(" "),
+                            self.timeout.as_secs()
+                        )
+                    });
+                }
+            }
         };
-        let (stdout, stderr) = (take(out), take(err));
+        let (stdout, stderr) = (take(out)?, take(err)?);
         if status.success() {
             Ok(String::from_utf8_lossy(&stdout).trim_end().to_string())
         } else {
@@ -331,6 +359,24 @@ jobs:
             String::from_utf8_lossy(&out.stderr)
         );
         String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// A call whose process exits while a descendant keeps its output open is stopped at the
+    /// deadline, not waited for.
+    #[test]
+    fn an_output_held_open_by_a_descendant_is_not_waited_for() {
+        let dir = tempfile::tempdir().unwrap();
+        let cancel = AtomicBool::new(false);
+        let held = Git {
+            dir: dir.path(),
+            cancel: &cancel,
+            program: "sh",
+            timeout: Duration::from_millis(300),
+        };
+        let started = Instant::now();
+        let e = held.run(&["-c", "sleep 30 & exit 0"]).unwrap_err();
+        assert!(e.contains("still open"), "{e}");
+        assert!(started.elapsed() < Duration::from_secs(10));
     }
 
     #[test]
