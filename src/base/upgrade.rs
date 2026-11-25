@@ -333,13 +333,18 @@ fn remove_leftovers(dir: &Path, prefix: &str) {
 
 /// The runs a stop of the core suspends (the rows `down::suspend` takes), and those already
 /// suspended, read only.
-fn runs_to_suspend(dir: &Path) -> Vec<String> {
-    let Ok(c) = rusqlite::Connection::open_with_flags(
-        dir.join("state.db"),
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    ) else {
-        return Vec::new();
-    };
+/// A ledger that does not exist yet holds none; one that cannot be read is an error, so that the
+/// question never shows "none" for runs it could not read.
+fn runs_to_suspend(dir: &Path) -> Result<Vec<String>, String> {
+    let path = dir.join("state.db");
+    if !path.exists() {
+        return Ok(Vec::new());
+    }
+    let c =
+        rusqlite::Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(|e| e.to_string())?;
+    c.busy_timeout(Duration::from_secs(5))
+        .map_err(|e| e.to_string())?;
     c.prepare(
         "SELECT task_id FROM runs WHERE status IN ('in_use', 'review', 'suspended')
            OR (status = 'queued' AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = runs.id
@@ -350,7 +355,50 @@ fn runs_to_suspend(dir: &Path) -> Vec<String> {
         q.query_map([], |r| r.get::<_, String>(0))?
             .collect::<Result<Vec<_>, _>>()
     })
-    .unwrap_or_default()
+    .map_err(|e| e.to_string())
+}
+
+/// The state folders of the other organizations that have a worker or a secretary among
+/// `terminals`: a stop of the core would end those agents without suspending their runs.
+fn foreign_agents(terminals: &[Terminal], org: &str) -> BTreeSet<String> {
+    terminals
+        .iter()
+        .filter(|t| {
+            matches!(
+                t.tags.get(TAG_ROLE).map(String::as_str),
+                Some("worker" | "secretary")
+            )
+        })
+        .filter_map(|t| t.tags.get(TAG_ORG).filter(|o| *o != org).cloned())
+        .collect()
+}
+
+/// Every live terminal of `session`, refused when it cannot be read whole or holds another
+/// organization's worker or secretary.
+fn inventory(session: &str, org: &str) -> Result<Vec<Terminal>, Failure> {
+    let terminals = super::connect_session_for_start(session, Duration::from_secs(10))
+        .list_session()
+        .map_err(|e| {
+            (
+                ErrorKind::Unavailable,
+                format!("cannot list the terminals of session {session}: {e}; nothing changed"),
+            )
+        })?;
+    let others = foreign_agents(&terminals, org);
+    if !others.is_empty() {
+        let names: Vec<&str> = others.iter().map(String::as_str).collect();
+        return Err((
+            ErrorKind::Conflict,
+            format!(
+                "session {session} holds a worker or secretary of another organization (state \
+                 folder {}); stopping the core would end its agents without suspending its runs. \
+                 Run that organization's `makiba down --secretary` (its own binary and \
+                 MAKIBA_STATE_DIR), then run this again; nothing changed",
+                names.join(", ")
+            ),
+        ));
+    }
+    Ok(terminals)
 }
 
 fn newest_start(dir: &Path) -> Option<i64> {
@@ -616,49 +664,32 @@ fn run(secretary: bool) -> Result<(), Failure> {
         )
     });
     if stop_core {
-        let terminals = match super::connect_session_for_start(&session, Duration::from_secs(10))
-            .list_session()
-        {
+        let terminals = match inventory(&session, &org) {
             Ok(t) => t,
             Err(e) => {
                 staging.clean();
-                return Err((
-                    ErrorKind::Unavailable,
-                    format!("cannot list the terminals of session {session}: {e}; nothing changed"),
-                ));
+                return Err(e);
             }
         };
-        let others: BTreeSet<&String> = terminals
-            .iter()
-            .filter(|t| {
-                matches!(
-                    t.tags.get(TAG_ROLE).map(String::as_str),
-                    Some("worker" | "secretary")
-                )
-            })
-            .filter_map(|t| t.tags.get(TAG_ORG).filter(|o| **o != org))
-            .collect();
-        if !others.is_empty() {
-            staging.clean();
-            let names: Vec<&str> = others.iter().map(|s| s.as_str()).collect();
-            return Err((
-                ErrorKind::Conflict,
-                format!(
-                    "session {session} holds a worker or secretary of another organization (state \
-                     folder {}); stopping the core would end its agents without suspending its runs. \
-                     Run that organization's `makiba down --secretary` (its own binary and \
-                     MAKIBA_STATE_DIR), then run this again; nothing changed",
-                    names.join(", ")
-                ),
-            ));
-        }
         lines.push("  terminals whose programs end:".into());
         lines.extend(inventory_lines(&terminals, &org));
     } else {
         lines.push("  terminals: none ends".into());
     }
     if stop_core || matches!(core, Core::Stopped) {
-        let runs = runs_to_suspend(&dir);
+        let runs = match runs_to_suspend(&dir) {
+            Ok(r) => r,
+            Err(e) => {
+                staging.clean();
+                return Err((
+                    ErrorKind::Unavailable,
+                    format!(
+                        "cannot read the runs a stop would suspend from {}: {e}; nothing changed",
+                        dir.join("state.db").display()
+                    ),
+                ));
+            }
+        };
         lines.push(format!(
             "  runs suspended and brought back: {}",
             if runs.is_empty() {
@@ -687,6 +718,13 @@ fn run(secretary: bool) -> Result<(), Failure> {
         staging.clean();
         println!("not upgraded: nothing changed");
         return Ok(());
+    }
+    // The question may have waited long: another organization's makibad may have launched an
+    // agent meanwhile. The inventory is read again right before the stop; the window left is
+    // between this read and `server.stop` (section 10, known limits).
+    if stop_core && let Err(e) = inventory(&session, &org) {
+        staging.clean();
+        return Err(e);
     }
 
     // S3: the stop. From here the old copy is kept.
@@ -821,5 +859,56 @@ pub fn main(args: &[String]) -> ExitCode {
             eprintln!("makiba: {}: {message}", kind.as_str());
             ExitCode::from(kind.exit_code() as u8)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::base::TerminalRef;
+
+    fn terminal(name: &str, tags: &[(&str, &str)]) -> Terminal {
+        Terminal {
+            id: TerminalRef(name.into()),
+            name: name.into(),
+            tags: tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            status: None,
+            turn: None,
+            alive: true,
+            exit_code: None,
+        }
+    }
+
+    #[test]
+    fn only_another_organizations_worker_or_secretary_is_foreign() {
+        let terminals = [
+            terminal("a", &[(TAG_ORG, "/mine"), (TAG_ROLE, "worker")]),
+            terminal("b", &[(TAG_ORG, "/other"), (TAG_ROLE, "curator")]),
+            terminal("c", &[]),
+            terminal("d", &[(TAG_ORG, "/other"), (TAG_ROLE, "worker")]),
+            terminal("e", &[(TAG_ORG, "/third"), (TAG_ROLE, "secretary")]),
+        ];
+        let found: Vec<String> = foreign_agents(&terminals, "/mine").into_iter().collect();
+        assert_eq!(found, ["/other", "/third"]);
+        assert!(foreign_agents(&terminals[..3], "/mine").is_empty());
+    }
+
+    #[test]
+    fn an_absent_ledger_has_no_runs_and_an_unreadable_one_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(runs_to_suspend(dir.path()), Ok(Vec::new()));
+        fs::write(dir.path().join("state.db"), "not a database").unwrap();
+        assert!(runs_to_suspend(dir.path()).is_err());
+    }
+
+    #[test]
+    fn the_version_is_the_first_plain_word() {
+        assert_eq!(version_in("herdr-core 0.1.22\n"), "0.1.22");
+        assert_eq!(version_in("0.1.21"), "0.1.21");
+        assert_eq!(version_in("herdr-core 0.1"), "herdr-core 0.1");
+        assert_eq!(version_in("hc 0.1.22-rc.1"), "hc 0.1.22-rc.1");
     }
 }
