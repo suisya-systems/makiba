@@ -506,8 +506,21 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     let head = &judged_head(j, head, |judged| is_ancestor(dir, head, judged))?;
     if !is_ancestor(dir, &old, head)? {
         // A restart after the merge was pushed and before it was recorded: origin holds the
-        // worktree's head and the base, which the worktree does not (it is not written).
-        if is_ancestor(dir, head, &old)? && is_ancestor(dir, &base_id, &old)? {
+        // worktree's head and the base, which the worktree does not (it is not written). For a
+        // readiness update (Issue 475) the base may have moved on since: a clean merge of the
+        // judged head with an older commit of the base is still that update's own push, recorded
+        // as it is; its readiness is judged again on its own CI.
+        let pushed_before = |old: &str| -> std::result::Result<bool, String> {
+            Ok(is_ancestor(dir, &base_id, old)?
+                || (j.readiness.is_some()
+                    && gate::pushed_base_merge(
+                        dir,
+                        &format!("refs/remotes/origin/{base}"),
+                        head,
+                        old,
+                    )))
+        };
+        if is_ancestor(dir, head, &old)? && pushed_before(&old)? {
             return Ok(Done::Current {
                 head: old,
                 base_merge: false,
@@ -989,6 +1002,94 @@ mod tests {
             judged_head(&job("t", Some(&a)), &b, |_| Ok(true)).unwrap(),
             a
         );
+    }
+
+    /// `git` in `dir` for the tests: a fixed identity, no signing.
+    fn git_t(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false", "-c", run_repo::HOOKS_OFF])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Issue 475: a readiness update that pushed its merge and was not recorded (a restart),
+    /// while the base moved on meanwhile, finds its own push again instead of failing.
+    #[test]
+    fn a_readiness_update_pushed_before_a_restart_is_found_after_the_base_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("repo"));
+        git_t(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                &origin.to_string_lossy(),
+            ],
+        );
+        git_t(
+            dir.path(),
+            &["init", "-q", "-b", "main", &repo.to_string_lossy()],
+        );
+        let commit = |name: &str| {
+            std::fs::write(repo.join(name), name).unwrap();
+            git_t(&repo, &["add", name]);
+            git_t(&repo, &["commit", "-q", "-m", name]);
+            git_t(&repo, &["rev-parse", "HEAD"])
+        };
+        commit("first");
+        git_t(
+            &repo,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        git_t(&repo, &["checkout", "-q", "-b", "makiba/t"]);
+        let head = commit("branch");
+        git_t(&repo, &["checkout", "-q", "main"]);
+        let b1 = commit("landing-1");
+        // The update's own push: a clean merge of the judged head with the base at b1.
+        let tree = git_t(&repo, &["merge-tree", "--write-tree", &head, &b1]);
+        let merged = git_t(
+            &repo,
+            &[
+                "commit-tree",
+                tree.lines().next().unwrap(),
+                "-p",
+                &head,
+                "-p",
+                &b1,
+                "-m",
+                "m",
+            ],
+        );
+        commit("landing-2");
+        git_t(
+            &repo,
+            &[
+                "push",
+                "-q",
+                "origin",
+                "main",
+                &format!("{merged}:refs/heads/makiba/t"),
+            ],
+        );
+        let j = job("t", Some(&head));
+        match update(&repo, &j, "main", &head) {
+            Ok(Done::Current { head: found, .. }) => assert_eq!(found, merged),
+            Ok(_) => panic!("not found as its own push"),
+            Err(e) => panic!("{e}"),
+        }
     }
 
     /// Issue 475: an update that ends after a newer head was recorded does not record its own
