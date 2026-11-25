@@ -12,14 +12,19 @@
 //! (exit 1) naming the file, the line and the shape, never the matched text. Anything that cannot
 //! be read refuses too.
 //!
+//! When the message is clean, `commit-msg` also checks a test commit before it is made (Issue
+//! 322, line L-K9; see `test_commit`): an `Acceptance-Test` line git does not read as a trailer, a
+//! declared path the commit does not change, or a declared test that starts makibad directly.
+//!
 //! `makiba hook prepare-commit-msg <pid>` (Issue 300, line L-K3) holds git's flag that skips the
 //! hooks: git runs `prepare-commit-msg` even with that flag, and its script passes the id of the
 //! git that runs it, whose argv (as exec received it, after the shell) is read for the flag
 //! (`skipping_flag`). It reads no shell text. A commit git's own rebase makes with the flag
 //! (`git rebase --continue` after a stop; git 2.43's cherry-pick continues without it, and
 //! revert commits in its own process) is refused too, with no exception (Issue 300, the
-//! person's choice): the refusal names `git merge` as the way to bring a branch up to date. Linux only; elsewhere it passes and the worker's Bash hook keeps reading the flag in
-//! the command text.
+//! person's choice): the refusal names `git merge` as the way to bring a branch up to date.
+//! Linux only; elsewhere it passes and the worker's Bash hook keeps reading the flag in the
+//! command text.
 
 use super::Refusal;
 use regex::bytes::Regex;
@@ -63,7 +68,7 @@ pub fn find(bytes: &[u8]) -> Option<(&'static str, usize)> {
         })
 }
 
-fn git(args: &[&str]) -> Result<Vec<u8>, String> {
+pub(super) fn git(args: &[&str]) -> Result<Vec<u8>, String> {
     let out = Command::new("git")
         .args(args)
         .stdin(Stdio::null())
@@ -81,7 +86,7 @@ fn git(args: &[&str]) -> Result<Vec<u8>, String> {
 
 /// Every path and blob the index holds that differs from `HEAD` (all of it before a first
 /// commit), gitlinks and deletions left out.
-fn staged() -> Result<Vec<(String, String)>, String> {
+pub(super) fn staged() -> Result<Vec<(String, String)>, String> {
     let base = match git(&["rev-parse", "--verify", "-q", "HEAD^{tree}"]) {
         Ok(t) => String::from_utf8_lossy(&t).trim().to_string(),
         // No commit yet: the empty tree, in the repository's own hash.
@@ -127,7 +132,15 @@ fn check(name: &str, args: &[String]) -> Result<(), Refusal> {
             .first()
             .ok_or_else(|| cannot("git named no message file".into()))?;
         let text = std::fs::read(file).map_err(|e| cannot(format!("cannot read {file}: {e}")))?;
-        find(&text).map(|(shape, line)| ("the commit message".to_string(), shape, line))
+        match find(&text) {
+            Some((shape, line)) => Some(("the commit message".to_string(), shape, line)),
+            // A clean message of a commit: the test commit's check (Issue 322).
+            None if name == "commit-msg" => {
+                super::test_commit::check(file, &text)?;
+                None
+            }
+            None => None,
+        }
     } else {
         let cannot = |why: String| Refusal::new(LINE, "the staged files", why);
         let mut found = None;

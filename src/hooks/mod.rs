@@ -28,6 +28,7 @@ pub mod merge_gate;
 pub mod premise_check;
 pub mod re;
 pub mod shell;
+pub mod test_commit;
 pub mod worker_boundary;
 
 /// Why a hook refuses: the line of docs/design/lines.md it holds, the part of the input that
