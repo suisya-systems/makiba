@@ -36,6 +36,15 @@
 //! close ends it in `apply_state`. Not carried from the design: two reads out of the queue alone
 //! do not end it (claim 6 is [unverified]), and the entry's id is not matched with the timeline.
 //!
+//! A pull request queued outside makibad (Issue 476, docs/design/merge-queue-watch.md): the
+//! membership read (`memberships`) asks, per repository at most once per interval and in one
+//! GraphQL call, whether each followed open pull request with no act and no open stay is in the
+//! queue; one that is gets `merge_queue_entered` (`apply_entered`). Its stay (`open_stay`) makes
+//! its state read GraphQL's, and `stay_queue` ends it as a queue act is ended, `attempt` null, but
+//! with the newest queue item of the timeline a removal in place of a removal after the attempt.
+//! While an act awaits its landing the stay writes nothing. `merge_dequeued` carries GitHub's
+//! `reason` of that removal for both.
+//!
 //! The merge state (Issue 387, in place of claude-org-ja's conflict announce): the same state read
 //! carries `mergeable`, `mergeStateStatus` and `isDraft`, and each open read is brought back to
 //! the loop. A passed CI result waits for a read of its head made after it, for at most three
@@ -997,6 +1006,38 @@ pub struct PrWatch {
     /// The first read out of the merge queue with a removal on its timeline, by queue act (its
     /// attempt), with its pull request (Issue 434). Memory only: a restart costs one more read.
     dequeue_seen: HashMap<i64, (String, i64, Instant)>,
+    /// The membership reads (Issue 476), by repository lowercased: the newest one's start and
+    /// thread. Memory only: a restart starts them again on its first pass.
+    members: HashMap<String, Member>,
+    member_tx: Sender<Membership>,
+    member_rx: Receiver<Membership>,
+    /// Membership reads not written yet: kept until their transaction commits.
+    member_queued: Vec<Membership>,
+}
+
+/// One membership read of a repository (Issue 476).
+struct Member {
+    started: Instant,
+    cancel: Arc<AtomicBool>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl Member {
+    fn stop(&mut self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        if let Some(h) = self.handle.take() {
+            let _ = h.join();
+        }
+    }
+}
+
+/// What a membership read brought back: for each pull request of `repo` it named, GitHub's answer
+/// (`number`, `state`, `headRefOid`, `isInMergeQueue`, `mergeQueueEntry`). `mark`: the newest
+/// event id when it was started.
+struct Membership {
+    repo: String,
+    mark: i64,
+    reads: Vec<(i64, Value)>,
 }
 
 impl PrWatch {
@@ -1006,6 +1047,7 @@ impl PrWatch {
         let (state_tx, state_rx) = channel();
         let (merge_tx, merge_rx) = channel();
         let (seen_tx, seen_rx) = channel();
+        let (member_tx, member_rx) = channel();
         PrWatch {
             gh: super::gh::program(),
             interval: millis_env("MAKIBA_PRWATCH_INTERVAL_MS", DEFAULT_INTERVAL),
@@ -1028,6 +1070,10 @@ impl PrWatch {
             told: HashMap::new(),
             ci_seen: HashMap::new(),
             dequeue_seen: HashMap::new(),
+            members: HashMap::new(),
+            member_tx,
+            member_rx,
+            member_queued: Vec::new(),
         }
     }
 
@@ -1051,6 +1097,20 @@ impl PrWatch {
                     d.f.repo, d.f.pr
                 );
                 self.state_queued.push(d);
+            }
+        }
+        // A pull request read in the merge queue with no act or stay of it (Issue 476), before
+        // the follows are read: its stay makes it read through GraphQL from now on.
+        while let Ok(m) = self.member_rx.try_recv() {
+            self.member_queued.push(m);
+        }
+        for m in std::mem::take(&mut self.member_queued) {
+            if let Err(e) = apply_entered(w, &m) {
+                eprintln!(
+                    "makibad: pr watch {}: cannot record its merge queue entries: {e}",
+                    m.repo
+                );
+                self.member_queued.push(m);
             }
         }
         let follows = followed(w.conn(), None)?;
@@ -1131,8 +1191,13 @@ impl PrWatch {
         }
         let mut gone = Vec::new();
         for (attempt, (repo, pr, _)) in &self.dequeue_seen {
-            let awaiting = super::door::act_awaiting(w.conn(), repo, *pr)?;
-            if awaiting.is_none_or(|a| a.attempt != *attempt || !a.queue) {
+            // The note of a queue act (its attempt), or of a stay makibad did not make (its
+            // entry, Issue 476), while that act or stay is the pull request's.
+            let kept = match super::door::act_awaiting(w.conn(), repo, *pr)? {
+                Some(a) => a.attempt == *attempt && a.queue,
+                None => open_stay(w.conn(), repo, *pr)?.is_some_and(|(s, _)| s == *attempt),
+            };
+            if !kept {
                 gone.push(*attempt);
             }
         }
@@ -1249,7 +1314,68 @@ impl PrWatch {
             );
         }
         self.scouts(w)?;
-        self.state_pollers(w)
+        self.state_pollers(w)?;
+        self.memberships(w)
+    }
+
+    /// The membership read (Issue 476): per repository, at most once per interval, one GraphQL
+    /// call asks whether each followed open pull request with no act awaiting its landing and no
+    /// open stay (`Followed::act` false) is in the merge queue. A pull request followed with an
+    /// act or a stay is read by its own state poller, which alone decides its leaving.
+    fn memberships(&mut self, w: &StateWriter) -> Result<()> {
+        let mut groups: Vec<(String, String, Vec<i64>)> = Vec::new();
+        for f in followed(w.conn(), None)? {
+            if f.closed || f.act {
+                continue;
+            }
+            let key = f.repo.to_lowercase();
+            match groups.iter_mut().find(|g| g.0 == key) {
+                Some(g) if !g.2.contains(&f.pr) => g.2.push(f.pr),
+                Some(_) => {}
+                None => groups.push((key, f.repo.clone(), vec![f.pr])),
+            }
+        }
+        for m in self.members.values_mut() {
+            if m.handle.as_ref().is_some_and(JoinHandle::is_finished) {
+                m.stop();
+            }
+        }
+        let interval = self.interval;
+        self.members
+            .retain(|_, m| m.handle.is_some() || m.started.elapsed() < interval);
+        if groups.iter().all(|g| self.members.contains_key(&g.0)) {
+            return Ok(());
+        }
+        let mark: i64 = w
+            .conn()
+            .query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?;
+        for (key, repo, prs) in groups {
+            if self.members.contains_key(&key) {
+                continue;
+            }
+            let cancel = Arc::new(AtomicBool::new(false));
+            let handle = {
+                let (gh, tx, cancel) =
+                    (self.gh.clone(), self.member_tx.clone(), Arc::clone(&cancel));
+                std::thread::spawn(move || {
+                    let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        read_membership(&gh, &repo, &prs, &cancel)
+                    }));
+                    if let Ok(Some(reads)) = read {
+                        let _ = tx.send(Membership { repo, mark, reads });
+                    }
+                })
+            };
+            self.members.insert(
+                key,
+                Member {
+                    started: Instant::now(),
+                    cancel,
+                    handle: Some(handle),
+                },
+            );
+        }
+        Ok(())
     }
 
     /// Every candidate (`scout_candidates`) has one attempt scout of its `finished_at`: one of a
@@ -1401,6 +1527,12 @@ impl Drop for PrWatch {
         for p in self.pollers.values_mut() {
             p.stop();
         }
+        for m in self.members.values() {
+            m.cancel.store(true, Ordering::SeqCst);
+        }
+        for m in self.members.values_mut() {
+            m.stop();
+        }
         for p in self.states.values_mut() {
             p.stop();
         }
@@ -1544,7 +1676,8 @@ pub(super) struct Followed {
     /// Read closed unmerged with nothing since (`pr_closed_sql`).
     pub closed: bool,
     /// The pull request has a merge act of makibad awaiting its landing (`door::act_awaiting`,
-    /// Issue 434): its state is read through GraphQL, which carries the merge queue.
+    /// Issue 434), or an open stay in the queue that makibad did not make (`open_stay`, Issue
+    /// 476): its state is read through GraphQL, which carries the merge queue.
     pub act: bool,
 }
 
@@ -1618,6 +1751,11 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
         // does not end the act for this one.
         f.act = attempted && super::door::act_awaiting_for(c, &f.repo, f.pr, Some(run))?.is_some();
         if plain || f.act {
+            // A pull request followed open with a stay in the queue of its own (Issue 476) is
+            // read through GraphQL as an act's is; the stay never makes a pull request followed.
+            if !f.act && !f.closed && open_stay(c, &f.repo, f.pr)?.is_some() {
+                f.act = true;
+            }
             out.push(f);
         }
     }
@@ -1651,7 +1789,7 @@ impl StatePoller {
 /// of `STATE_FIELDS`, under the same names, and the merge queue (whether the pull request is in
 /// it, its entry, and the timeline's additions to and removals from it). gh's `--json` has no
 /// queue field (merge-act.md section 10, claim 3). The timeline items are [unverified] (claim 5).
-const STATE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state mergedAt mergedBy{login} headRefOid mergeCommit{oid} title mergeable mergeStateStatus isDraft isInMergeQueue mergeQueueEntry{id state position} timelineItems(last:50,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt}}}}}}";
+const STATE_QUERY: &str = "query($owner:String!,$name:String!,$number:Int!){repository(owner:$owner,name:$name){pullRequest(number:$number){state mergedAt mergedBy{login} headRefOid mergeCommit{oid} title mergeable mergeStateStatus isDraft isInMergeQueue mergeQueueEntry{id state position} timelineItems(last:50,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{__typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt reason}}}}}}";
 
 /// The wall clock, in milliseconds since 1970.
 fn now_ms() -> i64 {
@@ -1675,6 +1813,154 @@ fn queue_items(v: &Value) -> Option<Vec<(bool, i64)>> {
             Some((added, parse_time(n["createdAt"].as_str()?)?))
         })
         .collect()
+}
+
+/// GitHub's `reason` of the newest queue item of a state read's timeline, when that item is a
+/// removal and carries one (Issue 476; the field is [unverified], merge-act.md section 10 claim
+/// 5). Of two items at the same time the later listed is the newer.
+fn removal_reason(v: &Value) -> Option<String> {
+    let nodes = v["timelineItems"]["nodes"].as_array()?;
+    let newest = nodes
+        .iter()
+        .filter_map(|n| Some((parse_time(n["createdAt"].as_str()?)?, n)))
+        .max_by_key(|(t, _)| *t)?
+        .1;
+    if newest["__typename"].as_str() != Some("RemovedFromMergeQueueEvent") {
+        return None;
+    }
+    newest["reason"]
+        .as_str()
+        .filter(|r| !r.is_empty())
+        .map(str::to_string)
+}
+
+/// The open stay of `repo#pr` in the merge queue that makibad did not make (Issue 476): its newest
+/// `merge_queue_entered`, when no `merge_dequeued`, `pr_merged` or `pr_closed` of the pull request
+/// (the repository in any case) is newer. Its event id and head.
+fn open_stay(c: &Connection, repo: &str, pr: i64) -> Result<Option<(i64, String)>> {
+    let newest: Option<(i64, Option<String>)> = c
+        .query_row(
+            "SELECT id, json_extract(payload_json, '$.head') FROM events
+             WHERE kind = 'merge_queue_entered'
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2
+             ORDER BY id DESC LIMIT 1",
+            params![repo, pr],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, head)) = newest else {
+        return Ok(None);
+    };
+    let ended: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE id > ?3
+           AND kind IN ('merge_dequeued', 'pr_merged', 'pr_closed')
+           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+           AND json_extract(payload_json, '$.pr') = ?2)",
+        params![repo, pr, id],
+        |r| r.get(0),
+    )?;
+    Ok((!ended).then(|| (id, head.unwrap_or_default())))
+}
+
+/// The fields of the membership read of one pull request (Issue 476; merge-act.md section 10
+/// claim 3 verified them).
+const MEMBER_FIELDS: &str =
+    "number state headRefOid isInMergeQueue mergeQueueEntry{id state position}";
+
+/// The membership read of `prs` of `repo` (Issue 476): one `gh api graphql` call, the pull
+/// request `prs[i]` under the alias `p<i>` with the variable `n<i>`. `None`: the call failed, its
+/// answer could not be read, or it was cancelled; a pull request missing from the answer is left
+/// out.
+fn read_membership(
+    gh: &str,
+    repo: &str,
+    prs: &[i64],
+    cancel: &AtomicBool,
+) -> Option<Vec<(i64, Value)>> {
+    let (owner, name) = repo.split_once('/')?;
+    let vars: String = (0..prs.len()).map(|i| format!(",$n{i}:Int!")).collect();
+    let fields: String = (0..prs.len())
+        .map(|i| format!(" p{i}:pullRequest(number:$n{i}){{{MEMBER_FIELDS}}}"))
+        .collect();
+    let mut args = vec![
+        "api".to_string(),
+        "graphql".into(),
+        "--hostname".into(),
+        "github.com".into(),
+        "-f".into(),
+        format!(
+            "query=query($owner:String!,$name:String!{vars}){{repository(owner:$owner,name:$name){{{}}}}}",
+            fields.trim_start()
+        ),
+        "-f".into(),
+        format!("owner={owner}"),
+        "-f".into(),
+        format!("name={name}"),
+    ];
+    for (i, pr) in prs.iter().enumerate() {
+        args.push("-F".into());
+        args.push(format!("n{i}={pr}"));
+    }
+    let args: Vec<&str> = args.iter().map(String::as_str).collect();
+    let text = run_gh(gh, &args, cancel).ok()?;
+    let v: Value = serde_json::from_str(&text).ok()?;
+    let data = v["data"]["repository"].as_object()?;
+    Some(
+        prs.iter()
+            .enumerate()
+            .filter_map(|(i, pr)| {
+                let read = data.get(&format!("p{i}")).filter(|r| r.is_object())?;
+                Some((*pr, read.clone()))
+            })
+            .collect(),
+    )
+}
+
+/// Write what a membership read found (Issue 476), in one transaction: for each pull request read
+/// open and in the merge queue that is still followed open with no act awaiting its landing and no
+/// open stay, and of which no queue record was written since the read was started (`mark`: such a
+/// record may say the pull request's stay already ended or is an act's), one
+/// `merge_queue_entered` with `attempt` null. Nothing else is written, and no notice.
+fn apply_entered(w: &StateWriter, m: &Membership) -> Result<()> {
+    w.transaction(|w| {
+        let follows = followed(w.conn(), None)?;
+        for (pr, v) in &m.reads {
+            if v["state"].as_str() != Some("OPEN") || v["isInMergeQueue"].as_bool() != Some(true) {
+                continue;
+            }
+            let Some(f) = follows
+                .iter()
+                .find(|f| f.pr == *pr && f.repo.eq_ignore_ascii_case(&m.repo))
+            else {
+                continue;
+            };
+            if f.closed || f.act || super::door::act_awaiting(w.conn(), &f.repo, f.pr)?.is_some() {
+                continue;
+            }
+            let since: bool = w.conn().query_row(
+                "SELECT EXISTS (SELECT 1 FROM events WHERE id > ?3
+                   AND kind IN ('merge_attempted', 'merge_dequeued', 'merge_queue_entered',
+                                'pr_merged', 'pr_closed')
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2)",
+                params![f.repo, f.pr, m.mark],
+                |r| r.get(0),
+            )?;
+            if since {
+                continue;
+            }
+            w.append_event(&NewEvent {
+                kind: "merge_queue_entered",
+                actor: Some("makibad"),
+                payload: Some(&json!({"repo": f.repo, "pr": f.pr, "head": v["headRefOid"],
+                                      "entry": v["mergeQueueEntry"], "attempt": null})),
+                run_task_id: Some(&f.task),
+                ..Default::default()
+            })?;
+        }
+        Ok(())
+    })
 }
 
 /// The arguments of the state read of `f`: `gh pr view`, or, while it has a merge act awaiting
@@ -1756,6 +2042,7 @@ fn poll_state(
                             started_ms,
                             queued: v["isInMergeQueue"].as_bool(),
                             timeline: queue_items(&v),
+                            removal_reason: removal_reason(&v),
                         });
                     }
                     if matches!(
@@ -2059,10 +2346,19 @@ fn apply_state(w: &StateWriter, d: &StateDone) -> Result<bool> {
             // A pull request closed without its merge: it will not land as it is (belt.md 4.3).
             Some("CLOSED") if !f.closed => {
                 // A queue act of a pull request read closed ends first (Issue 434).
-                if let Some(a) = super::door::act_awaiting(w.conn(), repo, pr)?
-                    && a.queue
-                {
-                    super::door::merge_dequeued(w, task, repo, pr, &a, "closed")?;
+                match super::door::act_awaiting(w.conn(), repo, pr)? {
+                    Some(a) if a.queue => {
+                        super::door::merge_dequeued(w, task, repo, pr, &a, "closed")?;
+                    }
+                    Some(_) => {}
+                    // And a stay in the queue makibad did not make (Issue 476).
+                    None => {
+                        if let Some((_, head)) = open_stay(w.conn(), repo, pr)? {
+                            super::door::merge_dequeued_with(
+                                w, task, repo, pr, &head, None, "closed", None,
+                            )?;
+                        }
+                    }
                 }
                 event(
                     "pr_closed",
@@ -2119,6 +2415,9 @@ struct MergeRead {
     queued: Option<bool>,
     /// The queue items of the timeline (`queue_items`).
     timeline: Option<Vec<(bool, i64)>>,
+    /// GitHub's reason of the newest queue item when it is a removal (`removal_reason`, Issue
+    /// 476).
+    removal_reason: Option<String>,
 }
 
 /// What `apply_queue` did with an open read, for the notes of `PrWatch::dequeue_seen`.
@@ -2150,7 +2449,7 @@ fn apply_queue(
     w.transaction(|w| {
         let (task, repo, pr) = (r.f.task.as_str(), r.f.repo.as_str(), r.f.pr);
         let Some(a) = super::door::act_awaiting(w.conn(), repo, pr)? else {
-            return Ok(QueueStep::Nothing);
+            return stay_queue(w, r, notes, interval);
         };
         if !a.queue || act_holds(w.conn(), repo, pr, r.started_ms)? {
             return Ok(QueueStep::Nothing);
@@ -2179,7 +2478,16 @@ fn apply_queue(
                 // never counts for a later one.
                 match notes.get(&a.attempt).map(|n| n.2) {
                     Some(t) if r.started >= t + interval => {
-                        super::door::merge_dequeued(w, task, repo, pr, &a, "left the queue")?;
+                        super::door::merge_dequeued_with(
+                            w,
+                            task,
+                            repo,
+                            pr,
+                            &a.head,
+                            Some(a.attempt),
+                            "left the queue",
+                            r.removal_reason.as_deref(),
+                        )?;
                         Ok(QueueStep::Ended(a.attempt))
                     }
                     Some(_) => Ok(QueueStep::Nothing),
@@ -2189,6 +2497,59 @@ fn apply_queue(
             None => Ok(QueueStep::Nothing),
         }
     })
+}
+
+/// An open read of a pull request with no act of makibad awaiting its landing, in the caller's
+/// transaction (Issue 476): when it has an open stay in the queue that makibad did not make
+/// (`open_stay`), its rules are those of a queue act (`apply_queue`) but for the removal: with no
+/// attempt to bound the timeline, and a stay recorded perhaps long after GitHub answered the
+/// membership read, a removal ends the stay when it is the newest queue item of the timeline
+/// (newer than every addition, so after the one the stay began with), whatever makibad's clock
+/// says. The note is the stay's (its event id).
+fn stay_queue(
+    w: &StateWriter,
+    r: &MergeRead,
+    notes: &HashMap<i64, (String, i64, Instant)>,
+    interval: Duration,
+) -> Result<QueueStep> {
+    let (task, repo, pr) = (r.f.task.as_str(), r.f.repo.as_str(), r.f.pr);
+    let Some((stay, head)) = open_stay(w.conn(), repo, pr)? else {
+        return Ok(QueueStep::Nothing);
+    };
+    // A read begun before the outcome of an attempt made during the stay is not the stay's.
+    if act_holds(w.conn(), repo, pr, r.started_ms)? {
+        return Ok(QueueStep::Nothing);
+    }
+    let end = |why: &str, reason: Option<&str>| {
+        super::door::merge_dequeued_with(w, task, repo, pr, &head, None, why, reason)
+    };
+    if !r.head.is_empty() && !r.head.eq_ignore_ascii_case(&head) {
+        end("head moved", None)?;
+        return Ok(QueueStep::Ended(stay));
+    }
+    match r.queued {
+        Some(true) => Ok(QueueStep::Clear(stay)),
+        Some(false) => {
+            let removed = r.timeline.as_ref().is_some_and(|items| {
+                items
+                    .iter()
+                    .max_by_key(|(_, t)| *t)
+                    .is_some_and(|(added, _)| !added)
+            });
+            if !removed {
+                return Ok(QueueStep::Clear(stay));
+            }
+            match notes.get(&stay).map(|n| n.2) {
+                Some(t) if r.started >= t + interval => {
+                    end("left the queue", r.removal_reason.as_deref())?;
+                    Ok(QueueStep::Ended(stay))
+                }
+                Some(_) => Ok(QueueStep::Nothing),
+                None => Ok(QueueStep::Note(stay)),
+            }
+        }
+        None => Ok(QueueStep::Nothing),
+    }
 }
 
 /// Record what an open read saw (`pr_read`, Issue 405), in one transaction, while its task still
@@ -3474,6 +3835,7 @@ esac"#,
             started_ms: now_ms(),
             queued: None,
             timeline: None,
+            removal_reason: None,
         }
     }
 
@@ -4362,6 +4724,7 @@ esac"#,
             started_ms: now_ms() + 1000,
             queued: Some(false),
             timeline: Some(timeline),
+            removal_reason: None,
             ..merge_read(&f, &head, "CLEAN")
         };
         let again = vec![(true, at), (false, at + 1000), (true, at + 2000)];
@@ -4518,6 +4881,7 @@ esac"#,
             started_ms: now_ms() + 1000,
             queued: Some(false),
             timeline: Some(vec![(true, now_ms()), (false, now_ms())]),
+            removal_reason: None,
             ..merge_read(&f, &head, "CLEAN")
         };
         let t0 = Instant::now();
