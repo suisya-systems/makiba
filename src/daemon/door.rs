@@ -1965,7 +1965,7 @@ fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
     let r = super::prwatch::register_with(w, kind, task, repo, number, head, base_merge)
         .map_err(internal)?;
     if let Some(a) = dequeued {
-        merge_dequeued(w, task, repo, number, &a).map_err(internal)?;
+        merge_dequeued(w, task, repo, number, &a, "head recorded").map_err(internal)?;
     }
     // The belt (Issue 282): the stops of an older head go, and a fix that reaches the range's
     // `budget_fixes` is a stop of the task; a clean merge of the base is no fix (Issue 358). The
@@ -3528,21 +3528,25 @@ pub(super) fn act_awaiting(
     }))
 }
 
-/// End the queue act `a` of `repo#pr` because another head of the pull request was recorded
-/// (`why` `head recorded`), and tell the secretary, in the caller's transaction.
+/// End the queue act `a` of `repo#pr` and tell the secretary, in the caller's transaction. `why`:
+/// `head recorded` (another head of the pull request was recorded, by the `pr` verb or the
+/// outcome writer), or, from the PR watch (Issue 434), `head moved` (GitHub shows another head),
+/// `closed` (read closed) or `left the queue` (read out of the queue with a removal on its
+/// timeline).
 pub(super) fn merge_dequeued(
     w: &StateWriter,
     task: &str,
     repo: &str,
     pr: i64,
     a: &Awaiting,
+    why: &str,
 ) -> crate::db::Result<()> {
     w.append_event(&NewEvent {
         kind: "merge_dequeued",
         actor: Some("makibad"),
         payload: Some(
             &json!({"repo": repo, "pr": pr, "head": a.head, "attempt": a.attempt,
-                               "why": "head recorded"}),
+                               "why": why}),
         ),
         run_task_id: Some(task),
         ..Default::default()
@@ -3551,10 +3555,23 @@ pub(super) fn merge_dequeued(
         w,
         crate::spec::AGENT_SECRETARY,
         task,
-        &format!(
-            "makibad's merge queue act for {repo}#{pr} at {} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge.",
-            a.head
-        ),
+        &match why {
+            "left the queue" => format!(
+                "{repo}#{pr} left the merge queue without landing (the queue's checks failed, or someone removed it). Read why on the pull request; fix it or ask again with merge."
+            ),
+            "head moved" => format!(
+                "makibad's merge queue act for {repo}#{pr} at {} has ended: GitHub shows another head of the pull request, and the queue entry was bound to the old one. Record the new head with makiba pr pushed; once CI passes at it, ask again with merge.",
+                a.head
+            ),
+            "closed" => format!(
+                "makibad's merge queue act for {repo}#{pr} at {} has ended: the pull request was closed without landing.",
+                a.head
+            ),
+            _ => format!(
+                "makibad's merge queue act for {repo}#{pr} at {} has ended: a new head of the pull request was recorded, and the queue entry was bound to the old one. Once CI passes at the new head, ask again with merge.",
+                a.head
+            ),
+        },
     )?;
     Ok(())
 }
