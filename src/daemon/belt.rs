@@ -43,6 +43,7 @@ use crate::db::writer::{NewEvent, RunUpsert, StateWriter};
 use crate::spec::{DoorError, ErrorKind, Role};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -881,6 +882,9 @@ pub(super) struct GateStop<'a> {
     pub refused: bool,
     pub reason: &'a str,
     pub edited_tests: &'a [String],
+    /// The gate's Issue 513 warnings (helpers changed, declared tests merged from the base,
+    /// helpers the base changed): a stop of line `tests` as edited tests are.
+    pub helpers: &'a [String],
 }
 
 /// The gate's answer about a range task's pull request as a stop (belt.md section 5, lines 5 and
@@ -952,7 +956,7 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
             recommend_answer: "no",
             more,
         }
-    } else {
+    } else if s.helpers.is_empty() {
         Stop {
             range,
             task: Some(s.task),
@@ -974,7 +978,63 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
             recommend_answer: "none",
             more,
         }
+    } else {
+        // Issue 513: the key holds the warning lines' sum, so other contents at the same head (a
+        // second landing that changes the same helper) are a new stop; the older one is withdrawn.
+        let sum: String = Sha256::digest(s.helpers.join("\n").as_bytes())
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let key = format!("tests:{subject}@{}#{sum}", s.head);
+        let mut question = format!(
+            "{}#{} at {short} changes test files after its test commit that only a reading can judge: {}.",
+            s.repo,
+            s.pr,
+            s.helpers.join("; ")
+        );
+        if !s.edited_tests.is_empty() {
+            question.push_str(&format!(
+                " It also edits tests that were there before its test commit and are not declared: {tests}."
+            ));
+        }
+        question.push_str(" Should it land?");
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "tests",
+            key,
+            question,
+            background: format!(
+                "The merge gate compared the test files at the head of task {}'s pull request and at the base with those of its test commit (Issue 513). {}",
+                s.task,
+                sentence(s.reason)
+            ),
+            if_yes: "The secretary asks makibad to merge it (merge request); you approve the pending merge entry with your key (makiba merge approve <id>), which shows the diff stat.".into(),
+            if_no: "The secretary sends the worker back to leave those test files as the test commit had them, or to make a new test commit on the current base.".into(),
+            recommend: "None: read the diff of those test files in the pending merge entry.",
+            why: "No rule tells a helper repaired from a helper weakened to pass; only a reading does.",
+            recommend_answer: "none",
+            more,
+        }
     };
+    // Issue 513: a `tests` stop is the one reading of its head; a stop of that line still
+    // escalated for the same pull request and head under another key (other warning lines, or
+    // edited tests only) asks about a reading the gate no longer makes, and is withdrawn.
+    if made.line == "tests" {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.by') = 'makibad'
+               AND json_extract(context_json, '$.stop_line') = 'tests'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.pr') = ?2
+               AND json_extract(context_json, '$.head') = ?3
+               AND json_extract(context_json, '$.key') != ?4",
+            params![range, subject, s.head, made.key],
+        )?;
+    }
     let (id, _) = stop(w, &made)?;
     // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
     if !s.allow
@@ -3976,6 +4036,7 @@ pub(in crate::daemon) mod tests {
                 refused: true,
                 reason: "no passed CI",
                 edited_tests: &[],
+                helpers: &[],
             },
         )
         .unwrap()
@@ -4186,6 +4247,7 @@ pub(in crate::daemon) mod tests {
                 refused: false,
                 reason: "passed",
                 edited_tests: &tests,
+                helpers: &[],
             },
         )
         .unwrap()
@@ -4251,6 +4313,7 @@ pub(in crate::daemon) mod tests {
                 refused: false,
                 reason: "tests edited",
                 edited_tests: &tests,
+                helpers: &[],
             },
         )
         .unwrap()
@@ -4270,6 +4333,52 @@ pub(in crate::daemon) mod tests {
             })
             .unwrap();
         assert_eq!(status, "withdrawn");
+    }
+
+    /// Issue 513 (diff review): a head stopped for helper warnings and edited tests, then read
+    /// with the edited tests only (the base took the helper back): the new `tests` stop replaces
+    /// the older one of that head, which is withdrawn; the same reading again is the same stop.
+    #[test]
+    fn a_new_reading_of_the_same_head_replaces_its_tests_stop() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let h = "1".repeat(40);
+        watch(&w, "a", 7, &h);
+        let tests = ["tests/test_x.py".to_string()];
+        let lines = ["test helpers the base changed: tests/common/h.py".to_string()];
+        let stop_with = |helpers: &[String]| {
+            gate_stop(
+                &w,
+                &GateStop {
+                    task: "a",
+                    repo: "o/p",
+                    pr: 7,
+                    head: &h,
+                    allow: true,
+                    refused: false,
+                    reason: "passed",
+                    edited_tests: &tests,
+                    helpers,
+                },
+            )
+            .unwrap()
+            .expect("a stop of line tests")
+        };
+        let first = stop_with(&lines);
+        assert_eq!(escalated(&w), 1);
+        let second = stop_with(&[]);
+        assert_ne!(second, first);
+        assert_eq!(escalated(&w), 1, "only the new reading's stop stands");
+        let status: String = w
+            .conn()
+            .query_row("SELECT status FROM pending WHERE id = ?1", [first], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "withdrawn");
+        assert_eq!(stop_with(&[]), second, "the same reading is the same stop");
+        assert_eq!(escalated(&w), 1);
     }
 
     /// A range budget is a stop only while it keeps a candidate out, and once.
