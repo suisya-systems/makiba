@@ -22,9 +22,9 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
 `makibad` sends you a notice when the checks of the watched head are decided, or when it cannot read them.
 
 - **Passed:** its last sentence says whether GitHub lets the pull request merge now; what happens next depends on that sentence and on the merge approval mode (below). Quote the notice (never a worker's own test run).
-  - **Mergeable now:** go on under the mode.
-  - **Behind its base (`BEHIND`):** it is not ready. Before telling the person anything, update it with the update-branch skill (mcp__makiba__update), record the new head, and wait for that head's CI notice; that notice, read mergeable now, is the ready signal.
-  - **Conflicts with its base (`DIRTY`):** send the worker the conflict (update-branch, step 5).
+  - **Mergeable now:** not yet the ready signal for a pull request `makibad` follows: wait for its queue-readiness notice (below), which comes once it has judged the head.
+  - **Behind its base (`BEHIND`):** that alone is no reason to update it (the merge queue tests the combination). Wait for the queue-readiness notice: `makibad` says it can be queued, or updates the branch itself.
+  - **Conflicts with its base (`DIRTY`):** `makibad` tries the update itself and says so; when the update's notice says the merge conflicts, send the worker the conflict (update-branch, step 5).
   - **Blocked (`BLOCKED`):** find what blocks it (`gh pr view <n> --repo <owner>/<name> --json reviewDecision,statusCheckRollup`, branch protection or rules), then tell the person what is missing.
   - **A draft:** tell the person; it is not ready.
   - **Not known yet (`UNKNOWN`, `not read`):** do not call it ready; `makibad` sends a merge-state notice once it reads the state.
@@ -34,7 +34,18 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
 
 ## A merge-state notice
 
-"The merge state of <repo>#<pr> at <head>, whose CI passed, changed: ..." comes when the merge state of a head whose CI passed changes, for example main moved under it and it is now behind its base. Act on its sentence as on the last sentence of a passed CI notice above. The newest of the two notices for a head is its merge state.
+"The merge state of <repo>#<pr> at <head>, whose CI passed, changed: ..." comes when the merge state of a head whose CI passed changes, for example main moved under it and it is now behind its base. Act on its sentence as on the last sentence of a passed CI notice above. The newest of the two notices for a head is its merge state. A head told ready that now conflicts is updated by `makibad`, with its own notice.
+
+## A queue-readiness notice
+
+For a pull request it follows, `makibad` judges whether the head is ready for the merge queue by the person's rule (docs/design/queue-ready.md section 1: its CI passed, it does not conflict, and no landing since the base it holds changed what the checks check), and records the decision. Never check this by hand (merge base, the log of landings) for such a pull request: act on the notice.
+
+- **"<repo>#<pr> at <head> can be queued: ..."** with its link: the one ready signal of that head. Quote it, then go on under the mode (Merging, below).
+- **"makibad is updating <repo>#<pr> at <head> ..."** (or "... is no longer ready for the queue: makibad is updating ..."): do not ask for the queue for that head and do not call update yourself. `makibad` merges the base in, records the new head and watches its CI; wait for the update's notice (on a conflict it names the files: update-branch, step 5) and the new head's notices. Tell the worker to fast-forward as the update notice says.
+- **"... needs <base> merged in ..., and its run has no code worktree":** the branch takes the base in another way (the person, or a new run); then record the new head.
+- **"makibad cannot judge whether ... is ready for the queue":** judge it by hand by the rule in docs/design/queue-ready.md section 1 and tell the person what you found, with the link.
+
+A move of main that changes nothing the checks check sends nothing: the head stays ready.
 
 ## A rerun of failed jobs
 
@@ -44,7 +55,7 @@ When a check failed for a cause outside the change (a flaky test) and you rerun 
 
 The organization's merge approval mode is the person's setting. Read it with mcp__makiba__status (its `merge_approval_mode`) before every merge call: under `acceptance` a call the gate allows lands at once. When you cannot read it, do not call merge: tell the person.
 
-- **`human`:** once the newest notice for the head reads it mergeable now (for a pull request not followed, your own read as above) and it hits none of the stop lines below, call merge; it answers `pending`, and only the person's key lets it land. A word in the conversation does not land it.
+- **`human`:** once a queue-readiness notice says the head can be queued (for a pull request not followed, or one whose notice says makibad cannot judge it: your own read as above and the rule in docs/design/queue-ready.md section 1) and it hits none of the stop lines below, call merge; it answers `pending`, and only the person's key lets it land. A word in the conversation does not land it.
 - **`acceptance`:** call merge for a pull request whose CI passed and that hits none of the stop lines below, without asking. Hitting one, stop on that pull request and tell the person which line, with its link; the other work goes on.
 
 Stop lines:
@@ -56,7 +67,7 @@ Stop lines:
 5. The worker ran out of its review rounds or its time, or reported a blocker, or the task's last diff review did not read the head you would merge.
 6. The declared test or the test setup was changed after the test commit, or anything suggests a test was weakened to pass.
 7. The merge gate refused.
-8. The newest notice for the head does not read it as mergeable now (for a pull request not followed, your own read as above). Behind its base is not a stop to the person: update it first (above).
+8. No queue-readiness notice says the head can be queued, and the head is not one where your own judgement stands for it: a pull request not followed, or a followed one whose notice says makibad cannot judge it ("cannot judge whether ... is ready for the queue"), where your own read as above shows it mergeable now and the rule in docs/design/queue-ready.md section 1 is met, which you tell the person with what you found. Behind its base is not a stop and no reason to update.
 
 To merge, in either mode, call mcp__makiba__merge with `repo` (`<owner>/<name>`), `pr`, `head` (the full 40-character head of the CI notice) and `method` `squash`. You never run `gh pr merge` or any other merge or enqueue command: the merge gate hook refuses them all. `makibad` runs the acceptance gate (below); on a refusal it answers the verdict and nothing runs.
 
@@ -77,7 +88,7 @@ After mcp__makiba__push and its notice, call mcp__makiba__pr with `state` `pushe
 
 ## Main moved under a pushed branch
 
-Use the update-branch skill: mcp__makiba__update has `makibad` merge the base in (a merge, never a rebase or a force) and push it; then record the new head as above.
+For a pull request `makibad` follows, do nothing: it updates the branch itself when its queue readiness rule says so (above), and a move of main that changes nothing the checks check is no reason to update. Otherwise (a branch with no pull request `makibad` follows, or when the person asks), use the update-branch skill: mcp__makiba__update has `makibad` merge the base in (a merge, never a rebase or a force) and push it; then record the new head as above.
 
 ## After the merge
 

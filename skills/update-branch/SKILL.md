@@ -1,7 +1,7 @@
 ---
 name: update-branch
 description: Have makibad take the base branch into a pushed worker branch with a merge commit and push it, so no push is ever forced, then record the new head.
-when_to_use: Main moved under a branch that is already pushed (a pull request is open or CI is watched), and the branch must take main in.
+when_to_use: A branch that is already pushed must take main in, and makibad does not do it on its own: makibad updates a pull request it follows itself when its queue readiness rule says so (docs/design/queue-ready.md), and a move of main is otherwise no reason to update.
 ---
 
 # update-branch

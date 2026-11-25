@@ -247,8 +247,9 @@ fn passed_prefix(repo: &str, head: &str) -> String {
     format!("CI passed for {repo}#5 at {}:", &head[..7])
 }
 
-/// The Issue's case: CI passed on a head that is behind its base, and the notice says so. The
-/// merge state comes from the state read alone, with its fields; no other call is made.
+/// The Issue's case: CI passed on a head that is behind its base, and the notice says so, and
+/// that being behind alone is no reason to update it (Issue 475). The merge state comes from the
+/// state read alone, with its fields; no other call is made.
 #[test]
 fn behind_head_passed_notice_names_it_behind() {
     let home = init();
@@ -258,7 +259,7 @@ fn behind_head_passed_notice_names_it_behind() {
     org.opened("t1", "review", repo, &head);
 
     let body = org.until_passed_notice(repo, &head);
-    for want in ["behind its base", "(BEHIND)", "update-branch"] {
+    for want in ["behind its base", "(BEHIND)", "no reason to update"] {
         assert!(body.contains(want), "{want:?} not in {body:?}");
     }
     let calls = calls(&home, repo);

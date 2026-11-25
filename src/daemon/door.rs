@@ -1850,8 +1850,10 @@ fn unsaved_work(w: &StateWriter, run: i64) -> Result<(), DoorError> {
 
 /// `pr opened|pushed|rerun` (spec section 12): the event, the older watches of the PR `superseded`
 /// and the watch of the new head, as `prwatch::register` does in one transaction. `base_merge`:
-/// the door found the pushed head to be a clean merge of the base (Issue 358).
-fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
+/// the door found the pushed head to be a clean merge of the base (Issue 358). makibad's own
+/// update on its queue readiness judgement records its head through this too (`push.rs`, Issue
+/// 475), in the transaction of the update's end.
+pub(super) fn pr(w: &StateWriter, args: &Value, base_merge: bool) -> Response {
     let state = str_arg(args, "state")?;
     let kind = match state {
         "opened" => "pr_opened",
@@ -3664,6 +3666,33 @@ fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError
                 a.attempt
             ),
             "wait for the act's notice, the landing, or the queue dropping it",
+        ));
+    }
+    // Issue 475 (docs/design/queue-ready.md section 6): no act under an update, nor on a head the
+    // PR watch judged not ready for the queue.
+    if let Some(command) = super::prwatch::update_running(w.conn(), &task).map_err(internal)? {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!(
+                "{repo}#{pr} is not ready for the queue: the update command {command} of {task} is running; nothing was judged or sent"
+            ),
+            "wait for the update's notice and the new head's notices",
+        ));
+    }
+    if let Some(head) = super::prwatch::newest_head(w.conn(), &task).map_err(internal)?
+        && let Some(r) =
+            super::prwatch::newest_readiness(w.conn(), repo, pr, &head).map_err(internal)?
+        && r.verdict == "update"
+    {
+        return Err(refuse(
+            ErrorKind::Conflict,
+            format!(
+                "{repo}#{pr} at {} is not ready for the queue (makibad's queue_readiness {}: {}); nothing was judged or sent",
+                &head[..head.len().min(7)],
+                r.id,
+                r.reason.as_deref().unwrap_or("update")
+            ),
+            "wait for its update and the new head's notices; a conflict the update could not resolve goes to the worker",
         ));
     }
     Ok(task)

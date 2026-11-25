@@ -40,22 +40,29 @@ pub struct Places {
     pub state_db: PathBuf,
 }
 
+/// `$var`, else `~/<default>` (spec section 2).
+fn dir_from_env(var: &str, default: &str) -> PathBuf {
+    std::env::var_os(var).map(PathBuf::from).unwrap_or_else(|| {
+        std::env::var_os("HOME")
+            .map(PathBuf::from)
+            .unwrap_or_default()
+            .join(default)
+    })
+}
+
+/// The repositories folder: `$MAKIBA_REPOS_DIR`, else `~/makiba-repos`.
+pub fn repos_from_env() -> PathBuf {
+    dir_from_env("MAKIBA_REPOS_DIR", "makiba-repos")
+}
+
 impl Places {
     /// `$MAKIBA_WORKERS_DIR` and `$MAKIBA_DOCS_DIR` with the defaults of spec section 2;
     /// the settings folder is `<state>/settings`.
     pub fn from_env(state: &Path) -> Places {
-        let home = std::env::var_os("HOME")
-            .map(PathBuf::from)
-            .unwrap_or_default();
-        let dir = |var: &str, default: &str| {
-            std::env::var_os(var)
-                .map(PathBuf::from)
-                .unwrap_or_else(|| home.join(default))
-        };
         Places {
-            workers: dir("MAKIBA_WORKERS_DIR", "makiba-workers"),
-            docs: dir("MAKIBA_DOCS_DIR", "makiba-docs"),
-            repos: dir("MAKIBA_REPOS_DIR", "makiba-repos"),
+            workers: dir_from_env("MAKIBA_WORKERS_DIR", "makiba-workers"),
+            docs: dir_from_env("MAKIBA_DOCS_DIR", "makiba-docs"),
+            repos: repos_from_env(),
             settings: state.join("settings"),
             state_db: state.join("state.db"),
         }

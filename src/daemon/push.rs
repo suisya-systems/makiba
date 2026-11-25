@@ -56,6 +56,17 @@ struct Job {
     head: Option<String>,
     /// What the check before CI needs from `state.db`, read when the job starts.
     before: Before,
+    /// An `update` makibad started on its queue readiness judgement (Issue 475): the
+    /// `queue_readiness` event, and the pull request and head it judged, whose new head `finish`
+    /// records.
+    readiness: Option<Readiness>,
+}
+
+#[derive(Clone)]
+struct Readiness {
+    repo: String,
+    pr: i64,
+    head: String,
 }
 
 /// Issue 307: the project's default branch and the heads with a failed CI run on any of the task's
@@ -125,10 +136,15 @@ fn before_ci(dir: &Path, j: &Job, base: &str, sent: &str) -> std::result::Result
 enum Done {
     /// `push`: the head pushed.
     Pushed(String),
-    /// `update`: origin's head of the branch before and after.
-    Updated { old: String, new: String },
-    /// `update`: nothing to merge or push; origin's head of the branch.
-    Current(String),
+    /// `update`: origin's head of the branch before and after; `base_merge` (a readiness update,
+    /// Issue 475): `new` is a clean merge of the base onto the judged head.
+    Updated {
+        old: String,
+        new: String,
+        base_merge: bool,
+    },
+    /// `update`: nothing to merge or push; origin's head of the branch, and `base_merge` as above.
+    Current { head: String, base_merge: bool },
 }
 
 type Outcome = std::result::Result<Done, String>;
@@ -231,7 +247,57 @@ fn work(places: &Places, j: &Job) -> Outcome {
             before_ci(&repo, j, &base, &sent)?;
             push_head(&repo, &sent, &j.branch).map(|()| Done::Pushed(sent))
         }
-        Some(base) => update(&repo, j, base, &head),
+        Some(base) => update(&repo, j, base, &head).map(|d| judged_merge(&repo, j, base, d)),
+    }
+}
+
+/// The head an update merges into: the worktree's `head`, except for a readiness update (Issue
+/// 475), which merges only the head makibad judged. A worktree behind the judged head (`behind`:
+/// the worker has not fast-forwarded after an earlier update of makibad) merges the judged head;
+/// one that holds commits of its own (the worker's, which go to origin with `push`) is refused.
+fn judged_head(
+    j: &Job,
+    head: &str,
+    behind: impl FnOnce(&str) -> std::result::Result<bool, String>,
+) -> std::result::Result<String, String> {
+    match &j.readiness {
+        Some(r) if !r.head.eq_ignore_ascii_case(head) => {
+            if behind(&r.head)? {
+                Ok(r.head.clone())
+            } else {
+                Err(format!(
+                    "the worktree of {} is at {head}, which is not the head makibad judged for \
+                     the queue ({}) nor behind it; nothing was merged or pushed (the worker's \
+                     newer commits go to origin with push)",
+                    j.task, r.head
+                ))
+            }
+        }
+        _ => Ok(head.to_string()),
+    }
+}
+
+/// For a readiness update (Issue 475): whether the head it ends with is a clean merge of the base
+/// onto the judged head (`gate::pushed_base_merge`, as the door judges `pr pushed`).
+fn judged_merge(dir: &Path, j: &Job, base: &str, d: Done) -> Done {
+    let Some(r) = &j.readiness else { return d };
+    let merged = |head: &str| {
+        gate::pushed_base_merge(dir, &format!("refs/remotes/origin/{base}"), &r.head, head)
+    };
+    match d {
+        Done::Updated { old, new, .. } => {
+            let base_merge = merged(&new);
+            Done::Updated {
+                old,
+                new,
+                base_merge,
+            }
+        }
+        Done::Current { head, .. } => {
+            let base_merge = merged(&head);
+            Done::Current { head, base_merge }
+        }
+        other => other,
     }
 }
 
@@ -437,11 +503,28 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
     let id = |r: String| git(dir, &["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
     let base_id = id(format!("refs/remotes/origin/{base}"))?;
     let old = id(format!("refs/remotes/origin/{}", j.branch))?;
+    let head = &judged_head(j, head, |judged| is_ancestor(dir, head, judged))?;
     if !is_ancestor(dir, &old, head)? {
         // A restart after the merge was pushed and before it was recorded: origin holds the
-        // worktree's head and the base, which the worktree does not (it is not written).
-        if is_ancestor(dir, head, &old)? && is_ancestor(dir, &base_id, &old)? {
-            return Ok(Done::Current(old));
+        // worktree's head and the base, which the worktree does not (it is not written). For a
+        // readiness update (Issue 475) the base may have moved on since: a clean merge of the
+        // judged head with an older commit of the base is still that update's own push, recorded
+        // as it is; its readiness is judged again on its own CI.
+        let pushed_before = |old: &str| -> std::result::Result<bool, String> {
+            Ok(is_ancestor(dir, &base_id, old)?
+                || (j.readiness.is_some()
+                    && gate::pushed_base_merge(
+                        dir,
+                        &format!("refs/remotes/origin/{base}"),
+                        head,
+                        old,
+                    )))
+        };
+        if is_ancestor(dir, head, &old)? && pushed_before(&old)? {
+            return Ok(Done::Current {
+                head: old,
+                base_merge: false,
+            });
         }
         return Err(format!(
             "the branch {} at origin moved to {old}, which the worktree does not hold; nothing \
@@ -457,14 +540,21 @@ fn update(dir: &Path, j: &Job, base: &str, head: &str) -> Outcome {
         merge(dir, j, base, head, &base_id)?
     };
     if new == old {
-        return Ok(Done::Current(new));
+        return Ok(Done::Current {
+            head: new,
+            base_merge: false,
+        });
     }
     let judged = judged_base(dir, j)?;
     before_ci(dir, j, &judged, &new)?;
     push_head(dir, &new, &j.branch).map_err(|e| {
         format!("the merged head {new} was not pushed: {e}; nothing changed at origin, update or push again")
     })?;
-    Ok(Done::Updated { old, new })
+    Ok(Done::Updated {
+        old,
+        new,
+        base_merge: false,
+    })
 }
 
 /// The merge commit of `head` and the base commit `base_id`, made in the project's repository with
@@ -643,7 +733,10 @@ impl Push {
                         CASE c.verb WHEN 'update' THEN
                           COALESCE(json_extract(c.args_json, '$.base'), '') END,
                         CASE c.verb WHEN 'push' THEN json_extract(c.args_json, '$.head') END,
-                        COALESCE(p.default_branch, 'main')
+                        COALESCE(p.default_branch, 'main'),
+                        CASE c.verb WHEN 'update' THEN json_extract(c.args_json, '$.readiness') END,
+                        json_extract(c.args_json, '$.repo'), json_extract(c.args_json, '$.pr'),
+                        json_extract(c.args_json, '$.head')
                  FROM commands c JOIN runs r ON r.task_id = json_extract(c.args_json, '$.task')
                  LEFT JOIN projects p ON p.id = r.project_id
                  WHERE c.verb IN ('push', 'update') AND c.status = 'accepted' ORDER BY c.id",
@@ -662,6 +755,17 @@ impl Push {
                     before: Before {
                         default_branch: r.get(8)?,
                         ..Default::default()
+                    },
+                    readiness: match (
+                        r.get::<_, Option<i64>>(9)?,
+                        r.get::<_, Option<String>>(10)?,
+                        r.get::<_, Option<i64>>(11)?,
+                        r.get::<_, Option<String>>(12)?,
+                    ) {
+                        (Some(_), Some(repo), Some(pr), Some(head)) => {
+                            Some(Readiness { repo, pr, head })
+                        }
+                        _ => None,
                     },
                 })
             })?
@@ -704,6 +808,63 @@ pub fn sync_request(branch: &str) -> String {
     )
 }
 
+/// For an update makibad started on its queue readiness judgement (Issue 475): `head` recorded as
+/// the `pr` verb records a `pushed`, in the caller's transaction, so the new head is watched with
+/// no step of the secretary. The sentence for the notice; `None` for any other update.
+fn record_head(w: &StateWriter, j: &Job, head: &str, base_merge: bool) -> Result<Option<String>> {
+    let Some(r) = &j.readiness else {
+        return Ok(None);
+    };
+    // Only while the run's current pull request is still the one judged, at the head judged: a
+    // head or a pull request recorded while the update ran is never overwritten by its result.
+    let current: Option<(Option<String>, Option<i64>)> = w
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT {}, {} FROM runs r WHERE r.task_id = ?1",
+                super::belt::current_pr_sql("r", "repo"),
+                super::belt::current_pr_sql("r", "pr")
+            ),
+            [&j.task],
+            |q| Ok((q.get(0)?, q.get(1)?)),
+        )
+        .map(Some)
+        .or_else(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => Ok(None),
+            e => Err(e),
+        })?;
+    let same_pr = matches!(&current, Some((Some(cr), Some(cp)))
+        if cr.eq_ignore_ascii_case(&r.repo) && *cp == r.pr);
+    let same_head = super::prwatch::newest_head(w.conn(), &j.task)?
+        .is_some_and(|h| h.eq_ignore_ascii_case(&r.head));
+    if !(same_pr && same_head) {
+        return Ok(Some(format!(
+            "makibad did not record it: {} no longer has {}#{} at {}, the head it judged, as its \
+             newest record; record it with pr pushed if it is still wanted.",
+            j.task, r.repo, r.pr, r.head
+        )));
+    }
+    let args = json!({"state": "pushed", "repo": r.repo, "pr": r.pr, "head": head,
+                      "task": j.task});
+    Ok(Some(match super::door::pr(w, &args, base_merge) {
+        Ok(_) => format!(
+            "makibad recorded it for {}#{} (pr pushed) and watches its CI; you need not record it.",
+            r.repo, r.pr
+        ),
+        // A failed write: the whole transaction is rolled back and tried again on the next tick.
+        Err(e) if e.kind == crate::spec::ErrorKind::Internal => {
+            return Err(crate::db::Error::Sqlite(rusqlite::Error::SqliteFailure(
+                rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_ERROR),
+                Some(e.message),
+            )));
+        }
+        Err(e) => format!(
+            "makibad could not record it ({}): record it with pr pushed and this head.",
+            e.message
+        ),
+    }))
+}
+
 /// The command `done` with `branch_pushed`, or `failed`, and the notice to the secretary, together.
 fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
     w.transaction(|w| {
@@ -737,7 +898,11 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
                     j.branch, j.task
                 )
             }
-            Ok(Done::Updated { old, new }) => {
+            Ok(Done::Updated {
+                old,
+                new,
+                base_merge,
+            }) => {
                 w.append_event(&NewEvent {
                     kind: "branch_updated",
                     actor: Some("makibad"),
@@ -748,16 +913,33 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
                     run_task_id: Some(&j.task),
                     ..Default::default()
                 })?;
+                let record = match record_head(w, j, new, *base_merge)? {
+                    Some(said) => said,
+                    None => "Record it with pr pushed and this head.".to_string(),
+                };
                 format!(
                     "The branch {} of {} holds origin/{base} and is pushed to origin at {new} \
-                     (was {old}). Record it with pr pushed and this head. The worker's tree is \
-                     not changed: {}",
+                     (was {old}). {record} The worker's tree is not changed: {}",
                     j.branch,
                     j.task,
                     sync_request(&j.branch)
                 )
             }
-            Ok(Done::Current(head)) => format!(
+            Ok(Done::Current { head, base_merge })
+                if j.readiness
+                    .as_ref()
+                    .is_some_and(|r| !r.head.eq_ignore_ascii_case(head)) =>
+            {
+                let record = record_head(w, j, head, *base_merge)?.unwrap_or_default();
+                format!(
+                    "The branch {} of {} already holds origin/{base}; nothing was merged. origin \
+                     has it at {head}. {record} If the worker's tree is behind it, {}",
+                    j.branch,
+                    j.task,
+                    sync_request(&j.branch)
+                )
+            }
+            Ok(Done::Current { head, .. }) => format!(
                 "The branch {} of {} already holds origin/{base}; nothing was merged. origin has \
                  it at {head}; record it with pr pushed and this head if it is not recorded yet. \
                  If the worker's tree is behind it, {}",
@@ -778,4 +960,169 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
         super::door::notice(w, AGENT_SECRETARY, &j.task, &body)?;
         Ok(())
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::writer::RunUpsert;
+
+    fn job(task: &str, judged: Option<&str>) -> Job {
+        Job {
+            command: 1,
+            verb: "update".into(),
+            task: task.into(),
+            branch: format!("makiba/{task}"),
+            project: "p".into(),
+            worktree: None,
+            base: Some("main".into()),
+            head: None,
+            before: Before::default(),
+            readiness: judged.map(|h| Readiness {
+                repo: "o/r".into(),
+                pr: 5,
+                head: h.into(),
+            }),
+        }
+    }
+
+    /// Issue 475: a readiness update of a worktree the worker committed on since the judgement
+    /// merges and pushes nothing; any other update is not held to a head.
+    #[test]
+    fn a_readiness_update_merges_only_the_judged_head() {
+        let (a, b) = ("a".repeat(40), "b".repeat(40));
+        let never = |_: &str| -> std::result::Result<bool, String> { panic!("not asked") };
+        assert_eq!(judged_head(&job("t", Some(&a)), &a, never).unwrap(), a);
+        let e = judged_head(&job("t", Some(&a)), &b, |_| Ok(false)).unwrap_err();
+        assert!(e.contains("nothing was merged or pushed"), "{e}");
+        assert_eq!(judged_head(&job("t", None), &b, never).unwrap(), b);
+        // Two updates of makibad with no fast-forward of the worker between them: the worktree
+        // is behind the judged head (the first update's merge), which the second one merges.
+        assert_eq!(
+            judged_head(&job("t", Some(&a)), &b, |_| Ok(true)).unwrap(),
+            a
+        );
+    }
+
+    /// `git` in `dir` for the tests: a fixed identity, no signing.
+    fn git_t(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false", "-c", run_repo::HOOKS_OFF])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    /// Issue 475: a readiness update that pushed its merge and was not recorded (a restart),
+    /// while the base moved on meanwhile, finds its own push again instead of failing.
+    #[test]
+    fn a_readiness_update_pushed_before_a_restart_is_found_after_the_base_moved() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, repo) = (dir.path().join("origin.git"), dir.path().join("repo"));
+        git_t(
+            dir.path(),
+            &[
+                "init",
+                "-q",
+                "--bare",
+                "-b",
+                "main",
+                &origin.to_string_lossy(),
+            ],
+        );
+        git_t(
+            dir.path(),
+            &["init", "-q", "-b", "main", &repo.to_string_lossy()],
+        );
+        let commit = |name: &str| {
+            std::fs::write(repo.join(name), name).unwrap();
+            git_t(&repo, &["add", name]);
+            git_t(&repo, &["commit", "-q", "-m", name]);
+            git_t(&repo, &["rev-parse", "HEAD"])
+        };
+        commit("first");
+        git_t(
+            &repo,
+            &["remote", "add", "origin", &origin.to_string_lossy()],
+        );
+        git_t(&repo, &["checkout", "-q", "-b", "makiba/t"]);
+        let head = commit("branch");
+        git_t(&repo, &["checkout", "-q", "main"]);
+        let b1 = commit("landing-1");
+        // The update's own push: a clean merge of the judged head with the base at b1.
+        let tree = git_t(&repo, &["merge-tree", "--write-tree", &head, &b1]);
+        let merged = git_t(
+            &repo,
+            &[
+                "commit-tree",
+                tree.lines().next().unwrap(),
+                "-p",
+                &head,
+                "-p",
+                &b1,
+                "-m",
+                "m",
+            ],
+        );
+        commit("landing-2");
+        git_t(
+            &repo,
+            &[
+                "push",
+                "-q",
+                "origin",
+                "main",
+                &format!("{merged}:refs/heads/makiba/t"),
+            ],
+        );
+        let j = job("t", Some(&head));
+        match update(&repo, &j, "main", &head) {
+            Ok(Done::Current { head: found, .. }) => assert_eq!(found, merged),
+            Ok(_) => panic!("not found as its own push"),
+            Err(e) => panic!("{e}"),
+        }
+    }
+
+    /// Issue 475: an update that ends after a newer head was recorded does not record its own
+    /// result over it; one that ends on the head it judged does.
+    #[test]
+    fn a_late_readiness_update_does_not_record_over_a_newer_head() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let (a, b, c) = ("a".repeat(40), "b".repeat(40), "c".repeat(40));
+        super::super::prwatch::register(&w, "pr_opened", "t", "o/r", 5, &a).unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "t", "o/r", 5, &b).unwrap();
+        let said = record_head(&w, &job("t", Some(&a)), &c, true)
+            .unwrap()
+            .unwrap();
+        assert!(said.contains("did not record"), "{said}");
+        assert_eq!(
+            super::super::prwatch::newest_head(w.conn(), "t").unwrap(),
+            Some(b.clone())
+        );
+        let said = record_head(&w, &job("t", Some(&b)), &c, true)
+            .unwrap()
+            .unwrap();
+        assert!(said.contains("makibad recorded it"), "{said}");
+        assert_eq!(
+            super::super::prwatch::newest_head(w.conn(), "t").unwrap(),
+            Some(c)
+        );
+    }
 }
