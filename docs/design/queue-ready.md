@@ -102,7 +102,10 @@ the reader stopped by the pass):
 | `stale` | none | nothing (a newer head is coming) |
 | git failed | none, or `unknown` | nothing, read again next interval; after 300 s from the head's first failure in this process (the PR watch's budget) the event with verdict `unknown` and one notice |
 
-The conflict row applies to a first judgement and to a watched `ready` head alike: the pass sees a
+A reading is decided on the head's merge state at the time it is written (the newest read of
+that head, begun after its CI result): a draft or a state not computed writes nothing (the reader
+is started again once it is computed), and a conflict makes it `update`, reason `conflict`,
+whatever the landings. The conflict row applies to a first judgement and to a watched `ready` head alike: the pass sees a
 `conflict` read of a candidate's head in `self.merges` and writes it without waiting for a reader
 (`base_tip` the last `covered`).
 
@@ -192,6 +195,8 @@ counts:
     item under a job's `steps`) whose own `uses:` names `actions/cache` (`actions/cache@...`,
     `actions/cache/restore@...`, `actions/cache/save@...`); a block scalar there (the cache
     step's `path: |`) is scheduling too.
+- The diff is read as text (`--text`, whatever the attributes say); contents that differ with no
+  hunk read count.
 - A file version holding a tab in its indentation, a flow mapping or sequence spanning lines, an
   anchor or alias (`&`, `*` as a node), or a second document (`---`) is not read: the change
   counts.

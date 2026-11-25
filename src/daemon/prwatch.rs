@@ -2234,8 +2234,6 @@ struct ReadDone {
     pr: i64,
     head: String,
     watch: bool,
-    /// The merge class the reader was started on.
-    class: String,
     result: std::result::Result<super::ready::Reading, String>,
 }
 
@@ -2260,7 +2258,6 @@ enum Decision {
 /// that counts), sending each reading the loop needs; a failure is sent and read again.
 fn read_ready(
     c: ReadyCand,
-    class: String,
     mut covered: Option<String>,
     interval: Duration,
     cancel: &AtomicBool,
@@ -2307,7 +2304,6 @@ fn read_ready(
                 pr: c.f.pr,
                 head: c.head.clone(),
                 watch,
-                class: class.clone(),
                 result,
             });
             if stop {
@@ -2343,7 +2339,7 @@ impl PrWatch {
         };
         self.covered.retain(|k, _| still(k));
         self.read_failing.retain(|k, _| still(k));
-        let mut wanted: Vec<(ReadyCand, String)> = Vec::new();
+        let mut wanted: Vec<ReadyCand> = Vec::new();
         for c in candidates {
             let key = told_key(&c.f.repo, c.f.pr, &c.head);
             let Some(r) = self.merges.get(&c.f.task).filter(|r| {
@@ -2380,13 +2376,13 @@ impl PrWatch {
                 )?;
                 continue;
             }
-            wanted.push((c, class));
+            wanted.push(c);
         }
         let tasks: Vec<String> = self.readers.keys().cloned().collect();
         for task in tasks {
             let keep = self.readers.get(&task).is_some_and(|r| {
                 !r.handle.as_ref().is_none_or(JoinHandle::is_finished)
-                    && wanted.iter().any(|(c, _)| {
+                    && wanted.iter().any(|c| {
                         c.f.task == task
                             && c.head.eq_ignore_ascii_case(&r.head)
                             && c.ready.is_some() == r.watch
@@ -2398,7 +2394,7 @@ impl PrWatch {
                 r.cancel.store(true, Ordering::SeqCst);
             }
         }
-        for (c, class) in wanted {
+        for c in wanted {
             if self.readers.contains_key(&c.f.task) {
                 continue;
             }
@@ -2412,7 +2408,7 @@ impl PrWatch {
             let handle = {
                 let (tx, cancel, interval) =
                     (self.ready_tx.clone(), Arc::clone(&cancel), self.interval);
-                std::thread::spawn(move || read_ready(c, class, covered, interval, &cancel, &tx))
+                std::thread::spawn(move || read_ready(c, covered, interval, &cancel, &tx))
             };
             self.readers.insert(
                 task,
@@ -2474,11 +2470,36 @@ impl PrWatch {
             }
             Ok(_) => return Ok(()),
         };
-        let class = self
+        // A reading decides only on the head's merge state now, read after its CI result: a draft
+        // or a state not computed waits (the reader is started again once it is), and a conflict
+        // is an update whatever the landings.
+        let now = self
             .merges
             .get(&d.task)
-            .filter(|r| r.head.eq_ignore_ascii_case(&d.head))
-            .map_or_else(|| d.class.clone(), |r| merge_class(&r.status, r.draft));
+            .filter(|r| {
+                r.head.eq_ignore_ascii_case(&d.head) && !began_before_ci(r, self.ci_seen.get(&key))
+            })
+            .map(|r| merge_class(&r.status, r.draft));
+        let Some(class) = now.filter(|c| c != "draft" && c != "unknown") else {
+            return Ok(());
+        };
+        let decision = match decision {
+            Decision::Ready { base_tip, .. } if class == "conflict" => Decision::Update {
+                reason: "conflict",
+                base_tip: Some(base_tip),
+                ci_base: None,
+                landings: Vec::new(),
+            },
+            Decision::Update {
+                base_tip, ci_base, ..
+            } if class == "conflict" => Decision::Update {
+                reason: "conflict",
+                base_tip,
+                ci_base,
+                landings: Vec::new(),
+            },
+            other => other,
+        };
         if decide(w, &self.repos, &d.task, &d.head, d.watch, &class, &decision)? {
             self.read_failing.remove(&key);
         }
@@ -3661,6 +3682,54 @@ esac"#,
             draft: false,
             title: None,
             started: Instant::now(),
+        }
+    }
+
+    /// Issue 475: a readiness reading that comes back once the head reads as a draft, or its
+    /// merge state is not computed, or there is no read of that head, decides nothing.
+    #[test]
+    fn a_reading_decides_nothing_on_a_draft_or_an_unknown_merge_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let f = Followed {
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            gen_reg: 1,
+            gen_close: 0,
+            closed: false,
+        };
+        let head = "a".repeat(40);
+        let reading = || ReadDone {
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            head: head.clone(),
+            watch: false,
+            result: Ok(super::super::ready::Reading::Read {
+                base_tip: "b".repeat(40),
+                ci_base: "c".repeat(40),
+                landings: Vec::new(),
+            }),
+        };
+        let mut p = PrWatch::from_env();
+        let mut draft = merge_read(&f, &head, "CLEAN");
+        draft.draft = true;
+        for read in [Some(draft), Some(merge_read(&f, &head, "UNKNOWN")), None] {
+            match read {
+                Some(r) => p.merges.insert("t".into(), r),
+                None => p.merges.remove("t"),
+            };
+            p.ready_done(&w, &reading()).unwrap();
+            let written: i64 = w
+                .conn()
+                .query_row(
+                    "SELECT count(*) FROM events WHERE kind = 'queue_readiness'",
+                    [],
+                    |q| q.get(0),
+                )
+                .unwrap();
+            assert_eq!(written, 0);
         }
     }
 

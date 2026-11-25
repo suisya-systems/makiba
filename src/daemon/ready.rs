@@ -203,6 +203,7 @@ fn counts(repo: &Path, parent: &str, sha: &str, status: &str, path: &str) -> Res
         &[
             "diff",
             "-U0",
+            "--text",
             "--no-color",
             "--no-ext-diff",
             "--no-textconv",
@@ -213,6 +214,11 @@ fn counts(repo: &Path, parent: &str, sha: &str, status: &str, path: &str) -> Res
         ],
     )?;
     let (removed, added) = hunk_lines(&diff);
+    // Contents that differ with no hunk read (an attribute that hides the diff, a form of
+    // output not read): the change counts.
+    if removed.is_empty() && added.is_empty() {
+        return Ok(old != new || !diff.is_empty());
+    }
     Ok(!scheduling_only(&old, &new, &removed, &added))
 }
 
@@ -345,7 +351,7 @@ fn unreadable(value: &str) -> bool {
 /// document marker, an anchor or alias, a flow or quoted value spanning lines).
 fn classes(text: &str) -> Option<Vec<Class>> {
     let mut stack: Vec<Frame> = Vec::new();
-    // Per frame id: its key, whether it is an item, whether it is a cache step.
+    // Per frame id: its key, and whether it is a step (an item of `jobs.<job>.steps`).
     let mut frames: Vec<(Option<String>, bool)> = Vec::new();
     let mut cache: Vec<bool> = Vec::new();
     // Per line: neutral, or the frame ids enclosing it.
@@ -384,7 +390,12 @@ fn classes(text: &str) -> Option<Vec<Class>> {
         let mut rest = trimmed;
         if rest == "-" || rest.starts_with("- ") {
             let id = frames.len();
-            frames.push((None, true));
+            let key = |i: usize| stack.get(i).and_then(|f| f.key.as_deref());
+            let step = stack.len() == 3
+                && key(0) == Some("jobs")
+                && key(1).is_some()
+                && key(2) == Some("steps");
+            frames.push((None, step));
             cache.push(false);
             stack.push(Frame {
                 indent: col,
@@ -415,6 +426,7 @@ fn classes(text: &str) -> Option<Vec<Class>> {
                         .any(|p| value.starts_with(p))
                         && let Some(owner) = stack.iter().rev().find(|f| f.key.is_none())
                         && stack.last().is_some_and(|f| f.id == owner.id)
+                        && frames[owner.id].1
                     {
                         cache[owner.id] = true;
                     }
@@ -464,6 +476,7 @@ fn classify(ids: &[usize], frames: &[(Option<String>, bool)], cache: &[bool]) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::Path;
 
     /// `.github/workflows/ci.yml` before PR 473 (4cefa34), the part it changed.
     const BEFORE_473: &str = "name: CI
@@ -636,6 +649,49 @@ jobs:
         assert!(!only_scheduling(base, &tab));
         let doc = format!("{base}---\non: [push]\n");
         assert!(!only_scheduling(base, &doc));
+    }
+
+    #[test]
+    fn only_a_step_gets_the_cache_exemption() {
+        let base = "jobs:\n  t:\n    strategy:\n      matrix:\n        include:\n          - uses: actions/cache@v4\n            cmd: cargo test\n    steps:\n      - run: x\n";
+        let changed = base.replace("cmd: cargo test", "cmd: cargo test --release");
+        assert!(!only_scheduling(base, &changed));
+    }
+
+    /// `git` in `dir` for the tests: a fixed identity, no hook, no signing.
+    fn git_t(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.com"])
+            .args(["-c", "commit.gpgsign=false", "-c", HOOKS_OFF])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn a_workflow_git_reads_as_binary_still_counts() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        git_t(d, &["init", "-q"]);
+        std::fs::create_dir_all(d.join(".github/workflows")).unwrap();
+        std::fs::write(d.join(".gitattributes"), "*.yml binary\n").unwrap();
+        let path = ".github/workflows/ci.yml";
+        std::fs::write(d.join(path), BEFORE_483).unwrap();
+        git_t(d, &["add", "-A"]);
+        git_t(d, &["commit", "-q", "-m", "one"]);
+        let parent = git_t(d, &["rev-parse", "HEAD"]);
+        std::fs::write(d.join(path), AFTER_483).unwrap();
+        git_t(d, &["commit", "-q", "-am", "two"]);
+        let sha = git_t(d, &["rev-parse", "HEAD"]);
+        assert!(counts(d, &parent, &sha, "M", path).unwrap());
     }
 
     #[test]
