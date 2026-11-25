@@ -62,9 +62,13 @@ pub fn person_key_path() -> PathBuf {
     })
 }
 
+/// How long `makiba gate` waits for the door's acceptance gate, which reads GitHub and git.
+const GATE_WAIT: Duration = Duration::from_secs(840);
+
 /// `$MAKIBA_GATE_KEY`, default `gate.key` beside the person key (by default
-/// `${XDG_CONFIG_HOME:-~/.config}/makiba/gate.key`): the key makibad writes at start for the merge
-/// gate hook alone (spec section 3). Beside the person key, so whatever moves that one moves both.
+/// `${XDG_CONFIG_HOME:-~/.config}/makiba/gate.key`): where a makibad before Issue 433 wrote the merge
+/// gate hook's key. The key is retired (no door accepts it, nothing writes it); the path stays so
+/// the redactions and deny rules still cover an old file on disk (docs/design/merge-act.md section 8).
 pub fn gate_key_path() -> PathBuf {
     env_path("MAKIBA_GATE_KEY").unwrap_or_else(|| person_key_path().with_file_name("gate.key"))
 }
@@ -668,9 +672,9 @@ fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let mut s = UnixStream::connect(&path)
         .map_err(|e| unavailable(format!("makibad is not running ({}: {e})", path.display())))?;
     let io = |e: std::io::Error| unavailable(format!("the door: {e}"));
-    // The gate reads GitHub and git: it may take as long as the hook waits for it.
+    // The gate reads GitHub and git: it may take minutes.
     let wait = if verb == "gate" {
-        crate::hooks::merge_gate::GATE_WAIT
+        GATE_WAIT
     } else {
         Duration::from_secs(30)
     };

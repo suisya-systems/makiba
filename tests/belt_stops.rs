@@ -180,7 +180,6 @@ impl Org {
         let person = issue_key(&w, Role::Person, "person", None, None).unwrap();
         let secretary = issue_key(&w, Role::Secretary, "secretary", None, None).unwrap();
         let door = Door::new(w, Arc::new(Stub::new()), "fake".into());
-        door.set_gate_key(GATE_KEY);
         let stop = Arc::new(AtomicBool::new(false));
         let daemon = run.then(|| {
             let (dir, flag) = (dir.clone(), Arc::clone(&stop));
@@ -360,8 +359,6 @@ fn item(range: &Value, issue: i64) -> Value {
         .unwrap_or_else(|| panic!("no item {issue}: {range}"))
 }
 
-const GATE_KEY: &str = "9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e9a7e";
-
 impl Org {
     fn repo(&self) -> String {
         format!("o/{}", self.slug)
@@ -385,11 +382,11 @@ impl Org {
         );
     }
 
-    /// The gate's answer for `pr` at `head`, asked with the merge gate's key.
+    /// The gate's answer for `pr` at `head`, asked with the person's key.
     fn gate(&self, pr: i64, head: &str) -> Value {
         self.door
             .handle(
-                Some(GATE_KEY),
+                Some(&self.person),
                 "gate",
                 json!({"repo": self.repo(), "pr": pr, "head": head}),
                 None,

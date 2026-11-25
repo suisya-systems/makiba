@@ -26,7 +26,7 @@ use std::os::fd::AsRawFd;
 use std::os::unix::fs::{DirBuilderExt, FileTypeExt, MetadataExt, PermissionsExt};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant};
 
 /// The MCP server's one path.
@@ -184,9 +184,6 @@ pub fn has_tool(v: Verb) -> bool {
     )
 }
 
-/// The actor of a request that carries the merge gate's key (spec section 3).
-pub const GATE_ACTOR: &str = "merge-gate";
-
 /// The tools a role is listed: its verbs (spec section 4) that have a tool.
 pub fn tools_of(role: Role) -> Vec<Verb> {
     role.verbs()
@@ -209,8 +206,6 @@ pub struct Door {
     /// The agent module `dispatch` gives a launch: `MAKIBA_LAUNCH_AGENT`, read when `makibad`
     /// starts, so no request can choose it.
     agent: String,
-    /// The SHA-256 of the merge gate's key, once it is written (spec section 3).
-    gate_key: OnceLock<String>,
     /// The state folder, where `state.db` is: the places a review reads (Issue 135).
     state: PathBuf,
     /// The readers' programs, read when the door is made, so no request chooses them.
@@ -230,7 +225,6 @@ impl Door {
             w: Mutex::new(w),
             base,
             agent,
-            gate_key: OnceLock::new(),
             state,
             review: super::review::Programs::from_env(),
             reviewing: Mutex::new(Default::default()),
@@ -241,15 +235,6 @@ impl Door {
     pub fn with_review_programs(mut self, other: PathBuf, same: PathBuf) -> Door {
         self.review = super::review::Programs { other, same };
         self
-    }
-
-    /// The merge gate's key: its holder may ask `gate` and nothing else.
-    pub fn set_gate_key(&self, key: &str) {
-        let _ = self.gate_key.set(sha256_hex(key));
-    }
-
-    fn is_gate_key(&self, key: Option<&str>) -> bool {
-        matches!((key, self.gate_key.get()), (Some(k), Some(sha)) if !k.is_empty() && sha256_hex(k) == *sha)
     }
 
     fn writer(&self) -> std::sync::MutexGuard<'_, StateWriter> {
@@ -272,23 +257,6 @@ impl Door {
         tool: bool,
     ) -> Response {
         let w = self.writer();
-        if self.is_gate_key(key) {
-            if verb != Verb::Gate.as_str() {
-                let r = Err(refuse(
-                    ErrorKind::Denied,
-                    format!("{GATE_ACTOR} may only use gate"),
-                    "",
-                ));
-                let _ = record(&w, GATE_ACTOR, verb, &args, idem, &r);
-                return r;
-            }
-            if let Some(idem) = idem
-                && let Some(first) = replay(&w, GATE_ACTOR, idem).map_err(internal)?
-            {
-                return first;
-            }
-            return self.gate(w, GATE_ACTOR, &args, idem);
-        }
         let who = match key {
             Some(k) => caller(w.conn(), k).map_err(internal)?,
             None => None,
@@ -4182,8 +4150,6 @@ pub struct Config {
     pub socket: Option<PathBuf>,
     pub port: u16,
     pub person_key: PathBuf,
-    /// `$MAKIBA_GATE_KEY`: where the merge gate's key is written at start.
-    pub gate_key: PathBuf,
     /// `MAKIBA_LAUNCH_AGENT`: the agent module of the launches `dispatch` makes.
     pub agent: String,
 }
@@ -4203,7 +4169,6 @@ impl Config {
             },
             port: crate::cli::port()?,
             person_key: crate::cli::person_key_path(),
-            gate_key: crate::cli::gate_key_path(),
             agent: match std::env::var(LAUNCH_AGENT_ENV)
                 .ok()
                 .filter(|v| !v.is_empty())
@@ -4293,7 +4258,6 @@ pub fn start(cfg: &Config, db: &Path, base: Arc<dyn Base>, hub: Hub) -> Result<R
         addr,
     };
     let door = Arc::new(Door::new(w, base, cfg.agent.clone()));
-    door.set_gate_key(&super::person_key::rotate_gate_key(&cfg.gate_key)?);
     let d = Arc::clone(&door);
     if let Some(unix) = unix {
         std::thread::spawn(move || {

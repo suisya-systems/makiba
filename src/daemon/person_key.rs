@@ -70,37 +70,6 @@ pub fn ensure(w: &StateWriter, path: &Path) -> Result<(), String> {
     .map_err(|e| format!("cannot store the person key's hash: {e}"))
 }
 
-/// The merge gate's key (spec section 3): a new one at every start of the door, written to `path`
-/// (mode 0600, in a folder of mode 0700) and returned. Only its holder may ask `gate`; it is kept
-/// out of `state.db` and replaced, not revoked.
-pub fn rotate_gate_key(path: &Path) -> Result<String, String> {
-    let shown = path.display();
-    let dir = path
-        .parent()
-        .filter(|d| !d.as_os_str().is_empty())
-        .ok_or_else(|| format!("the gate key {shown} has no folder"))?;
-    let io = |what: &str, e: std::io::Error| format!("cannot {what} {}: {e}", dir.display());
-    DirBuilder::new()
-        .recursive(true)
-        .mode(0o700)
-        .create(dir)
-        .map_err(|e| io("create", e))?;
-    std::fs::set_permissions(dir, Permissions::from_mode(0o700)).map_err(|e| io("chmod", e))?;
-    let key = random_key().map_err(|e| format!("cannot make a key: {e}"))?;
-    let tmp = dir.join(format!(".gate.key.{}", std::process::id()));
-    let _ = std::fs::remove_file(&tmp);
-    let mut f = OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&tmp)
-        .map_err(|e| format!("cannot create {}: {e}", tmp.display()))?;
-    f.write_all(format!("{key}\n").as_bytes())
-        .and_then(|()| std::fs::rename(&tmp, path))
-        .map_err(|e| format!("cannot write {shown}: {e}"))?;
-    Ok(key)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
