@@ -1087,8 +1087,17 @@ fn bounded_reader(
             Err(_) => {}
         }
     }
+    // A program that is a link (an npm `bin` entry) stays a link to its real place, which is
+    // given by its own folder or file above: bound as a file, a script would run away from the
+    // package it loads its parts from.
     for f in &files {
-        ro(&mut a, f, f);
+        if f.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            a.extend(["--symlink".into(), s(&real(f)), s(f)]);
+        } else {
+            ro(&mut a, f, f);
+        }
     }
     ro(&mut a, &snap.tree, &snap.tree);
     a.extend(["--bind".into(), s(&scratch), s(&scratch)]);
@@ -1383,6 +1392,65 @@ mod tests {
         assert!(m.contains(&t.join("reader/config")), "{m:?}");
         assert!(m.contains(&t.join("alias/config")), "{m:?}");
         assert!(!m.contains(&t.join("home/.codex")), "{m:?}");
+    }
+
+    /// A reader installed by npm under a prefix that also holds the state folder (the review of
+    /// Issue 262): the prefix is not given, the `bin` link stays a link to the script, and the
+    /// package the script lives in is given.
+    #[test]
+    fn a_linked_program_stays_a_link_to_its_package() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let local = t.join("local");
+        let package = local.join("lib/node_modules/@openai/codex");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(package.join("bin/codex.js"), "#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(local.join("bin")).unwrap();
+        let found = local.join("bin/codex");
+        std::os::unix::fs::symlink("../lib/node_modules/@openai/codex/bin/codex.js", &found)
+            .unwrap();
+        let state = local.join("state/makiba");
+        std::fs::create_dir_all(&state).unwrap();
+        let places = Places {
+            workers: t.join("workers"),
+            docs: t.join("docs"),
+            repos: t.join("repos"),
+            settings: state.join("settings"),
+            state_db: state.join("state.db"),
+        };
+        let dir = state.join("tmp/review-x");
+        std::fs::create_dir_all(dir.join("tree")).unwrap();
+        let snap = Snapshot {
+            tree: dir.join("tree"),
+            dir,
+            base: String::new(),
+            head: String::new(),
+            changed: vec![],
+            top: state.join("tmp"),
+        };
+        let c = bounded_reader(Path::new("bwrap"), &found, Reader::Other, &places, &snap).unwrap();
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let has = |w: &[String]| args.windows(w.len()).any(|x| x == w);
+        let s = |p: &Path| p.display().to_string();
+        let target = package.join("bin/codex.js");
+        assert!(
+            has(&["--symlink".into(), s(&target), s(&found)]),
+            "{args:?}"
+        );
+        assert!(
+            has(&["--ro-bind".into(), s(&package), s(&package)]),
+            "{args:?}"
+        );
+        assert!(
+            !has(&["--ro-bind".into(), s(&local), s(&local)]),
+            "{args:?}"
+        );
+        assert!(
+            !has(&["--ro-bind".into(), s(&found), s(&found)]),
+            "{args:?}"
+        );
     }
 
     #[test]
