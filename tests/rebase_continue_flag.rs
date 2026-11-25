@@ -1,8 +1,8 @@
 //! Issue 300, after the diff review: git's own sequencer runs `git commit -n` as a child when a
 //! rebase continues after a conflict. In a worktree prepared by a real `makibad`, whose
 //! `prepare-commit-msg` refuses that flag, `git rebase --continue` and `git cherry-pick
-//! --continue` still land; a commit with the flag that `git rebase --exec` starts through a shell
-//! is still refused.
+//! --continue` still land; a commit with the flag that `git rebase --exec` starts is still
+//! refused, through a shell and as the rebase's direct child (the shell's `exec`).
 //!
 //! Linux only, as the flag check is.
 #![cfg(target_os = "linux")]
@@ -195,19 +195,22 @@ fn a_rebase_or_cherry_pick_continued_after_a_conflict_lands_and_an_exec_commit_w
     );
     assert_eq!(git(&wt, &["log", "-1", "--format=%s"]), "theirs again");
 
-    // A commit with the flag that rebase --exec starts runs through a shell: still refused.
+    // A commit with the flag that rebase --exec starts is still refused: through a shell, and
+    // when the shell's `exec` makes it the rebase's direct child.
     let before = git(&wt, &["rev-parse", "HEAD"]);
-    let exec = "git -c user.name=t -c user.email=t@example.com commit --allow-empty -n -m y";
-    let out = git_out(&wt, &["rebase", "-x", exec, "HEAD~1"]);
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        !out.status.success(),
-        "the exec commit with the flag landed"
-    );
-    assert!(
-        err.contains(REFUSED_BY_GIT) && err.contains("Matched: \"-n\""),
-        "{err}"
-    );
-    git(&wt, &["rebase", "--abort"]);
-    assert_eq!(git(&wt, &["rev-parse", "HEAD"]), before);
+    let commit = "git -c user.name=t -c user.email=t@example.com commit --allow-empty -n -m y";
+    for exec in [commit.to_string(), format!("exec {commit}")] {
+        let out = git_out(&wt, &["rebase", "-x", &exec, "HEAD~1"]);
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "the exec commit with the flag landed: {exec}"
+        );
+        assert!(
+            err.contains(REFUSED_BY_GIT) && err.contains("Matched: \"-n\""),
+            "{exec}: {err}"
+        );
+        git(&wt, &["rebase", "--abort"]);
+        assert_eq!(git(&wt, &["rev-parse", "HEAD"]), before, "{exec}");
+    }
 }

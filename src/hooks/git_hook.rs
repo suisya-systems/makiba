@@ -279,13 +279,42 @@ fn by_sequencer(pid: &str) -> bool {
     let Ok(argv) = argv_of(&parent) else {
         return false;
     };
-    if !subcommand(&argv).is_some_and(|s| SEQUENCERS.contains(&s)) {
+    let Some(sub) = subcommand(&argv).filter(|s| SEQUENCERS.contains(s)) else {
+        return false;
+    };
+    // A rebase also runs exec steps, through a shell whose `exec` can make a commit its direct
+    // child: only a step that commits a pick is the sequencer's own.
+    if sub == "rebase" && !rebase_step_commits() {
         return false;
     }
     same_program(
         Path::new(&format!("/proc/{pid}/exe")),
         Path::new(&format!("/proc/{parent}/exe")),
     )
+}
+
+/// The rebase steps that commit a pick; `exec` (`x`) and the others do not.
+const COMMITTING_STEPS: [&str; 12] = [
+    "pick", "p", "reword", "r", "edit", "e", "squash", "s", "fixup", "f", "merge", "m",
+];
+
+/// Whether the rebase under way is at a step that commits a pick: the last line of
+/// `rebase-merge/done` (the step being run, which git writes there before running it) starts
+/// with one of `COMMITTING_STEPS`. A file that cannot be read is not.
+#[cfg(target_os = "linux")]
+fn rebase_step_commits() -> bool {
+    let Ok(path) = git(&["rev-parse", "--git-path", "rebase-merge/done"]) else {
+        return false;
+    };
+    let path = String::from_utf8_lossy(&path).trim().to_string();
+    let Ok(done) = std::fs::read_to_string(&path) else {
+        return false;
+    };
+    done.lines()
+        .rev()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| l.split_whitespace().next())
+        .is_some_and(|step| COMMITTING_STEPS.contains(&step))
 }
 
 /// Whether two executables are one file or hold the same bytes.
