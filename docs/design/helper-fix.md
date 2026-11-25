@@ -116,3 +116,39 @@ Round 1, reader codex, verdict passed, findings blocker 2, major 1, minor 0. Eac
 ## 7. The person's decision
 
 Pending entry 67, answered yes: option D. Q2 yes (a clean base merge into a declared test is in the route); Q3 (a) (a helper the base changed after the test commit warns for the key, from any route); Q4 no (no advance declaration of helpers in the test commit); Q5 yes (the build Issues name the edited-tests check for #506 and condition (a) for #475); Q6 yes (`.github/`, checker and test-infrastructure helper changes keep the lift); Q7 yes (the gate Issue before the checker Issue). #506 landed afterwards as e21e8da (PR 507), by the lift.
+
+## 8. Build (Issue 513): the gate
+
+Build Issue 1 of section 4, as built. Design reviewed once (reader codex, verdict passed, findings blocker 1, major 1, minor 1, each taken in; below) and approved by the secretary.
+
+### 8.1 Owners
+
+No new module, record or state: `src/daemon/gate.rs` judges from git, `src/daemon/door.rs` (`gate_outside` with the lock released, `judge` in the recording transaction) turns the lists into warnings, payload fields and the belt stop, the pending merge entry of Issue 432 carries the key, and `src/daemon/belt.rs` `gate_stop` writes the stop. No schema change, no new verb.
+
+### 8.2 gate.rs
+
+- `is_helper`: the checker's classification (`scripts/acceptance-check.sh` `is_helper`): under `tests/`, neither `tests/<name>.rs`, `tests/<name>/main.rs` nor a `test_*.py`. The route covers a helper that is not `is_infra`.
+- An entry is written as its blob id, `none` when missing, and `<id> (mode <m>)` for a mode other than 100644, so a mode change changes the line too.
+- `helpers_changed`: over the union of the paths of M's and head's trees, each route helper not declared and not changed by M whose entry differs between M and head and that head does not hold as the base does. Ids: M, head.
+- `base_helpers`: over the union of the paths of M^'s and the base's trees, each route helper not changed by M that the base holds differently from M^. Ids: M^, base.
+- `merged_tests` (`check_protected`): only when a protected path would be refused, one `git merge-tree --write-tree --name-only --no-messages -z M base` (exit 0 or 1; anything else refuses); a refused path that is declared or changed by M, is not infrastructure, is not among the conflicted paths and whose head entry equals that tree's is dropped from the refusal and listed. Ids: M, base, head.
+- `edited_tests`: with a test commit, a route helper is no edited test. Without one (no manifest) nothing changed.
+- `diff_stat`: `git diff --no-renames --stat=200 <from> <to> -- <paths>` under a heading line.
+
+### 8.3 door.rs and belt.rs
+
+- `gate_outside` reads the two helper lists and the diff stats (M..head for `helpers_changed` and `merged_tests`, M^..base for `base_helpers`); a failure is a refusal, never "none".
+- `judge`: one warning line per non-empty list under both modes; an allowed answer keeps `allow`, gets `warn` and `WARNING <line>: the person decides this landing` in its reason, so `merge request` is pending and only `makiba merge approve` lands it. The approval runs the gate again and compares the warnings by string, so other ids make it stale and the entry takes the new reading. The entry's text gains the diff stat lines (`Diff:`). The payload carries the three lists of paths when not empty.
+- A range task's pull request with a list is a stop of line `tests`. Its key holds the first 16 hex of the SHA-256 of the warning lines, and writing it withdraws (`withdrawn_by` `makibad`) the `tests` stops still escalated for that pull request and head under another key; its `if_yes` names the merge request and the key. An allowance withdraws the `tests` stops of its head only with no edited test and no list.
+
+### 8.4 Where the Issue and the code differed
+
+- Its case 3 ("M adds tests/test_calc.py; the base then changes another line") cannot be built: the base cannot change a file it does not hold, and an add/add of different contents conflicts. The test has the base hold the file first; M changes one line, the base a far line.
+- `tests/belt_gate.rs` `a_test_the_base_changed_is_not_an_edited_test` changed the helper `tests/other.py` on the base, which is now a `base_helpers` warning; it moved to `tests/test_other.py` with `edits_a_test`.
+- Known limit: `merged_tests` compares with the merge of M and the base fetched now; a branch that merged an older base, after which the base changed the same declared file again, stays refused by condition (a).
+
+### 8.5 Design review
+
+- Blocker (held): the clean-merge exception admitted infrastructure M changed (`tests/conftest.py` through a clean base merge). Infrastructure is never in `merged_tests`; tested.
+- Major (held): `belt::stop` returns the newest entry of a key unchanged, so a second base change of a helper at the same head left the first stop standing. The key holds the lines' sum and the older stop is withdrawn; tested in `tests/belt_gate.rs`.
+- Minor (taken): the stop's `if_yes` named the web UI; it names the merge request and the person's key.

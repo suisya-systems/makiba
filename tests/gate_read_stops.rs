@@ -762,3 +762,19 @@ fn a_refused_read_of_another_pull_request_is_not_hidden_by_an_unavailable_one() 
     let verdicts = c.events("acceptance_gate");
     assert_eq!(verdicts.last().unwrap()["verdict"], json!("merge_order"));
 }
+
+#[test]
+fn a_failed_read_after_a_changed_test_helper_leaves_that_stop_as_the_one_question() {
+    // `tests/helper.py` is a test helper (Issue 513) the fix changes after the test commit: the
+    // gate asks the person, a stop of line `tests` whose key carries the warning's sum.
+    let c = Case::with("helperthenread", &[("tests/helper.py", Some("X = 1\n"))]);
+    let v = answered(c.request(7, &c.head));
+    let first = c.escalated();
+    assert_eq!(first.len(), 1, "{v}\n{first:?}");
+
+    c.fail("view", "always");
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["status"], json!("unavailable"), "{v}");
+    assert_eq!(v["pending_id"], json!(first[0].0), "{v}");
+    assert_eq!(c.escalated(), first);
+}

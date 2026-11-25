@@ -28,6 +28,14 @@
 //! differs at head is reported (`edited_tests`); under `acceptance` such a pull request is refused,
 //! under `human` the person is asked. A test kept outside a folder `tests` is not seen.
 //!
+//! Test helpers (Issue 513, docs/design/helper-fix.md option D): no rule tells a helper repaired
+//! from a helper weakened, so three lists ask the person's key under either mode, each path with
+//! the object ids it was judged from: `helpers_changed` (a helper the test commit left alone,
+//! changed, added or deleted after it), `merged_tests` (a declared path head holds as git's clean
+//! merge of the test commit and the base: no condition (a) refusal) and `base_helpers` (a helper
+//! the base changed after the test commit's parent). A helper is no edited test; test
+//! infrastructure stays under condition (a).
+//!
 //! Merge order (Issue 331, docs/design/merge-order.md): a pull request whose own changes touch
 //! `landing::CHECKS` may add or tighten a check over `tests/`; `merge_order` reads, git only,
 //! which other open pull requests have a test commit (whose declared tests cannot change), and the
@@ -468,7 +476,7 @@ fn check_protected(
     base: &str,
     head: &str,
     manifest: &[String],
-) -> Result<(), Reject> {
+) -> Result<Vec<Change>, Reject> {
     let short = &msha[..12];
     if git(repo, &["rev-list", "--parents", "-n1", msha])?
         .split_whitespace()
@@ -516,12 +524,77 @@ fn check_protected(
         })
         .map(String::as_str)
         .collect();
+    // Issue 513: a declared or test-commit path that head holds as git's clean merge of the test
+    // commit and the base (no conflict on that path) is no change of the pull request's own; it is
+    // named for the person (`merged_tests`). Infrastructure the test commit left alone is not.
+    let mut merged = Vec::new();
+    let changed: Vec<&str> = if changed.is_empty() {
+        changed
+    } else {
+        let (mt, conflicted) = merge_tree(repo, msha, base)?;
+        changed
+            .into_iter()
+            .filter(|p| {
+                let own =
+                    !is_infra(p) && (touched.contains(*p) || manifest.iter().any(|m| under(p, m)));
+                if own && !conflicted.contains(*p) && ph.get(*p) == mt.get(*p) {
+                    merged.push(Change {
+                        path: p.to_string(),
+                        ids: vec![
+                            entry_id(pm.get(*p)),
+                            entry_id(pb.get(*p)),
+                            entry_id(ph.get(*p)),
+                        ],
+                    });
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect()
+    };
     if !changed.is_empty() {
         return reject(format!(
             "protected paths changed after the test commit {short}: {changed:?} (rebase so the test commit sits on the new base if the change came from base)"
         ));
     }
-    Ok(())
+    Ok(merged)
+}
+
+/// The tree `git merge-tree --write-tree a b` writes, and the paths it left in conflict. A git
+/// that fails otherwise is an error.
+fn merge_tree(repo: &Path, a: &str, b: &str) -> Result<(Tree, BTreeSet<String>), Reject> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "-c",
+            HOOKS_OFF,
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            a,
+            b,
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| Reject(format!("cannot run git: {e}")))?;
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return reject(format!("git merge-tree failed for {a} {b}"));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.split('\0');
+    let Some(id) = parts.next().filter(|t| !t.trim().is_empty()) else {
+        return reject(format!("git merge-tree wrote no tree for {a} {b}"));
+    };
+    let conflicted = parts
+        .take_while(|p| !p.is_empty())
+        .map(String::from)
+        .collect();
+    Ok((tree(repo, id.trim())?, conflicted))
 }
 
 /// M is the PR's first own commit: its parent is in the base, every other commit comes after it.
@@ -916,10 +989,122 @@ pub struct Verdict {
     /// The tests that were there before the test commit, are not declared and differ at head
     /// (`edited_tests`); the door decides what they mean under the mode.
     pub edited_tests: Vec<String>,
+    /// Issue 513 (docs/design/helper-fix.md, option D): test helpers changed after the test commit
+    /// (ids at the test commit and at head), declared paths the base merged in cleanly (ids at the
+    /// test commit, the base and head), and helpers the base changed after the test commit's
+    /// parent (ids there and at the base). The door asks the person's key for any.
+    pub helpers_changed: Vec<Change>,
+    pub merged_tests: Vec<Change>,
+    pub base_helpers: Vec<Change>,
+    /// `git diff --stat` of those (test commit to head, test commit's parent to base), for the
+    /// pending merge entry's text.
+    pub helper_stats: Vec<String>,
     /// The merge order (Issue 331); the door decides what it means under the mode.
     pub merge_order: MergeOrder,
     /// The language check's files the PR's own changes touch (Issue 339); the door decides.
     pub language_change: Vec<LanguageEntry>,
+}
+
+/// A path the gate names for the person's key, with the object ids it was judged from, in the
+/// order of its list (`none` for a missing entry).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Change {
+    pub path: String,
+    pub ids: Vec<String>,
+}
+
+fn entry_id(e: Option<&(String, String)>) -> String {
+    match e {
+        None => "none".into(),
+        Some((mode, obj)) if mode == "100644" => obj.clone(),
+        Some((mode, obj)) => format!("{obj} (mode {mode})"),
+    }
+}
+
+/// A test helper by the acceptance checker's classification (`is_helper` of
+/// `scripts/acceptance-check.sh`): under `tests/`, neither `tests/<name>.rs`,
+/// `tests/<name>/main.rs` nor a `test_*.py`.
+pub fn is_helper(path: &str) -> bool {
+    let Some(r) = path.strip_prefix("tests/") else {
+        return false;
+    };
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let py = name.starts_with("test_") && name.ends_with(".py");
+    let rs = match r.matches('/').count() {
+        0 => r.ends_with(".rs"),
+        1 => r.ends_with("/main.rs"),
+        _ => false,
+    };
+    !py && !rs
+}
+
+/// A test helper the route of Issue 513 covers: a helper that is not test infrastructure.
+fn route_helper(path: &str) -> bool {
+    is_helper(path) && !is_infra(path)
+}
+
+/// Issue 513: the helpers the pull request changed after its test commit `msha`
+/// (`helpers_changed`) and those the base changed after the test commit's parent
+/// (`base_helpers`). Left out: infrastructure and paths the test commit changed; for
+/// `helpers_changed` also declared paths and a helper head holds as the base does.
+pub fn helper_changes(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    msha: &str,
+    manifest: &[String],
+) -> Result<(Vec<Change>, Vec<Change>), Reject> {
+    let touched = changed_by(repo, msha)?;
+    let parent = git(repo, &["rev-parse", &format!("{msha}^")])?;
+    let (tp, tm, th, tb) = (
+        tree(repo, parent.trim())?,
+        tree(repo, msha)?,
+        tree(repo, head)?,
+        tree(repo, base)?,
+    );
+    let mine = |p: &str| route_helper(p) && !touched.contains(p);
+    let keys: BTreeSet<&String> = tm.keys().chain(th.keys()).collect();
+    let changed: Vec<Change> = keys
+        .into_iter()
+        .filter(|p| mine(p) && !manifest.iter().any(|m| under(p, m)))
+        .filter(|p| tm.get(*p) != th.get(*p) && th.get(*p) != tb.get(*p))
+        .map(|p| Change {
+            path: p.clone(),
+            ids: vec![entry_id(tm.get(p)), entry_id(th.get(p))],
+        })
+        .collect();
+    let keys: BTreeSet<&String> = tp.keys().chain(tb.keys()).collect();
+    let based: Vec<Change> = keys
+        .into_iter()
+        .filter(|p| mine(p) && tp.get(*p) != tb.get(*p))
+        .map(|p| Change {
+            path: p.clone(),
+            ids: vec![entry_id(tp.get(p)), entry_id(tb.get(p))],
+        })
+        .collect();
+    Ok((changed, based))
+}
+
+/// `git diff --stat from to -- paths` under a heading line naming the range; nothing for no path.
+pub fn diff_stat(
+    repo: &Path,
+    from: &str,
+    to: &str,
+    paths: &[&Change],
+) -> Result<Vec<String>, Reject> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["diff", "--no-renames", "--stat=200", from, to, "--"];
+    args.extend(paths.iter().map(|c| c.path.as_str()));
+    let out = git(repo, &args)?;
+    let id = |rev: &str| -> Result<String, Reject> {
+        let full = git(repo, &["rev-parse", &format!("{rev}^{{commit}}")])?;
+        Ok(full.trim().chars().take(12).collect())
+    };
+    let mut lines = vec![format!("git diff --stat {}..{}:", id(from)?, id(to)?)];
+    lines.extend(out.lines().map(|l| l.trim_end().to_string()));
+    Ok(lines)
 }
 
 /// A file under a folder `tests`: what the gate reports when a pull request edits it without
@@ -934,7 +1119,8 @@ fn is_test(path: &str) -> bool {
 /// test is declared. Left out: the declared paths and every other path the test commit changed,
 /// such as a helper it extended (condition (a) holds them; Issue 361), and a file `head`
 /// holds exactly as `base` does (the base brought that change, as in `check_protected`). A new
-/// test is not an edited one. A moved test is reported at the path it left.
+/// test is not an edited one. A moved test is reported at the path it left. With a test commit, a
+/// test helper that is not infrastructure is left out too (Issue 513: `helper_changes`).
 pub fn edited_tests(
     repo: &Path,
     base: &str,
@@ -954,11 +1140,12 @@ pub fn edited_tests(
         tree(repo, head)?,
         tree(repo, base)?,
     );
+    // Issue 513: with a test commit, a test helper is no edited test (`helper_changes` reads it).
+    let helper_route = msha.is_some();
     Ok(tp
         .iter()
-        .filter(|(p, _)| {
-            is_test(p) && !manifest.iter().any(|m| under(p, m)) && !by_test_commit.contains(*p)
-        })
+        .filter(|(p, _)| is_test(p) && !(helper_route && route_helper(p)))
+        .filter(|(p, _)| !manifest.iter().any(|m| under(p, m)) && !by_test_commit.contains(*p))
         .filter(|(p, e)| th.get(*p) != Some(*e) && th.get(*p) != tb.get(*p))
         .map(|(p, _)| p.clone())
         .collect())
@@ -1189,7 +1376,7 @@ pub fn evaluate(
             manifest
         ));
     }
-    check_protected(repo, &msha, base, head, &manifest)?;
+    v.merged_tests = check_protected(repo, &msha, base, head, &manifest)?;
     check_first(repo, &msha, base, head)?;
     let check = repo_check(repo, base)?;
     // The job behind the name is the base's: neither the PR nor an older branch point may swap in
@@ -1419,7 +1606,7 @@ pub fn clone_of(
 
 #[cfg(test)]
 mod tests {
-    use super::{Fault, Try, with_tries_in};
+    use super::*;
     use std::cell::Cell;
     use std::time::Duration;
 
@@ -1483,5 +1670,163 @@ mod tests {
         let (starts, r) = tried(5000, 60_000, 100, 20, None);
         assert_eq!(starts, [0]);
         assert_eq!(r, Err(Fault::Unavailable("fail 1 (after 1 try)".into())));
+    }
+
+    /// A repository in a temporary folder; `git` runs there with no hook and a fixed author.
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        run(&path, &["init", "-q", "-b", "main"]);
+        (dir, path)
+    }
+
+    fn run(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() || args.first() == Some(&"mer\x67e"),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(dir: &Path, msg: &str, files: &[(&str, &str)]) -> String {
+        for (p, text) in files {
+            let f = dir.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, text).unwrap();
+        }
+        run(dir, &["add", "--all"]);
+        run(dir, &["commit", "-q", "-m", msg]);
+        run(dir, &["rev-parse", "HEAD"])
+    }
+
+    const LINES: &str = "one\ntwo\nthree\nfour\nfive\nsix\n";
+
+    /// The test commit changes the first line of both declared tests; the base changes the first
+    /// line of `tests/a.py` (a conflict) and the last of `tests/b.py` (clean). The branch merges
+    /// the base, keeping in `tests/a.py` what `git merge-tree` wrote for the conflict (its
+    /// markers), and in `tests/b.py` git's clean merge. Returns (dir, test commit, base, head).
+    fn conflicted() -> (tempfile::TempDir, PathBuf, String, String, String) {
+        let (tmp, dir) = repo();
+        commit(
+            &dir,
+            "base",
+            &[("tests/test_a.py", LINES), ("tests/test_b.py", LINES)],
+        );
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        let first = LINES.replace("one", "ONE");
+        let m = commit(
+            &dir,
+            "test\n\nAcceptance-Test: tests/test_a.py\nAcceptance-Test: tests/test_b.py",
+            &[("tests/test_a.py", &first), ("tests/test_b.py", &first)],
+        );
+        run(&dir, &["checkout", "-q", "main"]);
+        let base = commit(
+            &dir,
+            "base moves",
+            &[
+                ("tests/test_a.py", &LINES.replace("one", "uno")),
+                ("tests/test_b.py", &LINES.replace("six", "SIX")),
+            ],
+        );
+        run(&dir, &["checkout", "-q", "feature"]);
+        // A merge that stops on the conflict; the conflicted file is kept as merge-tree writes it.
+        run(&dir, &["mer\x67e", "-q", "--no-edit", "main"]);
+        let (mt, conflicts) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            vec!["tests/test_a.py".to_string()]
+        );
+        let blob = &mt["tests/test_a.py"].1;
+        let text = run(&dir, &["cat-file", "blob", blob]);
+        std::fs::write(dir.join("tests/test_a.py"), format!("{text}\n")).unwrap();
+        run(&dir, &["add", "--all"]);
+        run(&dir, &["commit", "-q", "--no-edit"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        (tmp, dir, m, base, head)
+    }
+
+    /// Diff review (Issue 513): a declared test git conflicted on stays a condition (a) refusal,
+    /// even when head holds exactly the tree entry `git merge-tree` wrote for it.
+    #[test]
+    fn a_conflicted_declared_test_is_refused_even_as_merge_tree_wrote_it() {
+        let (_tmp, dir, m, base, head) = conflicted();
+        let (mt, _) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            tree(&dir, &head).unwrap().get("tests/test_a.py"),
+            mt.get("tests/test_a.py"),
+            "head holds merge-tree's entry of the conflicted file"
+        );
+        let paths = vec!["tests/test_a.py".to_string(), "tests/test_b.py".to_string()];
+        let why = check_protected(&dir, &m, &base, &head, &paths)
+            .expect_err("a conflicted declared test is refused")
+            .0;
+        assert!(
+            why.contains("protected paths changed after the test commit")
+                && why.contains("tests/test_a.py")
+                && !why.contains("tests/test_b.py"),
+            "{why}"
+        );
+    }
+
+    /// Diff review (Issue 513): a declared test git merged cleanly is listed in `merged_tests`
+    /// while `git merge-tree` of the test commit and the base conflicted on another path (a helper
+    /// the test commit changed, which head keeps as the test commit left it).
+    #[test]
+    fn a_clean_declared_test_beside_another_conflict_is_listed() {
+        let (_tmp, dir) = repo();
+        commit(
+            &dir,
+            "base",
+            &[("tests/common/h.py", LINES), ("tests/test_b.py", LINES)],
+        );
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        let mine = LINES.replace("one", "ONE");
+        let m = commit(
+            &dir,
+            "test\n\nAcceptance-Test: tests/test_b.py",
+            &[("tests/common/h.py", &mine), ("tests/test_b.py", &mine)],
+        );
+        run(&dir, &["checkout", "-q", "main"]);
+        let base = commit(
+            &dir,
+            "base moves",
+            &[
+                ("tests/common/h.py", &LINES.replace("one", "uno")),
+                ("tests/test_b.py", &LINES.replace("six", "SIX")),
+            ],
+        );
+        run(&dir, &["checkout", "-q", "feature"]);
+        let (_, conflicts) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            vec!["tests/common/h.py".to_string()]
+        );
+        run(&dir, &["mer\x67e", "-q", "--no-edit", "main"]);
+        std::fs::write(dir.join("tests/common/h.py"), &mine).unwrap();
+        run(&dir, &["add", "--all"]);
+        run(&dir, &["commit", "-q", "--no-edit"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        let merged = check_protected(&dir, &m, &base, &head, &["tests/test_b.py".to_string()])
+            .expect("a clean merge of the declared test is no refusal");
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].path, "tests/test_b.py");
+        let id = |rev: &str| run(&dir, &["rev-parse", &format!("{rev}:tests/test_b.py")]);
+        assert_eq!(merged[0].ids, vec![id(&m), id(&base), id(&head)]);
     }
 }
