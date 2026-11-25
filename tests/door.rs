@@ -443,7 +443,8 @@ fn each_role_is_listed_exactly_the_tools_of_its_verbs() {
             "candidate",
             "goal",
             "range",
-            "review"
+            "review",
+            "merge"
         ])
     );
     let limited = set(&["report", "send", "show", "inbox"]);

@@ -468,6 +468,14 @@ impl Org {
             .collect()
     }
 
+    /// The `landing_scanned` whose tip is `tip`, if written.
+    fn scan_at(&self, tip: &str) -> Vec<Value> {
+        self.scans()
+            .into_iter()
+            .filter(|s| s["base_head"] == json!(tip))
+            .collect()
+    }
+
     /// The bodies of makibad's notices to `recipient`, oldest first.
     fn notices(&self, recipient: &str) -> Vec<String> {
         let c = self.conn();
@@ -732,7 +740,10 @@ fn a_landing_that_may_change_the_checks_names_each_open_test_commit_once() {
     assert_eq!(org.secretary_naming("t461-a").len(), 3);
     assert_eq!(org.worker_told("t461-a").len(), 3);
 
-    // 6. Two landings between scans are read together, from the tip scanned last.
+    // 6. Two landings between scans are read together, from the tip scanned last. The PR watch
+    // reads each pull request on its own thread, so L6's merge may be recorded before L5's: the
+    // scan is the one of the newest record, L5's or L6's, and is waited for by its tip.
+    let before = org.scans().len();
     let l5 = org.landing(
         &p,
         "t461-r5",
@@ -742,27 +753,37 @@ fn a_landing_that_may_change_the_checks_names_each_open_test_commit_once() {
         false,
     );
     let l6 = org.landing(&p, "t461-r6", 16, &l5, &[("README.md", "six\n")], false);
+    // The id of `task`'s `pr_merged`, 0 before it is recorded.
     let merged = |task: &str| {
         org.count(&format!(
-            "SELECT count(*) FROM events e JOIN runs r ON r.id = e.run_id
+            "SELECT coalesce(max(e.id), 0) FROM events e JOIN runs r ON r.id = e.run_id
              WHERE e.kind = 'pr_merged' AND r.task_id = '{task}'"
-        )) > 0
+        ))
     };
     wait("both merges read", || {
-        merged("t461-r5") && merged("t461-r6")
+        merged("t461-r5") > 0 && merged("t461-r6") > 0
     });
     passes(&p, 1);
-    assert!(
-        org.scan_of(&l5).is_empty() && org.scan_of(&l6).is_empty(),
-        "{:?}",
+    assert_eq!(
+        org.scans().len(),
+        before,
+        "a scan while neither is on main: {:?}",
         org.scans()
     );
     p.put_on_main(&l6);
-    wait("the scan of L6", || !org.scan_of(&l6).is_empty());
+    wait("the scan of the tip L6", || !org.scan_at(&l6).is_empty());
     passes(&p, 1);
-    assert!(org.scan_of(&l5).is_empty(), "{:?}", org.scans());
-    let s6 = org.scan_of(&l6);
-    assert_eq!(s6.len(), 1, "{s6:?}");
+    let s6: Vec<Value> = org.scans().split_off(before);
+    assert_eq!(s6.len(), 1, "one scan of both landings: {s6:?}");
+    assert_eq!(s6[0]["base_head"], json!(l6), "{}", s6[0]);
+    let newest = merged("t461-r5").max(merged("t461-r6"));
+    assert_eq!(s6[0]["landed_event"], json!(newest), "{}", s6[0]);
+    let last = if newest == merged("t461-r5") {
+        &l5
+    } else {
+        &l6
+    };
+    assert_eq!(s6[0]["merge_commit"], json!(last), "{}", s6[0]);
     assert_eq!(s6[0]["from"], json!(l4), "{}", s6[0]);
     assert_eq!(s6[0]["matched"], json!(["tools/new_check.py"]), "{}", s6[0]);
     assert_eq!(named(&s6[0]), vec!["t461-a".to_string()], "{}", s6[0]);

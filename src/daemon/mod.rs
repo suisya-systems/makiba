@@ -14,11 +14,12 @@ pub mod dispatch;
 pub mod door;
 pub mod exe;
 pub mod gate;
-mod gh;
+pub mod gh;
 pub mod inbox;
 pub mod landing;
 pub mod language;
 pub mod launch;
+pub mod merge;
 mod monitor;
 pub mod notify_gate;
 pub mod park;
@@ -367,6 +368,7 @@ fn serve_until(
     let mut projects = project::Projects::from_env(Places::from_env(dir).repos);
     let close = close::Close::new(Places::from_env(dir), org.to_string_lossy().into_owned());
     let mut push = push::Push::new(Places::from_env(dir));
+    let mut merge = merge::Merge::new();
     let mut next_beat = Instant::now() + HEARTBEAT;
     let mut subscribed = false;
     // The subscription is recorded once; a refused write is tried again on the next tick.
@@ -419,6 +421,10 @@ fn serve_until(
             }
             if let Err(e) = push.pass(&w) {
                 eprintln!("makibad: push: {e}");
+            }
+            // Issue 431: the merge act, the only writer of its attempts' outcomes.
+            if let Err(e) = merge.pass(&w) {
+                eprintln!("makibad: merge: {e}");
             }
             if let Err(e) = anomalies.pass(&w) {
                 eprintln!("makibad: anomaly pass failed: {e}");

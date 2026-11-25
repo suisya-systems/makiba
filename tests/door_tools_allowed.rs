@@ -68,6 +68,7 @@ fn expected(role: Role) -> BTreeSet<String> {
             "goal",
             "range",
             "review",
+            "merge",
         ],
         Role::Worker => &["report", "send", "show", "inbox", "review"],
         Role::Curator => &["report", "send", "show", "inbox"],
