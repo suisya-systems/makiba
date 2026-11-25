@@ -3028,10 +3028,24 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 if let Some(at) = newest_event_at(c, run, "run_in_review")? {
                     it["since"] = json!(at);
                 }
+                // The watch of its current pull request (Issue 357), of its current head
+                // first: a pull request registered again keeps its older row, behind another's
+                // newer one, and so does a head it returns to.
                 let watch: Option<(String, Option<String>)> = c
                     .query_row(
-                        "SELECT status, conclusion FROM pr_watches WHERE run_id = ?1
-                         ORDER BY id DESC LIMIT 1",
+                        &format!(
+                            "SELECT w.status, w.conclusion FROM pr_watches w
+                             JOIN runs r ON r.id = w.run_id
+                             WHERE w.run_id = ?1 AND {}
+                             ORDER BY coalesce(w.head_oid = (
+                                        SELECT json_extract(ch.payload_json, '$.head_oid')
+                                        FROM events ch WHERE ch.run_id = r.id
+                                          AND ch.kind IN ('pr_opened', 'fix_pushed')
+                                        ORDER BY ch.id DESC LIMIT 1), 0) DESC,
+                                      w.id DESC
+                             LIMIT 1",
+                            is_current_pr_sql("r", "w.repo", "w.pr")
+                        ),
                         [run],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
@@ -3043,10 +3057,20 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 });
             }
             "completed" => {
+                // A merge of its current pull request only (Issue 357): one of a pull request
+                // it replaced is not its landing.
                 let merged: Option<String> = c
                     .query_row(
-                        "SELECT payload_json FROM events WHERE kind = 'pr_merged' AND run_id = ?1
-                         ORDER BY id LIMIT 1",
+                        &format!(
+                            "SELECT m.payload_json FROM events m JOIN runs r ON r.id = m.run_id
+                             WHERE m.kind = 'pr_merged' AND m.run_id = ?1 AND {}
+                             ORDER BY m.id DESC LIMIT 1",
+                            is_current_pr_sql(
+                                "r",
+                                "json_extract(m.payload_json, '$.repo')",
+                                "json_extract(m.payload_json, '$.pr')"
+                            )
+                        ),
                         [run],
                         |r| r.get(0),
                     )
@@ -4519,5 +4543,64 @@ pub(in crate::daemon) mod tests {
             landed_of(&w),
             Some(vec![(1, "d".to_string(), "m2".to_string())])
         );
+    }
+
+    /// A run in review that returns to an older head of its current pull request takes the
+    /// stage from that head's watch, not from a newer head's (Issue 357, diff review round 1).
+    #[test]
+    fn the_review_stage_is_that_of_the_current_head() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 1, 9, 'h', 's')",
+                [],
+            )
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "r1-9",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute("UPDATE runs SET range_id = 1 WHERE task_id = 'r1-9'", [])
+            .unwrap();
+        w.append_event(&NewEvent {
+            kind: "belt_dispatched",
+            actor: Some("makibad"),
+            payload: Some(&json!({"range_id": 1, "issue": 9, "task_id": "r1-9"})),
+            run_task_id: Some("r1-9"),
+            ..Default::default()
+        })
+        .unwrap();
+        let h1 = "1".repeat(40);
+        let h2 = "2".repeat(40);
+        let stage = || {
+            let items = items(w.conn(), 1, &json!({}), &[]).unwrap();
+            items[0]["stage"].clone()
+        };
+        super::super::prwatch::register(&w, "pr_opened", "r1-9", "o/p", 11, &h1).unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h2).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
+                 WHERE head_oid = ?1",
+                [&h2],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("to_land"));
+        // Back to h1: its row is watched again, older than h2's passed one.
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h1).unwrap();
+        assert_eq!(stage(), json!("ci"));
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'failed'
+                 WHERE head_oid = ?1",
+                [&h1],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("ci"));
     }
 }
