@@ -871,9 +871,14 @@ impl MergeOrder {
     }
 }
 
-/// The merge order of the PR at `head` on `base` (both in `clone`): its check paths and, when it
-/// has any, each other open pull request `(task, pr)` of `repo` with a test commit. Git only.
+/// The merge order of the PR at `head` on `base` (both in `clone`, `base` the tip of
+/// `base_branch`): its check paths and, when it has any, each other open pull request
+/// `(task, pr)` of `repo` into the same branch with a test commit. Each other pull request's base
+/// branch is read with `gh pr view` (`program`); one into another branch is not named, since the
+/// check does not reach it there. Its head and base are fetched as the gate fetches its own, and
+/// its test commit and check paths are read against its own fetched base. No project code runs.
 pub fn merge_order(
+    program: &str,
     clone: &Path,
     repo: &str,
     base: &str,
@@ -889,17 +894,22 @@ pub fn merge_order(
         return Ok(m);
     }
     for (task, pr) in others {
-        let read = fetch(clone, repo, *pr, base_branch)
-            .and_then(|(_, h)| Ok((find_manifest(clone, base, &h)?, h)));
+        let read = pr_view(program, repo, *pr).and_then(|(_, branch, _)| {
+            if branch != base_branch {
+                return Ok(None);
+            }
+            let (b, h) = fetch(clone, repo, *pr, &branch)?;
+            Ok(Some((find_manifest(clone, &b, &h)?, b, h)))
+        });
         match read {
-            Ok((Some((test_commit, declared)), h)) => m.waits_for.push(Waiting {
+            Ok(Some((Some((test_commit, declared)), b, h))) => m.waits_for.push(Waiting {
                 pr: *pr,
                 task: task.clone(),
                 test_commit,
                 declared,
-                check_adding: check_paths(clone, base, &h).is_ok_and(|p| !p.is_empty()),
+                check_adding: check_paths(clone, &b, &h).is_ok_and(|p| !p.is_empty()),
             }),
-            Ok((None, _)) => {}
+            Ok(_) => {}
             Err(e) => m.not_read.push((*pr, task.clone(), e.0)),
         }
     }

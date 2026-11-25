@@ -3242,7 +3242,7 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         .into_iter()
         .filter(|(_, n)| seen.insert(*n))
         .collect();
-    match gate::merge_order(&clone, repo, &base, &base_branch, head, &others) {
+    match gate::merge_order(&program, &clone, repo, &base, &base_branch, head, &others) {
         Ok(m) => v.merge_order = m,
         Err(e) if v.result != "rejected" => {
             v.result = "rejected".into();
