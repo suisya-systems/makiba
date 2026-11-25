@@ -254,16 +254,34 @@ fn target() -> Result<Target, Failure> {
 }
 
 /// The core of the session, as `hello` finds it.
+#[derive(PartialEq)]
 enum Core {
     Running(String),
     Stopped,
 }
 
+/// Whether a failed connect to `socket` means that nothing listens: no socket file, or one that
+/// refuses (a core that ended). Any other error (a socket that cannot be reached, for one)
+/// says nothing of the core, and the core is not taken as stopped.
+fn nothing_listens(socket: &Path) -> bool {
+    match std::os::unix::net::UnixStream::connect(socket) {
+        Ok(_) => false,
+        Err(e) => matches!(
+            e.kind(),
+            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+        ),
+    }
+}
+
 fn core_of(session: &str) -> Result<Core, Failure> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let socket = super::herdr::socket_path(runtime.as_deref(), session);
     match super::connect_session_for_start(session, Duration::from_secs(10)).hello() {
         Ok(info) => Ok(Core::Running(info.version)),
         Err(BaseError::UnsupportedVersion { found, .. }) => Ok(Core::Running(found)),
-        Err(BaseError::Unavailable(d)) if d.kind == "connect" => Ok(Core::Stopped),
+        Err(BaseError::Unavailable(d)) if d.kind == "connect" && nothing_listens(&socket) => {
+            Ok(Core::Stopped)
+        }
         Err(e) => Err((
             ErrorKind::Unavailable,
             format!(
@@ -755,6 +773,30 @@ fn run(secretary: bool) -> Result<(), Failure> {
         staging.clean();
         return Err(e);
     }
+    // The file and the core may also have changed meanwhile (an install by hand, a restart): what
+    // was decided at S0 holds only if the same file and the same two versions are found again.
+    let same = (|| -> Result<bool, Failure> {
+        let again = target()?;
+        let file_now = version_of(&again.file).map_err(fail(ErrorKind::Unavailable))?;
+        Ok(again.file == t.file && file_now == file_version && core_of(&session)? == core)
+    })();
+    match same {
+        Ok(true) => {}
+        Ok(false) => {
+            staging.clean();
+            return Err((
+                ErrorKind::Conflict,
+                format!(
+                    "the base's file or the core of session {session} changed while the question \
+                     waited; run this verb again; nothing changed"
+                ),
+            ));
+        }
+        Err(e) => {
+            staging.clean();
+            return Err(e);
+        }
+    }
 
     // S3: the stop. From here the old copy is kept.
     if let Err(e) = fs::rename(staging.dir.join("old/herdr-core"), &kept_at) {
@@ -964,6 +1006,21 @@ mod tests {
             fs::set_permissions(&path, fs::Permissions::from_mode(0o444)).unwrap();
             assert!(matches!(up_lock_at(&path, "s"), Ok(Some(_))));
         }
+    }
+
+    #[test]
+    fn a_socket_that_cannot_be_reached_is_not_a_stopped_core() {
+        // SAFETY: geteuid(2) only reads.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let closed = dir.path().join("closed");
+        fs::create_dir(&closed).unwrap();
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o000)).unwrap();
+        let unreachable = nothing_listens(&closed.join("makiba.sock"));
+        fs::set_permissions(&closed, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(!unreachable);
     }
 
     #[test]
