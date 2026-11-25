@@ -295,9 +295,21 @@ impl Launch {
             crate::cli::share_dir().display().to_string(),
         )]);
         let mut unset: Vec<String> = UNSET.iter().map(|v| v.to_string()).collect();
-        // Workers and the curator get an empty GH_CONFIG_DIR (spec section 6.4).
+        // Workers and the curator (spec section 6.4, Issue 297): a GitHub CLI folder of the
+        // launch, never empty (the CLI reads an empty value as unset); and the person's
+        // XDG_CONFIG_HOME, as makibad has it, only when the settings prepared for the launch deny
+        // every credential file under it; otherwise the base's, as inherited.
         if role != Role::Secretary {
-            env.insert("GH_CONFIG_DIR".to_string(), String::new());
+            let gh = super::prepare::tmp_dir(&self.settings, row.id).join("gh");
+            env.insert("GH_CONFIG_DIR".to_string(), gh.display().to_string());
+            if denies_credentials(&settings) {
+                match person_xdg() {
+                    Some(v) => {
+                        env.insert("XDG_CONFIG_HOME".to_string(), v);
+                    }
+                    None => unset.push("XDG_CONFIG_HOME".to_string()),
+                }
+            }
         }
         // The secretary finds the door where this process put it (spec section 3). The merge gate
         // hook's key is retired (Issue 433): no path to it is given.
@@ -535,6 +547,32 @@ pub(super) fn roles(role: &str) -> Option<(spec::Role, Role)> {
 
 /// The settings file of a launch (spec section 9): `<task_id>.json` for a run's, one per launch
 /// (`<role>-<spawn_id>.json`) for a launch without a run, so two of one role never share it.
+/// `XDG_CONFIG_HOME` as this process has it, when set and not empty.
+fn person_xdg() -> Option<String> {
+    std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty())
+}
+
+/// Whether the settings file `path` denies reading every credential file `prepare::credentials`
+/// names now (its sandbox's `denyRead`). An unreadable file denies none.
+fn denies_credentials(path: &Path) -> bool {
+    let Some(v) = std::fs::read_to_string(path)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+    else {
+        return false;
+    };
+    let named: Vec<&str> = v
+        .pointer("/sandbox/filesystem/denyRead")
+        .and_then(|a| a.as_array())
+        .map(|a| a.iter().filter_map(|x| x.as_str()).collect())
+        .unwrap_or_default();
+    // The folders (`~/.ssh`) do not follow XDG_CONFIG_HOME; the files do.
+    let (_, files) = super::prepare::credentials();
+    files
+        .iter()
+        .all(|p| named.contains(&p.display().to_string().as_str()))
+}
+
 pub(super) fn settings_file(dir: &Path, task: Option<&str>, role: &str, spawn: &str) -> PathBuf {
     match task {
         Some(task) => dir.join(format!("{task}.json")),
