@@ -315,19 +315,22 @@ fn run_after(line: &str, at: usize) -> Option<(usize, usize)> {
 
 /// The one parser of dependency lines (Issue 356), for the triage, the guard and the range.
 ///
-/// Refs: on every line, each non-negated `Blocked by`, `Depends on` or `Requires` and the run of
-/// refs right after it (closing emphasis aside), also inside a line and on a line that cannot be
-/// read whole. A **dependency line** starts with a keyword after an optional quote, heading, list
-/// marker, task box and emphasis or code marks (`DEP_LINE_START`); it is read whole when its
-/// keyword is followed by a run and every ref token on it lies in the run of one of its keywords.
+/// Refs: on every line (every boundary `splitlines` knows), each non-negated `Blocked by`,
+/// `Depends on` or `Requires` and the run of refs right after it (closing emphasis aside), also
+/// inside a line and on a line that cannot be read whole. A **dependency line** starts with a
+/// keyword after an optional quote, heading, list marker, task box and emphasis or code marks
+/// (`DEP_LINE_START`); it is read whole when its keyword is followed by a run and every ref token
+/// on it lies in the run of one of its keywords (a negated one's names nothing, and is no stray).
 /// Any other dependency line (the dependency in words, its number only on the next line, in prose,
 /// or after the run) is `unreadable`: the Issue is left out for its author to rewrite.
 pub fn dependency_lines(text: &str) -> DepLines {
     let mut home = BTreeSet::new();
     let mut cross = BTreeSet::new();
     let mut unreadable = None;
-    for line in text.split('\n') {
+    for line in splitlines(text) {
         let mut runs: Vec<(usize, usize)> = Vec::new();
+        // The runs of negated keywords: they name nothing, and are no ref outside a run.
+        let mut negated: Vec<(usize, usize)> = Vec::new();
         let lead = DEP_LINE_START
             .captures(line)
             .and_then(|c| c.name("kw"))
@@ -335,12 +338,12 @@ pub fn dependency_lines(text: &str) -> DepLines {
         let lead_run = lead.and_then(|at| run_after(line, at));
         runs.extend(lead_run);
         for m in BLOCK_KEYWORD.find_iter(line) {
-            if BLOCK_NEG.is_match(&line[..m.start()]) {
+            let Some(span) = run_after(line, m.end()) else {
                 continue;
-            }
-            if let Some(span) = run_after(line, m.end())
-                && !runs.contains(&span)
-            {
+            };
+            if BLOCK_NEG.is_match(&line[..m.start()]) {
+                negated.push(span);
+            } else if !runs.contains(&span) {
                 runs.push(span);
             }
         }
@@ -349,9 +352,11 @@ pub fn dependency_lines(text: &str) -> DepLines {
             cross.extend(cross_tokens(&line[s..e]));
         }
         let whole = lead_run.is_some()
-            && REF_TOKEN
-                .find_iter(line)
-                .all(|t| runs.iter().any(|&(s, e)| s <= t.start() && t.end() <= e));
+            && REF_TOKEN.find_iter(line).all(|t| {
+                runs.iter()
+                    .chain(&negated)
+                    .any(|&(s, e)| s <= t.start() && t.end() <= e)
+            });
         if unreadable.is_none() && lead.is_some() && !whole {
             unreadable = Some(shown_line(line));
         }
@@ -565,6 +570,32 @@ mod tests {
             let d = dependency_lines(body);
             assert!(d.unreadable.is_some(), "{body:?}");
             assert_eq!(d.home, home, "{body:?}");
+        }
+    }
+
+    /// A negated clause beside a readable one does not make the line unreadable (review round 1).
+    #[test]
+    fn a_negated_clause_beside_a_run_is_not_unreadable() {
+        for body in [
+            "Depends on #3; not blocked by #4",
+            "Blocked by #3, no longer requires #4.",
+        ] {
+            let d = dependency_lines(body);
+            assert_eq!((d.home, d.unreadable), (vec![3], None), "{body:?}");
+        }
+        let d = dependency_lines("Depends on #3; not blocked by the UI, see #4");
+        assert!(d.unreadable.is_some());
+    }
+
+    /// Every line boundary `splitlines` knows separates lines here too (review round 1).
+    #[test]
+    fn every_line_boundary_separates_dependency_lines() {
+        for sep in ["\r", "\r\n", "\u{2028}", "\u{85}", "\x0b"] {
+            let body = format!("Intro.{sep}Depends on the previous step.");
+            assert!(dependency_line_unreadable(&body).is_some(), "{body:?}");
+            let numbered = format!("Intro.{sep}- Depends on #30{sep}More.");
+            let d = dependency_lines(&numbered);
+            assert_eq!((d.home, d.unreadable), (vec![30], None), "{numbered:?}");
         }
     }
 
