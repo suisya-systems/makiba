@@ -545,11 +545,11 @@ pub(super) fn roles(role: &str) -> Option<(spec::Role, Role)> {
     }
 }
 
-/// The settings file of a launch (spec section 9): `<task_id>.json` for a run's, one per launch
-/// (`<role>-<spawn_id>.json`) for a launch without a run, so two of one role never share it.
 /// `XDG_CONFIG_HOME` as this process has it, when set and not empty.
 fn person_xdg() -> Option<String> {
-    std::env::var("XDG_CONFIG_HOME").ok().filter(|v| !v.is_empty())
+    std::env::var("XDG_CONFIG_HOME")
+        .ok()
+        .filter(|v| !v.is_empty())
 }
 
 /// Whether the settings file `path` denies reading every credential file `prepare::credentials`
@@ -573,6 +573,8 @@ fn denies_credentials(path: &Path) -> bool {
         .all(|p| named.contains(&p.display().to_string().as_str()))
 }
 
+/// The settings file of a launch (spec section 9): `<task_id>.json` for a run's, one per launch
+/// (`<role>-<spawn_id>.json`) for a launch without a run, so two of one role never share it.
 pub(super) fn settings_file(dir: &Path, task: Option<&str>, role: &str, spawn: &str) -> PathBuf {
     match task {
         Some(task) => dir.join(format!("{task}.json")),
