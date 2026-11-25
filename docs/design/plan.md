@@ -352,7 +352,7 @@ Before M2 and M3, a person runs probes P1 to P5 and P7 to P11 (section 9). M2 an
 | M4 Boundary | One real worker goes from request to done report with no person, and the base's command run from inside it is refused. |
 | M5 Close | After close, no terminal and no worktree remain; a push replaces the PR watch. |
 | M6 Secretary | A request, a PR and a close happen through conversation with the secretary alone; no skill or rules file names a terminal tool or the base's command. |
-| M7 Self-hosting | makiba developing makiba until twenty pull requests have landed through makiba and an update of the base, a secretary renewal and a failed launch have each been met (brought about on purpose if need be), incident tests green, claude-org-ja not started. |
+| M7 Self-hosting | makiba developing makiba until twenty pull requests have landed through makiba and an update of the base, a secretary renewal and a failed launch have each been met (brought about on purpose if need be), incident tests green, claude-org-ja taking no part in carrying out makiba's tasks (Issue 51 says what that means). |
 
 ## 9. How it is developed
 

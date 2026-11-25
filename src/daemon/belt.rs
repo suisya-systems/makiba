@@ -15,7 +15,9 @@
 //! - A run that waits only for the person (an escalated pending entry) counts in neither count.
 //! - The proof of a landing: the run's registered pull request read merged (`pr_merged`), which
 //!   the PR watch records (`prwatch.rs`, Issue 388); the belt only checks the project's clone.
-//! - The read surface's `ranges[]` (spec section 12, table "Range field").
+//! - The read surface's `ranges[]` (spec section 12, table "Range field"). Its `approves_under`
+//!   (the mode approving a draft would fix) is set by `status_local`, which owns the mode as each
+//!   reader knows it (Issue 326); `approve` refuses as `stale` a mode shown that is not makibad's.
 //!
 //! Step 2 (Issue 282): the stops `makibad` writes itself, each a pending entry escalated at once
 //! with `belt_stopped`, in the transaction of what caused it and before the fill there.
@@ -29,6 +31,10 @@
 //! - The pauses: two refused pull requests in a row (`gate_stop`), two failed launches in a row
 //!   (`launch_failed`); a failed run holds no slot.
 //! - `stop_parts_missing`: what a range task's entry lacks to be escalated.
+//!
+//! Step 5 (Issue 248): the read surface's `belt[]` (spec section 12, table "Belt field"), one
+//! row per open run of a range, placed by the same `run_item` as `ranges[].items[]` and counted
+//! by the same `counts_sql` as the fill. Computed on each read; nothing is kept beside the ledger.
 
 use super::door::{Response, internal, refuse, str_arg, usage};
 use super::gh::{GhError, run_gh};
@@ -399,6 +405,25 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "look at the range again (makiba range approve shows it) and approve that",
         ));
     }
+    // Issue 326: the approval fixes the merge approval mode the person was shown, as it fixes the
+    // read; the mode in force is read once, compared and stored.
+    let shown_mode = str_arg(args, "approval_mode")?;
+    if !["human", "acceptance"].contains(&shown_mode) {
+        return Err(usage(format!(
+            "approval_mode is human or acceptance (the mode shown), not {shown_mode:?}"
+        )));
+    }
+    let mode = super::gate::merge_approval_mode();
+    if shown_mode != mode {
+        return Err(refuse(
+            ErrorKind::Stale,
+            format!(
+                "range {} was shown under merge_approval_mode {shown_mode} and makibad's mode now is {mode}",
+                g.id
+            ),
+            "look at the range again (makiba range approve shows it) and approve that",
+        ));
+    }
     if let Some(old) = g.replaces {
         let st = load(w, old)?.status;
         // A draft replaced by this draft was ended at the proposal: nothing is left to replace.
@@ -424,7 +449,6 @@ fn approve(w: &StateWriter, actor: &str, args: &Value) -> Response {
             g.slug
         )));
     }
-    let mode = super::gate::merge_approval_mode();
     let store = || -> Result<()> {
         if let Some(old) = g.replaces {
             end_range(w, old, "replaced", actor)?;
@@ -1177,10 +1201,17 @@ fn range_count(w: &StateWriter, id: i64) -> Result<i64> {
         w,
         &format!(
             "{CHAIN} SELECT count(*) FROM runs r WHERE r.range_id IN (SELECT id FROM chain)
-               AND r.status IN ('queued', 'in_use', 'suspended') AND NOT {WAITING}"
+               AND {}",
+            counts_sql()
         ),
         [id],
     )
+}
+
+/// A run `r` of a range that counts against its `at_once` (`range_count`, and `belt[].counts` of
+/// the read surface): queued, at work or suspended, and not waiting (`WAITING`).
+fn counts_sql() -> String {
+    format!("(r.status IN ('queued', 'in_use', 'suspended') AND NOT {WAITING})")
 }
 
 /// The runs of the range and its chain not closed.
@@ -2828,7 +2859,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 (SELECT count(*) FROM runs WHERE range_id = g.id),
                 g.budget_hours, g.budget_fixes,
                 round((julianday(coalesce(g.ended_at, 'now')) - julianday(g.approved_at)) * 24.0, 3),
-                g.follow_ups, g.design_ahead = 1
+                g.follow_ups, g.design_ahead = 1, g.replaces
          FROM ranges g JOIN projects p ON p.id = g.project_id WHERE g.id = ?1",
         [id],
         |r| {
@@ -2847,6 +2878,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
                 "used": {"tasks": r.get::<_, i64>(14)?, "hours": r.get::<_, Option<f64>>(17)?},
                 "follow_ups": r.get::<_, String>(18)?,
                 "design_ahead": r.get::<_, bool>(19)?,
+                "replaces": r.get::<_, Option<i64>>(20)?,
             }))
         },
     )?;
@@ -2926,6 +2958,164 @@ fn item(issue: &Value, title: Value, place: &str) -> Value {
            "since": null, "task_id": null, "pr": null, "pr_title": null})
 }
 
+/// The item of the run of `task`, dispatched for `issue` (belt.md 7.1): its place, stage, why and
+/// since as `ranges[].items[]` and `belt[]` show them. None when the task has no run.
+fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<Value>> {
+    let run: Option<(i64, String, String, Option<String>, String)> = c
+        .query_row(
+            "SELECT r.id, r.status, r.title, r.completed_at, r.dispatched_at FROM runs r
+             WHERE r.task_id = ?1",
+            [&task],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+        )
+        .optional()?;
+    let Some((run, status, title, completed, dispatched)) = run else {
+        return Ok(None);
+    };
+    let mut it = item(&json!(issue), json!(title), "in_work");
+    it["task_id"] = json!(task);
+    it["since"] = json!(dispatched);
+    let stop: Option<(String, String)> = c
+        .query_row(
+            "SELECT coalesce(json_extract(context_json, '$.stop_line'), 'decision') || ': '
+                    || p.question, p.created_at
+             FROM pending p WHERE p.run_id = ?1 AND p.status = 'escalated'
+             ORDER BY p.id LIMIT 1",
+            [run],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    // A design-only run (belt.md 4.3, 7.1): `design_only` at work, `waits_landing #<n>` in
+    // review once its design is reported, until what it waits for has landed.
+    // Only a run still open waits: an abandoned or closed one is placed by its status.
+    let landing: bool = c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1
+               AND r.status IN ('queued', 'in_use', 'suspended', 'parked') AND {LANDING_WAIT})"
+        ),
+        [run],
+        |r| r.get(0),
+    )?;
+    let open_wait = super::ahead::open_wait(c, task)?;
+    if let Some((why, since)) = stop {
+        it["place"] = json!("waiting_person");
+        it["why"] = json!(why.lines().next().unwrap_or_default());
+        it["since"] = json!(since);
+        // Its terminal let go while it waits (Issue 283).
+        if status == "parked" {
+            it["stage"] = json!("parked");
+        }
+    } else if landing && let Some(wait) = &open_wait {
+        it["place"] = json!("review");
+        // In review since its newest design report (spec 5.8: it waits from there).
+        if let Some(at) = newest_event_at(c, run, "design_reported")? {
+            it["since"] = json!(at);
+        }
+        it["stage"] = json!(format!(
+            "waits_landing {}",
+            wait.issues
+                .iter()
+                .map(|n| format!("#{n}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    } else {
+        match status.as_str() {
+            "review" => {
+                it["place"] = json!("review");
+                // In review since the done report that moved it there (Issue 414); a run
+                // moved before `run_in_review` was written keeps its dispatch.
+                if let Some(at) = newest_event_at(c, run, "run_in_review")? {
+                    it["since"] = json!(at);
+                }
+                // The watch of its current pull request (Issue 357), of its current head
+                // first: a pull request registered again keeps its older row, behind another's
+                // newer one, and so does a head it returns to.
+                let watch: Option<(String, Option<String>)> = c
+                    .query_row(
+                        &format!(
+                            "SELECT w.status, w.conclusion FROM pr_watches w
+                             JOIN runs r ON r.id = w.run_id
+                             WHERE w.run_id = ?1 AND {}
+                             ORDER BY coalesce(w.head_oid = (
+                                        SELECT json_extract(ch.payload_json, '$.head_oid')
+                                        FROM events ch WHERE ch.run_id = r.id
+                                          AND ch.kind IN ('pr_opened', 'fix_pushed')
+                                        ORDER BY ch.id DESC LIMIT 1), 0) DESC,
+                                      w.id DESC
+                             LIMIT 1",
+                            is_current_pr_sql("r", "w.repo", "w.pr")
+                        ),
+                        [run],
+                        |r| Ok((r.get(0)?, r.get(1)?)),
+                    )
+                    .optional()?;
+                it["stage"] = json!(match watch {
+                    None => "no_pr",
+                    Some((s, Some(c))) if s == "completed" && c == "passed" => "to_land",
+                    Some(_) => "ci",
+                });
+            }
+            "completed" => {
+                // A merge of its current pull request only (Issue 357): one of a pull request
+                // it replaced is not its landing.
+                let merged: Option<String> = c
+                    .query_row(
+                        &format!(
+                            "SELECT m.payload_json FROM events m JOIN runs r ON r.id = m.run_id
+                             WHERE m.kind = 'pr_merged' AND m.run_id = ?1 AND {}
+                             ORDER BY m.id DESC LIMIT 1",
+                            is_current_pr_sql(
+                                "r",
+                                "json_extract(m.payload_json, '$.repo')",
+                                "json_extract(m.payload_json, '$.pr')"
+                            )
+                        ),
+                        [run],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                it["since"] = json!(completed);
+                match merged.and_then(|p| serde_json::from_str::<Value>(&p).ok()) {
+                    Some(m) => {
+                        it["place"] = json!("landed");
+                        it["pr"] = m["pr"].clone();
+                        it["pr_title"] = m["title"].clone();
+                    }
+                    None => {
+                        it["place"] = json!("closed");
+                        it["why"] = json!("no merge recorded");
+                    }
+                }
+            }
+            "abandoned" => {
+                it["place"] = json!("skipped");
+                it["why"] = json!("abandoned");
+                it["since"] = json!(completed);
+            }
+            _ => {
+                let stage: Option<String> = c
+                    .query_row(
+                        "SELECT stage FROM run_launch WHERE run_id = ?1 ORDER BY id DESC LIMIT 1",
+                        [run],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                it["stage"] = json!(if status == "failed" {
+                    "launch_failed"
+                } else if open_wait.is_some() {
+                    "design_only"
+                } else if status == "in_use" && stage.as_deref() == Some("verified") {
+                    "at_work"
+                } else {
+                    "launching"
+                });
+            }
+        }
+    }
+    Ok(Some(it))
+}
+
 /// The whole range as a list (belt.md 7.1): items with a run by their `belt_dispatched`, skipped
 /// ones by their `belt_skipped`, then the rest of the newest read in its order.
 fn items(
@@ -2950,135 +3140,9 @@ fn items(
         let issue = p["issue"].as_i64().unwrap_or(0);
         let task = p["task_id"].as_str().unwrap_or("").to_string();
         seen.insert(issue);
-        let run: Option<(i64, String, String, Option<String>, String)> = c
-            .query_row(
-                "SELECT r.id, r.status, r.title, r.completed_at, r.dispatched_at FROM runs r
-                 WHERE r.task_id = ?1",
-                [&task],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            )
-            .optional()?;
-        let Some((run, status, title, completed, dispatched)) = run else {
-            continue;
-        };
-        let mut it = item(&json!(issue), json!(title), "in_work");
-        it["task_id"] = json!(task);
-        it["since"] = json!(dispatched);
-        let stop: Option<(String, String)> = c
-            .query_row(
-                "SELECT coalesce(json_extract(context_json, '$.stop_line'), 'decision') || ': '
-                        || p.question, p.created_at
-                 FROM pending p WHERE p.run_id = ?1 AND p.status = 'escalated'
-                 ORDER BY p.id LIMIT 1",
-                [run],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )
-            .optional()?;
-        // A design-only run (belt.md 4.3, 7.1): `design_only` at work, `waits_landing #<n>` in
-        // review once its design is reported, until what it waits for has landed.
-        // Only a run still open waits: an abandoned or closed one is placed by its status.
-        let landing: bool = c.query_row(
-            &format!(
-                "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.id = ?1
-                   AND r.status IN ('queued', 'in_use', 'suspended', 'parked') AND {LANDING_WAIT})"
-            ),
-            [run],
-            |r| r.get(0),
-        )?;
-        let open_wait = super::ahead::open_wait(c, &task)?;
-        if let Some((why, since)) = stop {
-            it["place"] = json!("waiting_person");
-            it["why"] = json!(why.lines().next().unwrap_or_default());
-            it["since"] = json!(since);
-            // Its terminal let go while it waits (Issue 283).
-            if status == "parked" {
-                it["stage"] = json!("parked");
-            }
-        } else if landing && let Some(wait) = &open_wait {
-            it["place"] = json!("review");
-            // In review since its newest design report (spec 5.8: it waits from there).
-            if let Some(at) = newest_event_at(c, run, "design_reported")? {
-                it["since"] = json!(at);
-            }
-            it["stage"] = json!(format!(
-                "waits_landing {}",
-                wait.issues
-                    .iter()
-                    .map(|n| format!("#{n}"))
-                    .collect::<Vec<_>>()
-                    .join(" ")
-            ));
-        } else {
-            match status.as_str() {
-                "review" => {
-                    it["place"] = json!("review");
-                    // In review since the done report that moved it there (Issue 414); a run
-                    // moved before `run_in_review` was written keeps its dispatch.
-                    if let Some(at) = newest_event_at(c, run, "run_in_review")? {
-                        it["since"] = json!(at);
-                    }
-                    let watch: Option<(String, Option<String>)> = c
-                        .query_row(
-                            "SELECT status, conclusion FROM pr_watches WHERE run_id = ?1
-                             ORDER BY id DESC LIMIT 1",
-                            [run],
-                            |r| Ok((r.get(0)?, r.get(1)?)),
-                        )
-                        .optional()?;
-                    it["stage"] = json!(match watch {
-                        None => "no_pr",
-                        Some((s, Some(c))) if s == "completed" && c == "passed" => "to_land",
-                        Some(_) => "ci",
-                    });
-                }
-                "completed" => {
-                    let merged: Option<String> = c
-                        .query_row(
-                            "SELECT payload_json FROM events WHERE kind = 'pr_merged' AND run_id = ?1
-                             ORDER BY id LIMIT 1",
-                            [run],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    it["since"] = json!(completed);
-                    match merged.and_then(|p| serde_json::from_str::<Value>(&p).ok()) {
-                        Some(m) => {
-                            it["place"] = json!("landed");
-                            it["pr"] = m["pr"].clone();
-                            it["pr_title"] = m["title"].clone();
-                        }
-                        None => {
-                            it["place"] = json!("closed");
-                            it["why"] = json!("no merge recorded");
-                        }
-                    }
-                }
-                "abandoned" => {
-                    it["place"] = json!("skipped");
-                    it["why"] = json!("abandoned");
-                    it["since"] = json!(completed);
-                }
-                _ => {
-                    let stage: Option<String> = c
-                        .query_row(
-                            "SELECT stage FROM run_launch WHERE run_id = ?1 ORDER BY id DESC LIMIT 1",
-                            [run],
-                            |r| r.get(0),
-                        )
-                        .optional()?;
-                    it["stage"] = json!(if status == "failed" {
-                        "launch_failed"
-                    } else if open_wait.is_some() {
-                        "design_only"
-                    } else if status == "in_use" && stage.as_deref() == Some("verified") {
-                        "at_work"
-                    } else {
-                        "launching"
-                    });
-                }
-            }
+        if let Some(it) = run_item(c, issue, &task)? {
+            placed.push((eid, it));
         }
-        placed.push((eid, it));
     }
     for (eid, at, p) in skipped {
         let issue = p["issue"].as_i64().unwrap_or(0);
@@ -3120,6 +3184,72 @@ fn items(
             (true, _) => "no_slot".into(),
         });
         out.push(it);
+    }
+    Ok(out)
+}
+
+/// `belt[]` of `status --json` (belt.md 7, step 5; spec section 12, table "Belt field"): every run
+/// of a range not `completed` or `abandoned`, by run id, with the place and stage of its item in
+/// `ranges[].items[]`, whether it counts against its range's `at_once`, the stop it waits on and
+/// the Issues a design-only run still waits for.
+pub fn read_belt(c: &Connection) -> rusqlite::Result<Vec<Value>> {
+    let exists: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'ranges')",
+        [],
+        |r| r.get(0),
+    )?;
+    if !exists {
+        return Ok(Vec::new());
+    }
+    let runs: Vec<(i64, i64, String, bool)> = c
+        .prepare(&format!(
+            "SELECT r.id, r.range_id, r.task_id, {} FROM runs r
+             WHERE r.range_id IS NOT NULL AND r.status NOT IN ('completed', 'abandoned')
+             ORDER BY r.id",
+            counts_sql()
+        ))?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out = Vec::new();
+    for (run, range, task, counts) in runs {
+        let issue: Option<i64> = c
+            .query_row(
+                "SELECT json_extract(payload_json, '$.issue') FROM events
+                 WHERE run_id = ?1 AND kind = 'belt_dispatched' ORDER BY id LIMIT 1",
+                [run],
+                |r| r.get(0),
+            )
+            .optional()?
+            .flatten();
+        let it = match issue {
+            Some(n) => run_item(c, n, &task)?,
+            None => None,
+        };
+        let field = |name: &str| it.as_ref().map_or(Value::Null, |i| i[name].clone());
+        // The stop it waits on: the newest `belt_stopped` of the run whose entry is still escalated.
+        let stop: Option<(String, String, i64)> = c
+            .query_row(
+                "SELECT json_extract(e.payload_json, '$.line'),
+                        json_extract(e.payload_json, '$.reason'),
+                        json_extract(e.payload_json, '$.pending_id')
+                 FROM events e JOIN pending p
+                      ON p.id = json_extract(e.payload_json, '$.pending_id')
+                 WHERE e.run_id = ?1 AND e.kind = 'belt_stopped' AND p.status = 'escalated'
+                 ORDER BY e.id DESC LIMIT 1",
+                [run],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (line, reason, pending) = match stop {
+            Some((l, r, p)) => (json!(l), json!(r), json!(p)),
+            None => (Value::Null, Value::Null, Value::Null),
+        };
+        out.push(json!({
+            "range_id": range, "task_id": task, "issue": issue,
+            "place": field("place"), "stage": field("stage"), "since": field("since"),
+            "counts": counts, "stop_line": line, "stop_reason": reason, "pending_id": pending,
+            "waits_for": super::ahead::still_waits_for(c, &task)?,
+        }));
     }
     Ok(out)
 }
@@ -3238,7 +3368,8 @@ pub(in crate::daemon) mod tests {
             &w,
             "person",
             Role::Person,
-            &json!({"action": "approve", "id": second, "read": read}),
+            &json!({"action": "approve", "id": second, "read": read,
+                    "approval_mode": super::super::gate::merge_approval_mode()}),
         );
         assert_eq!(r.unwrap()["status"], json!("active"));
     }
@@ -4412,5 +4543,64 @@ pub(in crate::daemon) mod tests {
             landed_of(&w),
             Some(vec![(1, "d".to_string(), "m2".to_string())])
         );
+    }
+
+    /// A run in review that returns to an older head of its current pull request takes the
+    /// stage from that head's watch, not from a newer head's (Issue 357, diff review round 1).
+    #[test]
+    fn the_review_stage_is_that_of_the_current_head() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 1, 9, 'h', 's')",
+                [],
+            )
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "r1-9",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute("UPDATE runs SET range_id = 1 WHERE task_id = 'r1-9'", [])
+            .unwrap();
+        w.append_event(&NewEvent {
+            kind: "belt_dispatched",
+            actor: Some("makibad"),
+            payload: Some(&json!({"range_id": 1, "issue": 9, "task_id": "r1-9"})),
+            run_task_id: Some("r1-9"),
+            ..Default::default()
+        })
+        .unwrap();
+        let h1 = "1".repeat(40);
+        let h2 = "2".repeat(40);
+        let stage = || {
+            let items = items(w.conn(), 1, &json!({}), &[]).unwrap();
+            items[0]["stage"].clone()
+        };
+        super::super::prwatch::register(&w, "pr_opened", "r1-9", "o/p", 11, &h1).unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h2).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
+                 WHERE head_oid = ?1",
+                [&h2],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("to_land"));
+        // Back to h1: its row is watched again, older than h2's passed one.
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h1).unwrap();
+        assert_eq!(stage(), json!("ci"));
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'failed'
+                 WHERE head_oid = ?1",
+                [&h1],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("ci"));
     }
 }

@@ -404,6 +404,10 @@ pub enum Command {
         /// that is not the newest is refused (`stale`).
         #[arg(long)]
         read: Option<i64>,
+        /// approve: the merge approval mode the person looked at, sent instead of the one printed;
+        /// a mode that is not makibad's is refused (`stale`).
+        #[arg(long, value_parser = ["human", "acceptance"])]
+        mode: Option<String>,
     },
     /// Run the acceptance gate for a pull request at a head; merges nothing.
     Gate {
@@ -486,6 +490,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             reason,
             yes: _,
             read: shown_read,
+            mode: shown_mode,
         } => {
             let mut args = json!({"action": action});
             if design_ahead {
@@ -513,6 +518,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
                 ("takes", takes),
                 ("reason", reason),
                 ("follow_ups", follow_ups),
+                ("approval_mode", shown_mode),
             ] {
                 if let Some(v) = v {
                     args[k] = v.into();
@@ -760,8 +766,10 @@ pub fn exit(code: i32) -> ExitCode {
 /// Before `range approve`: print the draft and `makibad`'s newest complete read of it, read from
 /// `state.db` as `status` reads it, with its id, and ask on the terminal unless `yes`. The read's
 /// id goes with the approval (or the read named with `--read`, Issue 408), so a read made since is
-/// refused (`stale`) instead of approved unseen.
-fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
+/// refused (`stale`) instead of approved unseen. So does the merge approval mode printed, the one
+/// the approval fixes (the range's `approves_under`, Issue 326): a mode `makibad` no longer has is
+/// refused (`stale`); with none known, nothing is sent. Returns the read and the mode.
+fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> {
     let status = crate::status_local::read_here()?;
     let range = status["ranges"]
         .as_array()
@@ -802,8 +810,10 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
             "no"
         }
     );
-    // Issue 383: makibad's mode, the one the gate reads; this shell's only beside it.
-    let mode = status["merge_approval_mode"].as_str().unwrap_or("unknown");
+    // Issue 383: makibad's mode, the one the gate reads; this shell's only beside it. Issue 326:
+    // the mode approving this draft fixes, as status shows it for the range.
+    let fixes = range["approves_under"].as_str().map(str::to_string);
+    let mode = fixes.as_deref().unwrap_or("unknown");
     let here = status["merge_approval_mode_here"].as_str().unwrap_or("-");
     if mode == here {
         println!("Merge approval mode: {mode} (makibad's)");
@@ -839,7 +849,7 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
         );
     }
     if yes {
-        return Ok(read);
+        return Ok((read, fixes));
     }
     print!("Approve range {id}? [y/N] ");
     let _ = std::io::stdout().flush();
@@ -848,7 +858,7 @@ fn approve_preview(id: i64, yes: bool) -> Result<i64, String> {
         .read_line(&mut answer)
         .map_err(|e| format!("cannot read the answer: {e}"))?;
     if answer.trim().eq_ignore_ascii_case("y") {
-        Ok(read)
+        Ok((read, fixes))
     } else {
         Err("not approved".into())
     }
@@ -921,9 +931,22 @@ pub fn main(c: Command) -> ExitCode {
             .map_err(String::from)
             .and_then(|id| approve_preview(id, yes))
         {
-            // A read named with `--read` goes as named; else the newest read printed.
-            Ok(read) if request["read"].is_null() => request["read"] = read.into(),
-            Ok(_) => {}
+            Ok((read, mode)) => {
+                // A read named with `--read` goes as named; else the newest read printed.
+                if request["read"].is_null() {
+                    request["read"] = read.into();
+                }
+                // A mode named with `--mode` goes as named; else the mode printed (Issue 326).
+                if request["approval_mode"].is_null() {
+                    let Some(mode) = mode else {
+                        eprintln!(
+                            "makiba: makibad's merge approval mode is not known (it is not running or has not recorded it); nothing approved"
+                        );
+                        return exit(ErrorKind::Conflict.exit_code());
+                    };
+                    request["approval_mode"] = mode.into();
+                }
+            }
             Err(e) => {
                 eprintln!("makiba: {e}");
                 return exit(ErrorKind::Conflict.exit_code());

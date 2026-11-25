@@ -187,7 +187,14 @@ fn a_launched_worker_has_its_tags_no_key_in_its_environment_and_its_token_in_its
     for name in REMOVED {
         assert!(!env.contains_key(name), "{name} reached the agent");
     }
-    assert_eq!(env.get("GH_CONFIG_DIR").map(String::as_str), Some(""));
+    // A folder of the launch, never empty: the GitHub CLI reads an empty value as unset and
+    // looks under XDG_CONFIG_HOME (Issue 297).
+    let id: i64 = one(&dir, "SELECT id FROM run_launch").expect("the launch's id");
+    let own = dir.join("tmp").join(id.to_string()).join("gh");
+    assert_eq!(
+        env.get("GH_CONFIG_DIR").map(String::as_str),
+        Some(own.display().to_string().as_str())
+    );
 
     let stored: Vec<String> = {
         let conn = reader(&dir).unwrap();
