@@ -890,10 +890,62 @@ fn denied(places: &Places, home: Option<&Path>) -> Vec<PathBuf> {
     out.push(PathBuf::from("~/.claude.json"));
     out.extend(config_dir("CODEX_HOME", home, ".codex"));
     out.extend(config_dir("CLAUDE_CONFIG_DIR", home, ".claude"));
-    out.into_iter()
-        .filter_map(|p| expand(&p, home))
-        .map(|p| std::path::absolute(&p).unwrap_or(p))
-        .collect()
+    with_real(
+        out.into_iter()
+            .filter_map(|p| expand(&p, home))
+            .map(|p| std::path::absolute(&p).unwrap_or(p))
+            .collect(),
+    )
+}
+
+/// `p` as the filesystem resolves it (links followed), or `p` when it does not resolve.
+fn real(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Each path and, where a link leads elsewhere, the place it leads to: a denied place reached
+/// through a link is denied where it really is.
+fn with_real(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = vec![];
+    for p in paths {
+        let r = real(&p);
+        for q in [p, r] {
+            if !out.contains(&q) {
+                out.push(q);
+            }
+        }
+    }
+    out
+}
+
+/// Where a denied place shows inside the folders given: its own path under a given folder, and,
+/// when a given folder or the place is reached through a link, the path under the given folder
+/// at which its real place shows. Links themselves are left out: what they lead to is covered at
+/// its real place.
+fn masks(given: &[PathBuf], deny: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = vec![];
+    for g in given {
+        let gr = real(g);
+        for q in deny {
+            let qr = real(q);
+            let mut seen = vec![];
+            if q.starts_with(g) {
+                seen.push(q.clone());
+            }
+            if let Ok(rel) = qr.strip_prefix(&gr) {
+                seen.push(g.join(rel));
+            }
+            for m in seen {
+                let link = m
+                    .symlink_metadata()
+                    .is_ok_and(|md| md.file_type().is_symlink());
+                if !link && !out.contains(&m) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The files a reader's program needs to start: the program as found, the file it leads to,
@@ -943,11 +995,12 @@ fn program_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<Pa
     } else {
         dir
     };
-    let wide = root == Path::new("/")
-        || home.is_some_and(|h| h.starts_with(root))
-        || deny
-            .iter()
-            .any(|q| q.starts_with(root) || root.starts_with(q));
+    let rr = real(root);
+    let wide = [root, rr.as_path()].iter().any(|r| {
+        *r == Path::new("/")
+            || home.is_some_and(|h| h.starts_with(r) || real(h).starts_with(r))
+            || deny.iter().any(|q| q.starts_with(r) || r.starts_with(q))
+    });
     (!wide).then(|| root.to_path_buf())
 }
 
@@ -1027,13 +1080,10 @@ fn bounded_reader(
             None => files.push(f),
         }
     }
-    for q in &deny {
-        if !given.iter().any(|g| q.starts_with(g)) {
-            continue;
-        }
+    for q in masks(&given, &deny) {
         match q.symlink_metadata() {
-            Ok(m) if m.is_dir() => a.extend(["--tmpfs".into(), s(q)]),
-            Ok(_) => ro(&mut a, Path::new("/dev/null"), q),
+            Ok(m) if m.is_dir() => a.extend(["--tmpfs".into(), s(&q)]),
+            Ok(_) => ro(&mut a, Path::new("/dev/null"), &q),
             Err(_) => {}
         }
     }
@@ -1305,6 +1355,35 @@ fn withheld(mut a: Answer) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader's configuration reached through a link (the review of Issue 262): a program
+    /// folder holding its real place is not given, and where a given folder holds it, it is
+    /// covered at the path it shows at.
+    #[test]
+    fn a_denied_place_behind_a_link_is_denied_where_it_really_is() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        std::fs::create_dir_all(t.join("reader/bin")).unwrap();
+        std::fs::create_dir_all(t.join("reader/config/sessions")).unwrap();
+        std::fs::write(t.join("reader/bin/codex"), "").unwrap();
+        std::fs::create_dir_all(t.join("home")).unwrap();
+        std::os::unix::fs::symlink(t.join("reader/config"), t.join("home/.codex")).unwrap();
+        std::os::unix::fs::symlink(t.join("reader"), t.join("alias")).unwrap();
+        let deny = with_real(vec![t.join("home/.codex")]);
+        assert!(deny.contains(&t.join("reader/config")), "{deny:?}");
+        let home = t.join("home");
+        assert_eq!(
+            program_root(&t.join("reader/bin/codex"), Some(&home), &deny),
+            None
+        );
+        assert_eq!(
+            program_root(&t.join("alias/bin/codex"), Some(&home), &deny),
+            None
+        );
+        let m = masks(&[t.join("reader"), t.join("alias")], &deny);
+        assert!(m.contains(&t.join("reader/config")), "{m:?}");
+        assert!(m.contains(&t.join("alias/config")), "{m:?}");
+        assert!(!m.contains(&t.join("home/.codex")), "{m:?}");
+    }
 
     #[test]
     fn the_last_findings_line_counts() {
