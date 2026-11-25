@@ -987,18 +987,6 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
             .map(|b| format!("{b:02x}"))
             .collect();
         let key = format!("tests:{subject}@{}#{sum}", s.head);
-        w.conn().execute(
-            "UPDATE pending SET status = 'withdrawn',
-               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
-             WHERE status = 'escalated'
-               AND json_extract(context_json, '$.by') = 'makibad'
-               AND json_extract(context_json, '$.stop_line') = 'tests'
-               AND json_extract(context_json, '$.range_id') = ?1
-               AND json_extract(context_json, '$.pr') = ?2
-               AND json_extract(context_json, '$.head') = ?3
-               AND json_extract(context_json, '$.key') != ?4",
-            params![range, subject, s.head, key],
-        )?;
         let mut question = format!(
             "{}#{} at {short} changes test files after its test commit that only a reading can judge: {}.",
             s.repo,
@@ -1030,6 +1018,23 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
             more,
         }
     };
+    // Issue 513: a `tests` stop is the one reading of its head; a stop of that line still
+    // escalated for the same pull request and head under another key (other warning lines, or
+    // edited tests only) asks about a reading the gate no longer makes, and is withdrawn.
+    if made.line == "tests" {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.by') = 'makibad'
+               AND json_extract(context_json, '$.stop_line') = 'tests'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.pr') = ?2
+               AND json_extract(context_json, '$.head') = ?3
+               AND json_extract(context_json, '$.key') != ?4",
+            params![range, subject, s.head, made.key],
+        )?;
+    }
     let (id, _) = stop(w, &made)?;
     // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
     if !s.allow
@@ -4288,6 +4293,52 @@ pub(in crate::daemon) mod tests {
             })
             .unwrap();
         assert_eq!(status, "withdrawn");
+    }
+
+    /// Issue 513 (diff review): a head stopped for helper warnings and edited tests, then read
+    /// with the edited tests only (the base took the helper back): the new `tests` stop replaces
+    /// the older one of that head, which is withdrawn; the same reading again is the same stop.
+    #[test]
+    fn a_new_reading_of_the_same_head_replaces_its_tests_stop() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let h = "1".repeat(40);
+        watch(&w, "a", 7, &h);
+        let tests = ["tests/test_x.py".to_string()];
+        let lines = ["test helpers the base changed: tests/common/h.py".to_string()];
+        let stop_with = |helpers: &[String]| {
+            gate_stop(
+                &w,
+                &GateStop {
+                    task: "a",
+                    repo: "o/p",
+                    pr: 7,
+                    head: &h,
+                    allow: true,
+                    refused: false,
+                    reason: "passed",
+                    edited_tests: &tests,
+                    helpers,
+                },
+            )
+            .unwrap()
+            .expect("a stop of line tests")
+        };
+        let first = stop_with(&lines);
+        assert_eq!(escalated(&w), 1);
+        let second = stop_with(&[]);
+        assert_ne!(second, first);
+        assert_eq!(escalated(&w), 1, "only the new reading's stop stands");
+        let status: String = w
+            .conn()
+            .query_row("SELECT status FROM pending WHERE id = ?1", [first], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "withdrawn");
+        assert_eq!(stop_with(&[]), second, "the same reading is the same stop");
+        assert_eq!(escalated(&w), 1);
     }
 
     /// A range budget is a stop only while it keeps a candidate out, and once.
