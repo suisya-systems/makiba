@@ -6,8 +6,9 @@
 //!   One refusal per hook verb is checked, and each line id named is a row of lines.md.
 //! - The secret scanner's refusal names the file, line and shape, never the token itself.
 //! - docs/design/lines.md lists every `permissions.deny` rule of the roles' settings, which
-//!   Claude Code refuses with no reason, and says why it stays; the three git commit rules
-//!   stay while Issue 300 is open.
+//!   Claude Code refuses with no reason, and says why it stays; no role keeps a rule on
+//!   `git commit` text (Issue 300: git's own prepare-commit-msg and the no-verify hooks hold
+//!   the flag, and name their rule).
 
 use serde_json::{Value, json};
 use std::io::Write;
@@ -18,13 +19,6 @@ const ROLES: [&str; 3] = ["worker", "secretary", "curator"];
 
 /// The heading of the section of lines.md that lists the silent deny rules.
 const SILENT_RULES: &str = "## Deny rules that refuse without a reason";
-
-/// The git commit rules each role keeps while Issue 300 (reading git's arguments) is open.
-const GIT_COMMIT_RULES: [&str; 3] = [
-    "Bash(git commit *--no-veri*)",
-    "Bash(git commit -n*)",
-    "Bash(git commit * -n*)",
-];
 
 fn root() -> &'static Path {
     Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -142,9 +136,9 @@ fn check(
 fn each_hooks_refusal_names_the_hook_the_line_and_what_matched() {
     let p = Place::new();
     let mut wrong = Vec::new();
-    // The no-verify hook keeps origin/main's reading (Issue 300 is open): it is checked on
-    // a spelling it reads today, and an abbreviation of the long flag is left to the deny rules.
-    let bash_cases: [(&str, &str, &str, &str); 6] = [
+    // The secretary's and the curator's no-verify hook reads the commit flag in the text; the
+    // worker's (Issue 300) leaves it to git's prepare-commit-msg and still refuses the others.
+    let bash_cases: [(&str, &str, &str, &str); 7] = [
         ("deny-base", "hc list", "L-N2", "hc"),
         ("deny-push", "git push origin main", "L-K2", "git push"),
         (
@@ -154,6 +148,12 @@ fn each_hooks_refusal_names_the_hook_the_line_and_what_matched() {
             "reset --hard",
         ),
         ("deny-no-verify", "git commit -n -m x", "L-K3", "-n"),
+        (
+            "deny-no-verify-code-run",
+            "git push --no-verify origin x",
+            "L-K3",
+            "--no-verify",
+        ),
         (
             "merge-gate",
             "gh pr merge 5 --squash",
@@ -300,15 +300,13 @@ fn lines_md_says_why_each_silent_deny_rule_stays() {
         stale.is_empty(),
         "lines.md names deny rules no role holds: {stale:?}"
     );
-    // The three git commit rules stay while Issue 300 is open; the section says so.
-    for rule in GIT_COMMIT_RULES {
-        assert!(
-            rules.iter().any(|r| r == rule),
-            "a role no longer holds {rule:?}; Issue 300 is not part of this change"
-        );
-    }
+    // No role keeps a rule on git commit text (Issue 300): such a rule matches a message too.
+    let on_commit: Vec<&String> = rules
+        .iter()
+        .filter(|r| r.starts_with("Bash(git commit"))
+        .collect();
     assert!(
-        section.contains("Issue 300"),
-        "lines.md does not say the git commit rules stay silent for Issue 300"
+        on_commit.is_empty(),
+        "a role still denies git commit text, which refuses a message holding its letters: {on_commit:?}"
     );
 }
