@@ -56,10 +56,12 @@ for pd in s["pending"]:
     if pd["status"] == "escalated" and pd["task_id"] is None and pd["id"] not in stopped:
         bad.append(f"pending {pd['id']}: an escalated entry with no task and no belt_stopped to name its range")
 # triage.rs `shown`: an entry with a repository is written once per project of that repository
-# (case aside), with project null only when none matches. Checked only when the list is whole and
-# the scan read as many repositories as status registers (a later registration would differ).
+# (case aside), with project null only when none matches. This assumes, as a fixture may, that no
+# project was registered or removed between the scan and the status: a real pair of reads may differ
+# there without being wrong. The count of repositories is only a coarse guard of that assumption;
+# the check is also skipped when the list is cut.
 if nw["left_out_not_recorded"] or p["repos"] != len({x["repo"].lower() for x in s["projects"] if x["repo"]}):
-    print("left-out per project: not checked (the list is cut, or the projects changed since the scan)")
+    print("left-out per project: not checked (the list is cut, or the repositories changed since the scan)")
 else:
     owners = {}
     for x in s["projects"]:
