@@ -108,6 +108,17 @@ Needs `cargo`, `bwrap`, `codex` and `claude` (both logged in) besides what every
 
 Pass: `stand-in-readers` PASS and `real-readers` PASS. A `real-readers` FAIL whose answer names `fresh-session` for the first run means codex did not run inside the boundary (its own nested sandbox, or a login it could not refresh): read its `fallback_reason` in the result file.
 
+## P17 `p17-screen-place.sh <dir>` (Issue 404)
+
+Where the person's screen can run: M1 to M4 of `docs/design/screen.md` section 5 (probes.md P17). The owner runs it in a login shell on the base's machine, with the real organization up, and does the app's side by hand: `MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p17-screen-place.sh ./results`. Unlike the other scripts it uses the person's own organization (the environment it was started with, not probe_init's scratch folders). It starts no core, no `makibad` and no agent. It reads `commands` and `pending` of the real `state.db` read-only. For the length of the run it serves a stand-in page on 127.0.0.1 under a random path (`P17_PORT` picks the port; 0, the default, lets the system choose). It never makes or answers a pending question itself.
+
+- `m1-command`: the app runs `makiba status --json` and shows it, refreshed by itself (the owner's answer).
+- `m1-page`: the stand-in page shown anywhere in the app (the owner's answer) and at least two reads of its `status.json` counted during a 15-second window.
+- `m3-page`: `m1-page` passed and the page is beside the secretary's terminal (the owner's answer).
+- `m2-act`: the app runs `makiba config get conversation_language` as the person. PASS = a new `commands` row by `person` for `config get conversation_language`, not rejected, and the answer shown in the app. The owner also names the way (`extension`, `terminal`, `none`).
+- `m2-answer`: only when a question already waits and the owner answers it from the app after naming it (step 12) and the script's mark. PASS = the entry is `answered` by `person` and a new `answer` request by `person` for it is recorded. Otherwise NOT-RUN.
+- M4 is a paragraph the owner writes into probes.md; the script records the owner's one-line summary.
+
 ## TODO(confirm)
 
 Lines that use an `hc` or Claude Code feature not shown in paddock's measured scripts or `hc --help`, each marked `TODO(confirm)` in the source:

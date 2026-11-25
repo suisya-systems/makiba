@@ -373,6 +373,13 @@ fn write_sandbox_settings(path: &Path, task: &TaskSettings) -> io::Result<()> {
 /// Code's own.
 pub const TMP_VARS: [&str; 2] = ["TMPDIR", "CLAUDE_CODE_TMPDIR"];
 
+/// Claude Code's own folder in the shared temporary folder (Issue 243). Its sandbox adds these to
+/// every write surface itself, beside what the settings name (measured 2026-11-26, Claude Code
+/// 2.1.332, probes.md run-tmp-dir), so a folder anyone keeps there would be writable by every
+/// launch; each launch's settings deny writing them. Its per-user folder `claude-<uid>` is moved
+/// into the launch's own folder by `CLAUDE_CODE_TMPDIR` and needs no deny.
+pub const CLAUDE_SHARED_TMP: [&str; 2] = ["/tmp/claude", "/private/tmp/claude"];
+
 /// Name `tmp` as `TMP_VARS` in the `env` of the settings file at `path`, written by
 /// `write_task_settings`: given with `--settings`, it is applied over what the person's own
 /// settings say.

@@ -109,6 +109,18 @@ Cases for Issue 243 (lines L-K4 and L-K6), the case set `run-tmp-dir`, recorded 
 - `claude-user-tmp-write`: a write of `/tmp/claude-<uid>/makiba-probe`. OBSERVATION first: it tells whether `/tmp/claude-<uid>` can also be denied for write.
 - `scratchpad`: the scratchpad path Claude Code gives the model. OBSERVATION: under the launch's folder or not.
 - `close`: after the run's close, `<state>/tmp/<launch id>` from outside. PASS when it is gone.
+- `claude-shared-write`: a folder `/tmp/claude` made from outside beforehand, with a file in it, and a launch prepared after Issue 243's deny (its settings' `denyWrite` names `/tmp/claude`). A write of a new file in it, then a recursive delete of it. PASS when both are refused, the folder and its file are intact from outside, and `tmpdir-write` still passes in the same launch. Line L-K6 keeps `Open: #243` until this passes.
+
+Result (2026-11-26, Claude Code 2.1.332, Linux on WSL2, base commit 4060c8f; partial, by hand, not the script): run from the Bash of a worker launch prepared by the real `makibad` (launch 257, a code run, sandbox on), before the deny of `/tmp/claude` existed. Its settings named `allowWrite` = the workplace, the run's git folder and `<state>/tmp/257`, and `TMPDIR` = `CLAUDE_CODE_TMPDIR` = `<state>/tmp/257`.
+- `tmpdir-is-own`: PASS, `$TMPDIR` was `<state>/tmp/257/claude-1000`: `CLAUDE_CODE_TMPDIR` moves Claude Code's per-user folder.
+- `claude-user-tmp-write`: a `/tmp/claude-1000` left by another session existed; the write was refused with `Read-only file system`. It is outside the write surface, so it needs no deny.
+- `shared-tmp-write`: PASS (`Read-only file system`, no file afterwards).
+- `other-run-tmp`: the write into another live launch's `<state>/tmp/255` was refused (`Read-only file system`, no file afterwards). The recursive delete was not run: auto mode refused a delete in a live run's folder.
+- `tmpdir-write`: PASS.
+- `socket`: not measurable: the sandbox refuses `socket(AF_UNIX)` itself (`EPERM`) before any bind, so the path length of `CLAUDE_CODE_TMPDIR` limits no command's socket. The 59-character path above works for everything else.
+- `scratchpad`: OBSERVATION, under the launch's folder (`<state>/tmp/257/claude-1000/<project>/<session>/scratchpad`).
+- What Claude Code adds itself: the sandbox configuration it reported to the model held `/tmp/claude` and `/private/tmp/claude` in its write list beside the settings' three entries. `/tmp/claude` did not exist on that host, and a worker cannot make it (`/tmp` is read-only), but a folder anyone else keeps there is writable by every launch. Since Issue 243 every launch's settings deny writing both (`tests/claude_shared_tmp.rs`); `claude-shared-write` is to measure that the deny holds.
+- Not run (they need a person outside the sandbox): `claude-files-moved`, `other-tmp-folder-write`, `close`, `claude-shared-write`.
 
 Why the script runs one short turn per step and reads only one result line per step: of the four runs before, the first was cut off by the person's time limit; in the second, one long message raised a safeguards notice, the agent read the step files first, that call raised a permission prompt and its Escape ended the turn, so no step ran; in the third, the agent added `; echo "exit=$?"` when asked for the exit code (a prompt again), and a helper named `http.py` shadowed Python's `http`; in the fourth, `base-socket` was judged FAIL from a success marker quoted in a traceback's source line, while the socket had been refused.
 
@@ -391,6 +403,38 @@ Script: `scripts/probes/p16-review-read-boundary.sh <result-dir>`, which runs th
 
 Pass: in the first, every decoy (a scratch home's, the state folder's, the person key) is unreadable inside the boundary and the diff file is readable, for codex and for the fallback, while the test reads each decoy outside; in the second, the real codex and then the real claude (codex named as a missing program) each answer `passed` under their own name and carry neither decoy's content. If it fails: a decoy readable inside is a hole in the mount plan, fixed in `src/daemon/review.rs` before anything else; codex answering as `fresh-session` means codex cannot run inside the boundary, and the reason in `fallback_reason` says what to give it.
 
+### P17. Where the person's screen can run: M1 to M4 of screen.md section 5
+
+Why: Issue 404 (the screen acts as the person) waits for this. Its owner decision 2, how a page's request is told from another local program's, depends on where the buttons sit: inside herdr-app, acting through the app, or on a page served on 127.0.0.1, which an agent's tools outside the Bash sandbox can also reach (the door's MCP server is there already). The owner does not decide 1 to 5 of Issue 404 before this is measured. P12 showed only that the app shows the organization's terminals, given labels; nothing has shown that the app can show makiba's read surface, frame a page or run a command as the person. The measurement is the table of screen.md section 5; this probe writes it down as steps.
+
+Preconditions:
+
+- The machine where herdr-app runs, with the base it shows (on the owner's machine: the app on Windows, the base in WSL, P12), and a real organization up (`makiba up` done; `makiba status` shows `makibad` running). Unlike the other probes, this one runs against the person's own organization and not a scratch core: the app has to show the organization the person works in.
+- `makiba` on the person's `PATH` in the base's machine, the person key in its usual place.
+- Run from the person's login shell in the base's machine, never from an agent's terminal. The app's side is done by hand.
+
+Steps (`scripts/probes/p17-screen-place.sh <result-dir>`; the script prints each numbered action, waits for the owner's Enter, asks what the app showed, and checks the base's side). Run it as `MAKIBA_BIN=$(command -v makiba) bash scripts/probes/p17-screen-place.sh <result-dir>`.
+
+1 to 3. The owner gives the app's version, the version of `hc` on the app's side, and where the app and the base run. The script records `hc --version` and `makiba --version` on the base's side itself.
+
+4 and 5 (M1 by a command). The owner makes the app run `makiba status --json` on the base's machine and show its output, by whatever the app offers (an addition, a button, a panel), not by typing it into a terminal. The script prints the current `heartbeat_at` to compare. Case `m1-command`: PASS when the owner sees the JSON in the app and it changes by itself.
+
+6 to 8 (M3, and M1 by a request to 127.0.0.1). The script serves a stand-in page on 127.0.0.1 of the base's host under a random path, for the run's length only. The page reads `makiba status --json` through the script every 5 seconds and shows the number of reads, the time, whether `makibad` runs, its heartbeat and the number of questions waiting, never any record text. The owner opens it in the app, beside the secretary's terminal if the app allows. Case `m1-page`: PASS when the owner sees it anywhere in the app (a tab, a panel) and the server counted at least two reads during a 15-second window (step 7), so a page that only seems to be there is not counted. Case `m3-page`: PASS when `m1-page` passed and the owner also sees it beside the secretary's terminal, both in view at once (step 8b). M1 does not need the place beside the terminal; M3 does.
+
+9 to 11 (M2 by an act that changes nothing). The owner makes the app run `makiba config get conversation_language` as the person, outside any agent's terminal, and says how the app ran it: `extension` (an addition of the app ran it), `terminal` (the app typed it into a shell terminal it shows) or `none`. Case `m2-act`: PASS when `commands` gains a row by actor `person` for `config get conversation_language` that is not `rejected`, and the owner saw the answer in the app. Only that request counts, so other activity of the live organization neither passes nor fails it. A row by another actor (`unknown`: the request reached the door with no person key) is FAIL. The verb is the person's only (`src/spec.rs`, `Role::verbs`), so an agent cannot have made that row.
+
+12 and 13 (M2 as screen.md states it). Only when a question already waits for the person (`pending[]` `escalated`) and the owner chooses to answer it from the app as they would anyway. At step 12 the owner types the entry's id, which must be one of those waiting, and does not answer yet; the script marks `commands`; at step 13 the owner answers it from the app. Case `m2-answer`: PASS when the entry is `answered` with `answered_by` `person` and `commands` gains, after the mark, an `answer` request by `person` for that entry that is not `rejected`. The probe never makes a question, because an answer is delivered to a worker. With no question waiting, the case is NOT-RUN and M2 rests on `m2-act`.
+
+14 (M4). The owner writes, in one paragraph under this probe's row of section 4, what an addition to the app is made of, how it is installed, and what can start what it does: only a click in the app, or also a request from another local program (an agent included). The script records the owner's one-line summary.
+
+What it touches: it starts no core, no `makibad` and no agent. It reads `commands` and `pending` of the real `state.db` read-only (sqlite `mode=ro`), as `makiba status` does, and writes only its result file and its scratch folder.
+
+Record: the date, the script's commit, `hc --version` on both sides, the app's version, `makiba --version`, and yes or no per M (M1: `m1-command` or `m1-page`; M2: `m2-act`, with `m2-answer` when run, and the way, `extension` or `terminal`; M3: `m3-page`; M4: the paragraph).
+
+What follows (screen.md section 5): M3 passes: the page is built and the app frames it. M1 passes and M3 does not: the screen is built for the app. Neither: the page, with the person's terminal beside it. For Issue 404: an M2 way of `extension` makes option 2(a) (no page, the screen acts through the app) possible; `terminal` only makes it a terminal that types; `none` leaves 2(b) or 2(c). The M4 paragraph says whether 2(a) also holds against another local program.
+
+If it fails: nothing in makiba changes. The result picks the row of section 5's table that Issue 404's design follows.
+
 ## 3. If a move to Orca is considered
 
 Not part of this plan's work. herdr-core is the base (plan.md section 3.1), and Orca's orchestration is not used whatever these checks say. They are kept for the day one of the reasons listed there applies, and they concern Orca only as a base: its terminals, its status, its notifications.
@@ -499,5 +543,6 @@ Filled in by the person who runs each probe, with the script's commit. A row is 
 | P8 (0.1.22 pin move) | 2026-11-23 | 0.1.22 | not used | skipped: the 0.1.22 changelog adds only the `--doc` filter of `hc events`; unfiltered subscriptions and terminal filters keep their behaviour (release notes, #273) | makiba's one subscription (`src/base/herdr/events.rs`) sends `events.subscribe` with empty params and drops `doc` notices |
 | P15 (Issue 382) | | | not used | not yet run | the owner runs it on the pinned release and the previous one; #382 stays open until this row is filled |
 | P16 (Issue 262) | | not used | | not yet run | the person runs it on a host where bubblewrap can make a namespace; L-K10 names it as the evidence still to be recorded |
+| P17 (Issue 404) | | | not used | not yet run | the owner runs it in herdr-app with the real organization up; Issue 404's owner decisions wait for it. M1: , M2: , M3: , M4: |
 
 Not covered by a row on 2.1.328: steps 10 to 13 of `door-and-base-reach` since #144 (the port checks, the unsandboxed run, the Read and Edit tools on the decoy key; on 2.1.330 the whole probe has a row after #144, the run of 2026-11-21 at 12:24Z, Refs #150), P3, P4, P5, P7, P8, P9, P10 as their own probes, paddock's carried probes, and the runbook of M4-5. See `docs/upgrading-claude-code.md`.
