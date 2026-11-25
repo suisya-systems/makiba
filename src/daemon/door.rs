@@ -3679,6 +3679,8 @@ impl Door {
             .as_ref()
             .map(|v| v.merge_order.clone())
             .unwrap_or_default();
+        // An order not known because GitHub could not be read (Issue 512), decided last.
+        let mut order_unread: Option<String> = None;
         if order.holds() {
             let line = merge_order_line(&repo, pr, &order);
             // Issue 512: with nothing known to hold it, an order that could not be read from
@@ -3688,11 +3690,9 @@ impl Door {
                 .as_ref()
                 .filter(|_| order.waits_for.is_empty());
             if allow && let Some(why) = unread {
-                allow = false;
-                verdict = "unavailable".into();
-                reason = format!(
-                    "GitHub could not be read: the gate could not read an open pull request it must order this one after: {why} ({reason})"
-                );
+                // Decided after the last rule on the content, below; the line names it meanwhile.
+                order_unread = Some(why.clone());
+                reason = format!("{reason}; {line}");
             } else if allow && mode == "acceptance" {
                 allow = false;
                 verdict = "merge_order".into();
@@ -3750,9 +3750,16 @@ impl Door {
                 }
             }
         }
-        // Issue 512: a CI read that still failed, with no rule on the content refusing: the
-        // acceptance is not known, and that is all that stands.
-        if allow && verdict == "unavailable" {
+        // Issue 512: a read of GitHub that still failed (a CI read, or an open pull request this
+        // one must be ordered after), with no rule on the content refusing: the acceptance or the
+        // order is not known, and that is all that stands.
+        if allow && let Some(why) = order_unread {
+            allow = false;
+            verdict = "unavailable".into();
+            reason = format!(
+                "GitHub could not be read: the gate could not read an open pull request it must order this one after: {why} ({reason})"
+            );
+        } else if allow && verdict == "unavailable" {
             allow = false;
             reason = format!("GitHub could not be read: {reason}");
         }

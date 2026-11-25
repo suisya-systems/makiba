@@ -710,3 +710,22 @@ fn a_ci_outage_still_pins_the_test_commit_and_a_rewrite_after_it_is_refused() {
     );
     assert!(c.events("merge_attempted").is_empty());
 }
+
+#[test]
+fn a_change_to_the_language_check_is_not_hidden_by_another_pull_request_that_cannot_be_read() {
+    // `tools/check_language.py` is the language check (Issue 339) and under `tools/`, so PR 7 is
+    // ordered after the unreadable PR 8 too.
+    let c = Case::with(
+        "languageorder",
+        &[("tools/check_language.py", Some("print(1)\n"))],
+    );
+    c.second_task_without_review();
+    std::fs::write(c.gh.join("fail.view.8"), "").unwrap();
+    let v = answered(c.request(7, &c.head));
+    assert_eq!(v["verdict"], json!("language_check"), "{v}");
+    assert_eq!(v["allow"], json!(false), "{v}");
+    assert!(
+        v["reason"].as_str().unwrap_or_default().contains("#8"),
+        "{v}"
+    );
+}
