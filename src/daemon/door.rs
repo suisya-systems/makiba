@@ -690,6 +690,7 @@ fn run(
         Verb::Pending => pending(w, args),
         Verb::Answer => answer(w, base, actor, args),
         Verb::Renew => renew(w, args),
+        Verb::Handover => handover(w, args),
         Verb::Send => {
             let to = str_arg(args, "to")?;
             let text = str_arg(args, "text")?;
@@ -736,6 +737,22 @@ fn run(
 /// `renew` (spec section 12, Issue 46): the handover is stored in the command's own row, which
 /// `makibad`'s secretary pass takes up. One renewal at a time.
 fn renew(w: &StateWriter, args: &Value) -> Response {
+    handover_checks(w, args)?;
+    Ok(json!({"renewal": "accepted"}))
+}
+
+/// `handover` (spec section 12, Issue 502): the handover is stored in the command's own row,
+/// `done`, and the secretary is not replaced; the next decision of `makiba up` resumes from it
+/// (spec section 5.3).
+fn handover(w: &StateWriter, args: &Value) -> Response {
+    handover_checks(w, args)?;
+    Ok(json!({"handover": "stored"}))
+}
+
+/// What `renew` and `handover` refuse: a handover that is missing, empty or over `HANDOVER_MAX`
+/// (`usage`), and any while a renewal is under way (`conflict`): that renewal's launch carries its
+/// own handover.
+fn handover_checks(w: &StateWriter, args: &Value) -> Result<(), DoorError> {
     let handover = str_arg(args, "handover")?;
     if handover.trim().is_empty() {
         return Err(usage("the handover is empty"));
@@ -761,7 +778,7 @@ fn renew(w: &StateWriter, args: &Value) -> Response {
             "wait for it to finish (makiba status)",
         ));
     }
-    Ok(json!({"renewal": "accepted"}))
+    Ok(())
 }
 
 /// `status` (spec section 12): what the person's local `makiba status --json` prints, read from
@@ -5571,6 +5588,11 @@ fn tool(v: Verb) -> Value {
         ),
         Verb::Renew => (
             "Ask to be replaced by a fresh secretary that resumes from the handover text. Wired in M6-5: refused until then.",
+            Map::from_iter([("handover".into(), text.clone())]),
+            &["handover"],
+        ),
+        Verb::Handover => (
+            "Store a handover without being replaced: what was decided by word and the judgments in progress, for the secretary that makiba up launches next. Not empty, at most 32 KiB; refused while a renewal is under way. Call it when the person says the organization goes down.",
             Map::from_iter([("handover".into(), text.clone())]),
             &["handover"],
         ),

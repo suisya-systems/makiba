@@ -160,12 +160,15 @@ impl Secretary {
                 [],
                 |r| r.get(0),
             )?;
-            let brief = if before {
-                launch_brief(w, last_handover(w)?.as_deref(), None)?
-            } else {
-                BRIEF.to_string()
+            // A stored handover no verified launch carried yet is given (Issue 502), also to the
+            // first secretary: the person may store one after `makiba up --no-secretary`.
+            let given = unused_handover(w)?;
+            let brief = match (&given, before) {
+                (Some((_, text)), _) => launch_brief(w, Some(text), None)?,
+                (None, true) => launch_brief(w, None, None)?,
+                (None, false) => BRIEF.to_string(),
             };
-            if let Err(e) = super::launch::add_launch(
+            let spawn = match super::launch::add_launch(
                 w,
                 spec::Role::Secretary,
                 &self.folder,
@@ -173,8 +176,19 @@ impl Secretary {
                 None,
                 &self.agent,
             ) {
-                eprintln!("makibad: cannot add the secretary launch: {e}");
-                return Ok(false);
+                Ok(spawn) => spawn,
+                Err(e) => {
+                    eprintln!("makibad: cannot add the secretary launch: {e}");
+                    return Ok(false);
+                }
+            };
+            // The launch that carries it, in the transaction that adds that launch.
+            if let Some((id, _)) = given {
+                w.conn().execute(
+                    "UPDATE commands SET result_json = json_set(result_json, '$.result.launch', ?1)
+                     WHERE id = ?2",
+                    params![spawn, id],
+                )?;
             }
             Ok(true)
         })
@@ -311,8 +325,10 @@ impl Secretary {
             return insert(w, json!({"reason": "secretary_gone"}), "rejected", Err(why));
         }
         // With no handover left, the launch builds what state.db holds open (`launch_brief`).
+        // `from` names the row the handover came from: once this launch is verified, `makiba up`
+        // does not give it again (Issue 502).
         let args = match last_handover(w)? {
-            Some(h) => json!({"handover": h, "reason": "secretary_gone"}),
+            Some((id, h)) => json!({"handover": h, "from": id, "reason": "secretary_gone"}),
             None => json!({"reason": "secretary_gone"}),
         };
         eprintln!("makibad: the secretary is gone; relaunching it");
@@ -472,20 +488,56 @@ pub(crate) fn down(w: &StateWriter) -> Result<bool> {
     Ok(gone || failed)
 }
 
-/// The handover of the newest renewal that launched a secretary at the secretary's or the
-/// person's request.
-fn last_handover(w: &StateWriter) -> Result<Option<String>> {
-    Ok(w.conn()
+/// The row id and handover of the last stored handover: the newest `handover` row (Issue 502), or
+/// renewal that launched a secretary at the secretary's or the person's request.
+fn last_handover(w: &StateWriter) -> Result<Option<(i64, String)>> {
+    let row: Option<(i64, Option<String>)> = w
+        .conn()
         .query_row(
-            "SELECT json_extract(args_json, '$.handover') FROM commands
-             WHERE verb = 'renew' AND actor != 'makibad'
-               AND json_extract(result_json, '$.result.new') IS NOT NULL
+            "SELECT id, json_extract(args_json, '$.handover') FROM commands
+             WHERE (verb = 'handover' AND status = 'done')
+                OR (verb = 'renew' AND actor != 'makibad'
+                    AND json_extract(result_json, '$.result.new') IS NOT NULL)
              ORDER BY id DESC LIMIT 1",
             [],
-            |r| r.get(0),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
-        .optional()?
-        .flatten())
+        .optional()?;
+    Ok(row.and_then(|(id, h)| h.map(|h| (id, h))))
+}
+
+/// For the decision of `makiba up` (Issue 502): the newest stored handover (a `handover` row, or a
+/// renewal of the secretary or the person that launched a secretary), with its row id, unless a
+/// launch that carried it is verified: the renewal's own (`new`), the one `up` gave it to
+/// (`launch`), or a relaunch of `makibad` that took it (`from`). `verified_at` stays when `up`
+/// fails the launches after a stop of the base, so it is read rather than the stage.
+fn unused_handover(w: &StateWriter) -> Result<Option<(i64, String)>> {
+    let row: Option<(i64, Option<String>, bool)> = w
+        .conn()
+        .query_row(
+            "SELECT c.id, json_extract(c.args_json, '$.handover'),
+                    EXISTS (SELECT 1 FROM run_launch l
+                            WHERE l.role = 'secretary' AND l.verified_at IS NOT NULL
+                              AND (l.spawn_id = json_extract(c.result_json, '$.result.new')
+                                   OR l.spawn_id = json_extract(c.result_json, '$.result.launch')
+                                   OR l.spawn_id IN (
+                                       SELECT json_extract(m.result_json, '$.result.new')
+                                       FROM commands m
+                                       WHERE m.actor = 'makibad' AND m.verb = 'renew'
+                                         AND json_extract(m.args_json, '$.from') = c.id)))
+             FROM commands c
+             WHERE (c.verb = 'handover' AND c.status = 'done')
+                OR (c.verb = 'renew' AND c.actor != 'makibad'
+                    AND json_extract(c.result_json, '$.result.new') IS NOT NULL)
+             ORDER BY c.id DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(match row {
+        Some((id, Some(text), false)) => Some((id, text)),
+        _ => None,
+    })
 }
 
 /// What `state.db` holds open, for a secretary with no handover: the open pending entries and
@@ -697,7 +749,107 @@ mod tests {
             .unwrap();
         s.pass(&w, &base).unwrap();
         assert!(renewal(&w).unwrap().is_none());
-        assert_eq!(last_handover(&w).unwrap().as_deref(), Some("the state"));
+        assert_eq!(
+            last_handover(&w).unwrap().map(|(_, h)| h).as_deref(),
+            Some("the state")
+        );
+    }
+
+    /// A stored `handover` row (Issue 502).
+    fn store(w: &StateWriter, text: &str) -> i64 {
+        w.conn()
+            .execute(
+                "INSERT INTO commands (actor, verb, args_json, status, result_json)
+                 VALUES ('secretary', 'handover', ?1, 'done', ?2)",
+                [
+                    json!({"handover": text}).to_string(),
+                    json!({"ok": true, "result": {"handover": "stored"}}).to_string(),
+                ],
+            )
+            .unwrap();
+        w.conn().last_insert_rowid()
+    }
+
+    /// An `up` launch that carried a stored handover and failed: makibad's relaunch carries the
+    /// same handover and names its row, and once that relaunch is verified `up` gives it no more.
+    #[test]
+    fn a_relaunch_after_a_failed_up_launch_carries_the_stored_handover() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (run_id, role, spawn_id, agent, brief, worktree, stage, verified_at)
+                 VALUES (NULL, 'secretary', 'first', 'fake', 'b', 'f', 'verified', '2026-01-01T00:00:00.000Z')",
+                [],
+            )
+            .unwrap();
+        let id = store(&w, "the state");
+        let mut s = Secretary::from_env(dir.path());
+        s.start = true;
+        let base = Stub::new();
+        s.pass(&w, &base).unwrap();
+        let launch: String = w
+            .conn()
+            .query_row(
+                "SELECT json_extract(result_json, '$.result.launch') FROM commands WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        w.conn()
+            .execute(
+                "UPDATE run_launch SET stage = 'failed', failed_reason = 'x' WHERE spawn_id = ?1",
+                [&launch],
+            )
+            .unwrap();
+        for _ in 0..4 {
+            s.pass(&w, &base).unwrap();
+        }
+        let relaunch = renewal(&w).unwrap().expect("no relaunch");
+        assert_eq!(relaunch.actor, "makibad");
+        assert_eq!(relaunch.handover.as_deref(), Some("the state"));
+        let from: i64 = w
+            .conn()
+            .query_row(
+                "SELECT json_extract(args_json, '$.from') FROM commands WHERE id = ?1",
+                [relaunch.id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(from, id);
+        let new = relaunch.new.expect("the relaunch added no launch");
+        w.conn()
+            .execute(
+                "UPDATE run_launch SET stage = 'verified',
+                   verified_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE spawn_id = ?1",
+                [&new],
+            )
+            .unwrap();
+        assert!(unused_handover(&w).unwrap().is_none());
+    }
+
+    /// A handover stored before any secretary was launched (`makiba up --no-secretary`) is given
+    /// to the first one.
+    #[test]
+    fn the_first_secretary_gets_a_handover_stored_before_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        store(&w, "the state");
+        let mut s = Secretary::from_env(dir.path());
+        s.start = true;
+        s.pass(&w, &Stub::new()).unwrap();
+        let brief: String = w
+            .conn()
+            .query_row(
+                "SELECT brief FROM run_launch WHERE role = 'secretary'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            brief.starts_with(&format!("{RESUME}\n\nthe state")),
+            "{brief}"
+        );
     }
 
     /// A brief over the limit is cut on a character boundary and says where the rest is.

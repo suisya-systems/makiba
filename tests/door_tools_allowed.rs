@@ -59,6 +59,7 @@ fn expected(role: Role) -> BTreeSet<String> {
             "send",
             "show",
             "renew",
+            "handover",
             "inbox",
             "note",
             "push",

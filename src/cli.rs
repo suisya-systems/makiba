@@ -295,6 +295,13 @@ pub enum Command {
         #[arg(long)]
         handover_file: PathBuf,
     },
+    /// Store a handover without replacing the secretary: the one `makiba up` launches next
+    /// resumes from it.
+    Handover {
+        /// Read here; its content travels over the door.
+        #[arg(long)]
+        handover_file: PathBuf,
+    },
     /// Set a task's diff review allowance (a number, or unlimited), with a reason.
     Review {
         #[arg(long)]
@@ -651,6 +658,9 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
         }
         Command::Update { task, base } => ("update", json!({"task": task, "base": base})),
         Command::Renew { handover_file } => ("renew", json!({"handover": read(&handover_file)?})),
+        Command::Handover { handover_file } => {
+            ("handover", json!({"handover": read(&handover_file)?}))
+        }
         Command::Note { task, topic, text } => {
             ("note", json!({"task": task, "topic": topic, "text": text}))
         }
