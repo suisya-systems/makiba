@@ -66,7 +66,9 @@ db() { # db <sql> [params...]: one read-only query of the real state.db, rows ta
   python3 - "$REAL_DB" "$@" <<'PY'
 import sqlite3, sys
 c = sqlite3.connect("file:%s?mode=ro" % sys.argv[1], uri=True, timeout=5)
-for row in c.execute(sys.argv[2], sys.argv[3:]):
+# A parameter of digits is bound as an integer: SQLite never finds a text equal to an integer id.
+args = [int(a) if a.isdigit() else a for a in sys.argv[3:]]
+for row in c.execute(sys.argv[2], args):
     print("\t".join("" if v is None else str(v) for v in row))
 PY
 }
@@ -183,8 +185,10 @@ ask "10. Did the app show the answer (a language, or that none is set)?"
 SEEN=$ANSWER
 line "11. How did the app run it: extension (an addition of the app ran it), terminal (the app typed it into a shell terminal), or none?"
 WAY=${LINE:-none}
-ROWS=$(db 'SELECT id, actor, verb, status FROM commands WHERE id > ? AND verb = ? ORDER BY id' "$MARK" config)
-say "commands since $MARK with verb config: $(printf '%s' "$ROWS" | tr '\t\n' ' ;')"
+# Only the request of step 9: verb config, action get, key conversation_language (src/cli.rs sends these args).
+ROWS=$(db "SELECT id, actor, verb, status FROM commands WHERE id > ? AND verb = 'config'
+  AND json_extract(args_json, '\$.action') = 'get' AND json_extract(args_json, '\$.key') = 'conversation_language' ORDER BY id" "$MARK")
+say "commands since $MARK of config get conversation_language: $(printf '%s' "$ROWS" | tr '\t\n' ' ;')"
 if [ "$SEEN" = s ]; then say "CASE m2-act: NOT-RUN  skipped by the owner (way: $WAY)"
 elif printf '%s\n' "$ROWS" | awk -F'\t' '$2 != "person" && $2 != ""' | grep -q .; then
   record m2-act FAIL "a config request reached the door as another actor (no person key went with it); way: $WAY"
@@ -200,15 +204,22 @@ if [ -z "$WAITING" ]; then
 else
   line "12. Questions waiting for you: $WAITING. To answer one of them from the app as you would anyway, give its id and answer it there (\`makiba answer <id> yes|no\`); or press Enter to skip:"
   ID=$LINE
-  case "$ID" in
-    ''|*[!0-9]*) say "CASE m2-answer: NOT-RUN  skipped by the owner" ;;
-    *) step 13 "Answer entry $ID from the app, as at step 9."
-       R=$(db 'SELECT status, answered_by FROM pending WHERE id = ?' "$ID")
-       case "$R" in
-         "answered	person") record m2-answer PASS "entry $ID answered, answered_by person; way: $WAY" ;;
-         *) record m2-answer FAIL "entry $ID is now: $(printf '%s' "$R" | tr '\t' ' ')" ;;
-       esac ;;
-  esac
+  case "$ID" in ''|*[!0-9]*) ID="" ;; esac
+  case " $WAITING " in *" $ID "*) ;; *) [ -n "$ID" ] && say "entry $ID is not one of the questions waiting: skipped"; ID="" ;; esac
+  if [ -z "$ID" ]; then say "CASE m2-answer: NOT-RUN  skipped by the owner"
+  else
+    MARK2=$(db 'SELECT COALESCE(MAX(id),0) FROM commands')
+    step 13 "Answer entry $ID from the app, as at step 9."
+    ENTRY=$(db 'SELECT status, answered_by FROM pending WHERE id = ?' "$ID")
+    # The answer of this run: a new request by person, verb answer, for this entry, not rejected.
+    NEWANS=$(db "SELECT COUNT(*) FROM commands WHERE id > ? AND actor = 'person' AND verb = 'answer'
+      AND json_extract(args_json, '\$.id') = ? AND status != 'rejected'" "$MARK2" "$ID")
+    if [ "$ENTRY" = "answered	person" ] && [ "${NEWANS:-0}" -ge 1 ]; then
+      record m2-answer PASS "entry $ID answered by person through a new answer request; way: $WAY"
+    else
+      record m2-answer FAIL "entry $ID is now: $(printf '%s' "$ENTRY" | tr '\t' ' '); new answer requests by person for it: ${NEWANS:-0}"
+    fi
+  fi
 fi
 
 # ---- M4
