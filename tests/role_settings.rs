@@ -237,7 +237,7 @@ fn every_line_in_lines_md_names_a_holder_that_exists() {
         }
         lines.push(id);
     }
-    let expected: Vec<String> = (1..=12)
+    let expected: Vec<String> = (1..=13)
         .map(|n| format!("L-K{n}"))
         .chain((1..=9).map(|n| format!("L-N{n}")))
         .collect();

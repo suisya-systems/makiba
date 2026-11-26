@@ -610,14 +610,30 @@ fn the_commit_hook_refuses_a_test_commit_until_the_persons_yes() {
             ],
         )
         .unwrap();
-    let (secretary, person) = {
+    let secretary = {
         let w = StateWriter::open(&org.db()).unwrap();
-        (
-            issue_key(&w, Role::Secretary, "secretary", None, None).unwrap(),
-            issue_key(&w, Role::Person, "person", None, None).unwrap(),
-        )
+        issue_key(&w, Role::Secretary, "secretary", None, None).unwrap()
     };
     let _d = org.start();
+    // The person's key is the key file makibad's start makes the one person row (a key issued
+    // into state.db before the start is revoked by it).
+    let person = {
+        let file = org.root.join("key/person.key");
+        let until = Instant::now() + WAIT;
+        loop {
+            if let Ok(k) = std::fs::read_to_string(&file)
+                && !k.trim().is_empty()
+            {
+                break k.trim().to_string();
+            }
+            assert!(
+                Instant::now() < until,
+                "no person key at {}",
+                file.display()
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    };
 
     let h1 = org.prepared("h1");
     let before = head(&h1);
