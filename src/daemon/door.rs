@@ -38,13 +38,14 @@ const IO_LIMIT: Duration = Duration::from_secs(5);
 /// MCP protocol versions answered as asked; any other gets the first.
 const PROTOCOLS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
 /// The settings `config` knows (spec section 12).
-const CONFIG_KEYS: [&str; 6] = [
+const CONFIG_KEYS: [&str; 7] = [
     "max_concurrent_workers",
     "merge_approval_mode",
     "conversation_language",
     "artifact_language",
     super::project::OWNERS_KEY,
     super::project::HOSTS_KEY,
+    super::call::KEY,
 ];
 
 /// What a request comes to: the response's `result`, or its `error`.
@@ -1465,6 +1466,13 @@ fn dispatch(
         }
         (None, _) => (brief.to_string(), None),
     };
+    // Issue 337: a task whose test commit waits for the person's approval of its design.
+    let design_first = match args.get("design_first") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| usage("design_first is true or false"))?,
+    };
     let refs = issue.map(|n| super::belt::issue_ref(project, n));
     let refs: Vec<&str> = refs.iter().map(String::as_str).collect();
     let spawn = random_key().map_err(internal)?[..32].to_string();
@@ -1487,10 +1495,14 @@ fn dispatch(
              VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?2, ?3, ?4, ?5, ?6, ?7)",
             params![task, spawn, kind, agent, opt("model"), brief, worktree],
         )?;
+        let mut sent = json!({"task_id": task, "spawn_id": spawn, "kind": kind});
+        if design_first {
+            sent["design_first"] = json!(true);
+        }
         w.append_event(&NewEvent {
             kind: "delegate_sent",
             actor: Some(actor),
-            payload: Some(&json!({"task_id": task, "spawn_id": spawn, "kind": kind})),
+            payload: Some(&sent),
             run_task_id: Some(task),
             ..Default::default()
         })?;
@@ -2784,6 +2796,9 @@ fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
     if key == super::project::HOSTS_KEY {
         return network_hosts(w, actor, action, args);
     }
+    if key == super::call::KEY {
+        return notify_command(w, actor, action, args);
+    }
     let Some((kind, per_project)) = super::language::kind_of(key) else {
         return match action {
             "get" => Ok(json!({"key": key, "value": null})),
@@ -2876,6 +2891,40 @@ fn allowed_owners(w: &StateWriter, actor: &str, action: &str, args: &Value) -> R
     })
     .map_err(internal)?;
     Ok(shown(Some(&value)))
+}
+
+/// `config get|set notify_command` (Issue 272): the organization's, the absolute path of the
+/// person's command that calls the person back (docs/design/person-call.md); empty is off. A path
+/// an agent could write is refused (`call::check_set`). Stored as `config_set`.
+fn notify_command(w: &StateWriter, actor: &str, action: &str, args: &Value) -> Response {
+    let key = super::call::KEY;
+    if args
+        .get("project")
+        .and_then(Value::as_str)
+        .is_some_and(|p| !p.is_empty())
+    {
+        return Err(usage(format!("{key} is the organization's: no --project")));
+    }
+    let shown = |v: Option<&str>| json!({"key": key, "project": "", "value": v});
+    if action == "get" {
+        let v = super::language::get(w.conn(), "", key).map_err(internal)?;
+        return Ok(shown(v.as_deref()));
+    }
+    let value = str_arg(args, "value")?;
+    let state = w
+        .conn()
+        .path()
+        .and_then(|p| Path::new(p).parent().map(Path::to_path_buf))
+        .unwrap_or_default();
+    super::call::check_set(w.conn(), value, &state).map_err(usage)?;
+    w.append_event(&NewEvent {
+        kind: "config_set",
+        actor: Some(actor),
+        payload: Some(&json!({"project": "", "key": key, "value": value})),
+        ..Default::default()
+    })
+    .map_err(internal)?;
+    Ok(shown(Some(value)))
 }
 
 /// `config get|set network_hosts --project <slug>` (Issue 244): the hosts a project's workers may
@@ -6203,7 +6252,7 @@ fn tool(v: Verb) -> Value {
             &[],
         ),
         Verb::Dispatch => (
-            "Dispatch a task: a queued run and its first launch. kind is code or document; project is required for code. The brief is the task text itself. issue: the Issue number the task works on, so that a range does not dispatch it again.",
+            "Dispatch a task: a queued run and its first launch. kind is code or document; project is required for code. The brief is the task text itself. issue: the Issue number the task works on, so that a range does not dispatch it again. design_first: true when the person must approve the task's design first (a trust boundary: git, the sandbox, keys, the push line, the merge gate): makibad then refuses the task's test commit (Acceptance-Test), at the push and in the worker's commit hook, until a pending entry of the task with stop_kind design is answered yes by the person.",
             Map::from_iter([
                 (
                     "kind".into(),
@@ -6216,6 +6265,7 @@ fn tool(v: Verb) -> Value {
                 ("model".into(), text.clone()),
                 ("branch".into(), text.clone()),
                 ("issue".into(), json!({"type": "integer"})),
+                ("design_first".into(), json!({"type": "boolean"})),
             ]),
             &["kind", "task_id", "title", "brief"],
         ),
@@ -6316,7 +6366,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone (approve: id, read and approval_mode, the read and the merge approval mode shown; one that is no longer the newest read or makibad's mode is stale). makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land; design_first: true when the Issues touch a trust boundary: each task's test commit is refused, at the push and in the worker's commit hook, until a pending entry of the task with stop_kind design is answered yes by the person): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone (approve: id, read and approval_mode, the read and the merge approval mode shown; one that is no longer the newest read or makibad's mode is stale). makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -6338,6 +6388,7 @@ fn tool(v: Verb) -> Value {
                     json!({"type": "string", "enum": ["inside", "ask"]}),
                 ),
                 ("design_ahead".into(), json!({"type": "boolean"})),
+                ("design_first".into(), json!({"type": "boolean"})),
                 ("brief_head".into(), text.clone()),
                 ("replaces".into(), json!({"type": "integer"})),
                 ("issue".into(), json!({"type": "integer"})),
