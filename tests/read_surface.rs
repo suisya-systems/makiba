@@ -201,6 +201,15 @@ fn org() -> Org {
         json!({"repo": "acme/widget", "pr": 7, "head_oid": "a".repeat(40),
                "reason": format!("gh said {PERSON_KEY} and {GATE_KEY}")}),
     );
+    // Issue 338: a merge order on the pull request, so that `pull_requests[].merge_order[]`
+    // prints its fields.
+    event(
+        "merge_order_set",
+        "secretary",
+        Some("t1"),
+        json!({"repo": "acme/widget", "pr": 7, "after": "issue", "number": 3,
+               "project": "acme", "reason": "the person's condition", "by": "secretary"}),
+    );
     drop(w);
     Org {
         _tmp: tmp,
