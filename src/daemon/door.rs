@@ -125,6 +125,17 @@ pub(super) fn refuse(
     }
 }
 
+/// Open a request's write transaction (`BEGIN IMMEDIATE`) through the writer, which logs a hold
+/// of the lock over a second as `label` at the caller's line (Issue 561). A SQLite error keeps
+/// SQLite's own text, as the door answered before.
+#[track_caller]
+fn begin_as(w: &StateWriter, label: &str) -> Result<(), String> {
+    w.begin_as(label).map_err(|e| match e {
+        crate::db::Error::Sqlite(e) => e.to_string(),
+        e => e.to_string(),
+    })
+}
+
 pub(super) fn internal(e: impl std::fmt::Display) -> DoorError {
     refuse(
         ErrorKind::Internal,
@@ -437,8 +448,8 @@ impl Door {
         // The verb's writes and its record are one transaction (a verb's own transaction joins it).
         // IMMEDIATE takes the write lock first: a deferred one that reads, then writes after
         // makibad's loop has written, fails at once with `database is locked` (WAL snapshot).
-        let begin = || w.conn().execute_batch("BEGIN IMMEDIATE");
-        if let Err(e) = begin() {
+        let label = format!("door {verb}");
+        if let Err(e) = begin_as(&w, &label) {
             return Err(internal(e));
         }
         // A decided candidate's file, or a placed ledger, is written outside the transaction: its
@@ -460,7 +471,7 @@ impl Door {
             ),
         };
         if r.is_err() && w.rollback().is_ok() {
-            let _ = begin();
+            let _ = begin_as(&w, &label);
         }
         // A saved note is a file outside the transaction: it goes when its record does.
         let unsave = || {
@@ -3655,7 +3666,7 @@ impl Door {
         drop(w);
         let found = gate_outside(&rows, &repo, pr, &head);
         let w = self.writer();
-        if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+        if let Err(e) = begin_as(&w, "door gate") {
             return Err(internal(e));
         }
         let judged = match self.judge(&w, actor, &repo, pr, &head, &rows, found, "gate") {
@@ -4827,7 +4838,7 @@ impl Door {
         {
             return first;
         }
-        if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+        if let Err(e) = begin_as(&w, "door merge") {
             return Err(internal(e));
         }
         let j = match self.judge(&w, actor, &repo, pr, &head, &rows, found, "merge") {
@@ -5031,7 +5042,7 @@ impl Door {
         {
             return first;
         }
-        if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+        if let Err(e) = begin_as(&w, "door merge_approve") {
             return Err(internal(e));
         }
         let j = match self.judge(&w, actor, &repo, pr, &head, &rows, found, "merge") {
@@ -5242,7 +5253,7 @@ fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str
         Ok(p) => p,
         Err(e) => return fail(Err(e)),
     };
-    if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+    if let Err(e) = begin_as(w, "door merge_order_set") {
         return Err(internal(e));
     }
     let done = (|| -> Result<Response, rusqlite::Error> {
@@ -5368,7 +5379,7 @@ fn merge_end(
         .get("reason")
         .and_then(Value::as_str)
         .filter(|r| !r.trim().is_empty());
-    if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+    if let Err(e) = begin_as(w, "door merge_end") {
         return Err(internal(e));
     }
     let ended = (|| -> Result<Response, crate::db::Error> {
@@ -5769,7 +5780,7 @@ impl Door {
         // Admission: count and record the round, or refuse it, in one short transaction.
         let (round, allowed) = {
             let w = self.writer();
-            if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+            if let Err(e) = begin_as(&w, "door review") {
                 return Err(internal(e));
             }
             let counted = (|| -> rusqlite::Result<(i64, Option<i64>)> {
