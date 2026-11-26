@@ -252,6 +252,14 @@ def test_checkout_pytest_ini_that_deselects_does_not_reach_the_test_commit(tmp_p
     [
         ("pytest.ini", "[pytest]\npython_functions = check_*\n"),
         ("pyproject.toml", '[tool.pytest.ini_options]\npython_functions = ["check_*"]\n'),
+        ("pyproject.toml", '  [ tool.pytest.ini_options ]\npython_functions = ["check_*"]\n'),
+        pytest.param(
+            "pyproject.toml",
+            '[tool.pytest]\npython_functions = ["check_*"]\n',
+            marks=pytest.mark.skipif(
+                int(pytest.__version__.split(".")[0]) < 9, reason="pytest reads [tool.pytest] from version 9"
+            ),
+        ),
     ],
 )
 def test_worktree_own_pytest_config_is_still_used(tmp_path, rel, text):

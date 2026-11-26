@@ -338,7 +338,10 @@ py_config() { # py_config <tree> <test path>: a pytest config on the path from t
   d=$1/$(dirname "$2")
   while :; do
     for f in pytest.ini .pytest.ini pytest.toml .pytest.toml; do [ -f "$d/$f" ] && return 0; done
-    [ -f "$d/pyproject.toml" ] && grep -q '^\[tool\.pytest\.ini_options\]' "$d/pyproject.toml" && return 0
+    # TOML allows blanks around a table header and its dots; pytest 9 also reads [tool.pytest].
+    [ -f "$d/pyproject.toml" ] &&
+      grep -qE '^[[:space:]]*\[[[:space:]]*tool[[:space:]]*\.[[:space:]]*pytest([[:space:]]*\.[[:space:]]*ini_options)?[[:space:]]*\]' "$d/pyproject.toml" &&
+      return 0
     [ -f "$d/tox.ini" ] && grep -q '^\[pytest\]' "$d/tox.ini" && return 0
     [ -f "$d/setup.cfg" ] && grep -q '^\[tool:pytest\]' "$d/setup.cfg" && return 0
     [ "$d" = "$1" ] && return 1
