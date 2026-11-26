@@ -901,6 +901,21 @@ fn denied(places: &Places, home: Option<&Path>) -> Vec<PathBuf> {
     )
 }
 
+/// The person's home, by its path and by its real path, where it lies in a folder given whole
+/// (a home under `/usr`): what the system binds would otherwise show of it.
+fn home_masks(given: &[PathBuf], home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(h) = home else { return vec![] };
+    let mut out: Vec<PathBuf> = vec![];
+    for p in with_real(vec![
+        std::path::absolute(h).unwrap_or_else(|_| h.to_path_buf()),
+    ]) {
+        if given.iter().any(|g| p.starts_with(g)) && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
 /// `p` as the filesystem resolves it (links followed), or `p` when it does not resolve.
 fn real(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
@@ -1104,6 +1119,10 @@ fn bounded_reader(
                 given.push(d.to_path_buf());
             }
         }
+    }
+    // A home that lies in a system folder is hidden before anything of it is given back.
+    for h in home_masks(&given, home.as_deref()) {
+        a.extend(["--tmpfs".into(), s(&h)]);
     }
     let in_system = |p: &Path| {
         let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
@@ -1414,6 +1433,29 @@ mod tests {
     /// A reader's configuration reached through a link (the review of Issue 262): a program
     /// folder holding its real place is not given, and where a given folder holds it, it is
     /// covered at the path it shows at.
+    /// A home under a system folder (the review of Issue 262): it is hidden by its path and by
+    /// where it really is, and a home outside every given folder is left alone.
+    #[test]
+    fn a_home_in_a_system_folder_is_hidden() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let usr = t.join("usr");
+        let home = usr.join("local/home/someone");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(t.join("home")).unwrap();
+        let linked = t.join("home/someone");
+        std::os::unix::fs::symlink(&home, &linked).unwrap();
+        assert_eq!(
+            home_masks(std::slice::from_ref(&usr), Some(&home)),
+            vec![home.clone()]
+        );
+        assert_eq!(
+            home_masks(std::slice::from_ref(&usr), Some(&linked)),
+            vec![home.clone()]
+        );
+        assert!(home_masks(&[t.join("etc")], Some(&linked)).is_empty());
+        assert!(home_masks(&[usr], None).is_empty());
+    }
+
     #[test]
     fn a_denied_place_behind_a_link_is_denied_where_it_really_is() {
         let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
