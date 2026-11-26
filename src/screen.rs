@@ -741,13 +741,19 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
                     _ => None,
                 }
             };
+            // The age of the state shown (screen.md 2.5, Rows): an anomaly's own time when the
+            // row shows the anomaly, else the item's.
+            let at = match anomaly {
+                Some(a) if rank == Some(1) => &a["since"],
+                _ => &i["since"],
+            };
             items.push((
                 rank,
-                c.ms(&i["since"]).unwrap_or(0),
+                c.ms(at).unwrap_or(0),
                 json!({
                     "issue": i["issue"], "ref": c.reference(&project, &i["issue"]),
                     "title": i["title"], "place": place, "words": words,
-                    "detail": detail(c, i), "age_s": c.age_s(&i["since"]), "task_id": i["task_id"],
+                    "detail": detail(c, i), "age_s": c.age_s(at), "task_id": i["task_id"],
                     "did_not_start": did_not_start, "pr": i["pr"], "pr_title": i["pr_title"],
                 }),
             ));
@@ -1381,5 +1387,42 @@ mod tests {
             .map(|r| r["task_id"].as_str().unwrap())
             .collect();
         assert_eq!(order, vec!["b", "a"]);
+    }
+}
+
+#[cfg(test)]
+mod anomaly_age {
+    use super::*;
+
+    #[test]
+    fn an_item_showing_an_anomaly_takes_its_age_and_order() {
+        let item = |issue: i64, task: &str, since: &str| {
+            json!({"issue": issue, "place": "in_work", "stage": "at_work", "why": null,
+                   "task_id": task, "since": since})
+        };
+        let run = |t: &str| {
+            json!({"task_id": t, "project": "loom", "status": "in_use", "stage": "verified",
+                   "range_id": 1})
+        };
+        let s = json!({
+            "makibad": {"running": true, "heartbeat_at": "2026-11-24T09:59:57.000Z"},
+            "projects": [{"slug": "loom", "repo": "example-org/loom"}],
+            "runs": [run("a"), run("b")], "terminals": [], "pending": [],
+            "pull_requests": [], "next_work": null,
+            // a was dispatched first, but its error is the newer one.
+            "anomalies": [{"task_id": "a", "rule": "error", "since": "2026-11-24T09:50:00.000Z"},
+                          {"task_id": "b", "rule": "error", "since": "2026-11-24T09:00:00.000Z"}],
+            "ranges": [{"id": 1, "project": "loom", "status": "active", "places": {},
+                        "items": [item(1, "a", "2026-11-24T06:00:00.000Z"),
+                                  item(2, "b", "2026-11-24T07:00:00.000Z")]}],
+        });
+        let m = model(&s, 1_795_514_400_000, &Words::new("en"));
+        let r = &m["ranges"][0];
+        assert_eq!(r["items"][0]["age_s"], 600);
+        let order: Vec<i64> = arr(&r["active"])
+            .iter()
+            .map(|i| i["issue"].as_i64().unwrap())
+            .collect();
+        assert_eq!(order, vec![2, 1]);
     }
 }
