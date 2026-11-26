@@ -47,7 +47,9 @@ What tells the ways apart next time:
 The watch is owned by `src/channel.rs`; "stale" (30 s, `status_local::STALE`) by
 `src/status_local.rs`. The channel server keeps its watch in memory only (whether it is the
 secretary's, since when the door has not answered, whether it gave a notice for this spell); a new
-server starts empty. A notice is given once per spell, and again only after a fresh heartbeat.
+server starts empty. The door answers the first request of a new session of the secretary's
+server at once, with the age, so the server knows it watches without waiting out a hold; a server
+that never reached the door does not watch. A notice is given once per spell, and again only after a fresh heartbeat.
 Bounds: a killed makibad within about 32 s, a stopped tick within 30 s plus one hold of the door
 (25 s) and its IO limit. A `makiba down` without `--secretary` leaves the secretary, whose watch
 then gives one notice; its text says that is fine after `makiba down`.

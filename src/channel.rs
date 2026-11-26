@@ -247,6 +247,7 @@ impl Hub {
             // replaced is dropped: its receiver disconnects and that request answers 409.
             let mut slots = self.0.slots.lock().unwrap();
             let mut newest = self.0.newest.lock().unwrap();
+            let before = newest.get(&agent).copied();
             let seen = newest.entry(agent.clone()).or_insert(start);
             if start < *seen {
                 drop((slots, newest));
@@ -254,6 +255,14 @@ impl Hub {
                 return;
             }
             *seen = start;
+            // Issue 563: the first request of a new session of a watching server is answered at
+            // once, so it learns it watches without waiting out a hold.
+            let extra = self.extra(&agent);
+            if !extra.is_empty() && before.is_none_or(|b| start > b) {
+                drop((slots, newest));
+                let _ = respond_with(&mut s, "204 No Content", &extra, "");
+                return;
+            }
             slots.insert(
                 agent.clone(),
                 Slot {
@@ -677,5 +686,57 @@ mod tests {
         // Asking again, as the old server would after a 200, is refused at once.
         assert_eq!(code(&mut status_of(addr, "100-1")), "409");
         assert!(hub.connected("a"));
+    }
+
+    fn head_of(s: &mut TcpStream) -> String {
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let (buf, n) = read_head(s).unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    /// Issue 563: a new session of the secretary's server is answered at once with the
+    /// heartbeat's age, so a makibad that dies before any hold ends is still watched; a worker's
+    /// request carries no age and is held.
+    #[test]
+    fn a_new_secretary_session_learns_the_heartbeat_at_once() {
+        let hub = Hub::new(|t| match t {
+            "t" => Some(crate::spec::AGENT_SECRETARY.to_string()),
+            "w" => Some("w-t1".to_string()),
+            _ => None,
+        })
+        .with_beat(|| Some(1.5));
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = hub.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let h = h.clone();
+                std::thread::spawn(move || h.serve(s));
+            }
+        });
+        let asked = Instant::now();
+        let head = head_of(&mut status_of(addr, "100-1"));
+        assert!(asked.elapsed() < HOLD / 2, "the first request was held");
+        assert!(head.starts_with("HTTP/1.1 204"), "{head}");
+        assert!(head.contains(&format!("{BEAT_HEADER}: 1.5\r\n")), "{head}");
+        // The same session asks again: now it is held, as before.
+        let _held = status_of(addr, "100-1");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !hub.connected(crate::spec::AGENT_SECRETARY) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hub.connected(crate::spec::AGENT_SECRETARY));
+        // A worker's first request is held and carries no age.
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(
+            s,
+            "GET {PATH} HTTP/1.1\r\nAuthorization: Bearer w\r\nX-Makiba-Session: 100-2\r\n\r\n"
+        )
+        .unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !hub.connected("w-t1") && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hub.connected("w-t1"), "the worker's request was not held");
     }
 }

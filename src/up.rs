@@ -429,17 +429,24 @@ fn read_only(dir: &Path) -> Option<rusqlite::Connection> {
     .ok()
 }
 
-/// The running `makibad`'s pid and heartbeat age when the heartbeat is stale (Issue 563).
+/// The running `makibad`'s pid and heartbeat age when the heartbeat is stale (Issue 563). Only
+/// when the dispatcher row names the pid in the lock file: a `makibad` that has taken the lock
+/// but not yet written its row is starting, not stalled, and the row's pid may be an old one.
 fn stalled(dir: &Path) -> Option<(i64, f64)> {
+    let holder: i64 = std::fs::read_to_string(dir.join("makibad.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
     let conn = read_only(dir)?;
     let age = crate::status_local::heartbeat_age(&conn)?;
     if age < crate::status_local::STALE.as_secs_f64() {
         return None;
     }
-    let pid = conn
+    let pid: i64 = conn
         .query_row("SELECT pid FROM dispatcher WHERE id = 1", [], |r| r.get(0))
         .ok()?;
-    Some((pid, age))
+    (pid == holder).then_some((pid, age))
 }
 
 /// The previous `makibad` when it stopped without recording it (Issue 563); asked only while no
@@ -506,5 +513,39 @@ pub fn main(args: &[String]) -> ExitCode {
             eprintln!("makiba: {}: {message}", kind.as_str());
             ExitCode::from(kind.exit_code() as u8)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A state folder whose dispatcher row names `row_pid` with a heartbeat a minute old, and
+    /// whose lock file holds `lock_pid`.
+    fn folder(row_pid: i64, lock_pid: i64) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO dispatcher (id, pid, started_at, heartbeat_at, subscribed)
+                 VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now','-120 seconds'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'), 1)",
+                [row_pid],
+            )
+            .unwrap();
+        std::fs::write(dir.path().join("makibad.lock"), lock_pid.to_string()).unwrap();
+        dir
+    }
+
+    /// Issue 563: a stale row is a stall only when it is the lock holder's; a makibad that has
+    /// taken the lock but not yet written its row is starting, and the row's pid is not named.
+    #[test]
+    fn a_stale_row_of_another_pid_than_the_lock_holder_is_no_stall() {
+        let starting = folder(111, 222);
+        assert_eq!(stalled(starting.path()), None);
+        let stalled_one = folder(333, 333);
+        let (pid, age) = stalled(stalled_one.path()).expect("a stall");
+        assert_eq!(pid, 333);
+        assert!(age >= 59.0, "{age}");
     }
 }
