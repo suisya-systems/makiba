@@ -41,6 +41,11 @@
 //! which other open pull requests have a test commit (whose declared tests cannot change), and the
 //! door holds it while there are any.
 //!
+//! A merge order the person sets (Issue 338, docs/design/merge-order.md section 6): `merge` action
+//! `order` records "A merges only after Issue or pull request B has landed" (`merge_order_set`);
+//! `person_orders` reads, from the ledger only, each such order of a pull request and whether its
+//! B has landed, and the door refuses A under either mode while one has not.
+//!
 //! The language check (Issue 339): a pull request whose own changes touch `LANGUAGE_CHECK` (the
 //! language check's allowlist, or its checker, which holds its scope) lands only with the
 //! person's yes to a question naming each file's mode and object id at head; `language_change`
@@ -1253,6 +1258,8 @@ pub struct MergeOrder {
     pub waits_for: Vec<Waiting>,
     /// `(pr, task, why)` of an open pull request that could not be read: it holds as one waiting.
     pub not_read: Vec<(i64, String, String)>,
+    /// The orders the person set (Issue 338) whose pull request or Issue has not landed.
+    pub after: Vec<After>,
     /// Each read of GitHub for another pull request that still failed after its tries (Issue 512),
     /// one per entry of `not_read` that failed so. With nothing in `waits_for` and every entry of
     /// `not_read` such a read, the order is not known, and the gate answers `unavailable` when no
@@ -1272,9 +1279,125 @@ impl MergeOrder {
 }
 
 impl MergeOrder {
+    /// The hold of Issue 331 (open test commits wait for a check-adding pull request).
     pub fn holds(&self) -> bool {
         !self.waits_for.is_empty() || !self.not_read.is_empty()
     }
+
+    /// An order the person set holds (Issue 338).
+    pub fn person_holds(&self) -> bool {
+        !self.after.is_empty()
+    }
+}
+
+/// A merge order the person set (Issue 338): the pull request merges only after `after`
+/// (`pr` or `issue`) `number` has landed. `project` is the order's project for an Issue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct After {
+    pub event_id: i64,
+    pub after: String,
+    pub number: i64,
+    pub project: Option<String>,
+    pub reason: String,
+    pub by: String,
+    pub landed: bool,
+}
+
+impl After {
+    /// `Issue <n>` or `pull request #<n>`.
+    pub fn named(&self) -> String {
+        if self.after == "issue" {
+            format!("Issue {}", self.number)
+        } else {
+            format!("pull request #{}", self.number)
+        }
+    }
+}
+
+/// Whether an order's B has landed, from the ledger only (docs/design/merge-order.md 6.2): for a
+/// pull request, a `pr_merged` of it (repository in any case) of any run; for an Issue, a
+/// `pr_merged` of the order's repository (any case) on a run of the order's project whose
+/// `issue_refs` names `<project>#<n>`, of that run's current pull request (a merge of one it has
+/// replaced since does not count).
+pub fn order_landed(
+    c: &rusqlite::Connection,
+    repo: &str,
+    after: &str,
+    number: i64,
+    project: Option<&str>,
+) -> rusqlite::Result<bool> {
+    if after == "pr" {
+        return c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'pr_merged'
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2)",
+            rusqlite::params![repo, number],
+            |r| r.get(0),
+        );
+    }
+    let Some(project) = project else {
+        return Ok(false);
+    };
+    c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
+               JOIN projects p ON p.id = r.project_id
+               WHERE e.kind = 'pr_merged' AND p.slug = ?1
+                 AND lower(json_extract(e.payload_json, '$.repo')) = lower(?3)
+                 AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(r.issue_refs)
+                                                     THEN r.issue_refs ELSE '[]' END) j
+                             WHERE j.value = ?2)
+                 AND {})",
+            super::belt::is_current_pr_sql(
+                "r",
+                "json_extract(e.payload_json, '$.repo')",
+                "json_extract(e.payload_json, '$.pr')"
+            )
+        ),
+        rusqlite::params![project, super::belt::issue_ref(project, number), repo],
+        |r| r.get(0),
+    )
+}
+
+/// The merge orders the person set on `repo#pr` (Issue 338): every `merge_order_set` of it
+/// (repository in any case), in event order, the first one per `(after, number)`, each with
+/// whether its B has landed. Ledger only: no git, no `gh`.
+pub fn person_orders(
+    c: &rusqlite::Connection,
+    repo: &str,
+    pr: i64,
+) -> rusqlite::Result<Vec<After>> {
+    let mut st = c.prepare(
+        "SELECT id, payload_json FROM events WHERE kind = 'merge_order_set'
+           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+           AND json_extract(payload_json, '$.pr') = ?2
+         ORDER BY id",
+    )?;
+    let rows: Vec<(i64, String)> = st
+        .query_map(rusqlite::params![repo, pr], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out: Vec<After> = Vec::new();
+    for (id, text) in rows {
+        let v: Value = serde_json::from_str(&text).unwrap_or_default();
+        let (Some(after), Some(number)) = (v["after"].as_str(), v["number"].as_i64()) else {
+            continue;
+        };
+        if out.iter().any(|o| o.after == after && o.number == number) {
+            continue;
+        }
+        let project = v["project"].as_str().map(String::from);
+        let landed = order_landed(c, repo, after, number, project.as_deref())?;
+        out.push(After {
+            event_id: id,
+            after: after.to_string(),
+            number,
+            project,
+            reason: v["reason"].as_str().unwrap_or_default().to_string(),
+            by: v["by"].as_str().unwrap_or_default().to_string(),
+            landed,
+        });
+    }
+    Ok(out)
 }
 
 /// The merge order of the PR at `head` on `base` (both in `clone`, `base` the tip of
@@ -1607,6 +1730,64 @@ pub fn clone_of(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::writer::{NewEvent, RunUpsert, StateWriter};
+
+    fn writer() -> StateWriter {
+        StateWriter::new(crate::db::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn event(w: &StateWriter, kind: &str, task: &str, payload: Value) {
+        w.append_event(&NewEvent {
+            kind,
+            actor: Some("makibad"),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    /// Issue 338, diff review round 1: an Issue lands only through a merge in the order's
+    /// repository, even when the Issue's run made a pull request of another repository its current
+    /// one.
+    #[test]
+    fn an_issue_landing_in_another_repository_is_not_the_orders() {
+        let w = writer();
+        w.ensure_project("p", None, Some("https://github.com/o/p"))
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t332",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("review"),
+            issue_refs: Some(&["p#332"]),
+            ..Default::default()
+        })
+        .unwrap();
+        let other = json!({"repo": "o/elsewhere", "pr": 9, "head_oid": "a".repeat(40)});
+        event(&w, "pr_opened", "t332", other);
+        event(
+            &w,
+            "pr_merged",
+            "t332",
+            json!({"repo": "o/elsewhere", "pr": 9, "task_id": "t332"}),
+        );
+        let c = w.conn();
+        assert!(!order_landed(c, "o/p", "issue", 332, Some("p")).unwrap());
+        event(
+            &w,
+            "pr_opened",
+            "t332",
+            json!({"repo": "O/P", "pr": 10, "head_oid": "b".repeat(40)}),
+        );
+        event(
+            &w,
+            "pr_merged",
+            "t332",
+            json!({"repo": "O/P", "pr": 10, "task_id": "t332"}),
+        );
+        assert!(order_landed(c, "o/p", "issue", 332, Some("p")).unwrap());
+    }
     use std::cell::Cell;
     use std::time::Duration;
 
