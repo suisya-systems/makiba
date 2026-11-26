@@ -3283,8 +3283,9 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 // watches), of the pull request's newest registered head first: a pull request
                 // registered again keeps its older row, behind another's newer one, and so does
                 // a head it returns to. At that head a row still `watching` comes first, as
-                // `pull_requests[].ci` reads `running` while any is (rows of one head whose
-                // repository differs in case only are two rows).
+                // `pull_requests[].ci` reads `running` while any is, then the one finished last,
+                // whose `ci_completed` the same transaction wrote and `ci` reads (rows of one
+                // head whose repository differs in case only are two rows).
                 let watch: Option<(String, Option<String>)> = c
                     .query_row(
                         &format!(
@@ -3293,6 +3294,7 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                              WHERE {}
                              ORDER BY coalesce(lower(w.head_oid) = lower({}), 0) DESC,
                                       w.status = 'watching' DESC,
+                                      w.finished_at DESC,
                                       w.id DESC
                              LIMIT 1",
                             is_current_pr_sql("r", "w.repo", "w.pr"),
@@ -5044,22 +5046,25 @@ pub(in crate::daemon) mod tests {
                 .map(|i| i["stage"].clone())
                 .collect()
         };
+        let finish = |repo: &str, conclusion: &str, at: &str| {
+            w.conn()
+                .execute(
+                    "UPDATE pr_watches SET status = 'completed', conclusion = ?2,
+                       finished_at = ?3 WHERE repo = ?1",
+                    params![repo, conclusion, at],
+                )
+                .unwrap();
+        };
         // The newer row concludes passed while the older one still watches.
-        w.conn()
-            .execute(
-                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
-                 WHERE repo = 'O/P'",
-                [],
-            )
-            .unwrap();
+        finish("O/P", "passed", "2026-11-24T09:00:00.000Z");
         assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
-        w.conn()
-            .execute(
-                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
-                 WHERE repo = 'o/p'",
-                [],
-            )
-            .unwrap();
+        // Then the older row fails: the result finished last is the one shown.
+        finish("o/p", "failed", "2026-11-24T09:05:00.000Z");
+        assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
+        finish("o/p", "passed", "2026-11-24T09:10:00.000Z");
         assert_eq!(stages(), vec![json!("to_land"), json!("to_land")]);
+        // The newer row finishes failed last.
+        finish("O/P", "failed", "2026-11-24T09:15:00.000Z");
+        assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
     }
 }
