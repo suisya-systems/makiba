@@ -284,14 +284,19 @@ fn started_version(the_base: &dyn base::Base) -> Option<String> {
 
 /// The refusal of a core of session `session` that the base's own start started and that runs
 /// `found`, not the pinned release (Issue 382). The text is the base's
-/// (`base::started_other_version`); the way out is named by the path of this binary.
+/// (`base::started_other_version`); the way out is named by the path of this binary. It says
+/// what `up` left undone, which `base upgrade` (whose last step is `run`) passes on in its own
+/// failure.
 fn started_other_version(session: &str, found: &str) -> Failure {
     let exe = std::env::current_exe()
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "makiba".into());
     (
         ErrorKind::Unavailable,
-        base::started_other_version(session, found, &exe),
+        format!(
+            "{}. `up` stopped there: no run was resumed and makibad was not started",
+            base::started_other_version(session, found, &exe)
+        ),
     )
 }
 
