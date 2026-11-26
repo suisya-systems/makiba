@@ -452,6 +452,8 @@ fn answers(c: &Ctx) -> Value {
                 "background": ctx["background"], "if_yes": ctx["if_yes"], "if_no": ctx["if_no"],
                 "recommend": ctx["recommend"], "why": ctx["why"],
                 "recommended_answer": recommended, "age_s": c.age_s(&p["created_at"]),
+                "range_id": p["range_id"], "stop_line": p["stop_line"],
+                "stop_kind": stop.map_or(Value::Null, |s| s["kind"].clone()),
                 "lines": lines,
             })
         })
@@ -846,8 +848,21 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
                 .iter()
                 .partition(|k| k["admitted"] == true);
             json!({
-                "would_start": yes.iter().map(|k| json!({"issue": k["issue"], "title": k["title"],
-                    "ref": c.reference(&project, &k["issue"])})).collect::<Vec<_>>(),
+                "would_start": yes.iter().map(|k| {
+                    // Admitted for its design only, until the Issues it waits for land.
+                    let waits: Vec<String> = arr(&k["design_only_waits"])
+                        .iter()
+                        .filter_map(|i| i.as_i64().map(|i| i.to_string()))
+                        .collect();
+                    let detail = if waits.is_empty() {
+                        Value::Null
+                    } else {
+                        json!(c.w.fill("stage.waits_landing", &[n(waits.join(", #"))]))
+                    };
+                    json!({"issue": k["issue"], "title": k["title"],
+                           "ref": c.reference(&project, &k["issue"]),
+                           "design_only_waits": k["design_only_waits"], "detail": detail})
+                }).collect::<Vec<_>>(),
                 "not_now": no.iter().map(|k| json!({"issue": k["issue"], "title": k["title"],
                     "ref": c.reference(&project, &k["issue"]), "why": k["left_out_why"]}))
                     .collect::<Vec<_>>(),
@@ -1249,6 +1264,9 @@ pub fn history(events: &[Value], words: &Words) -> Value {
             let p = &e["payload"];
             let key = match kind {
                 "belt_dispatched" => Some("hist.started.makiba"),
+                // makibad writes one beside its belt_dispatched: started by makiba, not twice
+                // by two hands.
+                "delegate_sent" if e["actor"] == "makibad" => Some("hist.started.makiba"),
                 "delegate_sent" => Some("hist.started.secretary"),
                 "worker_spawn_verified" => Some("hist.began"),
                 "worker_reported" => match str_of(&p["state"]) {
@@ -1424,5 +1442,62 @@ mod anomaly_age {
             .map(|i| i["issue"].as_i64().unwrap())
             .collect();
         assert_eq!(order, vec![2, 1]);
+    }
+}
+
+#[cfg(test)]
+mod round3 {
+    use super::*;
+
+    fn base() -> Value {
+        json!({"makibad": {"running": true, "heartbeat_at": "2026-11-24T09:59:57.000Z"},
+               "projects": [{"slug": "loom", "repo": "example-org/loom"}],
+               "runs": [], "terminals": [], "anomalies": [], "pending": [],
+               "pull_requests": [], "next_work": null, "ranges": []})
+    }
+
+    #[test]
+    fn a_proposal_names_what_a_design_only_candidate_waits_for() {
+        let mut s = base();
+        s["ranges"] = json!([{"id": 4, "project": "loom", "status": "proposed", "items": [],
+            "places": {}, "read_id": 7,
+            "candidates": [{"issue": 9, "title": "T", "admitted": true, "left_out_why": null,
+                            "design_only_waits": [3, 4]}]}]);
+        let m = model(&s, 1_795_514_400_000, &Words::new("en"));
+        let k = &m["ranges"][0]["proposal"]["would_start"][0];
+        assert_eq!(k["design_only_waits"], json!([3, 4]));
+        assert_eq!(
+            k["detail"],
+            Words::new("en").fill("stage.waits_landing", &[n("3, #4")])
+        );
+    }
+
+    #[test]
+    fn a_stop_of_a_whole_range_keeps_its_range_and_line() {
+        let mut s = base();
+        s["pending"] = json!([{"id": 9, "task_id": null, "status": "escalated", "range_id": 2,
+                               "stop_line": "budget", "kind": "question", "question": "Go on?",
+                               "created_at": "2026-11-24T09:00:00.000Z", "context": {}}]);
+        let m = model(&s, 1_795_514_400_000, &Words::new("en"));
+        let e = &m["answers"]["entries"][0];
+        assert_eq!(e["range_id"], 2);
+        assert_eq!(e["stop_line"], "budget");
+    }
+
+    #[test]
+    fn a_belt_dispatch_is_started_by_makiba_once_in_words() {
+        let ev = |id: i64, kind: &str, actor: &str| json!({"id": id, "kind": kind, "actor": actor, "payload": {}});
+        let h = history(
+            &[
+                ev(1, "delegate_sent", "makibad"),
+                ev(2, "belt_dispatched", "makibad"),
+                ev(3, "delegate_sent", "secretary"),
+            ],
+            &Words::new("en"),
+        );
+        let w = Words::new("en");
+        assert_eq!(h[0]["words"], w.get("hist.started.makiba"));
+        assert_eq!(h[1]["words"], w.get("hist.started.makiba"));
+        assert_eq!(h[2]["words"], w.get("hist.started.secretary"));
     }
 }
