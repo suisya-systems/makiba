@@ -50,8 +50,11 @@ secretary's, since when the door has not answered, whether it gave a notice for 
 server starts empty. The door answers the first request of a new session of the secretary's
 server at once, with the age, so the server knows it watches without waiting out a hold; a server
 that never reached the door does not watch. A notice is given once per spell, and again only after a fresh heartbeat.
-Bounds: a killed makibad within about 32 s, a stopped tick within 30 s plus one hold of the door
-(25 s) and its IO limit. A `makiba down` without `--secretary` leaves the secretary, whose watch
+A silence is counted from the door's last answer. Bounds: a killed makibad within 30 s of that
+answer plus the ask's backoff (2 s); a process that keeps its socket open and answers nothing
+(stopped by a signal) once the held request's read timeout ends (35 s); a stopped tick within
+30 s plus one hold of the door (25 s) and its IO limit. When a stalled makibad holds its lock,
+`up` names it before any ledger write (its write lock may be held) and writes and starts nothing. A `makiba down` without `--secretary` leaves the secretary, whose watch
 then gives one notice; its text says that is fine after `makiba down`.
 
 ## 3. After a restart of the machine

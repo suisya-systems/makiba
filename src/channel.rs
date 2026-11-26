@@ -489,8 +489,9 @@ impl Out {
 struct Watch {
     /// An answer carried the heartbeat's age: this is the secretary's server.
     watcher: bool,
-    /// The first failed ask since the last answer.
-    unreachable_since: Option<Instant>,
+    /// When the door last answered. A silence is counted from here, so a door that keeps its
+    /// socket open and answers nothing (a stopped process) is counted as well.
+    last_answer: Option<Instant>,
     /// A notice was given for this stale spell.
     noticed: bool,
 }
@@ -498,7 +499,7 @@ struct Watch {
 impl Watch {
     /// An answer of the door, with the age it carried. Returns the notice to give, if any.
     fn answered(&mut self, age: Option<f64>) -> Option<String> {
-        self.unreachable_since = None;
+        self.last_answer = Some(Instant::now());
         let age = age?;
         self.watcher = true;
         if age < crate::status_local::STALE.as_secs_f64() {
@@ -515,8 +516,7 @@ impl Watch {
 
     /// A failed ask. Returns the notice to give, if any.
     fn failed(&mut self) -> Option<String> {
-        let since = *self.unreachable_since.get_or_insert_with(Instant::now);
-        let gone = since.elapsed();
+        let gone = self.last_answer?.elapsed();
         if gone < crate::status_local::STALE {
             return None;
         }
@@ -689,6 +689,48 @@ mod tests {
         // Asking again, as the old server would after a 200, is refused at once.
         assert_eq!(code(&mut status_of(addr, "100-1")), "409");
         assert!(hub.connected("a"));
+    }
+
+    /// `when` seconds ago, as an `Instant`.
+    fn ago(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .expect("the clock is too young for the test")
+    }
+
+    /// Issue 563: one notice per spell, given again after a fresh heartbeat; a silence counts from
+    /// the last answer; a server that never saw the age does not watch.
+    #[test]
+    fn the_watch_notices_once_per_spell_and_again_after_a_fresh_heartbeat() {
+        let mut w = Watch::default();
+        assert_eq!(w.answered(Some(1.0)), None);
+        assert!(w.watcher);
+        let first = w
+            .answered(Some(31.0))
+            .expect("a stale heartbeat is noticed");
+        assert!(first.contains("its tick has stopped"), "{first}");
+        assert_eq!(w.answered(Some(32.0)), None, "a second notice in one spell");
+        assert_eq!(w.answered(Some(0.5)), None);
+        let again = w
+            .answered(Some(31.0))
+            .expect("noticed again after a fresh heartbeat");
+        assert!(again.contains("its tick has stopped"), "{again}");
+        // A fresh heartbeat, then silence: counted from that answer, not from the first failure.
+        assert_eq!(w.answered(Some(0.5)), None);
+        assert_eq!(w.failed(), None, "a failure right after an answer");
+        w.last_answer = Some(ago(31));
+        let gone = w.failed().expect("a silence of 31 s since the last answer");
+        assert!(gone.contains("the door does not answer"), "{gone}");
+        assert_eq!(w.failed(), None, "a second notice in one silence");
+
+        let mut worker = Watch::default();
+        assert_eq!(worker.answered(None), None);
+        worker.last_answer = Some(ago(40));
+        assert_eq!(
+            worker.failed(),
+            None,
+            "a server that never saw the age watched"
+        );
     }
 
     fn head_of(s: &mut TcpStream) -> String {
