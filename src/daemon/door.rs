@@ -176,11 +176,12 @@ fn status_of(r: &Response) -> Option<&'static str> {
     }
 }
 
-/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `config`, `gate`).
+/// A verb that has a tool for agents (spec section 12: all but `up`, `down`, `base`, `config`,
+/// `gate`, `events`).
 pub fn has_tool(v: Verb) -> bool {
     !matches!(
         v,
-        Verb::Up | Verb::Down | Verb::Config | Verb::Gate | Verb::Events
+        Verb::Up | Verb::Down | Verb::Base | Verb::Config | Verb::Gate | Verb::Events
     )
 }
 
@@ -2923,6 +2924,9 @@ struct GateRows {
     /// The other open pull requests of the repository (Issue 331), as `prwatch::followed` reads
     /// them; read again when the verdict is recorded, a difference there is "ask again".
     others: Vec<OpenPr>,
+    /// The merge orders the person set on the PR (Issue 338); the copy read again inside the
+    /// verdict's transaction is the one judged.
+    orders: Vec<super::gate::After>,
 }
 
 /// One other open pull request of the repository (Issue 331, merge-order.md 3.3): its task,
@@ -3030,6 +3034,8 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
             gen_close: f.gen_close,
         })
         .collect();
+    // Issue 338: the merge orders the person set on this pull request, from the ledger only.
+    let orders = super::gate::person_orders(c, repo, pr)?;
     Ok(GateRows {
         latest_ci: ci
             .last()
@@ -3040,6 +3046,7 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         task,
         review,
         others,
+        orders,
     })
 }
 
@@ -3157,7 +3164,9 @@ fn pr_before_ci(
 }
 
 /// `(repo, pr, head)` of a `gate` request.
-fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
+/// The argument `repo` as the gate takes it: `owner/name`, each part letters, digits, `.`, `_`
+/// or `-` (shared by `merge` action `order`, Issue 338).
+fn repo_arg(args: &Value) -> Result<&str, DoorError> {
     let repo = str_arg(args, "repo")?;
     let ok = |s: &str| {
         !s.is_empty()
@@ -3167,6 +3176,11 @@ fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
     if !repo.split_once('/').is_some_and(|(o, n)| ok(o) && ok(n)) {
         return Err(usage(format!("repo is owner/name, not {repo:?}")));
     }
+    Ok(repo)
+}
+
+fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
+    let repo = repo_arg(args)?;
     let pr = args["pr"]
         .as_i64()
         .filter(|n| *n > 0)
@@ -3184,9 +3198,11 @@ fn gate_args(args: &Value) -> Result<(String, i64, String), DoorError> {
     Ok((repo.to_string(), pr, head.to_string()))
 }
 
-/// What the gate found outside the door's lock: refused before the git checks, or their verdict.
+/// What the gate found outside the door's lock: refused before the git checks, a read of GitHub
+/// that still failed after its tries (Issue 512: nothing about the pull request), or the verdict.
 enum Found {
     Before(String),
+    Unavailable(String),
     Ran(Box<super::gate::Verdict>, bool, Value),
 }
 
@@ -3366,9 +3382,10 @@ fn merge_order_line(repo: &str, pr: i64, m: &super::gate::MergeOrder) -> String 
 fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
     use super::gate;
     let program = super::gh::program();
-    let (_url, base_branch, view_head) = match gate::pr_view(&program, repo, pr) {
+    let (_url, base_branch, view_head) = match gate::pr_view_read(&program, repo, pr) {
         Ok(v) => v,
-        Err(e) => return Found::Before(e.0),
+        Err(gate::Fault::Refused(why)) => return Found::Before(why),
+        Err(gate::Fault::Unavailable(why)) => return Found::Unavailable(why),
     };
     if view_head != head {
         return Found::Before(format!(
@@ -3401,9 +3418,10 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
             repos.display()
         ));
     };
-    let (base, fetched) = match gate::fetch(&clone, repo, pr, &base_branch) {
+    let (base, fetched) = match gate::fetch_read(&clone, repo, pr, &base_branch) {
         Ok(ids) => ids,
-        Err(e) => return Found::Before(e.0),
+        Err(gate::Fault::Refused(why)) => return Found::Before(why),
+        Err(gate::Fault::Unavailable(why)) => return Found::Unavailable(why),
     };
     if fetched != head {
         return Found::Before(format!(
@@ -3429,7 +3447,15 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         &failed,
         &mut v,
     ) {
-        v.result = "rejected".into();
+        // A read of GitHub that still failed is the cause of the error: not a refusal (Issue 512).
+        // The verdict goes on, so that the test commit found is recorded (the pin) and the rules
+        // on the content still apply; `judge` answers `unavailable` only if none refuses.
+        v.result = if ci.unavailable().is_some() {
+            "unavailable"
+        } else {
+            "rejected"
+        }
+        .into();
         v.reason = e.0;
     }
     // The tests edited after the test commit (Issue 282). A comparison that cannot be made is
@@ -3445,6 +3471,33 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         }
         Err(_) => {}
     }
+    // Issue 513: helpers changed after the test commit and helpers the base changed after it,
+    // with the diff stat of each and of the declared paths the base merged in. A comparison that
+    // cannot be made is never read as "none".
+    if let Some(m) = v.manifest_commit.clone() {
+        let read = gate::helper_changes(&clone, &base, head, &m, &v.paths).and_then(|(c, b)| {
+            let own: Vec<&gate::Change> = c.iter().chain(v.merged_tests.iter()).collect();
+            let based: Vec<&gate::Change> = b.iter().collect();
+            let mut stats = gate::diff_stat(&clone, &m, head, &own)?;
+            stats.extend(gate::diff_stat(&clone, &format!("{m}^"), &base, &based)?);
+            Ok((c, b, stats))
+        });
+        match read {
+            Ok((c, b, stats)) => {
+                v.helpers_changed = c;
+                v.base_helpers = b;
+                v.helper_stats = stats;
+            }
+            Err(e) if v.result != "rejected" => {
+                v.result = "rejected".into();
+                v.reason = format!(
+                    "the test helpers at head and at the base could not be compared with those of the test commit: {}",
+                    e.0
+                );
+            }
+            Err(_) => {}
+        }
+    }
     // The merge order (Issue 331): read here, with no lock held, as every fetch of the gate. A
     // read that fails is never read as "not check-adding".
     let others: Vec<(String, i64)> = rows.others.iter().map(|o| (o.task.clone(), o.pr)).collect();
@@ -3454,11 +3507,25 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
         .filter(|(_, n)| seen.insert(*n))
         .collect();
     match gate::merge_order(&program, &clone, repo, &base, &base_branch, head, &others) {
+        // A pull request that could not be read from GitHub (Issue 512) is kept in the order:
+        // `judge` decides what it means once every rule on the content has been applied.
         Ok(m) => v.merge_order = m,
         Err(e) if v.result != "rejected" => {
             v.result = "rejected".into();
             v.reason = format!(
                 "the gate could not read whether this pull request may add a check over tests/: {}",
+                e.0
+            );
+        }
+        Err(_) => {}
+    }
+    // The language check (Issue 339): a read that fails is never read as "no change".
+    match gate::language_change(&clone, &base, head) {
+        Ok(l) => v.language_change = l,
+        Err(e) if v.result != "rejected" => {
+            v.result = "rejected".into();
+            v.reason = format!(
+                "the gate could not read whether this pull request changes the language check: {}",
                 e.0
             );
         }
@@ -3548,6 +3615,12 @@ impl Door {
         let mut warnings: Vec<String> = Vec::new();
         let (mut verdict, reason, mut allow, event) = match found {
             Found::Before(why) => ("rejected".to_string(), why, false, None),
+            Found::Unavailable(why) => (
+                "unavailable".to_string(),
+                format!("GitHub could not be read: {why}"),
+                false,
+                None,
+            ),
             Found::Ran(mut v, docs, rv) => {
                 // What changed while the gate ran: a new CI result, or a first pin of another test.
                 if now.latest_ci != rows.latest_ci {
@@ -3567,7 +3640,10 @@ impl Door {
                     v.result = "rejected".into();
                     v.reason = "the open pull requests of the repository changed while the gate ran; ask again".into();
                 }
+                // A CI read that failed (Issue 512) is held as allowed while the rules on the
+                // content run; if none refuses, it becomes `unavailable` below.
                 let allow = v.result == "passed"
+                    || v.result == "unavailable"
                     || (v.result == "no_manifest" && (mode == "human" || docs));
                 let reason = if v.result == "no_manifest" && !allow {
                     format!(
@@ -3636,17 +3712,47 @@ impl Door {
                 reason = format!("{reason}; {line}");
             }
         }
+        // Issue 513 (docs/design/helper-fix.md, option D): a helper changed after the test commit,
+        // a declared path the base merged in cleanly, or a helper the base changed after the test
+        // commit needs the person's key under either mode. Each line names the object ids it was
+        // judged from, so an approval shown other contents is refused (`shown_warnings`).
+        let lists = event.as_ref().map(|v| helper_lines(v)).unwrap_or_default();
+        for line in &lists {
+            if allow {
+                warn = true;
+                warnings.push(line.clone());
+                reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
+        let stats: Vec<String> = event
+            .as_ref()
+            .filter(|_| !lists.is_empty())
+            .map(|v| v.helper_stats.clone())
+            .unwrap_or_default();
         // Issue 331 (docs/design/merge-order.md 3.3): a pull request that may add or tighten a
         // check over tests/ waits while other open pull requests have test commits, whose declared
         // tests cannot change. Under acceptance no person is asked, so it is refused; under human
         // the person decides. An earlier refusal keeps its verdict and has the line appended.
-        let order = event
+        let mut order = event
             .as_ref()
             .map(|v| v.merge_order.clone())
             .unwrap_or_default();
+        // Issue 338: the orders the person set, as read inside this transaction, whose pull
+        // request or Issue has not landed.
+        order.after = now.orders.iter().filter(|o| !o.landed).cloned().collect();
+        // An order not known because GitHub could not be read (Issue 512), decided last.
+        let mut order_unread: Option<String> = None;
         if order.holds() {
             let line = merge_order_line(&repo, pr, &order);
-            if allow && mode == "acceptance" {
+            // Issue 512: with nothing known to hold it, an order that could not be read from
+            // GitHub is not known; after every rule on the content, that is all that stands.
+            if allow && let Some(why) = order.not_known() {
+                // Decided after the last rule on the content, below; the line names it meanwhile.
+                order_unread = Some(why);
+                reason = format!("{reason}; {line}");
+            } else if allow && mode == "acceptance" {
                 allow = false;
                 verdict = "merge_order".into();
                 reason = format!(
@@ -3659,6 +3765,91 @@ impl Door {
             } else {
                 reason = format!("{reason}; {line}");
             }
+        }
+        // Issue 338 (docs/design/merge-order.md section 6): an order the person set holds the pull
+        // request until its pull request or Issue has landed, under either mode: the person
+        // decided already, so neither a later secretary nor an approval with the key passes it.
+        // An earlier refusal keeps its verdict and has the line appended.
+        if order.person_holds() {
+            let clauses: Vec<String> = order
+                .after
+                .iter()
+                .map(|o| {
+                    format!(
+                        "{repo}#{pr} merges only after {} has landed (order {}, recorded by {}: {})",
+                        o.named(),
+                        o.event_id,
+                        o.by,
+                        o.reason
+                    )
+                })
+                .collect();
+            let line = format!("the person set a merge order: {}", clauses.join("; "));
+            if allow {
+                allow = false;
+                verdict = "merge_order".into();
+                reason = format!(
+                    "{line}; it has not landed, so this one waits; no check makes an exception: if the person decides otherwise, they merge it in the GitHub web UI ({reason})"
+                );
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+        }
+        // Issue 339: a change to the language check lands, under either mode, only with the
+        // person's own yes to the question naming each file at head, the newest answer of that
+        // question on the run deciding; a file that is not a regular one is never approved. An
+        // earlier refusal keeps its verdict and has the line appended.
+        let language: Vec<super::gate::LanguageEntry> = event
+            .as_ref()
+            .map(|v| v.language_change.clone())
+            .unwrap_or_default();
+        let mut language_q: Option<String> = None;
+        let mut language_ok: Option<i64> = None;
+        if !language.is_empty() {
+            let paths: Vec<&str> = language.iter().map(|e| e.path.as_str()).collect();
+            let line = if language.iter().all(|e| e.approvable()) {
+                let q = language_question(&repo, pr, &language);
+                language_ok = match language_approval(w, now.task.as_deref(), &q) {
+                    Ok(a) => a,
+                    Err(e) => {
+                        let _ = w.rollback();
+                        return Err(internal(e));
+                    }
+                };
+                let line = format!(
+                    "the pull request changes the language check ({}) and the person has not approved it: the person answers yes to the question {q:?} with their own makiba answer <id> yes (a range task's stop asks it; else add it with mcp__makiba__pending for the task and escalate it), then ask merge again",
+                    paths.join(", ")
+                );
+                language_q = Some(q);
+                line
+            } else {
+                format!(
+                    "the pull request changes the language check ({}) and one of them at head is not a regular file, which no answer approves: the person lands it in the GitHub web UI",
+                    paths.join(", ")
+                )
+            };
+            if language_ok.is_none() {
+                if allow {
+                    allow = false;
+                    verdict = "language_check".into();
+                    reason = format!("{line} ({reason})");
+                } else {
+                    reason = format!("{reason}; {line}");
+                }
+            }
+        }
+        // Issue 512: a read of GitHub that still failed (a CI read, or an open pull request this
+        // one must be ordered after), with no rule on the content refusing: the acceptance or the
+        // order is not known, and that is all that stands.
+        if allow && let Some(why) = order_unread {
+            allow = false;
+            verdict = "unavailable".into();
+            reason = format!(
+                "GitHub could not be read: the gate could not read an open pull request it must order this one after: {why} ({reason})"
+            );
+        } else if allow && verdict == "unavailable" {
+            allow = false;
+            reason = format!("GitHub could not be read: {reason}");
         }
         // Issue 282: a range task's pull request lands without the person only when the range was
         // approved under acceptance and the mode read now is acceptance too. The checks above are
@@ -3691,10 +3882,13 @@ impl Door {
                 "reason": v.reason, "mode": mode, "allow": allow,
             }),
             None => json!({
-                "repo": repo, "pr": pr, "base": null, "head": head, "result": "rejected",
+                "repo": repo, "pr": pr, "base": null, "head": head, "result": verdict,
                 "reason": reason, "mode": mode, "allow": allow,
             }),
         };
+        // The answer's verdict (Issue 512): `unavailable` is no refusal, and the pause of two
+        // refusals in a row does not count it; `result` stays the acceptance result.
+        payload["verdict"] = json!(verdict);
         if let Some(v) = &event {
             if let Some(m) = &v.manifest_commit {
                 payload["manifest_commit"] = json!(m);
@@ -3707,7 +3901,24 @@ impl Door {
         if !edited.is_empty() {
             payload["edited_tests"] = json!(edited);
         }
-        if order.holds() {
+        if !language.is_empty() {
+            payload["language_check"] = json!({
+                "paths": language.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
+                "question": language_q, "approved": language_ok,
+            });
+        }
+        if let Some(v) = &event {
+            for (key, list) in [
+                ("helpers_changed", &v.helpers_changed),
+                ("merged_tests", &v.merged_tests),
+                ("base_helpers", &v.base_helpers),
+            ] {
+                if !list.is_empty() {
+                    payload[key] = json!(list.iter().map(|c| &c.path).collect::<Vec<_>>());
+                }
+            }
+        }
+        if order.holds() || order.person_holds() {
             payload["merge_order"] = json!({
                 "paths": order.paths,
                 "waits_for": order.waits_for.iter().map(|w| json!({
@@ -3718,6 +3929,18 @@ impl Door {
                     "pr": n, "task": t, "why": why,
                 })).collect::<Vec<_>>(),
             });
+            if order.person_holds() {
+                payload["merge_order"]["after"] = json!(
+                    order
+                        .after
+                        .iter()
+                        .map(|o| json!({
+                            "event_id": o.event_id, "after": o.after, "number": o.number,
+                            "reason": o.reason, "by": o.by,
+                        }))
+                        .collect::<Vec<_>>()
+                );
+            }
         }
         if let Some(t) = &now.task {
             payload["task"] = json!(t);
@@ -3750,7 +3973,7 @@ impl Door {
         // here, then the pause rule, then the fill (belt.md 3.4), all with the verdict's record.
         let mut pending_id = None;
         if let Some(t) = now.task.as_deref().filter(|_| range.is_some())
-            && (!allow || !edited.is_empty())
+            && (!allow || !edited.is_empty() || !lists.is_empty())
         {
             let stop = super::belt::GateStop {
                 task: t,
@@ -3759,11 +3982,21 @@ impl Door {
                 head: &head,
                 allow,
                 refused: !allow && verdict != "tests_edited",
+                unavailable: verdict == "unavailable",
                 reason: &reason,
                 edited_tests: &edited,
+                helpers: &lists,
             };
-            let stopped = super::belt::gate_stop(w, &stop)
-                .and_then(|id| super::belt::fill(w, &self.agent).map(|_| id));
+            // A refusal for the language check asks the gate's own question (Issue 339), so the
+            // person's answer to the stop is the approval.
+            let asked = match language_q
+                .as_deref()
+                .filter(|_| verdict == "language_check")
+            {
+                Some(q) => super::belt::language_stop(w, &stop, q),
+                None => super::belt::gate_stop(w, &stop),
+            };
+            let stopped = asked.and_then(|id| super::belt::fill(w, &self.agent).map(|_| id));
             match stopped {
                 Ok(id) => pending_id = id,
                 Err(e) => {
@@ -3776,7 +4009,13 @@ impl Door {
         // its tests stop too when no edited test is reported any more.
         if allow
             && range.is_some()
-            && let Err(e) = super::belt::gate_allowed(w, &repo, pr, &head, edited.is_empty())
+            && let Err(e) = super::belt::gate_allowed(
+                w,
+                &repo,
+                pr,
+                &head,
+                edited.is_empty() && lists.is_empty(),
+            )
         {
             let _ = w.rollback();
             return Err(internal(format!("the stop could not be withdrawn: {e}")));
@@ -3800,6 +4039,7 @@ impl Door {
             allow,
             warn,
             warnings,
+            stats,
             verdict,
             reason,
             mode,
@@ -3807,6 +4047,47 @@ impl Door {
             event: event_id,
         })
     }
+}
+
+/// The question the person answers for a change to the language check of `repo`#`pr` (Issue
+/// 339), word for word: each file of `language` with its mode and object id at head. The
+/// repository is written in lower case, as the gate matches repositories in any case, so that
+/// one approval holds however the repository was named.
+fn language_question(repo: &str, pr: i64, language: &[super::gate::LanguageEntry]) -> String {
+    let words: Vec<String> = language.iter().map(|e| e.words()).collect();
+    format!(
+        "Approve the change to the language check of {}#{pr}: {}",
+        repo.to_lowercase(),
+        words.join(", ")
+    )
+}
+
+/// The pending entry that approves `question` on the run of `task` (Issue 339): the newest
+/// answered entry of that question there decides, and it approves only when the person answered
+/// it yes with their own key (a relayed answer is the secretary's).
+fn language_approval(
+    w: &StateWriter,
+    task: Option<&str>,
+    question: &str,
+) -> rusqlite::Result<Option<i64>> {
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    let newest: Option<(i64, Option<String>, Option<String>)> = w
+        .conn()
+        .query_row(
+            "SELECT p.id, p.answer, p.answered_by FROM pending p JOIN runs r ON r.id = p.run_id
+             WHERE r.task_id = ?1 AND p.kind = 'question' AND p.status = 'answered'
+               AND p.question = ?2
+             ORDER BY p.answered_at DESC, p.id DESC LIMIT 1",
+            params![task, question],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .optional()?;
+    Ok(newest.and_then(|(id, answer, by)| {
+        (answer.as_deref() == Some("yes") && by.as_deref() == Some(crate::spec::AGENT_PERSON))
+            .then_some(id)
+    }))
 }
 
 /// What `Door::judge` decided and recorded (the `acceptance_gate` row `event`), in the open
@@ -3818,6 +4099,8 @@ struct Judged {
     warn: bool,
     /// Each warning of `warn`, one line each.
     warnings: Vec<String>,
+    /// The `git diff --stat` lines of the paths of the Issue 513 warnings, for the entry's text.
+    stats: Vec<String>,
     verdict: String,
     reason: String,
     mode: &'static str,
@@ -4053,6 +4336,45 @@ fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError
     Ok(task)
 }
 
+/// The warning lines of Issue 513 for verdict `v`, one per non-empty list, each path with the
+/// object ids it was judged from (`none` for a missing entry).
+fn helper_lines(v: &super::gate::Verdict) -> Vec<String> {
+    let list = |items: &[super::gate::Change], names: &[&str]| -> String {
+        items
+            .iter()
+            .map(|c| {
+                let ids: Vec<String> = names
+                    .iter()
+                    .zip(&c.ids)
+                    .map(|(n, id)| format!("{n} {id}"))
+                    .collect();
+                format!("{} ({})", c.path, ids.join(", "))
+            })
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    let mut lines = Vec::new();
+    if !v.helpers_changed.is_empty() {
+        lines.push(format!(
+            "test helpers changed after the test commit, which no rule can tell a fix from a weakening: {}",
+            list(&v.helpers_changed, &["test commit", "head"])
+        ));
+    }
+    if !v.merged_tests.is_empty() {
+        lines.push(format!(
+            "declared tests that head holds as git's clean merge of the test commit and the base: {}",
+            list(&v.merged_tests, &["test commit", "base", "head"])
+        ));
+    }
+    if !v.base_helpers.is_empty() {
+        lines.push(format!(
+            "test helpers the base changed after the test commit was made, with which the declared test was never shown failing: {}",
+            list(&v.base_helpers, &["test commit's parent", "base"])
+        ));
+    }
+    lines
+}
+
 /// The text of a pending merge entry (Issue 432, merge-act.md section 5.1): exactly what
 /// `makiba merge approve` prints, whose SHA-256 the approval carries as `shown`.
 #[allow(clippy::too_many_arguments)]
@@ -4065,6 +4387,7 @@ fn merge_entry_text(
     method: &str,
     reason: &str,
     warnings: &[String],
+    stats: &[String],
     requested_by: &str,
 ) -> String {
     let mut text = format!(
@@ -4072,6 +4395,9 @@ fn merge_entry_text(
     );
     for w in warnings {
         text.push_str(&format!("Warning: {w}\n"));
+    }
+    for line in stats {
+        text.push_str(&format!("Diff: {line}\n"));
     }
     text.push_str(&format!("Requested by: {requested_by}\n"));
     text
@@ -4105,6 +4431,7 @@ fn merge_entry_context(
         method,
         &j.reason,
         &j.warnings,
+        &j.stats,
         requested_by,
     );
     Ok(json!({
@@ -4307,6 +4634,17 @@ fn merge_attempt(
     Ok(answer)
 }
 
+/// The answer's `status` and the command's status of a `merge` the gate did not allow: a read of
+/// GitHub that still failed is `unavailable`, recorded `failed` (Issue 512); any other verdict is
+/// `refused`, recorded `rejected`.
+fn merge_refusal(verdict: &str) -> (&'static str, &'static str) {
+    if verdict == "unavailable" {
+        ("unavailable", "failed")
+    } else {
+        ("refused", "rejected")
+    }
+}
+
 /// A refusal of a merge entry that is no longer the one shown, or no longer open.
 fn merge_stale(id: i64, why: &str) -> DoorError {
     refuse(
@@ -4339,11 +4677,13 @@ impl Door {
         let action = match args.get("action") {
             None | Some(Value::Null) => "request",
             Some(a) => match a.as_str() {
-                Some(a @ ("request" | "approve" | "refuse" | "withdraw")) => a,
+                Some(a @ ("request" | "order" | "approve" | "refuse" | "withdraw")) => a,
                 _ => {
                     return fail(
                         &w,
-                        Err(usage("action is request, approve, refuse or withdraw")),
+                        Err(usage(
+                            "action is request, order, approve, refuse or withdraw",
+                        )),
                     );
                 }
             },
@@ -4361,6 +4701,7 @@ impl Door {
         match action {
             "approve" => return self.merge_approve(w, actor, args, idem),
             "refuse" | "withdraw" => return merge_end(&w, actor, role, action, args, idem),
+            "order" => return merge_order_set(&w, actor, args, idem),
             _ => {}
         }
         let parsed = (|| -> Result<_, DoorError> {
@@ -4411,12 +4752,19 @@ impl Door {
             }
         };
         if !j.allow {
-            let mut answer = json!({"status": "refused", "verdict": j.verdict, "allow": false, "reason": j.reason,
+            let (status, recorded) = merge_refusal(&j.verdict);
+            let mut answer = json!({"status": status, "verdict": j.verdict, "allow": false, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head});
             if let Some(rv) = &j.review {
                 answer["review"] = rv.clone();
             }
-            return merge_finish(&w, actor, args, idem, "rejected", Ok(answer));
+            // The stop a read that failed made for the person (Issue 512).
+            if j.verdict == "unavailable"
+                && let Some(id) = j.answer.get("pending_id")
+            {
+                answer["pending_id"] = id.clone();
+            }
+            return merge_finish(&w, actor, args, idem, recorded, Ok(answer));
         }
         if j.warn || (j.mode != "acceptance" && role != Role::Person) {
             // Issue 432: the person's key decides. The same request again is the same entry; one
@@ -4635,12 +4983,17 @@ impl Door {
         }
         if !j.allow {
             // The entry stays open: the person may approve it again once the cause is dealt with.
+            let what = if j.verdict == "unavailable" {
+                "GitHub could not be read, so the gate could not judge"
+            } else {
+                "The gate refused"
+            };
             let told = notice(
                 &w,
                 crate::spec::AGENT_SECRETARY,
                 &task,
                 &format!(
-                    "The gate refused the person's approval of pending merge entry {id} ({repo}#{pr} at {}): {}. The entry stays open; deal with the cause, then the person approves it again.",
+                    "{what} the person's approval of pending merge entry {id} ({repo}#{pr} at {}): {}. The entry stays open; deal with the cause, then the person approves it again.",
                     &head[..head.len().min(12)],
                     j.reason
                 ),
@@ -4649,13 +5002,14 @@ impl Door {
                 let _ = w.rollback();
                 return Err(internal(e));
             }
-            let mut answer = json!({"status": "refused", "verdict": j.verdict, "allow": false, "reason": j.reason,
+            let (status, recorded) = merge_refusal(&j.verdict);
+            let mut answer = json!({"status": status, "verdict": j.verdict, "allow": false, "reason": j.reason,
                                     "mode": j.mode, "repo": repo, "pr": pr, "head": head,
                                     "pending_id": id});
             if let Some(rv) = &j.review {
                 answer["review"] = rv.clone();
             }
-            return merge_finish(&w, actor, args, idem, "rejected", Ok(answer));
+            return merge_finish(&w, actor, args, idem, recorded, Ok(answer));
         }
         if j.warnings.iter().any(|x| !shown_warnings.contains(x)) {
             // A warning the person was not shown: the entry takes the new reading, and the person
@@ -4742,6 +5096,160 @@ impl Door {
             return Err(internal(e));
         }
         Ok(answer)
+    }
+}
+
+/// `merge` action `order` (Issue 338, docs/design/merge-order.md section 6): the person's order
+/// "`repo#pr` merges only after `after_pr` or `after_issue` has landed", relayed by the secretary
+/// or given by the person, recorded as `merge_order_set` in one transaction with its command. The
+/// same order again is the first one. Refused (`conflict`) while the pull request has a merge act
+/// of makibad awaiting its landing: that act runs without a new judgement, so the order could not
+/// hold it.
+fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str>) -> Response {
+    let fail = |r: Response| {
+        let _ = record(w, actor, "merge", args, idem, &r);
+        r
+    };
+    let parsed = (|| -> Result<(String, i64, &'static str, i64, String), DoorError> {
+        let repo = repo_arg(args)?;
+        let number = |k: &str| -> Result<Option<i64>, DoorError> {
+            match args.get(k) {
+                None | Some(Value::Null) => Ok(None),
+                Some(v) => v
+                    .as_i64()
+                    .filter(|n| *n > 0)
+                    .map(Some)
+                    .ok_or_else(|| usage(format!("{k} is a positive number"))),
+            }
+        };
+        let pr = number("pr")?
+            .ok_or_else(|| usage("the argument pr (a pull request number) is missing"))?;
+        let (after, n) = match (number("after_pr")?, number("after_issue")?) {
+            (Some(n), None) => ("pr", n),
+            (None, Some(n)) => ("issue", n),
+            _ => {
+                return Err(usage(
+                    "an order names exactly one of after_pr (a pull request) and after_issue (an Issue) of the same repository",
+                ));
+            }
+        };
+        if after == "pr" && n == pr {
+            return Err(usage("a pull request cannot wait for itself"));
+        }
+        let reason = args
+            .get("reason")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .ok_or_else(|| {
+                usage("the argument reason (the person's decision, as text) is missing")
+            })?;
+        Ok((repo.to_string(), pr, after, n, reason.to_string()))
+    })();
+    let (repo, pr, after, number, reason) = match parsed {
+        Ok(p) => p,
+        Err(e) => return fail(Err(e)),
+    };
+    if let Err(e) = w.conn().execute_batch("BEGIN IMMEDIATE") {
+        return Err(internal(e));
+    }
+    let done = (|| -> Result<Response, rusqlite::Error> {
+        if let Some(a) = act_awaiting(w.conn(), &repo, pr)? {
+            return Ok(Err(refuse(
+                ErrorKind::Conflict,
+                format!(
+                    "{repo}#{pr} has a merge act of makibad awaiting its landing (attempt {}); an order cannot hold it",
+                    a.attempt
+                ),
+                "tell the person: the merge was already sent",
+            )));
+        }
+        let project = if after == "issue" {
+            let projects: Vec<(String, Option<String>)> = w
+                .conn()
+                .prepare(
+                    "SELECT slug, origin_url FROM projects WHERE status = 'active' ORDER BY slug",
+                )?
+                .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            let found: Vec<String> = projects
+                .into_iter()
+                .filter(|(_, url)| {
+                    url.as_deref()
+                        .and_then(super::triage::owner_repo_from_url)
+                        .is_some_and(|r| r.eq_ignore_ascii_case(&repo))
+                })
+                .map(|(slug, _)| slug)
+                .collect();
+            match found.as_slice() {
+                [slug] => Some(slug.clone()),
+                [_, _, ..] => {
+                    return Ok(Err(refuse(
+                        ErrorKind::Conflict,
+                        format!(
+                            "more than one active project records {repo} ({}): the Issue's project cannot be told",
+                            found.join(", ")
+                        ),
+                        "tell the person; an order after a pull request (after_pr) needs no project",
+                    )));
+                }
+                [] => {
+                    return Ok(Err(refuse(
+                        ErrorKind::NotFound,
+                        format!("no active project's recorded repository is {repo}"),
+                        "an Issue is matched through the runs of its project",
+                    )));
+                }
+            }
+        } else {
+            None
+        };
+        let existing = super::gate::person_orders(w.conn(), &repo, pr)?
+            .into_iter()
+            .find(|o| o.after == after && o.number == number);
+        let (event_id, landed) = match existing {
+            Some(o) => (o.event_id, o.landed),
+            None => {
+                let task: Option<String> = w
+                    .conn()
+                    .query_row(
+                        "SELECT r.task_id FROM pr_watches p JOIN runs r ON r.id = p.run_id
+                         WHERE lower(p.repo) = lower(?1) AND p.pr = ?2 ORDER BY p.id DESC LIMIT 1",
+                        params![repo, pr],
+                        |r| r.get(0),
+                    )
+                    .optional()?;
+                let payload = json!({"repo": repo, "pr": pr, "after": after, "number": number,
+                                     "project": project, "reason": reason, "by": actor});
+                let id = w
+                    .append_event(&NewEvent {
+                        kind: "merge_order_set",
+                        actor: Some(actor),
+                        payload: Some(&payload),
+                        run_task_id: task.as_deref(),
+                        ..Default::default()
+                    })
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                let landed =
+                    super::gate::order_landed(w.conn(), &repo, after, number, project.as_deref())?;
+                (id, landed)
+            }
+        };
+        Ok(Ok(
+            json!({"status": "recorded", "event_id": event_id, "repo": repo, "pr": pr,
+                     "after": after, "number": number, "landed": landed}),
+        ))
+    })();
+    match done {
+        Ok(Ok(v)) => merge_finish(w, actor, args, idem, "done", Ok(v)),
+        Ok(Err(e)) => {
+            let _ = w.rollback();
+            fail(Err(e))
+        }
+        Err(e) => {
+            let _ = w.rollback();
+            Err(internal(e))
+        }
     }
 }
 
@@ -5776,7 +6284,7 @@ fn tool(v: Verb) -> Value {
             &["action", "repo"],
         ),
         Verb::Range => (
-            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone. makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
+            "Ranges of work the person approves once; makibad then dispatches each range's next Issue itself when a slot frees. propose (project, issues and/or takes, at_once, budget_tasks, brief_head, replaces; budget_hours: hours from approval after which nothing new goes in; budget_fixes: fixes pushed to a task's pull request after its first head before it is a stop, default 3 (a head whose only new commit is a clean merge of the base is no fix); follow_ups: inside (default: an Issue created after the approval with a line Follow-up of #<n> naming an Issue of the range is in it, unless a line Needs host: names a host the project does not list or a line Stop line: names one) or ask; design_ahead: true lets a candidate whose open dependencies are range tasks with a pull request go in for its design only, parked until they land): a draft, read by makibad. pause, end (id), skip (id, issue, reason). approve and resume are the person's alone (approve: id, read and approval_mode, the read and the merge approval mode shown; one that is no longer the newest read or makibad's mode is stale). makibad pauses a range itself after two failed launches or two refused pull requests in a row, and writes the stops of the gate and the budgets as pending entries for the person.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -5803,6 +6311,10 @@ fn tool(v: Verb) -> Value {
                 ("issue".into(), json!({"type": "integer"})),
                 ("reason".into(), text.clone()),
                 ("read".into(), json!({"type": "integer"})),
+                (
+                    "approval_mode".into(),
+                    json!({"type": "string", "enum": ["human", "acceptance"]}),
+                ),
             ]),
             &["action"],
         ),
@@ -5821,12 +6333,14 @@ fn tool(v: Verb) -> Value {
             &[],
         ),
         Verb::Merge => (
-            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing.",
+            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing. action order records a merge order the person decided: repo, pr (the pull request that waits), exactly one of after_pr or after_issue (what must land first, in the same repository) and reason (the person's decision); the gate then refuses that pull request under either mode until the other has landed. The same order again is the first one; no action lifts it.",
             Map::from_iter([
                 (
                     "action".into(),
-                    json!({"type": "string", "enum": ["request", "withdraw"]}),
+                    json!({"type": "string", "enum": ["request", "order", "withdraw"]}),
                 ),
+                ("after_pr".into(), json!({"type": "integer"})),
+                ("after_issue".into(), json!({"type": "integer"})),
                 ("repo".into(), text.clone()),
                 ("pr".into(), json!({"type": "integer"})),
                 ("head".into(), text.clone()),
@@ -5837,7 +6351,8 @@ fn tool(v: Verb) -> Value {
                 ("id".into(), json!({"type": "integer"})),
                 ("reason".into(), text.clone()),
             ]),
-            // Each action checks its own (request: repo, pr, head; withdraw: id).
+            // Each action checks its own (request: repo, pr, head; order: repo, pr, after_pr or
+            // after_issue, reason; withdraw: id).
             &[],
         ),
         _ => ("Not built yet.", Map::new(), &[]),
@@ -5987,5 +6502,63 @@ mod tests {
                 "{t}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod merge_order_tests {
+    use super::{ErrorKind, json, merge_order_set};
+
+    /// Issue 338, diff review round 1: when two active projects record the order's repository, the
+    /// Issue's project is not chosen silently; the order is refused and nothing is written.
+    #[test]
+    fn an_issue_order_whose_repository_two_projects_record_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        for slug in ["a", "b"] {
+            w.ensure_project(slug, None, Some("https://github.com/o/r"))
+                .unwrap();
+        }
+        let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_issue": 1,
+                          "reason": "the person's condition"});
+        let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+        assert_eq!(e.kind, ErrorKind::Conflict, "{e:?}");
+        let n: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'merge_order_set'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
+        // An order after a pull request needs no project.
+        let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_pr": 1,
+                          "reason": "the person's condition"});
+        let v = merge_order_set(&w, "secretary", &args, None).unwrap();
+        assert_eq!(v["status"], json!("recorded"), "{v}");
+    }
+
+    /// Issue 338, diff review round 3: a repository the gate would refuse as malformed is refused
+    /// for an order too, so no order is recorded that never matches the pull request it names.
+    #[test]
+    fn an_order_with_a_malformed_repository_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = crate::db::writer::StateWriter::open(&dir.path().join("state.db")).unwrap();
+        for repo in ["o/r ", " o/r", "o/r/x", "o r/r", "o/", "/r", "o/r\n"] {
+            let args = json!({"action": "order", "repo": repo, "pr": 2, "after_pr": 1,
+                              "reason": "the person's condition"});
+            let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+            assert_eq!(e.kind, ErrorKind::Usage, "{repo:?}: {e:?}");
+        }
+        let n: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'merge_order_set'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(n, 0);
     }
 }

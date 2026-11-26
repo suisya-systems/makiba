@@ -628,7 +628,7 @@ fn shown(o: &Outcome, goals: &Path) -> Value {
     }
     for d in arr(&scan["excluded_dependency_unreadable"]) {
         let reason = format!(
-            "a dependency line names no Issue number: \"{}\"; write it as Depends on #<n>, or remove it",
+            "a dependency line is not in the one form: \"{}\"; write it as Depends on #<n> (one keyword, Issue numbers, nothing else on the line), or remove it",
             s(&d["line"])
         );
         leave(

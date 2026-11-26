@@ -125,7 +125,7 @@ pub fn run(dir: &Path, base: &dyn Base, opts: Options) -> std::result::Result<Su
 }
 
 /// SIGTERM to the `makibad` holding the lock of `dir`, and wait until it has let the lock go.
-fn stop_daemon(dir: &Path) -> std::result::Result<bool, String> {
+pub(crate) fn stop_daemon(dir: &Path) -> std::result::Result<bool, String> {
     let running = |d: &Path| crate::up::daemon_running(d).map_err(|(_, e)| e);
     if !running(dir)? {
         return Ok(false);

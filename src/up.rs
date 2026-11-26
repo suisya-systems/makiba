@@ -108,7 +108,7 @@ fn with_ledger<T>(
 
 /// `claude --version` must be at or above the lowest supported version and not refused by name;
 /// a version newer than the newest checked one is said so in one line and accepted.
-fn check_claude() -> Result<(), Failure> {
+pub(crate) fn check_claude() -> Result<(), Failure> {
     let out = Command::new("claude")
         .arg("--version")
         .output()
@@ -133,7 +133,7 @@ fn check_claude() -> Result<(), Failure> {
 
 /// `git --version` must be at or above `run_repo::GIT_LOWEST` (Issue 241: `update` merges with
 /// `git merge-tree --write-tree`).
-fn check_git() -> Result<(), Failure> {
+pub(crate) fn check_git() -> Result<(), Failure> {
     let out = Command::new("git")
         .arg("--version")
         .output()
@@ -254,8 +254,7 @@ fn other_version(session: &str, found: &str) -> Failure {
                 .unwrap_or_else(|_| "makiba".into());
             format!(
                 "{head}, this makiba pins {pinned}. To take {pinned}: `{exe} base upgrade` (it asks \
-                 before ending the base's terminals; until that verb exists, the steps of \
-                 docs/upgrading-the-base.md)"
+                 before ending the base's terminals)"
             )
         }
         Some(Ordering::Greater) => format!(
@@ -296,7 +295,9 @@ fn started_other_version(session: &str, found: &str) -> Failure {
     )
 }
 
-fn run(secretary: bool) -> Result<(), Failure> {
+/// Everything `up` does but take the session lock, which `main` takes shared and
+/// `base upgrade` (which calls this at its last step) holds exclusively.
+pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     if let Some(v) = agent_variable() {
         return Err((
             ErrorKind::Denied,
@@ -439,6 +440,16 @@ pub fn main(args: &[String]) -> ExitCode {
         eprint!("makiba: bad arguments for up\n{USAGE}");
         return ExitCode::from(ErrorKind::Usage.exit_code() as u8);
     }
+    // Held until `up` ends: no `base upgrade` stops or replaces the base meanwhile, and none
+    // that runs lets this `up` start the old core between its stop and its rename (Issue 422).
+    let session = crate::daemon::base_session();
+    let _lock = match crate::base::upgrade::up_lock(&session) {
+        Ok(lock) => lock,
+        Err((kind, message)) => {
+            eprintln!("makiba: {}: {message}", kind.as_str());
+            return ExitCode::from(kind.exit_code() as u8);
+        }
+    };
     match run(!args.iter().any(|a| a == "--no-secretary")) {
         Ok(()) => ExitCode::SUCCESS,
         Err((kind, message)) => {

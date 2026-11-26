@@ -189,7 +189,8 @@ fn fake_from_env() -> Option<fake::Fake> {
 /// `<share>/makiba`, the entry point the role hooks run (spec section 2): a link to this binary.
 /// A link to another file is pointed here; a file that is not a link is the person's and is kept.
 pub fn link_entry_point() -> io::Result<()> {
-    let exe = std::env::current_exe()?;
+    let exe = crate::daemon::exe::started_path()
+        .ok_or_else(|| io::Error::other("cannot tell the path of its own executable"))?;
     let link = crate::cli::share_dir().join("makiba");
     match std::fs::symlink_metadata(&link) {
         Ok(m) if !m.file_type().is_symlink() => return Ok(()),
@@ -249,7 +250,7 @@ pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
         }
         "claude_code" => Some(Box::new(claude_code::ClaudeCode::new(
             &on_path("claude").unwrap_or_else(|| PathBuf::from("claude")),
-            &std::env::current_exe().unwrap_or_else(|_| PathBuf::from("makiba")),
+            crate::daemon::exe::started_path().unwrap_or(Path::new("makiba")),
             std::env::var(REMOTE_CONTROL_ENV).as_deref() == Ok("1"),
         ))),
         _ => None,

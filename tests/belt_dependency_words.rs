@@ -7,6 +7,15 @@
 //! only such a candidate stays active and dispatches nothing; once the line reads `Depends on #<n>`
 //! and that Issue is closed, the candidate is admitted and dispatched.
 //!
+//! Issue 356: one parser of dependency lines serves the guard, the range and the triage. The last
+//! review of Issue 299 found the other direction: `Blocked by #30`, `Requires #30` and
+//! `- Depends on #30` named a number, passed the guard, and were admitted by the range while #30
+//! was open, because the range read only lines starting `Depends on`. Now each of these waits
+//! for #30 in the range and in the triage; a line rewritten from words to `- Depends on #30`
+//! keeps the Issue waiting while #30 is open; a dependency line whose number is only in prose or
+//! on the next line is unreadable in both; and a skipped candidate does not hold the range open
+//! on its open dependency.
+//!
 //! The scaffolding is that of `tests/belt.rs`: the daemon runs in this process on the stand-in
 //! base, `gh` is a stand-in script answering from files, and no test reaches the network.
 
@@ -282,11 +291,13 @@ impl Org {
     /// Approve range `id` with the person key, on the read the read surface shows.
     fn approve(&self, id: i64) {
         wait("the read of the draft", || self.read_done(id));
-        let read = self.range(id)["read_id"].clone();
+        let range = self.range(id);
+        // The mode the read surface shows is the one the approval binds (Issue 326).
+        let (read, mode) = (range["read_id"].clone(), range["approves_under"].clone());
         self.call(
             &self.person,
             "range",
-            json!({"action": "approve", "id": id, "read": read}),
+            json!({"action": "approve", "id": id, "read": read, "approval_mode": mode}),
         );
     }
 }
@@ -408,4 +419,223 @@ fn a_dependency_written_in_words_is_left_out_until_it_names_a_closed_issue() {
     wait("the task of 31", || org.run_exists(&task));
     let after = org.range(id);
     assert_eq!(candidate(&after, 31)["admitted"], json!(true), "{after}");
+}
+
+// ---- Issue 356 ---------------------------------------------------------------------------------
+
+/// The triage's scan of `issues` (one repository, every candidate kept).
+fn triage(issues: Vec<Value>) -> Value {
+    let config = makiba::work_discovery::ScanConfig {
+        top_n: -1,
+        ..makiba::work_discovery::ScanConfig::default()
+    };
+    makiba::work_discovery::scan(issues, vec![], vec![], &config, None, None, None, vec![])
+}
+
+/// The row of Issue `n` in the scan's list `list`, if any.
+fn row(scan: &Value, list: &str, n: i64) -> Option<Value> {
+    scan[list]
+        .as_array()
+        .unwrap_or_else(|| panic!("no {list}[]: {scan}"))
+        .iter()
+        .find(|r| r["issue"] == json!(n))
+        .cloned()
+}
+
+/// Issue `n` is no candidate of the scan and is excluded as blocked by exactly `refs`.
+fn triage_blocked_by(scan: &Value, n: i64, refs: Value) {
+    let b = row(scan, "excluded_blocked", n)
+        .unwrap_or_else(|| panic!("{n} is not in excluded_blocked: {scan}"));
+    assert_eq!(b["blocking_refs"], refs, "{n}: {scan}");
+    assert!(
+        row(scan, "candidates", n).is_none(),
+        "{n} is a candidate: {scan}"
+    );
+}
+
+/// Issue `n` is no candidate of the scan and is excluded as unreadable.
+fn triage_unreadable(scan: &Value, n: i64) {
+    assert!(
+        row(scan, "excluded_dependency_unreadable", n).is_some(),
+        "{n} is not in excluded_dependency_unreadable: {scan}"
+    );
+    assert!(
+        row(scan, "candidates", n).is_none(),
+        "{n} is a candidate: {scan}"
+    );
+}
+
+fn complete_reads(org: &Org, id: i64) -> usize {
+    org.events("range_read")
+        .iter()
+        .filter(|(_, p)| p["range_id"] == json!(id) && p["complete"] == json!(true))
+        .count()
+}
+
+/// `Blocked by #30`, `Requires #30` and `- Depends on #30` each wait for the open #30 in the
+/// range and in the triage.
+#[test]
+fn every_keyword_and_list_form_waits_in_the_range_and_the_triage() {
+    let issues = [
+        issue(30, "Open step", "Step.", "-"),
+        issue(31, "Blocked", "Blocked by #30", "-"),
+        issue(32, "Requires", "Requires #30", "-"),
+        issue(33, "Listed", "Step.\n\n- Depends on #30\n", "-"),
+    ];
+    let org = Org::new("keywords", &issues, true);
+    let id = org.propose(&[31, 32, 33], 3);
+    wait("the read of the draft", || org.read_done(id));
+    let draft = org.range(id);
+    for n in [31, 32, 33] {
+        let c = candidate(&draft, n);
+        assert_eq!(c["admitted"], json!(false), "{n}: {draft}");
+        assert_eq!(c["left_out_why"], json!("waits_for #30"), "{n}: {draft}");
+    }
+    assert!(org.tasks().is_empty(), "{:?}", org.tasks());
+
+    let scan = triage(issues.to_vec());
+    for n in [31, 32, 33] {
+        triage_blocked_by(&scan, n, json!([30]));
+    }
+}
+
+/// A line in words is unreadable; rewritten as `- Depends on #30` while #30 is open, the
+/// candidate waits for #30 and is not dispatched; once #30 is closed it is.
+#[test]
+fn a_line_rewritten_from_words_to_a_number_keeps_waiting_while_it_is_open() {
+    let open30 = issue(30, "Previous step", "Step.", "-");
+    let words = issue(
+        31,
+        "Next step",
+        "Next.\n\n- Depends on the previous step.\n",
+        "-",
+    );
+    let numbered = issue(31, "Next step", "Next.\n\n- Depends on #30\n", "-");
+    let org = Org::new("rewritten", &[open30.clone(), words.clone()], true);
+    let id = org.propose(&[31], 1);
+    wait("the read of the draft", || org.read_done(id));
+    let draft = org.range(id);
+    assert!(unreadable(&candidate(&draft, 31)), "{draft}");
+    org.approve(id);
+
+    // Rewritten with a number while #30 is still open: it waits, nothing is dispatched.
+    answer_open(&org, &[open30.clone(), numbered.clone()]);
+    let before = complete_reads(&org, id);
+    wait("three reads after the rewrite", || {
+        complete_reads(&org, id) >= before + 3
+    });
+    let waiting = org.range(id);
+    let c = candidate(&waiting, 31);
+    assert_eq!(c["admitted"], json!(false), "{waiting}");
+    assert_eq!(c["left_out_why"], json!("waits_for #30"), "{waiting}");
+    assert_eq!(waiting["status"], json!("active"), "{waiting}");
+    let task = format!("r{id}-31");
+    assert!(!org.run_exists(&task), "{:?}", org.tasks());
+
+    // #30 closed: admitted and dispatched.
+    std::fs::write(
+        org.answers.join("issue-30.json"),
+        json!({"number": 30, "title": "Previous step", "state": "CLOSED"}).to_string(),
+    )
+    .unwrap();
+    answer_open(&org, std::slice::from_ref(&numbered));
+    wait("the task of 31", || org.run_exists(&task));
+    let after = org.range(id);
+    assert_eq!(candidate(&after, 31)["admitted"], json!(true), "{after}");
+
+    // The triage reads both bodies the same way.
+    triage_unreadable(&triage(vec![open30.clone(), words]), 31);
+    triage_blocked_by(&triage(vec![open30, numbered]), 31, json!([30]));
+}
+
+/// A dependency line whose number is only in prose, or only on the next line, is unreadable in
+/// the range and in the triage.
+#[test]
+fn a_dependency_line_naming_its_issue_only_in_prose_is_unreadable() {
+    let issues = [
+        issue(30, "Open step", "Step.", "-"),
+        issue(
+            31,
+            "Prose",
+            "Step.\n\n- Depends on: the tokenizer work, see #30.\n",
+            "-",
+        ),
+        issue(32, "Next line", "Step.\n\nDepends on\n#30\n", "-"),
+    ];
+    let org = Org::new("prose", &issues, true);
+    let id = org.propose(&[31, 32], 2);
+    wait("the read of the draft", || org.read_done(id));
+    let draft = org.range(id);
+    for (n, line) in [(31, "Depends on: the tokenizer work"), (32, "Depends on")] {
+        let c = candidate(&draft, n);
+        assert!(unreadable(&c), "{n}: {draft}");
+        assert!(
+            c["left_out_why"].as_str().is_some_and(|w| w.contains(line)),
+            "{n}: the reason names the line: {draft}"
+        );
+    }
+    assert!(org.tasks().is_empty(), "{:?}", org.tasks());
+
+    let scan = triage(issues.to_vec());
+    triage_unreadable(&scan, 31);
+    triage_unreadable(&scan, 32);
+}
+
+/// A candidate skipped while it waits for an open Issue does not hold the range open: approved
+/// with nothing else left, the range ends `used_up`.
+#[test]
+fn a_skipped_candidate_waiting_for_an_open_issue_does_not_hold_the_range_open() {
+    let org = Org::new(
+        "skipped",
+        &[
+            issue(30, "Open step", "Step.", "-"),
+            issue(31, "Waiting", "Step.\n\nDepends on #30\n", "-"),
+        ],
+        true,
+    );
+    let id = org.propose(&[31], 1);
+    org.call(
+        &org.secretary,
+        "range",
+        json!({"action": "skip", "id": id, "issue": 31, "reason": "not this time"}),
+    );
+    org.approve(id);
+    wait("the range to end", || {
+        org.range(id)["status"] == json!("ended")
+    });
+    let ended: Vec<Value> = org
+        .events("range_ended")
+        .into_iter()
+        .map(|(_, p)| p)
+        .filter(|p| p["range_id"] == json!(id))
+        .collect();
+    assert_eq!(ended.len(), 1, "{ended:?}");
+    assert_eq!(ended[0]["reason"], json!("used_up"), "{ended:?}");
+    let range = org.range(id);
+    assert_eq!(
+        candidate(&range, 31)["left_out_why"],
+        json!("skipped"),
+        "{range}"
+    );
+    assert!(org.tasks().is_empty(), "{:?}", org.tasks());
+}
+
+/// A comment line naming more than its run is still read for the refs it does name: the triage
+/// keeps blocking on #3.
+#[test]
+fn a_comment_line_with_more_than_its_run_still_blocks_in_the_triage() {
+    let scan = triage(vec![
+        issue(3, "Three", "Three.", "-"),
+        issue(9, "Nine", "Nine.", "-"),
+        issue(10, "Ten", "Ten.", "Depends on #3, then see #9"),
+    ]);
+    let b = row(&scan, "excluded_blocked", 10)
+        .unwrap_or_else(|| panic!("10 is not in excluded_blocked: {scan}"));
+    assert!(
+        b["blocking_refs"]
+            .as_array()
+            .is_some_and(|r| r.contains(&json!(3))),
+        "{scan}"
+    );
+    assert!(row(&scan, "candidates", 10).is_none(), "{scan}");
 }

@@ -94,11 +94,15 @@ fn approvals(db: &Path, id: i64) -> Vec<Value> {
         .collect()
 }
 
-/// The door's verb and arguments of `makiba range approve <id> --read <read> --yes`.
+/// The door's verb and arguments of `makiba range approve <id> --read <read> --mode <mode> --yes`,
+/// with the mode of the door in this process (Issue 326: the approval carries the mode shown).
 fn approve_request(id: i64, read: i64) -> (&'static str, Value) {
     let (id, read) = (id.to_string(), read.to_string());
-    let m = Makiba::try_parse_from(["makiba", "range", "approve", &id, "--read", &read, "--yes"])
-        .unwrap_or_else(|e| panic!("the command line is refused: {e}"));
+    let mode = makiba::daemon::gate::merge_approval_mode();
+    let m = Makiba::try_parse_from([
+        "makiba", "range", "approve", &id, "--read", &read, "--mode", mode, "--yes",
+    ])
+    .unwrap_or_else(|e| panic!("the command line is refused: {e}"));
     request(m.verb).unwrap()
 }
 

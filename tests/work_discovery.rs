@@ -2232,10 +2232,14 @@ mod dependency_warnings {
         assert_eq!(w[0]["line"], "This depends on");
     }
 
+    /// Changed (Issue 356): a ref only on the next line is warned of, and the dependency line is
+    /// unreadable, as the range reads it: no candidate, not blocked.
     #[test]
-    fn does_not_change_candidates() {
+    fn a_ref_on_the_next_line_warns_and_is_unreadable() {
         let r = scan(vec![issue(7, "Depends on\n#12", &[])], &[], vec![]);
-        assert_eq!(r["candidate_count"], 1);
+        assert_eq!(r["dependency_warnings"].as_array().map(Vec::len), Some(1));
+        assert_eq!(r["candidate_count"], 0);
+        assert_eq!(r["excluded_dependency_unreadable"][0]["issue"], 7);
         assert_eq!(r["excluded_blocked"], json!([]));
     }
 }
