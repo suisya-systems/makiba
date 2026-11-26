@@ -1,6 +1,6 @@
 # The screen acts as the person
 
-Status: design note for Issue 404, 2026-11-27, approved by the person the same day (through the secretary), with the revision of decision 3 in section 3 and with merge approve and refuse excluded (section 1). Nothing is built. It follows the person's answers to the Issue's decisions 1 to 5 (given through the secretary on 2026-11-27: the worker's recommendations, as written). Decision 6, where the screen runs, is not measured yet (probe P17, [probes.md](probes.md)), so this note covers each outcome of [screen.md](screen.md) section 5 and says which choice changes under each. Read beside screen.md sections 4, 5 and 10, [spec.md](spec.md) sections 3, 5.2 and 12, and [lines.md](lines.md).
+Status: design note for Issue 404, 2026-11-27, approved by the person the same day (through the secretary), with the revision of decision 3 in section 3 and with merge approve and refuse excluded (section 1). Nothing is built. It follows the person's answers to the Issue's decisions 1 to 5 (given through the secretary on 2026-11-27: the worker's recommendations, as written). Decision 6, where the screen runs, was measured after the approval (probe P17, [probes.md](probes.md), 2026-11-26: outcome B, decided read-only by the person on 2026-11-27, section 3). This note covers each outcome of [screen.md](screen.md) section 5 and says which choice changes under each. Read beside screen.md sections 4, 5 and 10, [spec.md](spec.md) sections 3, 5.2 and 12, and [lines.md](lines.md).
 
 The line this note keeps: only the person's word counts, and nothing else acts as the person (lines.md; goal G1). A button on the screen does exactly what the person's own `makiba` command does today. It adds no verb, no key, no role and no way around a refusal.
 
@@ -13,7 +13,7 @@ The line this note keeps: only the person's word counts, and nothing else acts a
 | 3 | The actor recorded | (b) `person`, marked as coming through the screen. |
 | 4 | Which acts | A subset. Answer yes or no (with a note). Range pause, resume and end, and range approve with `--read` (which exists since Issue 408). Send, with the screen's fixed sentences only. Close with `--abandon`. |
 | 5 | Confirmation and undo | Abandon and approve need a typed confirmation, not a click. End is confirmed by a click. Nothing is undone from the screen, except that pause and resume undo each other. |
-| 6 | Where it runs | Not measured: probe P17. Section 3 below takes each outcome. |
+| 6 | Where it runs | Measured by probe P17 on 2026-11-26: outcome B of section 3. The person decided on 2026-11-27 that the screen stays read-only (section 3, "The measured outcome"). |
 
 Excluded: `makiba merge approve` and `merge refuse` (spec.md section 12, the merge row). The person left them out of the subset for now (2026-11-27). They are added later by an Issue of their own, once P17 shows outcome A (section 3); until then the screen shows no control for them.
 
@@ -43,6 +43,12 @@ P17 records, per M, yes or no, and for M2 how the app ran the command: `extensio
 | D. M2 fails; M3 passes (the page beside the terminal) or neither passes | The page behind `makiba screen` on 127.0.0.1, read-only (screen.md section 7, step 2). | (c) has no client: a page in a browser cannot open a Unix socket, and (b) was ruled out. | Read-only. Each control shows the line to type. |
 
 So under A', B, C and D the person's answers give a read-only screen, and none of the builds of section 7 is worth doing yet. This is where the Issue's options and the platform disagree: option 2(c) names a socket readable by the person only, but the clients that could use it (the app's addition, or a native program) are exactly the ones of outcome A, where no socket is needed, and a page cannot use one. Under every outcome no new listener is built. If the person later wants the page of D to act, that is option 2(b) again, which they ruled out, and it needs its own decision.
+
+### The measured outcome: B
+
+P17 ran on 2026-11-26 ([probes.md](probes.md) P17 and section 4). M1 passed in the app (`m1-command`: an addition of herdr-app ran `makiba status --json` and showed it refreshed). M2 passed by `extension` (`m2-act`: the `commands` row is by `person`). M3 failed: an addition has no web view, so the page cannot be framed. M4 says another local program can start an addition, through `herdr-app do`, not only a click in the app. That is outcome B.
+
+The person's decision on B (2026-11-27, through the secretary): the screen stays read-only and only P1a is built (Issue 570; section 7). Decision 2 stays open until it is shown that no agent can reach `herdr-app do`. Until then the screen is not made to act through the app, and P1b and P1c are not built. Option (c) stays without a client, as the paragraph above says.
 
 What changes between the outcomes is decision 2, whether the buttons act, and how far decisions 3 and 5 reach. Decisions 1 and 4 hold under every outcome: no new holder of the key, and the subset of decision 4 decides which controls show a line or act. Under the read-only outcomes:
 
@@ -113,4 +119,4 @@ Under outcomes A', B, C and D only P1a is proposed. P1b and P1c wait, and the sc
 
 Later, by an Issue of its own once P17 shows outcome A: `merge approve` and `merge refuse` on the screen (section 1). The proposal to start from: a typed confirmation of the pull request's number for approve, a click for refuse, and no undo.
 
-Left to the person: under outcome B, the M4 paragraph decides whether the screen may act at all.
+Left to the person: under outcome B, the M4 paragraph decides whether the screen may act at all. P17 showed B, and the person decided (2026-11-27, section 3): only P1a is built, as Issue 570, and the screen stays read-only until it is shown that no agent can reach `herdr-app do`.
