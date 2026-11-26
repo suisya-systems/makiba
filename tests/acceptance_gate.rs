@@ -79,6 +79,8 @@ fn init() -> PathBuf {
             std::env::set_var("MAKIBA_GH", &script);
             std::env::set_var("FAKE_GH_DIR", home.path());
             std::env::set_var("MAKIBA_REPOS_DIR", home.path().join("repos"));
+            // Issue 512: a failed read of GitHub is tried again; the wait between tries is short.
+            std::env::set_var("MAKIBA_GATE_READ_WAIT_MS", "10");
         }
     });
     HOME.get().unwrap().path().to_path_buf()
@@ -974,7 +976,8 @@ fn unreadable_check_runs_rejected() {
     c.ci(7, "failed", &m);
     // The stand-in answers the PR view, then fails on every API read.
     std::fs::write(c.gh.join("fail-api"), "").unwrap();
-    expect(&js_gate(&c, &head), "rejected", "cannot read");
+    // Issue 512: a read of GitHub that failed is not a refusal on the content.
+    expect(&js_gate(&c, &head), "unavailable", "cannot read");
 }
 
 #[test]
@@ -1482,7 +1485,8 @@ fn gh_failure_is_refused() {
     c.land();
     let head = c.ci_all(7);
     std::fs::write(c.gh.join("fail"), "").unwrap();
-    expect(&c.gate_at(7, &head), "rejected", "gh pr view failed");
+    // Issue 512: a read of GitHub that failed is not a refusal on the content.
+    expect(&c.gate_at(7, &head), "unavailable", "gh pr view failed");
 }
 
 #[test]

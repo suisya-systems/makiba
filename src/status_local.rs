@@ -153,7 +153,17 @@ pub fn read_as(path: &Path, reader: Reader) -> Result<Value, String> {
         "anomalies": anomalies(&conn).map_err(sql)?, "pending": pending(&conn).map_err(sql)?,
         "pr_watches": pr_watches(&conn).map_err(sql)?,
         "pull_requests": pull_requests(&conn).map_err(sql)?});
-    v["ranges"] = Value::Array(crate::daemon::belt::read_ranges(&conn).map_err(sql)?);
+    let mut ranges = crate::daemon::belt::read_ranges(&conn).map_err(sql)?;
+    // Issue 326: a draft shows the mode approving it now would fix, the one this reader knows as
+    // `makibad`'s (the same value as `merge_approval_mode`); every other range shows none.
+    for r in &mut ranges {
+        r["approves_under"] = if r["status"] == "proposed" {
+            json!(mode)
+        } else {
+            Value::Null
+        };
+    }
+    v["ranges"] = Value::Array(ranges);
     v["belt"] = Value::Array(crate::daemon::belt::read_belt(&conn).map_err(sql)?);
     v["next_work"] = next_work(&conn).map_err(sql)?;
     Mask::new(&conn).value(&mut v);
@@ -722,10 +732,19 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
         _ => Value::Null,
     };
     let of_merge = |k: &str| merged.as_ref().map_or(Value::Null, |m| m[k].clone());
+    // Issue 338: the merge orders the person set on it, each with whether it has landed.
+    let merge_order: Vec<Value> = crate::daemon::gate::person_orders(conn, repo, pr)?
+        .into_iter()
+        .map(|o| {
+            json!({"event_id": o.event_id, "after": o.after, "number": o.number,
+                   "reason": o.reason, "by": o.by, "landed": o.landed})
+        })
+        .collect();
     Ok(
         json!({"repo": repo, "pr": pr, "task_id": row["task_id"], "title": title,
               "head_oid": head, "ci": ci, "state": state, "merged_via": of_merge("merged_via"),
-              "merged_by": of_merge("merged_by"), "merge_state": merge_state}),
+              "merged_by": of_merge("merged_by"), "merge_state": merge_state,
+              "merge_order": merge_order}),
     )
 }
 

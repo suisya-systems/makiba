@@ -28,10 +28,28 @@
 //! differs at head is reported (`edited_tests`); under `acceptance` such a pull request is refused,
 //! under `human` the person is asked. A test kept outside a folder `tests` is not seen.
 //!
+//! Test helpers (Issue 513, docs/design/helper-fix.md option D): no rule tells a helper repaired
+//! from a helper weakened, so three lists ask the person's key under either mode, each path with
+//! the object ids it was judged from: `helpers_changed` (a helper the test commit left alone,
+//! changed, added or deleted after it), `merged_tests` (a declared path head holds as git's clean
+//! merge of the test commit and the base: no condition (a) refusal) and `base_helpers` (a helper
+//! the base changed after the test commit's parent). A helper is no edited test; test
+//! infrastructure stays under condition (a).
+//!
 //! Merge order (Issue 331, docs/design/merge-order.md): a pull request whose own changes touch
 //! `landing::CHECKS` may add or tighten a check over `tests/`; `merge_order` reads, git only,
 //! which other open pull requests have a test commit (whose declared tests cannot change), and the
 //! door holds it while there are any.
+//!
+//! A merge order the person sets (Issue 338, docs/design/merge-order.md section 6): `merge` action
+//! `order` records "A merges only after Issue or pull request B has landed" (`merge_order_set`);
+//! `person_orders` reads, from the ledger only, each such order of a pull request and whether its
+//! B has landed, and the door refuses A under either mode while one has not.
+//!
+//! The language check (Issue 339): a pull request whose own changes touch `LANGUAGE_CHECK` (the
+//! language check's allowlist, or its checker, which holds its scope) lands only with the
+//! person's yes to a question naming each file's mode and object id at head; `language_change`
+//! reads them, git only, and the door decides.
 //!
 //! Pin: the first verdict that saw a manifest records a digest of the declared files and of the
 //! other paths the test commit changed (its test helpers); a later
@@ -70,6 +88,124 @@ pub struct Reject(pub String);
 
 fn reject<T>(why: impl Into<String>) -> Result<T, Reject> {
     Err(Reject(why.into()))
+}
+
+/// Why a read of the gate gave no answer (Issue 512): a refusal on what was read, or a read of
+/// GitHub that failed (gh's non-zero exit, a timeout, no program, a failed fetch), which says
+/// nothing about the pull request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Fault {
+    Refused(String),
+    Unavailable(String),
+}
+
+impl From<Reject> for Fault {
+    fn from(r: Reject) -> Fault {
+        Fault::Refused(r.0)
+    }
+}
+
+impl From<Fault> for Reject {
+    fn from(f: Fault) -> Reject {
+        match f {
+            Fault::Refused(why) | Fault::Unavailable(why) => Reject(why),
+        }
+    }
+}
+
+/// The most tries of one read of GitHub (Issue 512).
+const READ_TRIES: u32 = 3;
+/// No new try of a read starts this long after its first began: a timed-out read is not tripled.
+const READ_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
+/// The wait between two tries, unless `$MAKIBA_GATE_READ_WAIT_MS` (the test seam) says otherwise.
+const READ_WAIT_MS: u64 = 5000;
+pub const READ_WAIT_ENV: &str = "MAKIBA_GATE_READ_WAIT_MS";
+
+/// One try of a read: its answer, a fault that no other try changes, or a failed read of GitHub
+/// that may answer on another try.
+enum Try<T> {
+    Done(Result<T, Fault>),
+    Again(String),
+}
+
+/// A read of GitHub tried up to `READ_TRIES` times, `$MAKIBA_GATE_READ_WAIT_MS` apart, each try
+/// starting before `READ_WINDOW` has passed since the first began; a read that still fails is
+/// `Fault::Unavailable` with its last message and the number of tries.
+fn with_tries<T>(read: impl FnMut() -> Try<T>) -> Result<T, Fault> {
+    let wait = std::env::var(READ_WAIT_ENV)
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .unwrap_or(READ_WAIT_MS);
+    let started = std::time::Instant::now();
+    with_tries_in(
+        std::time::Duration::from_millis(wait),
+        READ_WINDOW,
+        || started.elapsed(),
+        std::thread::sleep,
+        read,
+    )
+}
+
+/// `with_tries` with its wait, window, clock (the time since the first try began) and sleep: no
+/// try is started once `window` has passed, so a wait that would end after it ends the read
+/// instead, and the window is read again after the wait (a sleep may last longer than asked: a
+/// busy host, a suspended one).
+fn with_tries_in<T>(
+    wait: std::time::Duration,
+    window: std::time::Duration,
+    elapsed: impl Fn() -> std::time::Duration,
+    sleep: impl Fn(std::time::Duration),
+    mut read: impl FnMut() -> Try<T>,
+) -> Result<T, Fault> {
+    let mut tries = 0;
+    loop {
+        tries += 1;
+        let why = match read() {
+            Try::Done(r) => return r,
+            Try::Again(why) => why,
+        };
+        if tries < READ_TRIES && elapsed() + wait < window {
+            sleep(wait);
+            if elapsed() < window {
+                continue;
+            }
+        }
+        let n = if tries == 1 {
+            "1 try".to_string()
+        } else {
+            format!("{tries} tries")
+        };
+        return Err(Fault::Unavailable(format!("{why} (after {n})")));
+    }
+}
+
+/// A failed gh call as one line: its message, and the first line of what it wrote on stderr (the
+/// error GitHub answered); and whether another try may answer.
+fn gh_failure(program: &str, e: GhError) -> (String, bool) {
+    match e {
+        GhError::Missing => (format!("no program {program}"), false),
+        GhError::Cancelled => ("cancelled".into(), false),
+        GhError::Failed(f) => {
+            let first = f.stderr.lines().map(str::trim).find(|l| !l.is_empty());
+            match first {
+                Some(l) => (format!("{}: {l}", f.message), true),
+                None => (f.message, true),
+            }
+        }
+    }
+}
+
+/// One try of a gh read: a failure that another try may change is `Again`, one that it will not
+/// (no program, cancelled) is unavailable at once.
+fn gh_try(program: &str, args: &[&str], what: &str) -> Try<String> {
+    let never = AtomicBool::new(false);
+    match gh::run_gh(program, args, &never) {
+        Ok(out) => Try::Done(Ok(out)),
+        Err(e) => match gh_failure(program, e) {
+            (why, true) => Try::Again(format!("{what}: {why}")),
+            (why, false) => Try::Done(Err(Fault::Unavailable(format!("{what}: {why}")))),
+        },
+    }
 }
 
 /// The merge approval mode, and a warning for a value that is neither: `human` unless the setting
@@ -345,7 +481,7 @@ fn check_protected(
     base: &str,
     head: &str,
     manifest: &[String],
-) -> Result<(), Reject> {
+) -> Result<Vec<Change>, Reject> {
     let short = &msha[..12];
     if git(repo, &["rev-list", "--parents", "-n1", msha])?
         .split_whitespace()
@@ -393,12 +529,77 @@ fn check_protected(
         })
         .map(String::as_str)
         .collect();
+    // Issue 513: a declared or test-commit path that head holds as git's clean merge of the test
+    // commit and the base (no conflict on that path) is no change of the pull request's own; it is
+    // named for the person (`merged_tests`). Infrastructure the test commit left alone is not.
+    let mut merged = Vec::new();
+    let changed: Vec<&str> = if changed.is_empty() {
+        changed
+    } else {
+        let (mt, conflicted) = merge_tree(repo, msha, base)?;
+        changed
+            .into_iter()
+            .filter(|p| {
+                let own =
+                    !is_infra(p) && (touched.contains(*p) || manifest.iter().any(|m| under(p, m)));
+                if own && !conflicted.contains(*p) && ph.get(*p) == mt.get(*p) {
+                    merged.push(Change {
+                        path: p.to_string(),
+                        ids: vec![
+                            entry_id(pm.get(*p)),
+                            entry_id(pb.get(*p)),
+                            entry_id(ph.get(*p)),
+                        ],
+                    });
+                    false
+                } else {
+                    true
+                }
+            })
+            .collect()
+    };
     if !changed.is_empty() {
         return reject(format!(
             "protected paths changed after the test commit {short}: {changed:?} (rebase so the test commit sits on the new base if the change came from base)"
         ));
     }
-    Ok(())
+    Ok(merged)
+}
+
+/// The tree `git merge-tree --write-tree a b` writes, and the paths it left in conflict. A git
+/// that fails otherwise is an error.
+fn merge_tree(repo: &Path, a: &str, b: &str) -> Result<(Tree, BTreeSet<String>), Reject> {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(repo)
+        .args([
+            "-c",
+            HOOKS_OFF,
+            "merge-tree",
+            "--write-tree",
+            "--name-only",
+            "--no-messages",
+            "-z",
+            a,
+            b,
+        ])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .map_err(|e| Reject(format!("cannot run git: {e}")))?;
+    if !matches!(out.status.code(), Some(0 | 1)) {
+        return reject(format!("git merge-tree failed for {a} {b}"));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let mut parts = text.split('\0');
+    let Some(id) = parts.next().filter(|t| !t.trim().is_empty()) else {
+        return reject(format!("git merge-tree wrote no tree for {a} {b}"));
+    };
+    let conflicted = parts
+        .take_while(|p| !p.is_empty())
+        .map(String::from)
+        .collect();
+    Ok((tree(repo, id.trim())?, conflicted))
 }
 
 /// M is the PR's first own commit: its parent is in the base, every other commit comes after it.
@@ -638,27 +839,21 @@ fn clean_base_merge(repo: &Path, base: &str, c: &str, parents: &[&str]) -> Resul
 
 // ---- GitHub --------------------------------------------------------------------------------------
 
-/// One JSON value per line of `gh api --paginate <path> --jq <jq>`.
-pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Reject> {
-    let never = AtomicBool::new(false);
-    let out =
-        gh::run_gh(program, &["api", "--paginate", path, "--jq", jq], &never).map_err(|e| {
-            Reject(format!(
-                "cannot read {path} from GitHub: {}",
-                match e {
-                    GhError::Missing => format!("no program {program}"),
-                    GhError::Cancelled => "cancelled".into(),
-                    GhError::Failed(f) => f.message,
-                }
-            ))
-        })?;
+/// One JSON value per line of `gh api --paginate <path> --jq <jq>`. A failed read is tried again
+/// (Issue 512) and, if it still fails, is `Fault::Unavailable`; an answer that is not JSON is
+/// `Fault::Refused`.
+pub fn gh_lines_read(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Fault> {
+    let what = format!("cannot read {path} from GitHub");
+    let out = with_tries(|| gh_try(program, &["api", "--paginate", path, "--jq", jq], &what))?;
     out.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| {
-            serde_json::from_str(l)
-                .map_err(|e| Reject(format!("cannot read {path} from GitHub: {e}")))
-        })
+        .map(|l| serde_json::from_str(l).map_err(|e| Fault::Refused(format!("{what}: {e}"))))
         .collect()
+}
+
+/// `gh_lines_read`, either fault as a `Reject`.
+pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Reject> {
+    gh_lines_read(program, path, jq).map_err(Reject::from)
 }
 
 /// (check suite, workflow, base SHAs) of the latest `pull_request` run per workflow at `sha`.
@@ -666,14 +861,32 @@ pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Rejec
 pub struct Ci {
     program: String,
     runs: BTreeMap<String, Vec<(i64, i64, Vec<String>)>>,
+    /// A read of GitHub that still failed after its tries (Issue 512): the refusal it caused is
+    /// not one on the pull request.
+    unavailable: Option<String>,
 }
 
 impl Ci {
     pub fn new(program: &str) -> Ci {
         Ci {
             program: program.to_string(),
-            runs: BTreeMap::new(),
+            ..Default::default()
         }
+    }
+
+    /// The message of a read of GitHub that still failed after its tries, if one did.
+    pub fn unavailable(&self) -> Option<&str> {
+        self.unavailable.as_deref()
+    }
+
+    /// `gh_lines_read`, keeping a read that stayed unavailable.
+    fn lines(&mut self, path: &str, jq: &str) -> Result<Vec<Value>, Reject> {
+        gh_lines_read(&self.program, path, jq).map_err(|f| {
+            if let Fault::Unavailable(why) = &f {
+                self.unavailable = Some(why.clone());
+            }
+            Reject::from(f)
+        })
     }
 
     /// The latest run per workflow; a latest run that names no base is dropped, not replaced.
@@ -686,8 +899,7 @@ impl Ci {
             return Ok(r.clone());
         }
         let mut latest: BTreeMap<i64, Value> = BTreeMap::new();
-        for r in gh_lines(
-            &self.program,
+        for r in self.lines(
             &format!("repos/{repo}/actions/runs?head_sha={sha}&event=pull_request&per_page=100"),
             ".workflow_runs[] | {wf: .workflow_id, suite: .check_suite_id, created: .created_at, bases: [.pull_requests[].base.sha]}",
         )? {
@@ -736,8 +948,7 @@ impl Ci {
             .collect();
         let mut latest: BTreeMap<(i64, String, i64), (String, String)> = BTreeMap::new();
         // filter=all: the default keeps one run per name, and a push run can hide the PR's.
-        for r in gh_lines(
-            &self.program,
+        for r in self.lines(
             &format!("repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100"),
             ".check_runs[] | {app: .app.id, name, conclusion, completed_at, suite: .check_suite.id}",
         )? {
@@ -783,8 +994,122 @@ pub struct Verdict {
     /// The tests that were there before the test commit, are not declared and differ at head
     /// (`edited_tests`); the door decides what they mean under the mode.
     pub edited_tests: Vec<String>,
+    /// Issue 513 (docs/design/helper-fix.md, option D): test helpers changed after the test commit
+    /// (ids at the test commit and at head), declared paths the base merged in cleanly (ids at the
+    /// test commit, the base and head), and helpers the base changed after the test commit's
+    /// parent (ids there and at the base). The door asks the person's key for any.
+    pub helpers_changed: Vec<Change>,
+    pub merged_tests: Vec<Change>,
+    pub base_helpers: Vec<Change>,
+    /// `git diff --stat` of those (test commit to head, test commit's parent to base), for the
+    /// pending merge entry's text.
+    pub helper_stats: Vec<String>,
     /// The merge order (Issue 331); the door decides what it means under the mode.
     pub merge_order: MergeOrder,
+    /// The language check's files the PR's own changes touch (Issue 339); the door decides.
+    pub language_change: Vec<LanguageEntry>,
+}
+
+/// A path the gate names for the person's key, with the object ids it was judged from, in the
+/// order of its list (`none` for a missing entry).
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Change {
+    pub path: String,
+    pub ids: Vec<String>,
+}
+
+fn entry_id(e: Option<&(String, String)>) -> String {
+    match e {
+        None => "none".into(),
+        Some((mode, obj)) if mode == "100644" => obj.clone(),
+        Some((mode, obj)) => format!("{obj} (mode {mode})"),
+    }
+}
+
+/// A test helper by the acceptance checker's classification (`is_helper` of
+/// `scripts/acceptance-check.sh`): under `tests/`, neither `tests/<name>.rs`,
+/// `tests/<name>/main.rs` nor a `test_*.py`.
+pub fn is_helper(path: &str) -> bool {
+    let Some(r) = path.strip_prefix("tests/") else {
+        return false;
+    };
+    let name = path.rsplit('/').next().unwrap_or(path);
+    let py = name.starts_with("test_") && name.ends_with(".py");
+    let rs = match r.matches('/').count() {
+        0 => r.ends_with(".rs"),
+        1 => r.ends_with("/main.rs"),
+        _ => false,
+    };
+    !py && !rs
+}
+
+/// A test helper the route of Issue 513 covers: a helper that is not test infrastructure.
+fn route_helper(path: &str) -> bool {
+    is_helper(path) && !is_infra(path)
+}
+
+/// Issue 513: the helpers the pull request changed after its test commit `msha`
+/// (`helpers_changed`) and those the base changed after the test commit's parent
+/// (`base_helpers`). Left out: infrastructure and paths the test commit changed; for
+/// `helpers_changed` also declared paths and a helper head holds as the base does.
+pub fn helper_changes(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    msha: &str,
+    manifest: &[String],
+) -> Result<(Vec<Change>, Vec<Change>), Reject> {
+    let touched = changed_by(repo, msha)?;
+    let parent = git(repo, &["rev-parse", &format!("{msha}^")])?;
+    let (tp, tm, th, tb) = (
+        tree(repo, parent.trim())?,
+        tree(repo, msha)?,
+        tree(repo, head)?,
+        tree(repo, base)?,
+    );
+    let mine = |p: &str| route_helper(p) && !touched.contains(p);
+    let keys: BTreeSet<&String> = tm.keys().chain(th.keys()).collect();
+    let changed: Vec<Change> = keys
+        .into_iter()
+        .filter(|p| mine(p) && !manifest.iter().any(|m| under(p, m)))
+        .filter(|p| tm.get(*p) != th.get(*p) && th.get(*p) != tb.get(*p))
+        .map(|p| Change {
+            path: p.clone(),
+            ids: vec![entry_id(tm.get(p)), entry_id(th.get(p))],
+        })
+        .collect();
+    let keys: BTreeSet<&String> = tp.keys().chain(tb.keys()).collect();
+    let based: Vec<Change> = keys
+        .into_iter()
+        .filter(|p| mine(p) && tp.get(*p) != tb.get(*p))
+        .map(|p| Change {
+            path: p.clone(),
+            ids: vec![entry_id(tp.get(p)), entry_id(tb.get(p))],
+        })
+        .collect();
+    Ok((changed, based))
+}
+
+/// `git diff --stat from to -- paths` under a heading line naming the range; nothing for no path.
+pub fn diff_stat(
+    repo: &Path,
+    from: &str,
+    to: &str,
+    paths: &[&Change],
+) -> Result<Vec<String>, Reject> {
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut args = vec!["diff", "--no-renames", "--stat=200", from, to, "--"];
+    args.extend(paths.iter().map(|c| c.path.as_str()));
+    let out = git(repo, &args)?;
+    let id = |rev: &str| -> Result<String, Reject> {
+        let full = git(repo, &["rev-parse", &format!("{rev}^{{commit}}")])?;
+        Ok(full.trim().chars().take(12).collect())
+    };
+    let mut lines = vec![format!("git diff --stat {}..{}:", id(from)?, id(to)?)];
+    lines.extend(out.lines().map(|l| l.trim_end().to_string()));
+    Ok(lines)
 }
 
 /// A file under a folder `tests`: what the gate reports when a pull request edits it without
@@ -799,7 +1124,8 @@ fn is_test(path: &str) -> bool {
 /// test is declared. Left out: the declared paths and every other path the test commit changed,
 /// such as a helper it extended (condition (a) holds them; Issue 361), and a file `head`
 /// holds exactly as `base` does (the base brought that change, as in `check_protected`). A new
-/// test is not an edited one. A moved test is reported at the path it left.
+/// test is not an edited one. A moved test is reported at the path it left. With a test commit, a
+/// test helper that is not infrastructure is left out too (Issue 513: `helper_changes`).
 pub fn edited_tests(
     repo: &Path,
     base: &str,
@@ -819,14 +1145,83 @@ pub fn edited_tests(
         tree(repo, head)?,
         tree(repo, base)?,
     );
+    // Issue 513: with a test commit, a test helper is no edited test (`helper_changes` reads it).
+    let helper_route = msha.is_some();
     Ok(tp
         .iter()
-        .filter(|(p, _)| {
-            is_test(p) && !manifest.iter().any(|m| under(p, m)) && !by_test_commit.contains(*p)
-        })
+        .filter(|(p, _)| is_test(p) && !(helper_route && route_helper(p)))
+        .filter(|(p, _)| !manifest.iter().any(|m| under(p, m)) && !by_test_commit.contains(*p))
         .filter(|(p, e)| th.get(*p) != Some(*e) && th.get(*p) != tb.get(*p))
         .map(|(p, _)| p.clone())
         .collect())
+}
+
+// ---- the language check (Issue 339) -----------------------------------------------------------
+
+/// The files of the language check: its exceptions, and its checker, whose scope is not read
+/// (any change to it counts; a reading of the Python would be a hand parse of a safety rule).
+pub const LANGUAGE_CHECK: [&str; 2] = ["tools/language-allowlist.txt", "tools/check_language.py"];
+
+/// One file of `LANGUAGE_CHECK` the PR's own changes touch, as `git ls-tree` reads it at head:
+/// `None` for both when the PR deletes it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LanguageEntry {
+    pub path: String,
+    pub mode: Option<String>,
+    pub oid: Option<String>,
+}
+
+impl LanguageEntry {
+    /// A regular file (or a deletion): only such a change can be approved by the person's word.
+    pub fn approvable(&self) -> bool {
+        self.mode
+            .as_deref()
+            .is_none_or(|m| m == "100644" || m == "100755")
+    }
+
+    /// `<path> at <mode> <oid>`, or `<path> deleted`: the words of the person's question.
+    pub fn words(&self) -> String {
+        match (&self.mode, &self.oid) {
+            (Some(m), Some(o)) => format!("{} at {m} {o}", self.path),
+            _ => format!("{} deleted", self.path),
+        }
+    }
+}
+
+/// The files of `LANGUAGE_CHECK` the PR's own changes (from the merge base of `base` and `head`
+/// to `head`, as `check_paths` reads them) touch, the path itself or under it, in that order.
+/// A change only the base made is not the PR's.
+pub fn language_change(repo: &Path, base: &str, head: &str) -> Result<Vec<LanguageEntry>, Reject> {
+    let mb = git(repo, &["merge-base", base, head])?;
+    let changed = git(
+        repo,
+        &["diff", "--no-renames", "--name-only", "-z", mb.trim(), head],
+    )?;
+    let mut out = Vec::new();
+    for c in LANGUAGE_CHECK {
+        if !changed.split('\0').any(|p| !p.is_empty() && under(p, c)) {
+            continue;
+        }
+        let line = git(repo, &["ls-tree", "-z", head, "--", c])?;
+        let line = line.trim_end_matches('\0');
+        let (mode, oid) = match line.split_once('\t') {
+            None if line.is_empty() => (None, None),
+            None => return reject(format!("git ls-tree {c}: cannot read {line:?}")),
+            Some((meta, _)) => {
+                let words: Vec<&str> = meta.split(' ').collect();
+                let [mode, _, oid] = words[..] else {
+                    return reject(format!("git ls-tree {c}: cannot read {line:?}"));
+                };
+                (Some(mode.to_string()), Some(oid.to_string()))
+            }
+        };
+        out.push(LanguageEntry {
+            path: c.to_string(),
+            mode,
+            oid,
+        });
+    }
+    Ok(out)
 }
 
 // ---- the merge order (Issue 331) ---------------------------------------------------------------
@@ -863,12 +1258,146 @@ pub struct MergeOrder {
     pub waits_for: Vec<Waiting>,
     /// `(pr, task, why)` of an open pull request that could not be read: it holds as one waiting.
     pub not_read: Vec<(i64, String, String)>,
+    /// The orders the person set (Issue 338) whose pull request or Issue has not landed.
+    pub after: Vec<After>,
+    /// Each read of GitHub for another pull request that still failed after its tries (Issue 512),
+    /// one per entry of `not_read` that failed so. With nothing in `waits_for` and every entry of
+    /// `not_read` such a read, the order is not known, and the gate answers `unavailable` when no
+    /// rule on the content refused the pull request; a read refused on what it answered holds.
+    pub unavailable: Vec<String>,
 }
 
 impl MergeOrder {
+    /// Why the order is not known (Issue 512): every pull request that holds it could not be read
+    /// from GitHub, and none is known to hold it.
+    pub fn not_known(&self) -> Option<String> {
+        (self.waits_for.is_empty()
+            && !self.unavailable.is_empty()
+            && self.unavailable.len() == self.not_read.len())
+        .then(|| self.unavailable.join("; "))
+    }
+}
+
+impl MergeOrder {
+    /// The hold of Issue 331 (open test commits wait for a check-adding pull request).
     pub fn holds(&self) -> bool {
         !self.waits_for.is_empty() || !self.not_read.is_empty()
     }
+
+    /// An order the person set holds (Issue 338).
+    pub fn person_holds(&self) -> bool {
+        !self.after.is_empty()
+    }
+}
+
+/// A merge order the person set (Issue 338): the pull request merges only after `after`
+/// (`pr` or `issue`) `number` has landed. `project` is the order's project for an Issue.
+#[derive(Debug, Clone, PartialEq)]
+pub struct After {
+    pub event_id: i64,
+    pub after: String,
+    pub number: i64,
+    pub project: Option<String>,
+    pub reason: String,
+    pub by: String,
+    pub landed: bool,
+}
+
+impl After {
+    /// `Issue <n>` or `pull request #<n>`.
+    pub fn named(&self) -> String {
+        if self.after == "issue" {
+            format!("Issue {}", self.number)
+        } else {
+            format!("pull request #{}", self.number)
+        }
+    }
+}
+
+/// Whether an order's B has landed, from the ledger only (docs/design/merge-order.md 6.2): for a
+/// pull request, a `pr_merged` of it (repository in any case) of any run; for an Issue, a
+/// `pr_merged` of the order's repository (any case) on a run of the order's project whose
+/// `issue_refs` names `<project>#<n>`, of that run's current pull request (a merge of one it has
+/// replaced since does not count).
+pub fn order_landed(
+    c: &rusqlite::Connection,
+    repo: &str,
+    after: &str,
+    number: i64,
+    project: Option<&str>,
+) -> rusqlite::Result<bool> {
+    if after == "pr" {
+        return c.query_row(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'pr_merged'
+               AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+               AND json_extract(payload_json, '$.pr') = ?2)",
+            rusqlite::params![repo, number],
+            |r| r.get(0),
+        );
+    }
+    let Some(project) = project else {
+        return Ok(false);
+    };
+    c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
+               JOIN projects p ON p.id = r.project_id
+               WHERE e.kind = 'pr_merged' AND p.slug = ?1
+                 AND lower(json_extract(e.payload_json, '$.repo')) = lower(?3)
+                 AND EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid(r.issue_refs)
+                                                     THEN r.issue_refs ELSE '[]' END) j
+                             WHERE j.value = ?2)
+                 AND {})",
+            super::belt::is_current_pr_sql(
+                "r",
+                "json_extract(e.payload_json, '$.repo')",
+                "json_extract(e.payload_json, '$.pr')"
+            )
+        ),
+        rusqlite::params![project, super::belt::issue_ref(project, number), repo],
+        |r| r.get(0),
+    )
+}
+
+/// The merge orders the person set on `repo#pr` (Issue 338): every `merge_order_set` of it
+/// (repository in any case), in event order, the first one per `(after, number)`, each with
+/// whether its B has landed. Ledger only: no git, no `gh`.
+pub fn person_orders(
+    c: &rusqlite::Connection,
+    repo: &str,
+    pr: i64,
+) -> rusqlite::Result<Vec<After>> {
+    let mut st = c.prepare(
+        "SELECT id, payload_json FROM events WHERE kind = 'merge_order_set'
+           AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+           AND json_extract(payload_json, '$.pr') = ?2
+         ORDER BY id",
+    )?;
+    let rows: Vec<(i64, String)> = st
+        .query_map(rusqlite::params![repo, pr], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut out: Vec<After> = Vec::new();
+    for (id, text) in rows {
+        let v: Value = serde_json::from_str(&text).unwrap_or_default();
+        let (Some(after), Some(number)) = (v["after"].as_str(), v["number"].as_i64()) else {
+            continue;
+        };
+        if out.iter().any(|o| o.after == after && o.number == number) {
+            continue;
+        }
+        let project = v["project"].as_str().map(String::from);
+        let landed = order_landed(c, repo, after, number, project.as_deref())?;
+        out.push(After {
+            event_id: id,
+            after: after.to_string(),
+            number,
+            project,
+            reason: v["reason"].as_str().unwrap_or_default().to_string(),
+            by: v["by"].as_str().unwrap_or_default().to_string(),
+            landed,
+        });
+    }
+    Ok(out)
 }
 
 /// The merge order of the PR at `head` on `base` (both in `clone`, `base` the tip of
@@ -894,11 +1423,11 @@ pub fn merge_order(
         return Ok(m);
     }
     for (task, pr) in others {
-        let read = pr_view(program, repo, *pr).and_then(|(_, branch, _)| {
+        let read = pr_view_read(program, repo, *pr).and_then(|(_, branch, _)| {
             if branch != base_branch {
                 return Ok(None);
             }
-            let (b, h) = fetch(clone, repo, *pr, &branch)?;
+            let (b, h) = fetch_read(clone, repo, *pr, &branch)?;
             Ok(Some((find_manifest(clone, &b, &h)?, b, h)))
         });
         match read {
@@ -910,7 +1439,11 @@ pub fn merge_order(
                 check_adding: check_paths(clone, &b, &h).is_ok_and(|p| !p.is_empty()),
             }),
             Ok(_) => {}
-            Err(e) => m.not_read.push((*pr, task.clone(), e.0)),
+            Err(Fault::Refused(why)) => m.not_read.push((*pr, task.clone(), why)),
+            Err(Fault::Unavailable(why)) => {
+                m.unavailable.push(format!("#{pr}: {why}"));
+                m.not_read.push((*pr, task.clone(), why));
+            }
         }
     }
     Ok(m)
@@ -966,7 +1499,7 @@ pub fn evaluate(
             manifest
         ));
     }
-    check_protected(repo, &msha, base, head, &manifest)?;
+    v.merged_tests = check_protected(repo, &msha, base, head, &manifest)?;
     check_first(repo, &msha, base, head)?;
     let check = repo_check(repo, base)?;
     // The job behind the name is the base's: neither the PR nor an older branch point may swap in
@@ -1031,57 +1564,62 @@ pub fn evaluate(
 
 // ---- the PR ------------------------------------------------------------------------------------
 
-/// `gh pr view` of the PR: (number, url, base branch, head).
-pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, String), Reject> {
-    let never = AtomicBool::new(false);
+/// `gh pr view` of the PR: (url, base branch, head). A failed read is tried again (Issue 512) and,
+/// if it still fails, is `Fault::Unavailable`; an answer that is not what was asked is
+/// `Fault::Refused`.
+pub fn pr_view_read(program: &str, repo: &str, pr: i64) -> Result<(String, String, String), Fault> {
     let n = pr.to_string();
-    let out = gh::run_gh(
-        program,
-        &[
-            "pr",
-            "view",
-            &n,
-            "--repo",
-            repo,
-            "--json",
-            "number,url,baseRefName,headRefOid",
-        ],
-        &never,
-    )
-    .map_err(|e| {
-        Reject(format!(
-            "gh pr view failed: {}",
-            match e {
-                GhError::Missing => format!("no program {program}"),
-                GhError::Cancelled => "cancelled".into(),
-                GhError::Failed(f) => f.message,
-            }
-        ))
-    })?;
+    let args = [
+        "pr",
+        "view",
+        &n,
+        "--repo",
+        repo,
+        "--json",
+        "number,url,baseRefName,headRefOid",
+    ];
+    let out = with_tries(|| gh_try(program, &args, "gh pr view failed"))?;
     let v: Value = serde_json::from_str(out.trim())
-        .map_err(|e| Reject(format!("gh pr view answered no JSON: {e}")))?;
+        .map_err(|e| Fault::Refused(format!("gh pr view answered no JSON: {e}")))?;
     let field = |k: &str| v[k].as_str().map(String::from);
     match (field("url"), field("baseRefName"), field("headRefOid")) {
         (Some(url), Some(base), Some(head)) => Ok((url, base, head)),
-        _ => reject(format!("gh pr view answered {v}")),
+        _ => Err(Fault::Refused(format!("gh pr view answered {v}"))),
     }
+}
+
+/// `pr_view_read`, either fault as a `Reject`.
+pub fn pr_view(program: &str, repo: &str, pr: i64) -> Result<(String, String, String), Reject> {
+    pr_view_read(program, repo, pr).map_err(Reject::from)
 }
 
 /// Fetch the PR's head and base into `clone` under `refs/makiba/gate/<repo>/<n>/`, through the
 /// clone's own `origin` (Issue 198), which must name `repo`; their ids. The configured URL is
 /// compared, not the one `url.<x>.insteadOf` rewrites it to; git applies the person's rewrites and
-/// ssh configuration when it fetches. Nothing is fetched from an origin that names another one.
+/// ssh configuration when it fetches. Nothing is fetched from an origin that names another one. A
+/// failed fetch is tried again (Issue 512) and, if it still fails, is `Fault::Unavailable`.
+pub fn fetch_read(
+    clone: &Path,
+    repo: &str,
+    pr: i64,
+    base_branch: &str,
+) -> Result<(String, String), Fault> {
+    let never = AtomicBool::new(false);
+    with_tries(|| fetch_try(clone, repo, pr, base_branch, &never))
+}
+
+/// `fetch_read`, either fault as a `Reject`.
 pub fn fetch(
     clone: &Path,
     repo: &str,
     pr: i64,
     base_branch: &str,
 ) -> Result<(String, String), Reject> {
-    fetch_with(clone, repo, pr, base_branch, &AtomicBool::new(false))
+    fetch_read(clone, repo, pr, base_branch).map_err(Reject::from)
 }
 
-/// As `fetch`; the git child is killed when `cancel` is set (a pass's thread at makibad's stop,
-/// Issue 461).
+/// As `fetch`, one try; the git child is killed when `cancel` is set (a pass's thread at makibad's
+/// stop, Issue 461).
 pub fn fetch_with(
     clone: &Path,
     repo: &str,
@@ -1089,10 +1627,28 @@ pub fn fetch_with(
     base_branch: &str,
     cancel: &AtomicBool,
 ) -> Result<(String, String), Reject> {
-    let origin = origin_of(clone, repo)?;
+    match fetch_try(clone, repo, pr, base_branch, cancel) {
+        Try::Done(r) => r.map_err(Reject::from),
+        Try::Again(why) => Err(Reject(why)),
+    }
+}
+
+/// One try of the fetch: a refusal of the clone's origin, or a failed git fetch, which another try
+/// may change.
+fn fetch_try(
+    clone: &Path,
+    repo: &str,
+    pr: i64,
+    base_branch: &str,
+    cancel: &AtomicBool,
+) -> Try<(String, String)> {
+    let origin = match origin_of(clone, repo) {
+        Ok(o) => o,
+        Err(e) => return Try::Done(Err(e.into())),
+    };
     let r = format!("refs/makiba/gate/{repo}/{pr}");
     let dir = clone.display().to_string();
-    gh::run_gh(
+    let fetched = gh::run_gh(
         "git",
         &[
             "-C",
@@ -1108,12 +1664,16 @@ pub fn fetch_with(
             &format!("+refs/heads/{base_branch}:{r}/base"),
         ],
         cancel,
-    )
-    .map_err(|_| {
-        Reject(format!(
-            "git fetch of the PR through origin ({origin}) failed"
-        ))
-    })?;
+    );
+    if let Err(e) = fetched {
+        let (why, again) = gh_failure("git", e);
+        let why = format!("git fetch of the PR through origin ({origin}) failed: {why}");
+        return if again {
+            Try::Again(why)
+        } else {
+            Try::Done(Err(Fault::Unavailable(why)))
+        };
+    }
     let id = |end: &str| -> Result<String, Reject> {
         Ok(
             git(clone, &["rev-parse", &format!("{r}/{end}^{{commit}}")])?
@@ -1121,7 +1681,11 @@ pub fn fetch_with(
                 .to_string(),
         )
     };
-    Ok((id("base")?, id("head")?))
+    Try::Done(
+        id("base")
+            .and_then(|b| Ok((b, id("head")?)))
+            .map_err(Fault::from),
+    )
 }
 
 /// The clone's one origin URL, when it names `repo` (as configured, before `insteadOf`); the
@@ -1161,4 +1725,289 @@ pub fn clone_of(
             super::triage::repo_of(slug, url.as_deref(), repos).as_deref() == Some(repo)
         })
         .map(|(slug, _)| repos.join(slug))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::writer::{NewEvent, RunUpsert, StateWriter};
+
+    fn writer() -> StateWriter {
+        StateWriter::new(crate::db::open_in_memory().unwrap()).unwrap()
+    }
+
+    fn event(w: &StateWriter, kind: &str, task: &str, payload: Value) {
+        w.append_event(&NewEvent {
+            kind,
+            actor: Some("makibad"),
+            payload: Some(&payload),
+            run_task_id: Some(task),
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    /// Issue 338, diff review round 1: an Issue lands only through a merge in the order's
+    /// repository, even when the Issue's run made a pull request of another repository its current
+    /// one.
+    #[test]
+    fn an_issue_landing_in_another_repository_is_not_the_orders() {
+        let w = writer();
+        w.ensure_project("p", None, Some("https://github.com/o/p"))
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t332",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("review"),
+            issue_refs: Some(&["p#332"]),
+            ..Default::default()
+        })
+        .unwrap();
+        let other = json!({"repo": "o/elsewhere", "pr": 9, "head_oid": "a".repeat(40)});
+        event(&w, "pr_opened", "t332", other);
+        event(
+            &w,
+            "pr_merged",
+            "t332",
+            json!({"repo": "o/elsewhere", "pr": 9, "task_id": "t332"}),
+        );
+        let c = w.conn();
+        assert!(!order_landed(c, "o/p", "issue", 332, Some("p")).unwrap());
+        event(
+            &w,
+            "pr_opened",
+            "t332",
+            json!({"repo": "O/P", "pr": 10, "head_oid": "b".repeat(40)}),
+        );
+        event(
+            &w,
+            "pr_merged",
+            "t332",
+            json!({"repo": "O/P", "pr": 10, "task_id": "t332"}),
+        );
+        assert!(order_landed(c, "o/p", "issue", 332, Some("p")).unwrap());
+    }
+    use std::cell::Cell;
+    use std::time::Duration;
+
+    /// A simulated clock: each read takes `read_takes`, and a sleep of `d` lasts `d * stretch`.
+    /// The start time of each try, and the answer.
+    fn tried(
+        wait: u64,
+        window: u64,
+        read_takes: u64,
+        stretch: u32,
+        answers_on: Option<usize>,
+    ) -> (Vec<u64>, Result<usize, Fault>) {
+        let now = Cell::new(Duration::ZERO);
+        let mut starts = Vec::new();
+        let r = with_tries_in(
+            Duration::from_millis(wait),
+            Duration::from_millis(window),
+            || now.get(),
+            |d| now.set(now.get() + d * stretch),
+            || {
+                starts.push(now.get().as_millis() as u64);
+                now.set(now.get() + Duration::from_millis(read_takes));
+                if answers_on == Some(starts.len()) {
+                    Try::Done(Ok(starts.len()))
+                } else {
+                    Try::Again(format!("fail {}", starts.len()))
+                }
+            },
+        );
+        (starts, r)
+    }
+
+    /// Issue 512: a failed read is tried again up to three times; one that answers on a later try
+    /// is its answer.
+    #[test]
+    fn a_failed_read_is_tried_again_at_most_three_times() {
+        let (starts, r) = tried(5000, 60_000, 100, 1, None);
+        assert_eq!(starts, [0, 5100, 10200]);
+        assert_eq!(r, Err(Fault::Unavailable("fail 3 (after 3 tries)".into())));
+        let (starts, r) = tried(5000, 60_000, 100, 1, Some(2));
+        assert_eq!(starts, [0, 5100]);
+        assert_eq!(r, Ok(2));
+    }
+
+    /// Issue 512: no try starts once the window has passed: a wait that would end after it ends
+    /// the read instead.
+    #[test]
+    fn no_try_starts_after_the_window() {
+        // A read that times out at 40 s: the wait would end at 45 s, the second read at 85 s.
+        let (starts, r) = tried(5000, 60_000, 40_000, 1, None);
+        assert_eq!(starts, [0, 45_000]);
+        assert_eq!(r, Err(Fault::Unavailable("fail 2 (after 2 tries)".into())));
+        let (starts, _) = tried(30_000, 50_000, 1, 1, None);
+        assert_eq!(starts, [0, 30_001]);
+    }
+
+    /// Issue 512: a wait that lasts longer than asked (a busy or suspended host) and ends after
+    /// the window starts no other try.
+    #[test]
+    fn a_wait_that_overshoots_the_window_starts_no_other_try() {
+        let (starts, r) = tried(5000, 60_000, 100, 20, None);
+        assert_eq!(starts, [0]);
+        assert_eq!(r, Err(Fault::Unavailable("fail 1 (after 1 try)".into())));
+    }
+
+    /// A repository in a temporary folder; `git` runs there with no hook and a fixed author.
+    fn repo() -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().to_path_buf();
+        run(&path, &["init", "-q", "-b", "main"]);
+        (dir, path)
+    }
+
+    fn run(dir: &Path, args: &[&str]) -> String {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@example.com",
+                "-c",
+                "commit.gpgsign=false",
+                "-c",
+                "core.hooksPath=/dev/null",
+            ])
+            .args(args)
+            .current_dir(dir)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success() || args.first() == Some(&"mer\x67e"),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    }
+
+    fn commit(dir: &Path, msg: &str, files: &[(&str, &str)]) -> String {
+        for (p, text) in files {
+            let f = dir.join(p);
+            std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+            std::fs::write(f, text).unwrap();
+        }
+        run(dir, &["add", "--all"]);
+        run(dir, &["commit", "-q", "-m", msg]);
+        run(dir, &["rev-parse", "HEAD"])
+    }
+
+    const LINES: &str = "one\ntwo\nthree\nfour\nfive\nsix\n";
+
+    /// The test commit changes the first line of both declared tests; the base changes the first
+    /// line of `tests/a.py` (a conflict) and the last of `tests/b.py` (clean). The branch merges
+    /// the base, keeping in `tests/a.py` what `git merge-tree` wrote for the conflict (its
+    /// markers), and in `tests/b.py` git's clean merge. Returns (dir, test commit, base, head).
+    fn conflicted() -> (tempfile::TempDir, PathBuf, String, String, String) {
+        let (tmp, dir) = repo();
+        commit(
+            &dir,
+            "base",
+            &[("tests/test_a.py", LINES), ("tests/test_b.py", LINES)],
+        );
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        let first = LINES.replace("one", "ONE");
+        let m = commit(
+            &dir,
+            "test\n\nAcceptance-Test: tests/test_a.py\nAcceptance-Test: tests/test_b.py",
+            &[("tests/test_a.py", &first), ("tests/test_b.py", &first)],
+        );
+        run(&dir, &["checkout", "-q", "main"]);
+        let base = commit(
+            &dir,
+            "base moves",
+            &[
+                ("tests/test_a.py", &LINES.replace("one", "uno")),
+                ("tests/test_b.py", &LINES.replace("six", "SIX")),
+            ],
+        );
+        run(&dir, &["checkout", "-q", "feature"]);
+        // A merge that stops on the conflict; the conflicted file is kept as merge-tree writes it.
+        run(&dir, &["mer\x67e", "-q", "--no-edit", "main"]);
+        let (mt, conflicts) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            vec!["tests/test_a.py".to_string()]
+        );
+        let blob = &mt["tests/test_a.py"].1;
+        let text = run(&dir, &["cat-file", "blob", blob]);
+        std::fs::write(dir.join("tests/test_a.py"), format!("{text}\n")).unwrap();
+        run(&dir, &["add", "--all"]);
+        run(&dir, &["commit", "-q", "--no-edit"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        (tmp, dir, m, base, head)
+    }
+
+    /// Diff review (Issue 513): a declared test git conflicted on stays a condition (a) refusal,
+    /// even when head holds exactly the tree entry `git merge-tree` wrote for it.
+    #[test]
+    fn a_conflicted_declared_test_is_refused_even_as_merge_tree_wrote_it() {
+        let (_tmp, dir, m, base, head) = conflicted();
+        let (mt, _) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            tree(&dir, &head).unwrap().get("tests/test_a.py"),
+            mt.get("tests/test_a.py"),
+            "head holds merge-tree's entry of the conflicted file"
+        );
+        let paths = vec!["tests/test_a.py".to_string(), "tests/test_b.py".to_string()];
+        let why = check_protected(&dir, &m, &base, &head, &paths)
+            .expect_err("a conflicted declared test is refused")
+            .0;
+        assert!(
+            why.contains("protected paths changed after the test commit")
+                && why.contains("tests/test_a.py")
+                && !why.contains("tests/test_b.py"),
+            "{why}"
+        );
+    }
+
+    /// Diff review (Issue 513): a declared test git merged cleanly is listed in `merged_tests`
+    /// while `git merge-tree` of the test commit and the base conflicted on another path (a helper
+    /// the test commit changed, which head keeps as the test commit left it).
+    #[test]
+    fn a_clean_declared_test_beside_another_conflict_is_listed() {
+        let (_tmp, dir) = repo();
+        commit(
+            &dir,
+            "base",
+            &[("tests/common/h.py", LINES), ("tests/test_b.py", LINES)],
+        );
+        run(&dir, &["checkout", "-q", "-b", "feature"]);
+        let mine = LINES.replace("one", "ONE");
+        let m = commit(
+            &dir,
+            "test\n\nAcceptance-Test: tests/test_b.py",
+            &[("tests/common/h.py", &mine), ("tests/test_b.py", &mine)],
+        );
+        run(&dir, &["checkout", "-q", "main"]);
+        let base = commit(
+            &dir,
+            "base moves",
+            &[
+                ("tests/common/h.py", &LINES.replace("one", "uno")),
+                ("tests/test_b.py", &LINES.replace("six", "SIX")),
+            ],
+        );
+        run(&dir, &["checkout", "-q", "feature"]);
+        let (_, conflicts) = merge_tree(&dir, &m, &base).unwrap();
+        assert_eq!(
+            conflicts.into_iter().collect::<Vec<_>>(),
+            vec!["tests/common/h.py".to_string()]
+        );
+        run(&dir, &["mer\x67e", "-q", "--no-edit", "main"]);
+        std::fs::write(dir.join("tests/common/h.py"), &mine).unwrap();
+        run(&dir, &["add", "--all"]);
+        run(&dir, &["commit", "-q", "--no-edit"]);
+        let head = run(&dir, &["rev-parse", "HEAD"]);
+        let merged = check_protected(&dir, &m, &base, &head, &["tests/test_b.py".to_string()])
+            .expect("a clean merge of the declared test is no refusal");
+        assert_eq!(merged.len(), 1, "{merged:?}");
+        assert_eq!(merged[0].path, "tests/test_b.py");
+        let id = |rev: &str| run(&dir, &["rev-parse", &format!("{rev}:tests/test_b.py")]);
+        assert_eq!(merged[0].ids, vec![id(&m), id(&base), id(&head)]);
+    }
 }

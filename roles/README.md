@@ -11,7 +11,8 @@ Each role also has a rules file, `rules.md`, carried from paddock's templates wi
 | `deny-base` | Bash | all | the base's command (M4-1) |
 | `deny-push` | Bash | worker, curator | pushing, and every `gh` call that writes to GitHub |
 | `deny-dangerous-git` | Bash | all | force pushes, hard resets, stashes that change something, adding everything, and the like |
-| `deny-no-verify` | Bash | all | skipping the repository's git hooks |
+| `deny-no-verify` | Bash | secretary, curator | skipping the repository's git hooks (git commit's flag read in the text) |
+| `deny-no-verify-code-run` | Bash | worker | skipping the repository's git hooks, except git commit's flag, which git's own `prepare-commit-msg` refuses in a code run (Issue 300) |
 | `deny-workers-delete` | Bash | all | a recursive `rm` naming the folder of worktrees or of document folders |
 | `worker-boundary` | Edit, Write | worker, curator | a write outside the agent's folder, or to its own settings or `.mcp.json` |
 | `deny-foreground-subagent` | Agent, Task | all | a subagent in the foreground |

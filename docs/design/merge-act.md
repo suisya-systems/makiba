@@ -135,6 +135,10 @@ with the same `idem` is answered from `commands` as every verb is (`replay`, `do
   its command is recorded `done` (`status_of`, `door.rs:166-177`); `merge` records a refusal as
   `rejected`, so a reader of `commands` sees a merge request that did nothing. `gate` keeps its
   recording.
+- Unavailable (Issue 512): a read of GitHub that still failed after the gate's tries answers
+  `{"status": "unavailable", "verdict": "unavailable", "reason", "mode", "repo", "pr", "head",
+  "pending_id"?}`, the reason carrying gh's message; the command `failed`. Nothing was judged
+  about the pull request; for a range task the answer names the stop written for the person.
 - Attempt: `{"status": "accepted", "attempt": <event id>, "repo", "pr", "head", "method", "mode"}`;
   the command stays `accepted` until the outcome finishes it (`done` or `failed`), as `push`.
 - Pending: `{"status": "pending", "pending_id", "repo", "pr", "head", "mode", "warnings": [...]}`;
