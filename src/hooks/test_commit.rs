@@ -221,7 +221,7 @@ pub fn design_wait(file: &str, message: &[u8]) -> Result<(), Refusal> {
     let marker = Path::new(hooks.trim_end_matches('\n'))
         .join(crate::daemon::prepare::DESIGN_WAIT)
         .join(&task);
-    if !marker.exists() {
+    if !marker_present(&marker).map_err(&cannot)? {
         return Ok(());
     }
     let why = std::fs::read_to_string(&marker).unwrap_or_else(|e| {
@@ -367,9 +367,38 @@ fn is_executable(path: &Path) -> bool {
     std::fs::metadata(path).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
 }
 
+/// Whether the design marker `marker` is there; an error reading it (a folder that cannot be
+/// searched, an I/O error) is an error, never "absent", so the check refuses rather than lets a
+/// test commit through.
+fn marker_present(marker: &Path) -> Result<bool, String> {
+    marker
+        .try_exists()
+        .map_err(|e| format!("the marker {}: {e}", marker.display()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_marker_that_cannot_be_read_is_an_error_not_absent() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let wait = dir.path().join("design-wait");
+        std::fs::create_dir(&wait).unwrap();
+        assert_eq!(marker_present(&wait.join("t")), Ok(false));
+        std::fs::write(wait.join("t"), "why").unwrap();
+        assert_eq!(marker_present(&wait.join("t")), Ok(true));
+        // A folder that cannot be searched: whether the marker is there cannot be known.
+        std::fs::set_permissions(&wait, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let unreadable = marker_present(&wait.join("t"));
+        let searchable = std::fs::read_dir(&wait).is_ok();
+        std::fs::set_permissions(&wait, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // Root searches any folder; for anyone else the read is refused.
+        if !searchable {
+            assert!(unreadable.is_err(), "{unreadable:?}");
+        }
+    }
 
     #[test]
     fn targets_keys_and_paths_are_read_as_the_gate_reads_them() {
