@@ -732,10 +732,19 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
         _ => Value::Null,
     };
     let of_merge = |k: &str| merged.as_ref().map_or(Value::Null, |m| m[k].clone());
+    // Issue 338: the merge orders the person set on it, each with whether it has landed.
+    let merge_order: Vec<Value> = crate::daemon::gate::person_orders(conn, repo, pr)?
+        .into_iter()
+        .map(|o| {
+            json!({"event_id": o.event_id, "after": o.after, "number": o.number,
+                   "reason": o.reason, "by": o.by, "landed": o.landed})
+        })
+        .collect();
     Ok(
         json!({"repo": repo, "pr": pr, "task_id": row["task_id"], "title": title,
               "head_oid": head, "ci": ci, "state": state, "merged_via": of_merge("merged_via"),
-              "merged_by": of_merge("merged_by"), "merge_state": merge_state}),
+              "merged_by": of_merge("merged_by"), "merge_state": merge_state,
+              "merge_order": merge_order}),
     )
 }
 
@@ -949,13 +958,13 @@ pub fn events_main(after: i64, limit: Option<u32>, task: Option<&str>, as_json: 
 /// What no output of the read surface shows: the person key and the merge gate's key, as their
 /// files hold them, and every run of 64 hex characters that is a key whose SHA-256 `agents`
 /// stores. Each becomes `<key>`.
-struct Mask {
+pub(crate) struct Mask {
     literals: Vec<String>,
     hashes: std::collections::HashSet<String>,
 }
 
 impl Mask {
-    fn new(conn: &Connection) -> Mask {
+    pub(crate) fn new(conn: &Connection) -> Mask {
         let literals = [crate::cli::person_key_path(), crate::cli::gate_key_path()]
             .iter()
             .filter_map(|f| std::fs::read_to_string(f).ok())
@@ -969,7 +978,7 @@ impl Mask {
         Mask { literals, hashes }
     }
 
-    fn text(&self, s: &str) -> String {
+    pub(crate) fn text(&self, s: &str) -> String {
         let mut s = s.to_string();
         for k in &self.literals {
             s = s.replace(k.as_str(), "<key>");

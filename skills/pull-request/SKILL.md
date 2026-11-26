@@ -17,6 +17,8 @@ Your sandbox lets your `gh` reach `api.github.com` with the person's stored logi
 3. Once the notice names the head: `gh pr create --repo <owner>/<name> --head <branch> --base <base> --title "<title>" --body-file <file>`, the title and body in the project's artifact language (English unless your launch task or a later notice names another for the project; spec section 13). The body says what changed and why, how it was checked, and, when the review's verdict is not `passed` (or there is none), that the second reader's review was not established, with the line as it was, and which reader was used when it was the fresh session.
 4. Record it: mcp__makiba__pr with `state` `opened`, `repo` (`owner/name`), `pr` (the number), `head` (the full 40-character commit id the push notice names) and `task` (the task id). End your turn.
 
+A push refused because a task dispatched with `design_first` has no `yes` by the person to its design (the notice names line L-K13 and the missing approval): do not push again and do not ask the worker to change the commit. Make sure the design question is a pending entry of the task with `stop_kind` `design` and is escalated, ask the person to run `makiba answer <id> yes` in their own shell, and push again once they have. An answer through mcp__makiba__answer is yours and does not count; an entry you answered is closed, so add and escalate a new one.
+
 ## The CI notice
 
 `makibad` sends you a notice when the checks of the watched head are decided, or when it cannot read them.
@@ -73,9 +75,12 @@ Stop lines:
 To merge, in either mode, call mcp__makiba__merge with `repo` (`<owner>/<name>`), `pr`, `head` (the full 40-character head of the CI notice) and `method` `squash`. You never run `gh pr merge` or any other merge or enqueue command: the merge gate hook refuses them all. `makibad` runs the acceptance gate (below); on a refusal it answers the verdict and nothing runs.
 
 - `accepted`: `makibad` merges (or, on a branch that requires the merge queue, enqueues) the pull request at that head itself. End your turn; its notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: on a refusal or an unknown outcome, deal with the cause and call merge again.
+- `unavailable`: the gate could not read GitHub, even after `makibad` tried again (gh's message is in the reason); nothing was judged and nothing ran. Call merge again later. For a range task the stop already went to the person; an answer that allows withdraws it.
 - `pending` (under `human`, or when the gate warns): tell the person the pull request, its link and the warnings, and that they approve it in their shell with `makiba merge approve <id>`. A word in the conversation does not merge it. End your turn; a notice follows the approval.
 
 On `merge_order` (stop line 7): merge the pull requests it names first; once their landing notices came, call merge again for this one. When the reason says the two hold each other (both may add a check), or the person wants another order, stop on it and tell the person, with the link and the reason.
+
+A merge order the person decides (Issue 338: "this pull request merges only after Issue or pull request B has landed", for example a condition on approving a design) is recorded at once with mcp__makiba__merge `action` `order`, `repo`, `pr`, `after_issue` or `after_pr` and `reason` (the person's words, with the pending entry's id); a pull request's body or your memory does not hold it. `mcp__makiba__status` shows it on the pull request (`pull_requests[].merge_order`, with `landed`). The gate refuses the pull request under either mode with verdict `merge_order` naming B until makibad records B's landing; then call merge again. Never ask the person to approve around it: their key is refused too, and if they decide otherwise they merge it in the GitHub web UI. An order is refused (`conflict`) once makibad's merge of the pull request was accepted; tell the person.
 
 When the pull request leaves the merge queue without landing, the PR watch tells you; read why, fix it or call merge again (the gate judges it again, and under `human` the person approves again).
 

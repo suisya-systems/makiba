@@ -300,6 +300,14 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
             .as_bool()
             .ok_or_else(|| usage("design_ahead is true or false"))?,
     };
+    // Issue 337: every task of the range needs the person's approval of its design before its
+    // test commit, kept in `range_proposed` and carried into each task's `delegate_sent`.
+    let design_first = match args.get("design_first") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| usage("design_first is true or false"))?,
+    };
     let head = str_arg(args, "brief_head")?;
     if head.trim().is_empty() {
         return Err(usage("the brief head is not empty"));
@@ -343,7 +351,8 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "range_proposed",
             actor,
             None,
-            json!({"range_id": id, "project": slug, "replaces": replaces.as_ref().map(|g| g.id)}),
+            json!({"range_id": id, "project": slug, "replaces": replaces.as_ref().map(|g| g.id),
+                   "design_first": design_first}),
         )?;
         // A draft replaced by a newer draft ends now; an active or paused one at the approval.
         if let Some(old) = replaces.as_ref().filter(|g| g.status == "proposed") {
@@ -880,6 +889,9 @@ pub(super) struct GateStop<'a> {
     pub allow: bool,
     /// The gate refused (line `gate`), or it reports only edited tests (line `tests`).
     pub refused: bool,
+    /// The gate could not read GitHub after its tries (Issue 512): a stop of line `gate` that
+    /// says so, and no refusal for the pause.
+    pub unavailable: bool,
     pub reason: &'a str,
     pub edited_tests: &'a [String],
     /// The gate's Issue 513 warnings (helpers changed, declared tests merged from the base,
@@ -915,7 +927,69 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    let made = if let Some(question) = language.filter(|_| s.refused) {
+    // One question per head (Issue 512): a stop on the content (a refusal, line `gate`, also one
+    // for the language check, or edited tests and Issue 513's test helpers, line `tests`) still
+    // escalated stands over a read of GitHub that failed later, and a stop on the content
+    // replaces the question a failed read asked, marked as makibad's own withdrawal.
+    let read_key = format!("gate-read:{subject}@{}", s.head);
+    if s.unavailable {
+        let standing: Option<i64> = w
+            .conn()
+            .query_row(
+                "SELECT id FROM pending WHERE status = 'escalated'
+                   AND json_extract(context_json, '$.range_id') = ?1
+                   AND (json_extract(context_json, '$.key') IN (?2, ?3, ?4)
+                        OR substr(json_extract(context_json, '$.key'), 1, length(?5)) = ?5)
+                 ORDER BY id DESC LIMIT 1",
+                params![
+                    range,
+                    format!("gate:{subject}@{}", s.head),
+                    format!("tests:{subject}@{}", s.head),
+                    format!("language:{subject}@{}", s.head),
+                    // A stop of Issue 513's warnings: its key carries their sum.
+                    format!("tests:{subject}@{}#", s.head)
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if standing.is_some() {
+            return Ok(standing);
+        }
+    } else {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.key') = ?2",
+            params![range, read_key],
+        )?;
+    }
+    let made = if s.unavailable {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: read_key,
+            question: format!(
+                "The merge gate could not read GitHub for {}#{} at {short}: {} Should the secretary ask the merge again later?",
+                s.repo,
+                s.pr,
+                sentence(s.reason)
+            ),
+            background: format!(
+                "makibad's merge gate tried to read GitHub for the pull request of task {} and every try failed; this says nothing about the pull request: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The secretary asks merge again; an answer that allows withdraws this stop."
+                .into(),
+            if_no: "It waits; you merge it yourself in the GitHub web UI or close it.".into(),
+            recommend: "Yes: ask again once GitHub answers.",
+            why: "A failed read is not a judgement of the pull request.",
+            recommend_answer: "yes",
+            more: json!({"pr": subject, "head": s.head, "unavailable": true}),
+        }
+    } else if let Some(question) = language.filter(|_| s.refused) {
         Stop {
             range,
             task: Some(s.task),
@@ -1036,8 +1110,10 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
         )?;
     }
     let (id, _) = stop(w, &made)?;
-    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
+    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing,
+    // and neither does a read of GitHub that failed (Issue 512).
     if !s.allow
+        && !s.unavailable
         && let Some((acting, status)) = acting(w, range)?
         && status == "active"
     {
@@ -1052,6 +1128,8 @@ fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Re
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
                     AND json_extract(e.payload_json, '$.allow') = 0
+                    AND coalesce(json_extract(e.payload_json, '$.verdict'),
+                                 json_extract(e.payload_json, '$.result'), '') != 'unavailable'
                     AND json_extract(e.payload_json, '$.head') = coalesce(
                       (SELECT json_extract(p.payload_json, '$.head_oid') FROM events p
                        WHERE p.kind IN ('pr_opened', 'fix_pushed') AND p.id < e.id
@@ -1701,13 +1779,11 @@ fn dispatch(
          VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?2, 'code', ?3, ?4, ?5)",
         params![task, spawn, agent, brief(head, n), worktree],
     )?;
-    event(
-        w,
-        "delegate_sent",
-        "makibad",
-        Some(&task),
-        json!({"task_id": task, "spawn_id": spawn, "kind": "code"}),
-    )?;
+    let mut sent = json!({"task_id": task, "spawn_id": spawn, "kind": "code"});
+    if design_first(w.conn(), id)? {
+        sent["design_first"] = json!(true);
+    }
+    event(w, "delegate_sent", "makibad", Some(&task), sent)?;
     event(
         w,
         "belt_dispatched",
@@ -1730,6 +1806,17 @@ fn dispatch(
         },
     )?;
     Ok(task)
+}
+
+/// Whether the range `id` was proposed `design_first` (Issue 337): its `range_proposed` says so.
+fn design_first(c: &Connection, id: i64) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'range_proposed'
+                        AND json_extract(payload_json, '$.range_id') = ?1
+                        AND json_extract(payload_json, '$.design_first') = 1)",
+        [id],
+        |r| r.get(0),
+    )
 }
 
 /// Put the next tasks of every active range in while there is room (belt.md 3.4), and end a range
@@ -3012,6 +3099,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
             }))
         },
     )?;
+    v["design_first"] = json!(design_first(c, id)?);
     let read: Option<(i64, String, bool)> = c
         .query_row(
             "SELECT id, occurred_at, coalesce(json_extract(payload_json, '$.complete'), 0) = 1
@@ -3502,6 +3590,77 @@ pub(in crate::daemon) mod tests {
                     "approval_mode": super::super::gate::merge_approval_mode()}),
         );
         assert_eq!(r.unwrap()["status"], json!("active"));
+    }
+
+    /// Issue 337: a range proposed `design_first` says so in its read, and each task the belt
+    /// dispatches from it carries the mark in its `delegate_sent`; a range without it does not.
+    #[test]
+    fn a_design_first_range_marks_each_task_it_dispatches() {
+        let (_dir, w) = org();
+        let propose = |design_first: Option<bool>| {
+            let mut args = json!({"action": "propose", "project": "p", "issues": [1],
+                                  "at_once": 1, "budget_tasks": 1, "brief_head": "h"});
+            if let Some(d) = design_first {
+                args["design_first"] = json!(d);
+            }
+            range(&w, "secretary", Role::Secretary, &args).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        };
+        let marked = propose(Some(true));
+        let plain = propose(None);
+        assert!(
+            range(
+                &w,
+                "secretary",
+                Role::Secretary,
+                &json!({"action": "propose", "project": "p", "issues": [1], "at_once": 1,
+                        "budget_tasks": 1, "brief_head": "h", "design_first": "yes"}),
+            )
+            .is_err()
+        );
+        let next = |issue: i64| Next {
+            issue,
+            title: "t".into(),
+            body: String::new(),
+            comments: String::new(),
+            waits: None,
+            landed: Vec::new(),
+        };
+        let first = dispatch(&w, "fake", marked, "p", "h", &next(1)).unwrap();
+        let second = dispatch(&w, "fake", plain, "p", "h", &next(2)).unwrap();
+        let mark = |task: &str| -> Option<bool> {
+            w.conn()
+                .query_row(
+                    "SELECT json_extract(e.payload_json, '$.design_first') FROM events e
+                     JOIN runs r ON r.id = e.run_id
+                     WHERE e.kind = 'delegate_sent' AND r.task_id = ?1",
+                    [task],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(mark(&first), Some(true));
+        assert_eq!(mark(&second), None);
+        assert_eq!(
+            one_range(w.conn(), marked).unwrap()["design_first"],
+            json!(true)
+        );
+        assert_eq!(
+            one_range(w.conn(), plain).unwrap()["design_first"],
+            json!(false)
+        );
+        // Not approved by the person, not dispatched for its design yet: the push holds it.
+        assert!(
+            super::super::push::design_wait(w.conn(), &first)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            super::super::push::design_wait(w.conn(), &second)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A candidate whose dependency is written in words is left out as `dependency_unreadable`,
@@ -4034,6 +4193,7 @@ pub(in crate::daemon) mod tests {
                 head,
                 allow: false,
                 refused: true,
+                unavailable: false,
                 reason: "no passed CI",
                 edited_tests: &[],
                 helpers: &[],
@@ -4245,6 +4405,7 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: true,
                 refused: false,
+                unavailable: false,
                 reason: "passed",
                 edited_tests: &tests,
                 helpers: &[],
@@ -4311,6 +4472,7 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: false,
                 refused: false,
+                unavailable: false,
                 reason: "tests edited",
                 edited_tests: &tests,
                 helpers: &[],
@@ -4357,6 +4519,7 @@ pub(in crate::daemon) mod tests {
                     head: &h,
                     allow: true,
                     refused: false,
+                    unavailable: false,
                     reason: "passed",
                     edited_tests: &tests,
                     helpers,

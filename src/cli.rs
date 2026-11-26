@@ -62,7 +62,8 @@ pub fn person_key_path() -> PathBuf {
     })
 }
 
-/// How long `makiba gate` waits for the door's acceptance gate, which reads GitHub and git.
+/// How long `makiba gate` and `makiba merge` wait for the door's acceptance gate, which reads
+/// GitHub and git.
 const GATE_WAIT: Duration = Duration::from_secs(840);
 
 /// `$MAKIBA_GATE_KEY`, default `gate.key` beside the person key (by default
@@ -188,6 +189,9 @@ pub enum Command {
         /// The Issue number the task works on, so that a range does not dispatch it again.
         #[arg(long)]
         issue: Option<i64>,
+        /// The task's test commit waits for the person's yes to its design (Issue 337).
+        #[arg(long)]
+        design_first: bool,
     },
     /// Close a task's run; refused before its done report unless --abandon, or --limit for a
     /// merged run with a known limit the person accepted.
@@ -353,7 +357,8 @@ pub enum Command {
         #[arg(long)]
         hosts: Option<String>,
     },
-    /// Organization and project settings.
+    /// Organization and project settings (`notify_command`: the absolute path of the person's command
+    /// that calls the person back when something waits for them; empty is off).
     Config {
         #[arg(value_parser = ["get", "set"])]
         action: String,
@@ -396,6 +401,9 @@ pub enum Command {
         /// A candidate waiting only for range tasks with a pull request goes in for its design.
         #[arg(long)]
         design_ahead: bool,
+        /// Each task's test commit waits for the person's yes to its design (Issue 337).
+        #[arg(long)]
+        design_first: bool,
         /// Read here; its content travels over the door.
         #[arg(long)]
         brief_head_file: Option<PathBuf>,
@@ -466,9 +474,13 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             model,
             branch,
             issue,
+            design_first,
         } => {
             let mut args = json!({"kind": kind, "task_id": task_id, "title": title,
                                   "brief": read(&brief_file)?});
+            if design_first {
+                args["design_first"] = true.into();
+            }
             for (k, v) in [("project", project), ("model", model), ("branch", branch)] {
                 if let Some(v) = v {
                     args[k] = v.into();
@@ -492,6 +504,7 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             budget_fixes,
             follow_ups,
             design_ahead,
+            design_first,
             brief_head_file,
             replaces,
             reason,
@@ -502,6 +515,9 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
             let mut args = json!({"action": action});
             if design_ahead {
                 args["design_ahead"] = true.into();
+            }
+            if design_first {
+                args["design_first"] = true.into();
             }
             if let Some(id) = range_id {
                 args["id"] = id.into();
@@ -730,6 +746,16 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
     })
 }
 
+/// How long a request waits for the door's answer. The gate reads GitHub and git, trying a failed
+/// read again (Issue 512): it may take minutes, and `merge` (the person's `merge approve`) runs it.
+fn wait_for(verb: &str) -> Duration {
+    if verb == "gate" || verb == "merge" {
+        GATE_WAIT
+    } else {
+        Duration::from_secs(30)
+    }
+}
+
 /// Send one request to the door and read its answer line.
 fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let unavailable = |e: String| (ErrorKind::Unavailable, e);
@@ -748,13 +774,7 @@ fn ask(verb: &str, args: Value) -> Result<Value, (ErrorKind, String)> {
     let mut s = UnixStream::connect(&path)
         .map_err(|e| unavailable(format!("makibad is not running ({}: {e})", path.display())))?;
     let io = |e: std::io::Error| unavailable(format!("the door: {e}"));
-    // The gate reads GitHub and git: it may take minutes.
-    let wait = if verb == "gate" {
-        GATE_WAIT
-    } else {
-        Duration::from_secs(30)
-    };
-    s.set_read_timeout(Some(wait)).map_err(io)?;
+    s.set_read_timeout(Some(wait_for(verb))).map_err(io)?;
     writeln!(s, "{req}").map_err(io)?;
     let mut line = String::new();
     BufReader::new(s).read_line(&mut line).map_err(io)?;
@@ -813,6 +833,14 @@ fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> 
         "Design ahead: {}",
         if range["design_ahead"] == json!(true) {
             "yes (a candidate waiting for range tasks with a pull request goes in for its design only)"
+        } else {
+            "no"
+        }
+    );
+    println!(
+        "Design first: {}",
+        if range["design_first"] == json!(true) {
+            "yes (each task's test commit waits for your yes to its design)"
         } else {
             "no"
         }
@@ -1002,6 +1030,15 @@ mod tests {
         request(m.verb)
     }
 
+    /// Issue 512: `merge` runs the gate, which tries a failed read of GitHub again, so the
+    /// person's `merge approve` waits as long as `gate` does; other verbs keep the short wait.
+    #[test]
+    fn merge_waits_as_long_as_the_gate() {
+        assert_eq!(wait_for("merge"), GATE_WAIT);
+        assert_eq!(wait_for("gate"), GATE_WAIT);
+        assert_eq!(wait_for("status"), Duration::from_secs(30));
+    }
+
     /// `dispatch` reads the brief file itself and sends its content as `brief`.
     #[test]
     fn dispatch_sends_the_files_content_and_needs_its_four_arguments() {
@@ -1076,6 +1113,10 @@ mod tests {
         let (_, v) = propose(&["--follow-ups", "ask", "--design-ahead"]).unwrap();
         assert_eq!(v["follow_ups"], json!("ask"));
         assert_eq!(v["design_ahead"], json!(true));
+        // Issue 337: design_first only when named.
+        assert!(v.get("design_first").is_none());
+        let (_, v) = propose(&["--design-first"]).unwrap();
+        assert_eq!(v["design_first"], json!(true));
         for bad in ["NaN", "inf", "-inf", "0", "-1"] {
             let flag = format!("--budget-hours={bad}");
             assert!(propose(&[&flag]).is_err(), "{bad}");
