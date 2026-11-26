@@ -5,6 +5,7 @@
 pub mod ahead;
 pub mod anomalies;
 pub mod belt;
+mod call;
 mod close;
 mod crash;
 pub mod curator;
@@ -279,6 +280,8 @@ fn serve_until(
         eprintln!("makibad: cannot clear the earlier binary_replaced: {e}");
     }
     let mut exe_watch = exe::Watch::start(Arc::clone(&stop));
+    // Issue 272: calling the person back; its seams are read now.
+    let mut person_call = call::Call::new(dir);
     let base = connect();
     // Not subscribed yet: the row says so, and the heartbeat already runs.
     w.conn()
@@ -415,6 +418,10 @@ fn serve_until(
         if let Err(e) = exe_watch.pass(&w) {
             eprintln!("makibad: the executable's watch: {e}");
         }
+        // Needs only state.db as well: the person is called without waiting for the base's records.
+        if let Err(e) = person_call.pass(&w) {
+            eprintln!("makibad: the call to the person: {e}");
+        }
         // Not before the subscription is recorded: the first Resync's records come after it.
         if started_recorded {
             monitor.drain(&w);
@@ -513,6 +520,7 @@ fn serve_until(
     }
 
     // A stop: end the pollers (their `gh` children too), say so, release the lock, leave no pid behind.
+    person_call.stop(&w);
     drop(prwatch);
     drop(triage);
     drop(belt);

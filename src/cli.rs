@@ -357,7 +357,8 @@ pub enum Command {
         #[arg(long)]
         hosts: Option<String>,
     },
-    /// Organization and project settings.
+    /// Organization and project settings (`notify_command`: the absolute path of the person's command
+    /// that calls the person back when something waits for them; empty is off).
     Config {
         #[arg(value_parser = ["get", "set"])]
         action: String,
