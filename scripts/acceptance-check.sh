@@ -25,7 +25,8 @@
 # The two worktrees are made under the repository's git folder (<git common dir>/acceptance-check/),
 # not under the system's temporary folder, and removed at exit (Issue 558). It fails at once when
 # that git folder is in a temporary folder while the checkout is not, or when a folder above the
-# work folder, other than CARGO_HOME, holds a Cargo config.
+# work folder, other than CARGO_HOME, holds a Cargo config. A declared Python test runs with no
+# conftest.py and no pytest config from above its worktree (--confcutdir; -c, --rootdir).
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
 #   bash scripts/acceptance-check.sh --test-commit SHA
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
@@ -327,17 +328,40 @@ run_rs() { # run_rs <tree> <name> <where>: output in $work/out, Cargo's exit sta
   (cd "$1" && export CARGO_TERM_COLOR=never CARGO_TARGET_DIR="$1/target" CARGO_BUILD_BUILD_DIR="$1/target" &&
     cargo fetch --locked && cargo test --locked --test "$2") >"$work/out" 2>&1
 }
+# pytest looks above the worktree too: for a config file (whose folder then becomes the rootdir,
+# and conftest.py files up to it are loaded) when the worktree has none. Above the worktree is the
+# checkout, in CI the head, which would then shape the test commit's run (Issue 558). So no
+# conftest.py above the worktree is loaded (--confcutdir), and a worktree with no pytest config on
+# the path from the test up to it gets an empty one (-c, --rootdir) instead of the checkout's.
+py_config() { # py_config <tree> <test path>: a pytest config on the path from the test's folder up to <tree>
+  local d f
+  d=$1/$(dirname "$2")
+  while :; do
+    for f in pytest.ini .pytest.ini pytest.toml .pytest.toml; do [ -f "$d/$f" ] && return 0; done
+    [ -f "$d/pyproject.toml" ] && grep -q '^\[tool\.pytest\.ini_options\]' "$d/pyproject.toml" && return 0
+    [ -f "$d/tox.ini" ] && grep -q '^\[pytest\]' "$d/tox.ini" && return 0
+    [ -f "$d/setup.cfg" ] && grep -q '^\[tool:pytest\]' "$d/setup.cfg" && return 0
+    [ "$d" = "$1" ] && return 1
+    d=$(dirname "$d")
+  done
+}
+: >"$work/empty-pytest.ini" # a name pytest's own search never takes
+run_py() { # run_py <tree> <test path>: output in $work/out, pytest's exit status returned
+  local opts=(--confcutdir="$1")
+  py_config "$1" "$2" || opts+=(-c "$work/empty-pytest.ini" --rootdir="$1")
+  (cd "$1" && python3 -m pytest -q -p no:cacheprovider "${opts[@]}" "$2") >"$work/out" 2>&1
+}
 ran() { sed -n 's/^running \([0-9][0-9]*\) tests\{0,1\}$/\1/p' "$work/out" | head -1; }
 while read -r kind t n; do
   [ -n "$kind" ] || continue
   if [ "$kind" = py ]; then
-    (cd "$work/t" && python3 -m pytest -q -p no:cacheprovider "$t") >"$work/out" 2>&1
+    run_py "$work/t" "$t"
     case $? in
       0) no "$t passes at the test commit $first; it must fail before the fix" ;;
       5) no "$t collects no test at the test commit $first; it must fail before the fix" ;;
       *) echo "acceptance-check: $t fails at the test commit (expected)" ;;
     esac
-    if (cd "$work/h" && python3 -m pytest -q -p no:cacheprovider "$t") >"$work/out" 2>&1; then
+    if run_py "$work/h" "$t"; then
       echo "acceptance-check: $t passes at head"
     else
       no "$t fails at head $head:"; sed 's/^/  /' "$work/out" | tail -20

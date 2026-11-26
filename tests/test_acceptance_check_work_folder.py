@@ -102,6 +102,12 @@ def outside(tmp_path):
     """A fresh folder outside every temporary folder: under the git folder of the tree holding this
     file (the checkout's .git in CI and in a makiba worktree)."""
     d = Path(tempfile.mkdtemp(prefix="acceptance-work-folder.", dir=common_dir(ROOT))).resolve()
+    roots = ["/tmp", "/private/tmp", "/var/tmp", tempfile.gettempdir(), os.environ.get("TMPDIR", "")]
+    for r in filter(None, roots):
+        p = Path(r).resolve()
+        if d == p or p in d.parents:
+            shutil.rmtree(d, ignore_errors=True)
+            pytest.skip(f"this checkout's git folder is under the temporary folder {p}; no folder outside one to test in")
     yield d
     shutil.rmtree(d, ignore_errors=True)
 
@@ -123,7 +129,9 @@ def test_separate_git_folder_in_a_temporary_folder_is_refused(tmp_path, outside)
     base, head = branch(repo)
     rc, out = check(repo, base, head, TMPDIR=str(tmpdir))
     assert (rc, last(out)) == (1, "ACCEPTANCE: fail"), out
-    assert f"the git folder {gitdir} is under a temporary folder ({tmpdir.resolve()}) while the checkout {repo.resolve()} is not" in out, out
+    # The root named is the first temporary folder that holds the git folder: /tmp before TMPDIR.
+    assert f"the git folder {gitdir} is under a temporary folder (" in out, out
+    assert f") while the checkout {repo.resolve()} is not" in out, out
     assert "passes at head" not in out and "fails at the test commit" not in out, out
     left_nothing(gitdir, repo, out)
 
@@ -183,4 +191,89 @@ def test_cargo_config_of_cargo_home_above_the_work_folder_proceeds(tmp_path):
     rc, out = check(repo, base, head, CARGO_HOME=str(home / ".cargo"))
     assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
     assert "lies above the work folder" not in out, out
+    left_nothing(common_dir(repo), repo, out)
+
+
+# pytest's config and conftest.py above the worktree
+#
+# The checker runs from a checkout of another branch, so the checkout above the work folder holds
+# files that neither the test commit nor head has (in CI the checkout is the head itself).
+
+PASSING_CONFTEST = """import pytest
+
+
+@pytest.hookimpl(hookwrapper=True)
+def pytest_runtest_makereport(item, call):
+    out = yield
+    r = out.get_result()
+    if r.failed:
+        r.outcome = "passed"
+"""
+
+
+def checkout_holds(repo: Path, files: dict[str, str]) -> None:
+    """Check out a branch off main whose root holds `files`."""
+    git(repo, "checkout", "-q", "-b", "outer", "main")
+    for rel, text in files.items():
+        write(repo, rel, text)
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "outer")
+
+
+def test_checkout_conftest_that_turns_failures_into_passes_does_not_reach_the_test_commit(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    base, head = branch(repo)
+    checkout_holds(repo, {"pytest.ini": "[pytest]\n", "conftest.py": PASSING_CONFTEST})
+    rc, out = check(repo, base, head)
+    assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
+    assert "acceptance-check: tests/test_answer.py fails at the test commit (expected)" in out, out
+    assert "tests/test_answer.py passes at head" in out, out
+    left_nothing(common_dir(repo), repo, out)
+
+
+def test_checkout_pytest_ini_that_deselects_does_not_reach_the_test_commit(tmp_path):
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    base, head = branch(repo)
+    checkout_holds(repo, {"pytest.ini": "[pytest]\naddopts = -k nothing_matches\n"})
+    rc, out = check(repo, base, head)
+    assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
+    assert "acceptance-check: tests/test_answer.py fails at the test commit (expected)" in out, out
+    assert "collects no test" not in out, out
+    assert "tests/test_answer.py passes at head" in out, out
+    left_nothing(common_dir(repo), repo, out)
+
+
+@pytest.mark.parametrize(
+    "rel,text",
+    [
+        ("pytest.ini", "[pytest]\npython_functions = check_*\n"),
+        ("pyproject.toml", '[tool.pytest.ini_options]\npython_functions = ["check_*"]\n'),
+    ],
+)
+def test_worktree_own_pytest_config_is_still_used(tmp_path, rel, text):
+    # The base's own config collects check_* functions only; the declared test has no test_*
+    # function, so it runs only when the worktree's config is read.
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    write(repo, rel, text)
+    write(repo, "lib.py", "def answer():\n    return 1\n")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "base")
+    base = git(repo, "rev-parse", "HEAD").strip()
+    git(repo, "checkout", "-q", "-b", "feat/x")
+    write(repo, "tests/test_answer.py", "from lib import answer\n\n\ndef check_answer():\n    assert answer() == 2\n")
+    git(repo, "add", "tests/test_answer.py")
+    git(repo, "commit", "-q", "-m", "test: declare\n\nAcceptance-Test: tests/test_answer.py\nCo-Authored-By: t <t@t>")
+    write(repo, "lib.py", "def answer():\n    return 2\n")
+    git(repo, "commit", "-q", "-am", "fix")
+    head = git(repo, "rev-parse", "HEAD").strip()
+    rc, out = check(repo, base, head)
+    assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
+    assert "acceptance-check: tests/test_answer.py fails at the test commit (expected)" in out, out
+    assert "tests/test_answer.py passes at head" in out, out
     left_nothing(common_dir(repo), repo, out)
