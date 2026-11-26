@@ -2989,10 +2989,11 @@ struct OpenPr {
 }
 
 /// What the gate read of the PR's task's reviews (Issue 263): the kind of its newest launch and
-/// its worker's newest diff review row (`commands.id`, the answer), and its newest diff review row
-/// whose answer names a head (Issue 557: an attempt no reader could start names none, and must not
-/// hide the head an earlier review read). Read again when the verdict is recorded; a difference
-/// there is "ask again".
+/// its worker's newest diff review row (`commands.id`, the answer), and its newest passed diff
+/// review row that names a head (Issue 557: a round is passed only when its reader read the change,
+/// Issue 280; an attempt that read nothing, with or without a head, must not hide the head an
+/// earlier review read). Read again when the verdict is recorded; a difference there is "ask
+/// again".
 #[derive(Clone, Default, PartialEq)]
 struct ReviewRows {
     kind: Option<String>,
@@ -3075,7 +3076,10 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
             Ok(row.and_then(|(id, t)| Some((id, serde_json::from_str(&t?).ok()?))))
         };
         review.row = newest("")?;
-        review.read = newest(" AND json_type(result_json, '$.result.head') = 'text'")?;
+        review.read = newest(
+            " AND json_extract(result_json, '$.result.verdict') = 'passed'
+              AND json_type(result_json, '$.result.head') = 'text'",
+        )?;
     }
     // Issue 331: the other pull requests makibad follows in this repository, not read closed.
     let others = super::prwatch::followed(c, None)
@@ -3269,8 +3273,8 @@ enum Found {
 /// `not-established` or `not-required` (only Markdown or `docs/` changed). A review of another
 /// head is carried to this one only when the PR's own changes are byte-equal (a join commit of
 /// the base, a rebase); otherwise it is stale. Issue 557: a docs-only PR needs no review, but when
-/// its task's worker ran a diff review that read a head, a head after it is held the same way
-/// (stale unless carried), whatever that review's verdict.
+/// its task's worker ran a passed diff review (one whose reader read the change) of a head, a head
+/// after it is held the same way (stale unless carried), whatever that review found.
 fn gate_review(rows: &GateRows, clone: &Path, base: &str, head: &str, docs: bool) -> Value {
     let mut r = json!({"state": "not-established", "head": head});
     if docs {
