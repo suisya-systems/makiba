@@ -1,0 +1,143 @@
+# The screen's words in English (docs/design/screen.md sections 2.2 and 2.4; Issue 169).
+# One line per key: key<TAB>text. {n}, {m}, {x} and {repo} are filled by the screen.
+top.needs_you	Needs you {n}
+top.failed	Failed {n}
+top.unattended	unattended {n}
+top.running	Running · updated {n} s ago
+top.stopped	makiba has not responded for {n} min
+top.display	Display
+col.hand_over	Hand over work
+col.progress	Progress
+col.more	Views
+range.title	Approved work #{n}
+range.in_progress	in progress
+range.proposed	needs your approval
+range.paused	on hold
+range.ended	ended
+range.at_a_time	{n} at a time
+range.budget	{n} of {m} tasks started
+range.hold	Hold new tasks
+range.resume	Start new tasks again
+range.end	End after running tasks
+range.approve	Approve exactly this
+range.change	Ask to change it
+range.would_start	It would start, in this order
+range.not_now	not now
+ready.title	Ready to start
+ready.not_approved	{n} Issues, not yet approved
+ready.ask	Ask to start
+ready.suggested	suggested first
+ready.no_goal	no goal
+ready.size	size {x}
+ready.size_estimated	size {x} (estimate)
+ready.none	No Issue is ready to start
+ready.check_failed	The last check of GitHub failed
+ready.no_check	No check has been made yet
+ready.not_recorded	{n} found; their details were not recorded, the next check will list them
+ready.all_held	Every ready Issue is already in approved work
+notready.title	Not ready yet
+notready.waits	Waits for another Issue
+notready.set_aside	Set aside by a label
+notready.no_goals	No goals written for this project
+notready.goals_error	The project's goals cannot be read
+notready.no_repo	No repository recorded for this project
+notready.unreadable	A line naming what it waits for names no Issue
+tab.failures	Failures
+tab.approved_items	All approved items
+tab.issues	Issues to start
+tab.one_off	One-off tasks
+tab.prs	Pull requests
+tab.history	Task history
+tab.instructions	Instructions
+tab.mark_failed	{n} failed
+tab.mark_needs_you	{n} need you
+answer.title	Needs your answer
+answer.kind_decision	A decision
+answer.kind_question	A question
+answer.kind_permission	A permission request
+answer.background	Show the background
+answer.if_yes	If yes
+answer.if_no	If no
+answer.recommended	recommended
+answer.why	Why
+answer.yes	Answer yes
+answer.no	Answer no
+answer.discuss	Discuss it first
+fail.title	Failures
+fail.did_not_start	did not start
+fail.silent	silent since it started
+fail.gone	its terminal is gone
+fail.error	reports an error
+fail.stuck_question	stopped at a question
+fail.stuck_login	stopped at a login
+fail.stuck_permission	stopped at a permission prompt
+fail.no_report	finished without a report
+fail.secretary_gone	The secretary's terminal is gone
+fail.secretary_still	The secretary has not moved
+fail.replaced	makiba was updated while running
+who.nobody	Nobody is on it
+who.no_sign	No sign that anyone is on it
+who.secretary	With the secretary
+who.told	told {n} min ago
+who.looking	looking
+who.you	Needs your answer
+act.ask_look	Ask the secretary to look
+act.history	Show its history
+act.abandon	Abandon and close…
+act.abandon_confirm	This abandons the task: its work is not landed, and you are recorded as the one who abandoned it.
+act.show_question	Show the question
+act.in_shell	In your shell:
+place.merged	merged
+place.closed	closed, not merged
+place.needs_you	needs you
+place.in_review	in review
+place.working.long	being worked on
+place.working.short	working
+place.not_started	not started
+place.skipped	skipped
+stage.checks_running	checks running
+stage.checks_failed	checks failed
+stage.ready_to_merge	checks passed · ready to merge
+stage.no_pr	no pull request yet
+stage.free_place	waits for a free slot
+stage.budget	the budget is used up
+stage.waits_for	waits for #{n}
+stage.starting	starting
+stage.design_only	writing its design first
+stage.waits_landing	waits for #{n} to land
+pr.open	open
+pr.checks_passed	checks passed
+pr.closed_outside	closed outside makiba
+pr.reopened	reopened · checks not watched
+pr.merged_gate	through the gate
+pr.merged_hand	by hand, outside the gate
+term.working	working
+term.idle	idle
+term.blocked	stopped at a prompt
+term.done	done
+term.suspended	suspended until makiba starts again
+gap.missing	missing: {x}
+active.title	Active now
+active.stuck_first	stuck ones first
+list.more	{n} more
+list.close	close
+list.not_recorded	{n} more entries not listed
+shared.also	also under {x}
+shared.heading	{repo}, shared with {x}
+shared.ask_for	for {x}
+hist.started.makiba	Started by makiba
+hist.started.secretary	Started by the secretary
+hist.began	Began working
+hist.plan	Reported its plan
+hist.done	Reported done
+hist.blocked	Reported it is stuck
+hist.review.passed	Review passed
+hist.review.found	Review found {n}
+hist.asked	Stopped to ask you
+hist.pr.opened	Pull request opened
+hist.pr.updated	Pull request updated
+hist.checks.passed	Checks passed
+hist.checks.failed	Checks failed
+hist.merged	Merged
+hist.closed.completed	Closed
+hist.closed.abandoned	Abandoned
