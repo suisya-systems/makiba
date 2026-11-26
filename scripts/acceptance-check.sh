@@ -6,14 +6,17 @@
 # The branch's own commits are HEAD's first-parent line not reachable from BASE; the oldest of
 # them (whose parent is then in BASE) may declare tests with "Acceptance-Test: <path>" trailers.
 # The base may be merged in after it (no force push). When it declares:
-#   - it is the only commit that declares, and it changes only declared paths and test helpers;
-#   - every declared path is a test target or a test helper (a file under tests/ that is not a
-#     target: protected, not run); at least one is a test target; every target fails at that commit and passes at HEAD. A Cargo
+#   - it is the only commit that declares, and it changes only declared paths and test helpers
+#     (files under tests/common/ or tests/fixtures/ that are not test targets: helpers by place,
+#     Issue 372; any other file under tests/, a test of another language included, is refused
+#     unless declared);
+#   - every declared path is a test target or a declared test file (a file under tests/ that is
+#     not a target: protected, not run); at least one is a test target; every target fails at that commit and passes at HEAD. A Cargo
 #     target is tests/<name>.rs or tests/<name>/ holding main.rs (or that main.rs), run as
 #     `cargo test --locked --test <name>`; a Python test is tests/**/test_*.py (a directory: every
 #     test_*.py under it), run as `python3 -m pytest <path>`. See docs/acceptance-check.md;
 #   - the test commit is not a merge, and the branch's own commits after it leave the declared
-#     paths, test helpers (files under tests/ that are not test targets), .github/ and this
+#     paths, every file under tests/ that is not a test target, .github/ and this
 #     script unchanged (what a merge brings from its other parents does not count).
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
 #   bash scripts/acceptance-check.sh --test-commit SHA
@@ -45,7 +48,11 @@ rs_name() { # rs_name <file>: the Cargo target name of tests/<name>.rs or tests/
   case $r in */*/*) return 1 ;; */main.rs) echo "${r%/main.rs}" ;; */*) return 1 ;; *.rs) echo "${r%.rs}" ;; *) return 1 ;; esac
 }
 is_py() { case $1 in tests/*) case ${1##*/} in test_*.py) true ;; *) false ;; esac ;; *) false ;; esac; }
-is_helper() { case $1 in tests/*) ! is_py "$1" && ! rs_name "$1" >/dev/null ;; *) false ;; esac; }
+# A file under tests/ that is not a test target: what rule 4 protects and what a declared path that
+# is not a target is ("helper": protected, not run).
+is_test_file() { case $1 in tests/*) ! is_py "$1" && ! rs_name "$1" >/dev/null ;; *) false ;; esac; }
+# A test helper by place (Issue 372), which a test commit may change without declaring it.
+is_helper() { case $1 in tests/common/* | tests/fixtures/*) is_test_file "$1" ;; *) false ;; esac; }
 is_declared() { local p; while IFS= read -r p; do under "$1" "$p" && return 0; done <<<"$paths"; return 1; }
 # The one rule of what a test commit may change (Issue 361): a path under a path the commit
 # declares, or a test helper. Prints every other path the commit changes, one per line. The merge
@@ -78,7 +85,7 @@ classify() { # classify <root>
     if [ -f "$1/$p" ]; then
       if n=$(rs_name "$p"); then echo "rs $p $n"
       elif is_py "$p"; then echo "py $p"
-      elif is_helper "$p"; then echo "helper $p"
+      elif is_test_file "$p"; then echo "helper $p"
       else echo "bad declared path $p is not a test target"
       fi
     elif [ -d "$1/$p" ]; then
@@ -86,7 +93,7 @@ classify() { # classify <root>
       n=$(rs_name "$p/main.rs") && [ -f "$1/$p/main.rs" ] && found+="rs $p $n"$'\n'
       found+=$(cd "$1" && find "$p" -type f -name 'test_*.py' | sort | while IFS= read -r f; do is_py "$f" && echo "py $f"; done)
       if [ -n "$(printf '%s' "$found" | sed '/^$/d')" ]; then printf '%s\n' "$found" | sed '/^$/d'
-      elif is_helper "$p"; then echo "helper $p"
+      elif is_test_file "$p"; then echo "helper $p"
       else echo "bad declared path $p is not a test target"
       fi
     else
@@ -193,7 +200,7 @@ done
 changes=$(own_changes) || no "cannot list the changes of the commits after the test commit"
 while IFS= read -r f; do
   [ -n "$f" ] || continue
-  if is_declared "$f" || is_helper "$f" || under "$f" .github || [ "$f" = scripts/acceptance-check.sh ]; then
+  if is_declared "$f" || is_test_file "$f" || under "$f" .github || [ "$f" = scripts/acceptance-check.sh ]; then
     no "$f changed after the test commit (declared tests, test helpers, .github/ and this script are protected)"
   fi
 done <<<"$changes"

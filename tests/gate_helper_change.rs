@@ -769,13 +769,18 @@ fn test_infrastructure_through_a_clean_base_merge_is_still_refused() {
         return;
     }
     let c = Case::new("hfconfmerged", &[]);
-    c.test_commit(&[
-        ("tests/test_calc.py", Some(TEST)),
-        (
-            "tests/conftest.py",
-            Some(&CONFTEST.replace("import pytest", "import pytest  # used")),
-        ),
-    ]);
+    // Issue 372: a test commit changes a file under tests/ outside tests/common/ and
+    // tests/fixtures/ only by declaring it.
+    c.commit(
+        &format!("test: failing test{TRAILER}\nAcceptance-Test: tests/conftest.py"),
+        &[
+            ("tests/test_calc.py", Some(TEST)),
+            (
+                "tests/conftest.py",
+                Some(&CONFTEST.replace("import pytest", "import pytest  # used")),
+            ),
+        ],
+    );
     c.land_on_base(&[(
         "tests/conftest.py",
         Some(&CONFTEST.replace("# end", "# the end")),
