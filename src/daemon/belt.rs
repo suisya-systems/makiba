@@ -43,6 +43,7 @@ use crate::db::writer::{NewEvent, RunUpsert, StateWriter};
 use crate::spec::{DoorError, ErrorKind, Role};
 use rusqlite::{Connection, OptionalExtension, params};
 use serde_json::{Map, Value, json};
+use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -879,8 +880,14 @@ pub(super) struct GateStop<'a> {
     pub allow: bool,
     /// The gate refused (line `gate`), or it reports only edited tests (line `tests`).
     pub refused: bool,
+    /// The gate could not read GitHub after its tries (Issue 512): a stop of line `gate` that
+    /// says so, and no refusal for the pause.
+    pub unavailable: bool,
     pub reason: &'a str,
     pub edited_tests: &'a [String],
+    /// The gate's Issue 513 warnings (helpers changed, declared tests merged from the base,
+    /// helpers the base changed): a stop of line `tests` as edited tests are.
+    pub helpers: &'a [String],
 }
 
 /// The gate's answer about a range task's pull request as a stop (belt.md section 5, lines 5 and
@@ -889,6 +896,18 @@ pub(super) struct GateStop<'a> {
 /// the pause rule: two refusals in a row of different pull requests pause the range. The caller
 /// fills after this, so the refusal that pauses puts nothing in. Returns the entry's id.
 pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
+    gate_stop_asking(w, s, None)
+}
+
+/// A refusal for a change to the language check (Issue 339) as a stop of line `gate` that asks
+/// `question`, the gate's question word for word, under a key of its own (`language:`), so that
+/// the person's yes to it, with their own key, is the approval the gate reads; then the pause
+/// rule as for any refusal.
+pub(super) fn language_stop(w: &StateWriter, s: &GateStop, question: &str) -> Result<Option<i64>> {
+    gate_stop_asking(w, s, Some(question))
+}
+
+fn gate_stop_asking(w: &StateWriter, s: &GateStop, language: Option<&str>) -> Result<Option<i64>> {
     let Some(range) = range_of(w, s.task)? else {
         return Ok(None);
     };
@@ -899,7 +918,87 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
     let short = &s.head[..s.head.len().min(12)];
     let tests = s.edited_tests.join(", ");
     let more = json!({"pr": subject, "head": s.head});
-    let made = if s.refused {
+    // One question per head (Issue 512): a stop on the content (a refusal, line `gate`, also one
+    // for the language check, or edited tests and Issue 513's test helpers, line `tests`) still
+    // escalated stands over a read of GitHub that failed later, and a stop on the content
+    // replaces the question a failed read asked, marked as makibad's own withdrawal.
+    let read_key = format!("gate-read:{subject}@{}", s.head);
+    if s.unavailable {
+        let standing: Option<i64> = w
+            .conn()
+            .query_row(
+                "SELECT id FROM pending WHERE status = 'escalated'
+                   AND json_extract(context_json, '$.range_id') = ?1
+                   AND (json_extract(context_json, '$.key') IN (?2, ?3, ?4)
+                        OR substr(json_extract(context_json, '$.key'), 1, length(?5)) = ?5)
+                 ORDER BY id DESC LIMIT 1",
+                params![
+                    range,
+                    format!("gate:{subject}@{}", s.head),
+                    format!("tests:{subject}@{}", s.head),
+                    format!("language:{subject}@{}", s.head),
+                    // A stop of Issue 513's warnings: its key carries their sum.
+                    format!("tests:{subject}@{}#", s.head)
+                ],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if standing.is_some() {
+            return Ok(standing);
+        }
+    } else {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.key') = ?2",
+            params![range, read_key],
+        )?;
+    }
+    let made = if s.unavailable {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: read_key,
+            question: format!(
+                "The merge gate could not read GitHub for {}#{} at {short}: {} Should the secretary ask the merge again later?",
+                s.repo,
+                s.pr,
+                sentence(s.reason)
+            ),
+            background: format!(
+                "makibad's merge gate tried to read GitHub for the pull request of task {} and every try failed; this says nothing about the pull request: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The secretary asks merge again; an answer that allows withdraws this stop."
+                .into(),
+            if_no: "It waits; you merge it yourself in the GitHub web UI or close it.".into(),
+            recommend: "Yes: ask again once GitHub answers.",
+            why: "A failed read is not a judgement of the pull request.",
+            recommend_answer: "yes",
+            more: json!({"pr": subject, "head": s.head, "unavailable": true}),
+        }
+    } else if let Some(question) = language.filter(|_| s.refused) {
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "gate",
+            key: format!("language:{subject}@{}", s.head),
+            question: question.to_string(),
+            background: format!(
+                "makibad's merge gate refused the pull request of task {}: {}",
+                s.task, s.reason
+            ),
+            if_yes: "The gate lets this change to the language check land; the merge still follows the merge approval mode. Answer with your own makiba answer <id> yes: an answer the secretary relays does not count.".into(),
+            if_no: "The secretary sends the worker back to take the change to the language check out.".into(),
+            recommend: "No: the language check gets no new exception.",
+            why: "On 2026-11-22 the person said the language check gets no new exception; only the person makes one.",
+            recommend_answer: "no",
+            more,
+        }
+    } else if s.refused {
         Stop {
             range,
             task: Some(s.task),
@@ -922,7 +1021,7 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
             recommend_answer: "no",
             more,
         }
-    } else {
+    } else if s.helpers.is_empty() {
         Stop {
             range,
             task: Some(s.task),
@@ -944,10 +1043,68 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
             recommend_answer: "none",
             more,
         }
+    } else {
+        // Issue 513: the key holds the warning lines' sum, so other contents at the same head (a
+        // second landing that changes the same helper) are a new stop; the older one is withdrawn.
+        let sum: String = Sha256::digest(s.helpers.join("\n").as_bytes())
+            .iter()
+            .take(8)
+            .map(|b| format!("{b:02x}"))
+            .collect();
+        let key = format!("tests:{subject}@{}#{sum}", s.head);
+        let mut question = format!(
+            "{}#{} at {short} changes test files after its test commit that only a reading can judge: {}.",
+            s.repo,
+            s.pr,
+            s.helpers.join("; ")
+        );
+        if !s.edited_tests.is_empty() {
+            question.push_str(&format!(
+                " It also edits tests that were there before its test commit and are not declared: {tests}."
+            ));
+        }
+        question.push_str(" Should it land?");
+        Stop {
+            range,
+            task: Some(s.task),
+            line: "tests",
+            key,
+            question,
+            background: format!(
+                "The merge gate compared the test files at the head of task {}'s pull request and at the base with those of its test commit (Issue 513). {}",
+                s.task,
+                sentence(s.reason)
+            ),
+            if_yes: "The secretary asks makibad to merge it (merge request); you approve the pending merge entry with your key (makiba merge approve <id>), which shows the diff stat.".into(),
+            if_no: "The secretary sends the worker back to leave those test files as the test commit had them, or to make a new test commit on the current base.".into(),
+            recommend: "None: read the diff of those test files in the pending merge entry.",
+            why: "No rule tells a helper repaired from a helper weakened to pass; only a reading does.",
+            recommend_answer: "none",
+            more,
+        }
     };
+    // Issue 513: a `tests` stop is the one reading of its head; a stop of that line still
+    // escalated for the same pull request and head under another key (other warning lines, or
+    // edited tests only) asks about a reading the gate no longer makes, and is withdrawn.
+    if made.line == "tests" {
+        w.conn().execute(
+            "UPDATE pending SET status = 'withdrawn',
+               context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+             WHERE status = 'escalated'
+               AND json_extract(context_json, '$.by') = 'makibad'
+               AND json_extract(context_json, '$.stop_line') = 'tests'
+               AND json_extract(context_json, '$.range_id') = ?1
+               AND json_extract(context_json, '$.pr') = ?2
+               AND json_extract(context_json, '$.head') = ?3
+               AND json_extract(context_json, '$.key') != ?4",
+            params![range, subject, s.head, made.key],
+        )?;
+    }
     let (id, _) = stop(w, &made)?;
-    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing.
+    // The pause is for refusals: an answer that allows (edited tests under human) pauses nothing,
+    // and neither does a read of GitHub that failed (Issue 512).
     if !s.allow
+        && !s.unavailable
         && let Some((acting, status)) = acting(w, range)?
         && status == "active"
     {
@@ -962,6 +1119,8 @@ pub(super) fn gate_stop(w: &StateWriter, s: &GateStop) -> Result<Option<i64>> {
                    (SELECT r.id FROM runs r WHERE r.range_id IN (SELECT id FROM chain))
                AND (e.kind = 'pr_merged' OR (e.kind = 'acceptance_gate'
                     AND json_extract(e.payload_json, '$.allow') = 0
+                    AND coalesce(json_extract(e.payload_json, '$.verdict'),
+                                 json_extract(e.payload_json, '$.result'), '') != 'unavailable'
                     AND json_extract(e.payload_json, '$.head') = coalesce(
                       (SELECT json_extract(p.payload_json, '$.head_oid') FROM events p
                        WHERE p.kind IN ('pr_opened', 'fix_pushed') AND p.id < e.id
@@ -1386,7 +1545,7 @@ fn dep_runs(c: &Connection, slug: &str, d: i64) -> Result<Vec<DepRun>> {
 /// names, or whose run the watch no longer reads, holds nothing.
 fn landings(c: &Connection, slug: &str, body: &str) -> Result<Option<Vec<Landed>>> {
     let mut out = Vec::new();
-    for d in refs_on_lines(body, "depends on") {
+    for d in admitted_dependencies(body) {
         for r in dep_runs(c, slug, d)? {
             if r.merged {
                 let Some(merge) = r.seen else {
@@ -1424,7 +1583,7 @@ fn held_checks(w: &StateWriter) -> Result<Vec<CloneCheck>> {
         .collect::<std::result::Result<_, _>>()?;
     let mut out: Vec<CloneCheck> = Vec::new();
     for (slug, branch, body) in rows {
-        for d in refs_on_lines(&body, "depends on") {
+        for d in admitted_dependencies(&body) {
             for r in dep_runs(w.conn(), &slug, d)? {
                 if !r.merged || r.seen.is_some() {
                     continue;
@@ -1797,6 +1956,39 @@ impl Takes {
             }
         })
     }
+}
+
+/// The Issues of the repository `repo` (`owner/name`) the body depends on, read by the one parser
+/// of dependency lines (`work_discovery::refs::dependency_lines`, Issue 356): every keyword
+/// (`Blocked by`, `Depends on`, `Requires`) behind any Markdown lead, and inside a line. `Err`
+/// says why they cannot be read: a dependency line not read whole, or a dependency of another
+/// repository, whose state the range does not read.
+fn dependencies(body: &str, repo: &str) -> std::result::Result<Vec<i64>, String> {
+    let d = crate::work_discovery::refs::dependency_lines(body);
+    if let Some(line) = d.unreadable {
+        return Err(line);
+    }
+    let mut out = d.home;
+    for (r, n) in d.cross {
+        if !r.eq_ignore_ascii_case(repo) {
+            return Err(format!("{r}#{n} is of another repository"));
+        }
+        out.push(n);
+    }
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The dependencies of an admitted candidate's body: home and cross refs alike, since `admit`
+/// leaves out a body naming another repository's Issue.
+fn admitted_dependencies(body: &str) -> Vec<i64> {
+    let d = crate::work_discovery::refs::dependency_lines(body);
+    let mut out = d.home;
+    out.extend(d.cross.into_iter().map(|(_, n)| n));
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 /// The `#<n>` numbers of the body's lines that start with `prefix` (any case).
@@ -2306,7 +2498,8 @@ fn read(gh: &str, s: &Spec, repos_dir: &Path, cancel: &AtomicBool) -> ReadResult
             && !refs_on_lines(i["body"].as_str().unwrap_or(""), "follow-up of").is_empty();
         if s.listed.contains(&n) || s.takes.matches(i) || follow_up {
             need.extend(
-                refs_on_lines(i["body"].as_str().unwrap_or(""), "depends on")
+                dependencies(i["body"].as_str().unwrap_or(""), &repo)
+                    .unwrap_or_default()
                     .into_iter()
                     .filter(|d| !open_numbers.contains(d)),
             );
@@ -2549,11 +2742,12 @@ fn admit(
         if why.is_none() && followed.contains(&n) {
             why = kept_out(&body);
         }
+        let deps = dependencies(&body, &f.repo);
         if why.is_none()
-            && let Some(line) = crate::work_discovery::refs::dependency_line_with_no_number(&body)
+            && let Err(line) = &deps
         {
-            // A dependency in words is not read as none (Issue 299): the line must name `#<n>`.
-            // The range's own records come first, so a skipped one does not hold the range open.
+            // A dependency line not read whole is not read as none (Issues 299, 356). The range's
+            // own records come first, so a skipped one does not hold the range open.
             why = Some(match records_why(w, s, n)? {
                 Some(r) => r,
                 None => format!("dependency_unreadable ({line})"),
@@ -2561,7 +2755,7 @@ fn admit(
         }
         let mut waits = None;
         if why.is_none() {
-            let deps: Vec<i64> = refs_on_lines(&body, "depends on");
+            let deps: Vec<i64> = deps.unwrap_or_default();
             let waiting: Vec<i64> = deps
                 .into_iter()
                 .filter(|d| {
@@ -2584,14 +2778,19 @@ fn admit(
             if ahead {
                 waits = Some(waiting);
             } else if !waiting.is_empty() {
-                why = Some(format!(
-                    "waits_for {}",
-                    waiting
-                        .iter()
-                        .map(|d| format!("#{d}"))
-                        .collect::<Vec<_>>()
-                        .join(" ")
-                ));
+                // The range's own records come first here too (Issue 356): a skipped candidate
+                // does not hold the range open while its dependency is open.
+                why = Some(match records_why(w, s, n)? {
+                    Some(r) => r,
+                    None => format!(
+                        "waits_for {}",
+                        waiting
+                            .iter()
+                            .map(|d| format!("#{d}"))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    ),
+                });
             }
         }
         if why.is_none()
@@ -3028,10 +3227,24 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 if let Some(at) = newest_event_at(c, run, "run_in_review")? {
                     it["since"] = json!(at);
                 }
+                // The watch of its current pull request (Issue 357), of its current head
+                // first: a pull request registered again keeps its older row, behind another's
+                // newer one, and so does a head it returns to.
                 let watch: Option<(String, Option<String>)> = c
                     .query_row(
-                        "SELECT status, conclusion FROM pr_watches WHERE run_id = ?1
-                         ORDER BY id DESC LIMIT 1",
+                        &format!(
+                            "SELECT w.status, w.conclusion FROM pr_watches w
+                             JOIN runs r ON r.id = w.run_id
+                             WHERE w.run_id = ?1 AND {}
+                             ORDER BY coalesce(w.head_oid = (
+                                        SELECT json_extract(ch.payload_json, '$.head_oid')
+                                        FROM events ch WHERE ch.run_id = r.id
+                                          AND ch.kind IN ('pr_opened', 'fix_pushed')
+                                        ORDER BY ch.id DESC LIMIT 1), 0) DESC,
+                                      w.id DESC
+                             LIMIT 1",
+                            is_current_pr_sql("r", "w.repo", "w.pr")
+                        ),
                         [run],
                         |r| Ok((r.get(0)?, r.get(1)?)),
                     )
@@ -3043,10 +3256,20 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 });
             }
             "completed" => {
+                // A merge of its current pull request only (Issue 357): one of a pull request
+                // it replaced is not its landing.
                 let merged: Option<String> = c
                     .query_row(
-                        "SELECT payload_json FROM events WHERE kind = 'pr_merged' AND run_id = ?1
-                         ORDER BY id LIMIT 1",
+                        &format!(
+                            "SELECT m.payload_json FROM events m JOIN runs r ON r.id = m.run_id
+                             WHERE m.kind = 'pr_merged' AND m.run_id = ?1 AND {}
+                             ORDER BY m.id DESC LIMIT 1",
+                            is_current_pr_sql(
+                                "r",
+                                "json_extract(m.payload_json, '$.repo')",
+                                "json_extract(m.payload_json, '$.pr')"
+                            )
+                        ),
                         [run],
                         |r| r.get(0),
                     )
@@ -3880,8 +4103,10 @@ pub(in crate::daemon) mod tests {
                 head,
                 allow: false,
                 refused: true,
+                unavailable: false,
                 reason: "no passed CI",
                 edited_tests: &[],
+                helpers: &[],
             },
         )
         .unwrap()
@@ -4090,8 +4315,10 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: true,
                 refused: false,
+                unavailable: false,
                 reason: "passed",
                 edited_tests: &tests,
+                helpers: &[],
             },
         )
         .unwrap()
@@ -4155,8 +4382,10 @@ pub(in crate::daemon) mod tests {
                 head: &h,
                 allow: false,
                 refused: false,
+                unavailable: false,
                 reason: "tests edited",
                 edited_tests: &tests,
+                helpers: &[],
             },
         )
         .unwrap()
@@ -4176,6 +4405,53 @@ pub(in crate::daemon) mod tests {
             })
             .unwrap();
         assert_eq!(status, "withdrawn");
+    }
+
+    /// Issue 513 (diff review): a head stopped for helper warnings and edited tests, then read
+    /// with the edited tests only (the base took the helper back): the new `tests` stop replaces
+    /// the older one of that head, which is withdrawn; the same reading again is the same stop.
+    #[test]
+    fn a_new_reading_of_the_same_head_replaces_its_tests_stop() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        run_of(&w, id, "a");
+        let h = "1".repeat(40);
+        watch(&w, "a", 7, &h);
+        let tests = ["tests/test_x.py".to_string()];
+        let lines = ["test helpers the base changed: tests/common/h.py".to_string()];
+        let stop_with = |helpers: &[String]| {
+            gate_stop(
+                &w,
+                &GateStop {
+                    task: "a",
+                    repo: "o/p",
+                    pr: 7,
+                    head: &h,
+                    allow: true,
+                    refused: false,
+                    unavailable: false,
+                    reason: "passed",
+                    edited_tests: &tests,
+                    helpers,
+                },
+            )
+            .unwrap()
+            .expect("a stop of line tests")
+        };
+        let first = stop_with(&lines);
+        assert_eq!(escalated(&w), 1);
+        let second = stop_with(&[]);
+        assert_ne!(second, first);
+        assert_eq!(escalated(&w), 1, "only the new reading's stop stands");
+        let status: String = w
+            .conn()
+            .query_row("SELECT status FROM pending WHERE id = ?1", [first], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(status, "withdrawn");
+        assert_eq!(stop_with(&[]), second, "the same reading is the same stop");
+        assert_eq!(escalated(&w), 1);
     }
 
     /// A range budget is a stop only while it keeps a candidate out, and once.
@@ -4228,10 +4504,24 @@ pub(in crate::daemon) mod tests {
 
     #[test]
     fn only_the_lines_that_start_with_the_word_are_read() {
-        let body =
-            "Depends on #3 and #4\nThis mentions depends on #5\n  depends on: #6\nFollow-up of #7";
-        assert_eq!(refs_on_lines(body, "depends on"), vec![3, 4, 6]);
+        let body = "Follow-up of #7\nThis is a follow-up of #8";
         assert_eq!(refs_on_lines(body, "follow-up of"), vec![7]);
+    }
+
+    /// The range reads dependencies through the one parser (Issue 356).
+    #[test]
+    fn dependencies_are_read_by_the_one_parser() {
+        let body = "Depends on #3 and #4\n  depends on: #6\n- Blocked by o/R#9\n> **Requires** #10";
+        assert_eq!(dependencies(body, "o/r"), Ok(vec![3, 4, 6, 9, 10]));
+        assert_eq!(admitted_dependencies(body), vec![3, 4, 6, 9, 10]);
+        assert!(dependencies("Depends on other/x#5", "o/r").is_err());
+        // Only the one form is read: a keyword inside prose with a ref, or a URL, is not.
+        assert!(dependencies("This mentions depends on #5", "o/r").is_err());
+        assert!(dependencies("Depends on https://github.com/o/r/issues/30", "o/r").is_err());
+        assert_eq!(
+            dependencies("- Depends on the previous step.", "o/r"),
+            Err("- Depends on the previous step.".to_string())
+        );
     }
 
     /// A completed run `dep` and a design-only run `wait` waiting for it (Issue 345 tests).
@@ -4519,5 +4809,64 @@ pub(in crate::daemon) mod tests {
             landed_of(&w),
             Some(vec![(1, "d".to_string(), "m2".to_string())])
         );
+    }
+
+    /// A run in review that returns to an older head of its current pull request takes the
+    /// stage from that head's watch, not from a newer head's (Issue 357, diff review round 1).
+    #[test]
+    fn the_review_stage_is_that_of_the_current_head() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 1, 9, 'h', 's')",
+                [],
+            )
+            .unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "r1-9",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute("UPDATE runs SET range_id = 1 WHERE task_id = 'r1-9'", [])
+            .unwrap();
+        w.append_event(&NewEvent {
+            kind: "belt_dispatched",
+            actor: Some("makibad"),
+            payload: Some(&json!({"range_id": 1, "issue": 9, "task_id": "r1-9"})),
+            run_task_id: Some("r1-9"),
+            ..Default::default()
+        })
+        .unwrap();
+        let h1 = "1".repeat(40);
+        let h2 = "2".repeat(40);
+        let stage = || {
+            let items = items(w.conn(), 1, &json!({}), &[]).unwrap();
+            items[0]["stage"].clone()
+        };
+        super::super::prwatch::register(&w, "pr_opened", "r1-9", "o/p", 11, &h1).unwrap();
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h2).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
+                 WHERE head_oid = ?1",
+                [&h2],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("to_land"));
+        // Back to h1: its row is watched again, older than h2's passed one.
+        super::super::prwatch::register(&w, "fix_pushed", "r1-9", "o/p", 11, &h1).unwrap();
+        assert_eq!(stage(), json!("ci"));
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'failed'
+                 WHERE head_oid = ?1",
+                [&h1],
+            )
+            .unwrap();
+        assert_eq!(stage(), json!("ci"));
     }
 }
