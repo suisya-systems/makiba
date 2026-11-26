@@ -16,8 +16,12 @@
 #     `cargo test --locked --test <name>`; a Python test is tests/**/test_*.py (a directory: every
 #     test_*.py under it), run as `python3 -m pytest <path>`. See docs/acceptance-check.md;
 #   - the test commit is not a merge, and the branch's own commits after it leave the declared
-#     paths, every file under tests/ that is not a test target, .github/ and this
-#     script unchanged (what a merge brings from its other parents does not count).
+#     paths, every path the test commit changed, the test infrastructure (gate.rs INFRA_NAMES,
+#     INFRA_PREFIXES), every file under tests/ that is not a test target and not a test helper,
+#     .github/ and this script unchanged. A test helper the test commit left alone may change, be
+#     added or be deleted; each is named before the last line, and the person accepts it at the
+#     merge (Issue 514). A base merge counts only for its own resolution: what differs from the
+#     clean merge of its parents, or a conflict not resolved as the branch's own version.
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
 #   bash scripts/acceptance-check.sh --test-commit SHA
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
@@ -176,20 +180,55 @@ else
 fi
 
 # 2. protected paths unchanged by the branch's own commits after the test commit. A merge (of
-# the base) counts only for files it leaves different from every parent: its own resolution.
-# Names are read unquoted (-z), as in refused_in_test_commit, so a non-ASCII helper is still seen.
-# A failed git diff fails the function (pipefail), so it is not read as "nothing changed".
+# the base) counts only for its own resolution (merge_own). Names are read unquoted and kept
+# NUL-delimited to the end (-z), so a non-ASCII helper is still seen and a name holding a newline
+# stays one name. A failed git fails the function (pipefail), so it is not read as "nothing changed".
+# The gate's test-infrastructure names (src/daemon/gate.rs INFRA_NAMES, INFRA_PREFIXES): a helper
+# whose file name is one of them stays protected. tests/test_acceptance_helper_change.py checks
+# that the two lists are equal.
+INFRA_NAMES='conftest.py pytest.ini .pytest.ini pytest.toml .pytest.toml pyproject.toml setup.cfg tox.ini package.json'
+INFRA_PREFIXES='vitest.config. vitest.workspace. vite.config.'
+is_infra() { # by file name, as gate.rs is_infra (its workflows part is .github/, protected anyway)
+  local n=${1##*/} x
+  for x in $INFRA_NAMES; do [ "$n" = "$x" ] && return 0; done
+  for x in $INFRA_PREFIXES; do case $n in "$x"*) return 0 ;; esac; done
+  return 1
+}
+# merge_own <commit> <p1> <p2>: the paths a two-parent merge made itself, NUL-delimited. Against T,
+# the tree `git merge-tree --write-tree` makes of the parents (as the gate's clean merge, Issue
+# 344): a path it merged cleanly counts when the commit holds it otherwise than T (an own edit, or
+# a file set back to either parent); a conflicted path counts unless the commit holds it as p1
+# (the branch's own version kept). Returns 2 when git fails.
+merge_own() {
+  local tree f rc out
+  local -A conf=() own=()
+  out=$(mktemp) || return 2
+  git merge-tree --write-tree --name-only -z "$2" "$3" >"$out"; rc=$?
+  [ "$rc" -le 1 ] || { rm -f "$out"; return 2; }
+  { IFS= read -r -d '' tree; while IFS= read -r -d '' f && [ -n "$f" ]; do conf[$f]=1; done; } <"$out"
+  [ -n "$tree" ] && git diff --no-renames --name-only -z "$tree" "$1" >"$out" || { rm -f "$out"; return 2; }
+  while IFS= read -r -d '' f; do [ -z "$f" ] || [ -n "${conf[$f]+x}" ] || own[$f]=1; done <"$out"
+  git diff --no-renames --name-only -z "$2" "$1" >"$out" || { rm -f "$out"; return 2; }
+  while IFS= read -r -d '' f; do [ -z "$f" ] || [ -z "${conf[$f]+x}" ] || own[$f]=1; done <"$out"
+  rm -f "$out"
+  for f in "${!own[@]}"; do printf '%s\0' "$f"; done
+}
 own_changes() (
   set -o pipefail
   for c in $(printf '%s\n' "$commits" | tail -n +2); do
-    ps=$(git rev-list --parents -n 1 "$c" | cut -d' ' -f2-)
-    if [ "$(echo $ps | wc -w)" -eq 1 ]; then
-      git diff --no-renames --name-only -z "$c^" "$c" | tr '\0' '\n' || exit 2
-    else
-      for p in $ps; do git diff --no-renames --name-only -z "$p" "$c" | tr '\0' '\n' || exit 2; done | sort | uniq -c |
-        while read -r n f; do [ "$n" -lt "$(echo $ps | wc -w)" ] || printf '%s\n' "$f"; done || exit 2
+    read -r -a ps <<<"$(git rev-list --parents -n 1 "$c" | cut -d' ' -f2-)"
+    if [ "${#ps[@]}" -eq 1 ]; then
+      git diff --no-renames --name-only -z "$c^" "$c" || exit 2
+    elif [ "${#ps[@]}" -eq 2 ]; then
+      merge_own "$c" "${ps[0]}" "${ps[1]}" || exit 2
+    else # an octopus merge: the files it leaves different from every parent
+      for p in "${ps[@]}"; do git diff --no-renames --name-only -z "$p" "$c" || exit 2; done | sort -z | uniq -zc |
+        while IFS= read -r -d '' l; do
+          l=${l#"${l%%[![:space:]]*}"}
+          [ "${l%% *}" -lt "${#ps[@]}" ] || printf '%s\0' "${l#* }"
+        done || exit 2
     fi
-  done | sed '/^$/d' | sort -u
+  done | sort -zu
 )
 # A merge may bring in only the base: a side branch's own commits are off the first-parent line.
 for c in $(printf '%s\n' "$commits" | tail -n +2); do
@@ -197,13 +236,30 @@ for c in $(printf '%s\n' "$commits" | tail -n +2); do
     git merge-base --is-ancestor "$p" "$1" || no "merge $c brings in $p, which is not in the base"
   done
 done
-changes=$(own_changes) || no "cannot list the changes of the commits after the test commit"
-while IFS= read -r f; do
+# Rule 4 (Issue 514): protected are the declared paths, every path the test commit changed,
+# .github/, this script, the test infrastructure and every other file under tests/ that is not a
+# test target; a test helper by place that the test commit left alone may change, be added or be
+# deleted, and is named before the last line (the person accepts it at the merge).
+declare -A in_test_commit=()
+helpers_changed=()
+list=$(mktemp) || exit 2
+if git diff --no-renames --name-only -z "$first^" "$first" >"$list"; then
+  while IFS= read -r -d '' f; do [ -z "$f" ] || in_test_commit[$f]=1; done <"$list"
+else
+  no "cannot list the changes of the test commit $first"
+fi
+own_changes >"$list" || no "cannot list the changes of the commits after the test commit"
+while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
-  if is_declared "$f" || is_test_file "$f" || under "$f" .github || [ "$f" = scripts/acceptance-check.sh ]; then
-    no "$f changed after the test commit (declared tests, test helpers, .github/ and this script are protected)"
+  if is_declared "$f" || [ -n "${in_test_commit[$f]+x}" ] || under "$f" .github ||
+    [ "$f" = scripts/acceptance-check.sh ] || { is_test_file "$f" && is_infra "$f"; } ||
+    { is_test_file "$f" && ! is_helper "$f"; }; then
+    no "$f changed after the test commit (declared tests, paths the test commit changed, test infrastructure, test files outside tests/common/ and tests/fixtures/, .github/ and this script are protected)"
+  elif is_helper "$f"; then
+    helpers_changed+=("$f")
   fi
-done <<<"$changes"
+done <"$list"
+rm -f "$list"
 
 # 3. declared tests fail at the test commit and pass at head
 work=$(mktemp -d)
@@ -276,5 +332,8 @@ while read -r kind t n; do
   fi
 done <<<"$tests"
 
+for f in "${helpers_changed[@]}"; do
+  echo "acceptance-check: test helper $f changed after the test commit; the person accepts it at the merge"
+done
 if [ "$bad" -eq 0 ]; then echo "ACCEPTANCE: pass"; exit 0; fi
 echo "ACCEPTANCE: fail"; exit 1
