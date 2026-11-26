@@ -3010,8 +3010,8 @@ struct OpenPr {
 /// its worker's newest diff review row (`commands.id`, the answer), and its newest passed diff
 /// review row that names a head (Issue 557: a round is passed only when its reader read the change,
 /// Issue 280; an attempt that read nothing, with or without a head, must not hide the head an
-/// earlier review read). Read again when the verdict is recorded; a difference there is "ask
-/// again".
+/// earlier review read; for code too since Issue 564). Read again when the verdict is recorded; a
+/// difference there is "ask again".
 #[derive(Clone, Default, PartialEq)]
 struct ReviewRows {
     kind: Option<String>,
@@ -3290,9 +3290,11 @@ enum Found {
 /// is `passed`, `blockers` (passed, with blockers found: not a pass), `none`, `stale`,
 /// `not-established` or `not-required` (only Markdown or `docs/` changed). A review of another
 /// head is carried to this one only when the PR's own changes are byte-equal (a join commit of
-/// the base, a rebase); otherwise it is stale. Issue 557: a docs-only PR needs no review, but when
-/// its task's worker ran a passed diff review (one whose reader read the change) of a head, a head
-/// after it is held the same way (stale unless carried), whatever that review found.
+/// the base, a rebase); otherwise it is stale. Issue 564: for code, the head the PR is held to is
+/// that of the newest passed diff review that names one (its reader read the change), so a later
+/// attempt that read nothing does not hide it; with none, the last diff review's. Issue 557: a
+/// docs-only PR needs no review, but when its task's worker ran a passed diff review of a head, a
+/// head after it is held the same way (stale unless carried), whatever that review found.
 fn gate_review(rows: &GateRows, clone: &Path, base: &str, head: &str, docs: bool) -> Value {
     let mut r = json!({"state": "not-established", "head": head});
     if docs {
@@ -3330,18 +3332,18 @@ fn gate_review(rows: &GateRows, clone: &Path, base: &str, head: &str, docs: bool
         r["state"] = json!("none");
         return r;
     };
-    r["reviewed_head"] = l["head"].clone();
-    if let Some(rh) = l["head"].as_str()
+    // Issue 564: the stale check judges from the newest passed round that names a head, as for
+    // docs (Issue 557), so a later attempt that read nothing cannot hide the head a reader read;
+    // with no such round, from the newest row as before.
+    let (judged, passed) = match &rv.read {
+        Some((_, p)) => (p, true),
+        None => (l, l["verdict"] == json!("passed")),
+    };
+    r["reviewed_head"] = judged["head"].clone();
+    if let Some(rh) = judged["head"].as_str()
         && rh != head
     {
-        carry(
-            &mut r,
-            clone,
-            base,
-            rh,
-            head,
-            l["verdict"] == json!("passed"),
-        );
+        carry(&mut r, clone, base, rh, head, passed);
     }
     if r["state"] == json!("stale") {
         return r;
