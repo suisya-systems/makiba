@@ -22,6 +22,8 @@
 #     added or be deleted; each is named before the last line, and the person accepts it at the
 #     merge (Issue 514). A base merge counts only for its own resolution: what differs from the
 #     clean merge of its parents, or a conflict not resolved as the branch's own version.
+# The two worktrees are made under the repository's git folder (<git common dir>/acceptance-check/),
+# not under the system's temporary folder, and removed at exit (Issue 558).
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
 #   bash scripts/acceptance-check.sh --test-commit SHA
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
@@ -262,8 +264,28 @@ done <"$list"
 rm -f "$list"
 
 # 3. declared tests fail at the test commit and pass at head
-work=$(mktemp -d)
-trap 'git worktree remove --force "$work/t" >/dev/null 2>&1; git worktree remove --force "$work/h" >/dev/null 2>&1; rm -rf "$work"' EXIT
+# The work folder is under the repository's git folder, not the system's temporary folder: a
+# declared test then sees in the acceptance job the kind of path it sees in the tests job, also
+# when the code under test treats a temporary folder otherwise (Issue 558). A git folder in a
+# temporary folder while the checkout is not would bring that back, so it fails the check.
+tmp_root() { # tmp_root <resolved dir>: prints the temporary folder that holds it, if any
+  local r
+  for r in /tmp /private/tmp /var/tmp ${TMPDIR:+"$TMPDIR"}; do
+    r=$(cd -P "$r" 2>/dev/null && pwd -P) || continue
+    under "$1" "$r" && { echo "$r"; return 0; }
+  done
+  return 1
+}
+gitdir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && gitdir=$(cd -P "$gitdir" && pwd -P) &&
+  mkdir -p "$gitdir/acceptance-check" && work=$(mktemp -d "$gitdir/acceptance-check/run.XXXXXX") ||
+  { echo "acceptance-check: cannot make a work folder under the repository's git folder" >&2; echo "ACCEPTANCE: fail"; exit 1; }
+trap 'git worktree remove --force "$work/t" >/dev/null 2>&1; git worktree remove --force "$work/h" >/dev/null 2>&1; rm -rf "$work"; rmdir "$gitdir/acceptance-check" 2>/dev/null' EXIT
+if root=$(tmp_root "$work"); then
+  if top=$(git rev-parse --show-toplevel 2>/dev/null) && top=$(cd -P "$top" && pwd -P) && ! tmp_root "$top" >/dev/null; then
+    echo "acceptance-check: the git folder $gitdir is under a temporary folder ($root) while the checkout $top is not; declared tests would see a path the tests job does not"
+    echo "ACCEPTANCE: fail"; exit 1
+  fi
+fi
 git worktree add -q --detach "$work/t" "$first" && git worktree add -q --detach "$work/h" "$head" \
   || { echo "acceptance-check: git worktree add failed" >&2; echo "ACCEPTANCE: fail"; exit 1; }
 # Each test is "py <path>" or "rs <path> <target name>".
