@@ -651,10 +651,20 @@ fn detail(c: &Ctx, item: &Value) -> Value {
             .find(|p| p["task_id"] == t)
             .map(|p| p["ci"].clone())
     });
+    // `<prefix> #12 #34`: every number, written "12, #34" into the key's `#{n}`.
     let waits = |s: &str, prefix: &str, key: &str| -> Option<String> {
-        s.strip_prefix(prefix)
-            .and_then(|r| r.trim().parse::<i64>().ok())
-            .map(|i| c.w.fill(key, &[n(i)]))
+        let rest = s.strip_prefix(prefix)?;
+        let nums: Option<Vec<i64>> = rest
+            .split_whitespace()
+            .map(|t| t.strip_prefix('#').and_then(|d| d.parse::<i64>().ok()))
+            .collect();
+        let nums = nums.filter(|v| !v.is_empty())?;
+        let joined = nums
+            .iter()
+            .map(i64::to_string)
+            .collect::<Vec<_>>()
+            .join(", #");
+        Some(c.w.fill(key, &[n(joined)]))
     };
     if let Some(stage) = str_of(&item["stage"]) {
         let words = match stage {
@@ -667,18 +677,21 @@ fn detail(c: &Ctx, item: &Value) -> Value {
             "no_pr" => Some(c.w.get("stage.no_pr")),
             "launching" => Some(c.w.get("stage.starting")),
             "design_only" => Some(c.w.get("stage.design_only")),
-            s => waits(s, "waits_landing #", "stage.waits_landing"),
+            s => waits(s, "waits_landing", "stage.waits_landing"),
         };
         if let Some(w) = words {
             return json!(w);
+        }
+        // A stage the screen has no words for, with no `why`, is shown by its record name.
+        if item["why"].is_null() && !matches!(stage, "ci" | "at_work" | "launch_failed" | "parked")
+        {
+            return json!(stage);
         }
     }
     match str_of(&item["why"]) {
         Some("no_slot") => json!(c.w.get("stage.free_place")),
         Some("budget") => json!(c.w.get("stage.budget")),
-        Some(w) => {
-            waits(w, "waits_for #", "stage.waits_for").map_or_else(|| json!(w), |s| json!(s))
-        }
+        Some(w) => waits(w, "waits_for", "stage.waits_for").map_or_else(|| json!(w), |s| json!(s)),
         None => Value::Null,
     }
 }
@@ -690,7 +703,10 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
         let project = str_of(&r["project"]).map(String::from);
         let mut items = Vec::new();
         let mut dns = 0;
-        let mut flag = false;
+        // A stop of the whole range (a budget spent) waits for the person with no task.
+        let mut flag = arr(&c.st["pending"])
+            .iter()
+            .any(|p| p["status"] == "escalated" && p["range_id"] == r["id"]);
         for i in arr(&r["items"]) {
             let place = str_of(&i["place"]).unwrap_or("");
             let task = str_of(&i["task_id"]);
@@ -732,7 +748,7 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
                     "issue": i["issue"], "ref": c.reference(&project, &i["issue"]),
                     "title": i["title"], "place": place, "words": words,
                     "detail": detail(c, i), "age_s": c.age_s(&i["since"]), "task_id": i["task_id"],
-                    "did_not_start": did_not_start,
+                    "did_not_start": did_not_start, "pr": i["pr"], "pr_title": i["pr_title"],
                 }),
             ));
         }
@@ -1111,7 +1127,9 @@ fn one_off(c: &Ctx) -> Value {
                 "ref": c.reference(&str_of(&r["project"]).map(String::from), &r["issue"]),
                 "words": words, "age_s": c.age_s(&at), "status": r["status"],
             });
-            Some((rank, c.ms(&r["since"]).unwrap_or(0), row))
+            // Within a rank, by the age shown: the time of the state's own record.
+            let order = c.ms(&at).or_else(|| c.ms(&r["since"])).unwrap_or(0);
+            Some((rank, order, row))
         })
         .collect();
     rows.sort_by_key(|(k, s, _)| (*k, *s));
@@ -1271,4 +1289,97 @@ pub fn history(events: &[Value], words: &Words) -> Value {
         })
         .collect();
     json!(rows)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const NOW: i64 = 1_795_514_400_000; // 2026-11-24T10:00:00Z
+
+    fn base() -> Value {
+        json!({"makibad": {"running": true, "heartbeat_at": "2026-11-24T09:59:57.000Z"},
+               "projects": [{"slug": "loom", "repo": "example-org/loom"}],
+               "runs": [], "terminals": [], "anomalies": [], "pending": [],
+               "pull_requests": [], "ranges": [], "next_work": null})
+    }
+
+    fn range(id: i64, items: Value) -> Value {
+        json!({"id": id, "project": "loom", "status": "active", "items": items,
+               "approved_at": "2026-11-20T08:00:00.000Z", "places": {}})
+    }
+
+    #[test]
+    fn several_landings_are_each_named() {
+        let mut s = base();
+        s["ranges"] = json!([range(
+            1,
+            json!([
+            {"issue": 5, "place": "review", "stage": "waits_landing #12 #34", "why": null,
+             "task_id": "t5", "since": "2026-11-24T09:00:00.000Z"},
+            {"issue": 6, "place": "not_in", "stage": null, "why": "waits_for #7 #8",
+             "task_id": null, "since": null}])
+        )]);
+        let m = model(&s, NOW, &Words::new("en"));
+        let w = Words::new("en");
+        assert_eq!(
+            m["ranges"][0]["items"][0]["detail"],
+            w.fill("stage.waits_landing", &[n("12, #34")])
+        );
+        assert_eq!(
+            m["ranges"][0]["items"][1]["detail"],
+            w.fill("stage.waits_for", &[n("7, #8")])
+        );
+    }
+
+    #[test]
+    fn a_stop_of_a_whole_range_selects_it() {
+        let mut s = base();
+        s["ranges"] = json!([range(1, json!([])), range(2, json!([]))]);
+        s["ranges"][0]["approved_at"] = json!("2026-11-23T08:00:00.000Z");
+        s["pending"] = json!([{"id": 9, "task_id": null, "status": "escalated", "range_id": 2,
+                               "kind": "question", "question": "Budget spent; go on?",
+                               "created_at": "2026-11-24T09:00:00.000Z", "context": {}}]);
+        let m = model(&s, NOW, &Words::new("en"));
+        assert_eq!(m["ranges"][1]["selected"], true);
+        assert_eq!(m["ranges"][0]["selected"], false);
+        assert_eq!(m["top"]["needs_you_in"], json!(["loom"]));
+    }
+
+    #[test]
+    fn an_item_keeps_its_pull_request() {
+        let mut s = base();
+        s["ranges"] = json!([range(
+            1,
+            json!([
+            {"issue": 5, "place": "landed", "task_id": "t5", "pr": 41, "pr_title": "Fix it",
+             "since": "2026-11-23T09:00:00.000Z"}])
+        )]);
+        let m = model(&s, NOW, &Words::new("en"));
+        assert_eq!(m["ranges"][0]["items"][0]["pr"], 41);
+        assert_eq!(m["ranges"][0]["items"][0]["pr_title"], "Fix it");
+    }
+
+    #[test]
+    fn one_off_tasks_of_one_rank_go_by_the_age_shown() {
+        let mut s = base();
+        let run = |t: &str, since: &str| {
+            json!({"task_id": t, "project": "loom", "status": "in_use", "stage": "verified",
+                   "range_id": null, "since": since, "waiting": null})
+        };
+        // a was dispatched first, but its error is newer than b's.
+        s["runs"] = json!([
+            run("a", "2026-11-24T06:00:00.000Z"),
+            run("b", "2026-11-24T07:00:00.000Z")
+        ]);
+        s["anomalies"] = json!([
+            {"task_id": "a", "rule": "error", "since": "2026-11-24T09:50:00.000Z"},
+            {"task_id": "b", "rule": "error", "since": "2026-11-24T09:00:00.000Z"}]);
+        let m = model(&s, NOW, &Words::new("en"));
+        let order: Vec<&str> = arr(&m["one_off"])
+            .iter()
+            .map(|r| r["task_id"].as_str().unwrap())
+            .collect();
+        assert_eq!(order, vec!["b", "a"]);
+    }
 }
