@@ -1,0 +1,116 @@
+# The screen's words in Japanese: the owner's table (Issue 169, agreed 2026-11-23).
+# A key missing here is shown in English. One line per key: key<TAB>text.
+top.needs_you	判断待ち {n}
+top.failed	失敗 {n}
+top.unattended	未対応 {n}
+top.running	稼働中・{n} 秒前に更新
+top.stopped	makiba が {n} 分応答なし
+top.display	表示
+col.hand_over	仕事を渡す
+col.progress	進み具合
+col.more	その他
+range.title	まとめて任せた仕事 #{n}
+range.in_progress	進行中
+range.proposed	承認待ち
+range.paused	保留中
+range.ended	終了
+range.at_a_time	同時に {n} 件
+range.budget	{m} 件中 {n} 件着手
+range.hold	新しい着手を止める
+range.resume	着手を再開する
+range.end	進行中の分で終える
+range.approve	この内容で承認する
+range.change	変更を頼む
+range.would_start	この順に着手する予定
+range.not_now	今回は外す
+ready.title	着手できる Issue
+ready.not_approved	未承認の Issue {n} 件
+ready.ask	着手を頼む
+ready.suggested	おすすめ
+ready.no_goal	目標なし
+ready.size	規模 {x}
+ready.size_estimated	規模 {x}（見積もり）
+ready.none	着手できる Issue はありません
+ready.check_failed	前回の GitHub 確認に失敗
+ready.no_check	まだ確認していません
+notready.title	まだ着手できない
+notready.waits	他の Issue 待ち
+notready.set_aside	ラベルで保留
+notready.no_goals	このプロジェクトに目標が未記入
+notready.goals_error	目標を読み取れない
+notready.no_repo	リポジトリが未登録
+tab.failures	失敗
+tab.approved_items	承認済みの全件
+tab.issues	着手できる Issue
+tab.one_off	単発の作業
+tab.prs	プルリクエスト
+tab.history	作業の経過
+tab.instructions	作業の指示文
+tab.mark_failed	失敗 {n}
+tab.mark_needs_you	判断待ち {n}
+answer.title	判断待ち
+answer.kind_decision	判断
+answer.kind_question	質問
+answer.kind_permission	許可の依頼
+answer.background	背景を表示
+answer.if_yes	はいの場合
+answer.if_no	いいえの場合
+answer.recommended	推奨
+answer.why	理由
+answer.yes	はいと答える
+answer.no	いいえと答える
+answer.discuss	先に相談する
+fail.title	失敗
+fail.did_not_start	起動できなかった
+fail.silent	起動後に応答なし
+fail.gone	端末が消えた
+fail.error	エラーを報告
+fail.stuck_question	確認画面で停止
+fail.stuck_login	ログインで停止
+fail.no_report	報告なしで終了
+fail.secretary_gone	窓口の端末が消えた
+fail.secretary_still	窓口が動いていない
+who.nobody	誰も対応していない
+who.no_sign	対応している形跡なし
+who.secretary	窓口が対応中
+who.told	{n} 分前に伝達
+who.looking	調査中
+who.you	判断待ち
+act.ask_look	窓口に調べてもらう
+act.history	経過を見る
+act.abandon	放棄して閉じる…
+act.show_question	質問を見る
+act.in_shell	シェルで実行:
+place.merged	マージ済み
+place.closed	マージせず終了
+place.needs_you	判断待ち
+place.in_review	レビュー中
+place.working.long	作業中
+place.working.short	作業中
+place.not_started	未着手
+place.skipped	見送り
+stage.checks_running	CI 実行中
+stage.ready_to_merge	CI 通過・マージ可
+stage.no_pr	PR 未作成
+stage.free_place	空き枠待ち
+stage.budget	予算切れ
+stage.waits_for	#{n} 待ち
+active.title	作業中
+active.stuck_first	止まっているものを先に
+list.more	ほか {n} 件
+list.close	閉じる
+hist.started.makiba	makiba が開始
+hist.started.secretary	窓口が開始
+hist.began	作業開始
+hist.plan	計画を報告
+hist.done	完了を報告
+hist.review.passed	レビュー通過
+hist.review.found	指摘 {n} 件
+hist.asked	判断待ちで停止
+hist.pr.opened	PR 作成
+hist.pr.updated	PR 更新
+hist.checks.passed	CI 通過
+hist.checks.failed	CI 失敗
+hist.merged	マージ
+hist.closed.completed	終了
+hist.closed.abandoned	放棄

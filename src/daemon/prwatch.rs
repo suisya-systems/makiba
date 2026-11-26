@@ -850,7 +850,7 @@ fn log_lines(text: &str, cut: bool) -> Vec<(Option<i64>, String)> {
 }
 
 /// `YYYY-MM-DDTHH:MM:SS[.fraction](Z|+HH:MM|-HH:MM)` as milliseconds since 1970 (UTC).
-fn parse_time(s: &str) -> Option<i64> {
+pub(crate) fn parse_time(s: &str) -> Option<i64> {
     let b = s.as_bytes();
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
         let t = s.get(r)?;

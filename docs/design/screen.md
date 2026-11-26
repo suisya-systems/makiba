@@ -4,6 +4,8 @@ Status: design note for Issue 169, 2026-11-22; redrawn twice on 2026-11-23 after
 
 Two things are not decided here and stop the code: the drawing needs the owner's agreement, and where the screen runs needs a measurement on the owner's machine (section 5). A third is a boundary: the screen acting with the person key (section 4).
 
+**The owner's agreement (2026-11-27, through the secretary).** The person agreed to the drawing as [screen-draft.html](screen-draft.html) stands after Issue 415 (draft 7), after reading a Japanese rendering of it. Nine words the drawing uses that this note does not define go to Issue 566. With the agreement the person approved step 1 of section 7, the model only (no page, no acting); it is built (section 11).
+
 ## 1. What the owner decided (2026-11-22)
 
 Taken from the Issue's comments; they replace the first list in its body.
@@ -593,6 +595,8 @@ Either way the parts and their read fields (section 3) are the same, so the mode
 
 ## 6. What the read surface lacks
 
+Since then the read surface has come to give A, B, C (with the merge state), D, E, G, I and J, and `makiba range approve` takes `--read` and `--mode`; section 11 says what the model reads in their place. The table below is kept as the design record.
+
 Each is a small addition to `status --json` (or `events`) with a row in the table `Status field` and in `tests/read_surface.rs`; each would be its own Issue, before or with the code of the screen. None blocks the drawing, which draws each as a gap. The letters are those of the inventory (3.5); brought up to date on 2026-11-24 (Issue 394): E, J and the merge state are new, G is now a convenience (the reason is derivable), and C takes in what Issue 388 added to the events.
 
 | | Field | For | Without it |
@@ -759,3 +763,22 @@ One condition holds for every button: **today the screen can only show the line 
 5. **`makiba range approve --read <id>`.** S.
 6. **`worker_reported` for every report**, so the history shows a plan and a done without a review. S.
 7. **B, E, G, I, J**: the left-out title, the organization's name, the launch's failure reason, `events --task`, the time an item went into review. S each; one Issue or five.
+
+## 11. Step 1 as built: the model (Issue 169)
+
+Built: `src/screen.rs`, `screen::model(status, now_ms, words)` and `screen::history(events, words)`, with the wording tables `roles/locale/screen/en.tsv` and `ja.tsv` (the owner's Japanese of the comment on Issue 169), carried in the binary. Declared test: `tests/screen_model.rs`. The model is a pure function of what `makiba status --json` prints: it opens no table and no file, holds nothing between calls and reads no clock; `status_local` stays the one reader of `state.db`. Nothing calls it yet: the frame (step 2) waits for probe P17, and acting from the screen (step 4) is Issue 404. Every control is a line to type.
+
+What it gives: `top` (the counts and where they are, whether `makibad` answers), `answers` (escalated entries oldest first, the heading from the kind and the task's title, never the question), `failures` (every row, the first three, the rest counted), `ranges` (each with its terms whole for every status, the band, the groups by need, "Active now", the proposal and its lines), `others`, `ready` (the rows, the held Issues, the Issues not ready, the projects not ranked, the counts not listed), `one_off`, `pull_requests`, `views` and `projects`.
+
+Departures from the sections above, decided with the design review and the secretary's answers of 2026-11-26 and 2026-11-27:
+
+- **Fields in place of folded events.** The model reads `runs[].title`, `.since`, `.issue`, `.range_id` (A), `left_out[].title` (B), `pull_requests[]` (C), `anomalies[].notice`, `runs[].notice` and `runs[].secretary_acted_at` (D), `organization` (E), `runs[].failed_reason` (G) and the review `items[].since` (J). It folds no event except one task's history, which the caller gathers with `makiba events --json --after <id> --task <task>` from `--after 0`, page by page.
+- **Who is on a failure** (4.1), the first that holds: an escalated entry of its task (`you`); the row of a silent `makibad`, or any row while `secretary_gone` or `secretary_still` is open (`nobody`); `secretary_acted_at` after the row began (`looking`); its notice `delivered` (`told`); else `no_sign`. "unattended" counts `nobody` and `no_sign`.
+- **Held Issues are shown, not dropped.** A candidate that an item of a range not ended (proposed, active or paused) names is in `ready.held`, with its range, and gets no "Ask to start". When every recorded candidate is held and none went unrecorded, the list says so (`ready.all_held`). A list cut at its bound says how many entries are not listed (`list.not_recorded`); it is never shown as empty.
+- **Approve exactly this** is `makiba range approve <id> --read <read_id>` plus `--mode` with `approves_under`, and never `--yes`. Section 4's "the command has no `--read`" no longer holds.
+- **A task id or slug that could be read as an option** (a leading `-` or `.`) gives no line.
+- **Words added to 2.4**, in English only until the owner gives their Japanese: `fail.stuck_permission`, `fail.replaced`, `pr.open`, `pr.checks_passed`, `hist.blocked`, `ready.size_estimated`, `ready.not_recorded`, `ready.all_held`, `notready.unreadable`, `stage.starting`, `stage.design_only`, `stage.waits_landing`, `term.*`, `act.abandon_confirm`. The owner's cells that hold two wordings are split into sub-keys (`hist.started.makiba` and `.secretary`, `hist.review.passed` and `.found`, `hist.pr.opened` and `.updated`, `hist.checks.passed` and `.failed`, `hist.closed.completed` and `.abandoned`, `place.working.long` and `.short`). `stage.free_place` reads "waits for a free slot", since "place" is one of makiba's own words that stay off the screen; the Japanese is unchanged.
+- **An item's checks** ("checks running", "checks failed") come from the row of `pull_requests[]` whose `task_id` is the item's task, else from the row of the item's own `pr` in its project's repository. `pull_requests[]` lists one row per pull request, so a second run on a shared open pull request (no `items[].pr` until it is merged) shows no checks: the read surface lacks the link between the item and its current pull request (its own Issue).
+- **A row that shows an open anomaly** (an item being worked on or in review) names the anomaly in its words and takes the anomaly's age.
+- **The view "Issues to start"** carries its ready count with the Issues not ready (`not_ready`) and the projects not checked (`unchecked`) counted apart (3.1).
+- **Not in the model:** the layout, the top line's widths, the filter by project, the selected view and "asked by you N min ago". These belong to the frame.
