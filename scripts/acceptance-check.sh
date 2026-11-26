@@ -23,7 +23,9 @@
 #     merge (Issue 514). A base merge counts only for its own resolution: what differs from the
 #     clean merge of its parents, or a conflict not resolved as the branch's own version.
 # The two worktrees are made under the repository's git folder (<git common dir>/acceptance-check/),
-# not under the system's temporary folder, and removed at exit (Issue 558).
+# not under the system's temporary folder, and removed at exit (Issue 558). It fails at once when
+# that git folder is in a temporary folder while the checkout is not, or when a folder above the
+# work folder, other than CARGO_HOME, holds a Cargo config.
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
 #   bash scripts/acceptance-check.sh --test-commit SHA
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
@@ -286,6 +288,21 @@ if root=$(tmp_root "$work"); then
     echo "ACCEPTANCE: fail"; exit 1
   fi
 fi
+# Cargo reads .cargo/config.toml (or .cargo/config) in every folder above the one it builds in. A
+# folder above the work folder is outside both worktrees (in CI, the checkout, which is the head),
+# so its config would shape the test commit's build too: the check fails instead. CARGO_HOME's
+# config is read by every build anyway and is left out.
+cargo_home=$(cd -P "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null && pwd -P) || cargo_home=
+d=$work
+while [ "$d" != / ]; do
+  d=$(dirname "$d")
+  [ -n "$cargo_home" ] && [ "$d/.cargo" = "$cargo_home" ] && continue
+  for f in "$d/.cargo/config" "$d/.cargo/config.toml"; do
+    [ -e "$f" ] || continue
+    echo "acceptance-check: $f lies above the work folder $work; Cargo would read it in the builds of both the test commit and head, so a config outside them could shape the test commit's build"
+    echo "ACCEPTANCE: fail"; exit 1
+  done
+done
 git worktree add -q --detach "$work/t" "$first" && git worktree add -q --detach "$work/h" "$head" \
   || { echo "acceptance-check: git worktree add failed" >&2; echo "ACCEPTANCE: fail"; exit 1; }
 # Each test is "py <path>" or "rs <path> <target name>".
