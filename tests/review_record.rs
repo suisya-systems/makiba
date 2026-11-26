@@ -96,6 +96,18 @@ printf '%s\n' '{"type":"assistant","message":{"content":[{"type":"tool_use","id"
 printf '%s\n' '{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"u1","content":"the diff"}]}}'
 printf '%s\n' '{"type":"result","subtype":"success","is_error":false,"result":"FINDINGS: blocker=0 major=0 minor=0"}'"#;
 
+/// A stand-in boundary (Issue 262) that runs what follows `--`, so that the stand-in readers
+/// here keep writing their records beside themselves.
+fn pass_through(state: &Path) -> PathBuf {
+    let p = state.join("bin/boundary/bwrap");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    common::exe::write(
+        &p,
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do a=$1; shift; [ \"$a\" = -- ] && break; done\nexec \"$@\"\n",
+    );
+    p
+}
+
 /// A stand-in program at `path`: it appends its arguments (one per line, then a line `--`) to
 /// `<path>.args` and its folder to `<path>.cwd`, answers `login status` with `login`, and else
 /// runs `body`.
@@ -204,7 +216,8 @@ fn org(task: &str, kind: &str) -> Org {
         Arc::new(Stub::new()),
         "fake".into(),
     )
-    .with_review_programs(other.clone(), same.clone());
+    .with_review_programs(other.clone(), same.clone())
+    .with_review_boundary(pass_through(&state));
     Org {
         task: task.into(),
         state,
@@ -463,7 +476,8 @@ fn a_review_no_reader_could_run_is_not_reported_stale() {
     .with_review_programs(
         o.state.join("bin/nowhere/codex"),
         o.state.join("bin/nowhere/claude"),
-    );
+    )
+    .with_review_boundary(pass_through(&o.state));
     let v = door
         .handle(
             Some(&o.worker),

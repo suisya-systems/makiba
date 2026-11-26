@@ -69,6 +69,18 @@ fn root() -> &'static Path {
     })
 }
 
+/// A stand-in boundary (Issue 262) that runs what follows `--`, so that the stand-in readers
+/// here keep writing their records beside themselves.
+fn pass_through(state: &Path) -> PathBuf {
+    let p = state.join("bin/boundary/bwrap");
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    common::exe::write(
+        &p,
+        "#!/bin/sh\nwhile [ $# -gt 0 ]; do a=$1; shift; [ \"$a\" = -- ] && break; done\nexec \"$@\"\n",
+    );
+    p
+}
+
 /// A stand-in program at `path`: it appends its arguments (one per line, then a line `--`) to
 /// `<path>.args` and its folder to `<path>.cwd`, answers `login status` with `login`, and else
 /// runs `body`.
@@ -151,7 +163,8 @@ fn org(task: &str) -> Org {
         Arc::new(Stub::new()),
         "fake".into(),
     )
-    .with_review_programs(other.clone(), same.clone());
+    .with_review_programs(other.clone(), same.clone())
+    .with_review_boundary(pass_through(&state));
     Org {
         worktree,
         door,

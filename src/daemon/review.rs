@@ -13,6 +13,14 @@
 //! with the hardened git of `run_repo`, never a value the worker wrote) and the diff from the
 //! project clone's base into a folder of its own under `<state>/tmp`, and removes it after.
 //!
+//! Both readers run inside an OS-level boundary that makibad sets up outside the reader's own
+//! program (Issue 262): bubblewrap (`MAKIBA_REVIEW_BOUNDARY`, default `bwrap`) with a mount plan
+//! of its own (`bounded_reader`). The reader sees the system folders, its program's own folders,
+//! the round's tree (read-only), its scratch and settings, and a home of the round holding, of
+//! the person's home, only its login (and codex's configuration, read-only); the keys, the state
+//! folder, the credentials, the base's folders and both readers' configuration are covered where
+//! a folder given holds them. When the boundary cannot start, no reader runs (fail closed).
+//!
 //! An answer is `passed` (established) only when the reader exited 0, opened at least one file
 //! of the change under review (the diff file or a file it changes; for a design the note), judged
 //! from its recorded commands or tool calls (a recognised read command with the file among its
@@ -44,12 +52,14 @@ pub const NOTE_FILE: &str = "MAKIBA_DESIGN.md";
 
 const FORM: &str = "List each finding on its own line as `[Blocker] <file>:<line> - <finding> - <fix>` (or `[Major]`, `[Minor]`). Blocker: wrong or unsafe, must be fixed. Major: should be fixed before it lands. Minor: may be left. Do not change any file. End with exactly one line `FINDINGS: blocker=<n> major=<n> minor=<n>`.";
 
-/// The two programs, read when makibad starts (`MAKIBA_REVIEW_OTHER`, default `codex`;
-/// `MAKIBA_REVIEW_SAME`, default `claude`) so that no request can choose them.
+/// The two programs and the boundary they run in, read when makibad starts
+/// (`MAKIBA_REVIEW_OTHER`, default `codex`; `MAKIBA_REVIEW_SAME`, default `claude`;
+/// `MAKIBA_REVIEW_BOUNDARY`, default `bwrap`) so that no request can choose them.
 #[derive(Clone, Debug)]
 pub struct Programs {
     pub other: PathBuf,
     pub same: PathBuf,
+    pub boundary: PathBuf,
 }
 
 impl Programs {
@@ -63,17 +73,21 @@ impl Programs {
         Programs {
             other: var("MAKIBA_REVIEW_OTHER", "codex"),
             same: var("MAKIBA_REVIEW_SAME", "claude"),
+            boundary: var("MAKIBA_REVIEW_BOUNDARY", "bwrap"),
         }
     }
 }
 
-/// The program `p` as it would run: a path as it is, a bare name looked up on PATH.
+/// The program `p` as it would run: a path made absolute against makibad's own folder (a reader
+/// starts in the round's tree, where a relative path would name the worker's files), a bare name
+/// looked up on PATH.
 fn resolve(p: &Path) -> Option<PathBuf> {
     use std::os::unix::fs::PermissionsExt;
     if p.components().count() > 1 {
-        return std::fs::metadata(p)
+        let p = std::path::absolute(p).ok()?;
+        return std::fs::metadata(&p)
             .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-            .then(|| p.to_path_buf());
+            .then_some(p);
     }
     agents::on_path(&p.to_string_lossy())
 }
@@ -84,14 +98,56 @@ fn name(p: &Path) -> String {
         .unwrap_or_else(|| p.display().to_string())
 }
 
-/// Which readers can start: the other model's program (or why not) and the same model's.
+/// Which readers can start: the boundary they run in (or why it cannot start), the other
+/// model's program (or why not) and the same model's.
 pub struct Plan {
+    pub boundary: Result<PathBuf, String>,
     pub other: Result<PathBuf, String>,
     pub same: Option<PathBuf>,
 }
 
+/// Can the boundary make its namespaces here? It is asked to run `true` in one.
+fn boundary_starts(p: &Path) -> Result<PathBuf, String> {
+    let path = resolve(p).ok_or_else(|| format!("{} not on PATH", name(p)))?;
+    let mut c = Command::new(&path);
+    c.args([
+        "--ro-bind",
+        "/",
+        "/",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--unshare-pid",
+        "--die-with-parent",
+        "--",
+        "true",
+    ]);
+    match bounded(c, None, Duration::from_secs(30)) {
+        Ok(r) if r.ok => Ok(path),
+        Ok(r) => Err(first_line(&r.err)
+            .unwrap_or("it exited with a failure")
+            .to_string()),
+        Err(e) => Err(e),
+    }
+}
+
 impl Plan {
     pub fn find(p: &Programs) -> Plan {
+        let boundary = boundary_starts(&p.boundary).map_err(|why| {
+            format!(
+                "the reader's boundary {} cannot start: {why}",
+                name(&p.boundary)
+            )
+        });
+        if let Err(why) = &boundary {
+            // No reader runs outside the boundary (Issue 262): nothing else is asked.
+            return Plan {
+                boundary: Err(why.clone()),
+                other: Err(why.clone()),
+                same: None,
+            };
+        }
         let other = match resolve(&p.other) {
             None => Err(format!("{} not on PATH", name(&p.other))),
             Some(path) => {
@@ -109,12 +165,16 @@ impl Plan {
             }
         };
         Plan {
+            boundary,
             other,
             same: resolve(&p.same),
         }
     }
 
     pub fn none(&self) -> Option<String> {
+        if let Err(why) = &self.boundary {
+            return Some(why.clone());
+        }
         match (&self.other, &self.same) {
             (Err(why), None) => Some(format!("{why}; the same model's program not on PATH")),
             _ => None,
@@ -785,14 +845,398 @@ fn same_settings(places: &Places, snap: &Snapshot) -> Result<PathBuf, String> {
     Ok(file)
 }
 
-fn run_other(
+/// Which reader a boundary is made for: the files of the person's home it is given differ.
+#[derive(Clone, Copy, PartialEq)]
+enum Reader {
+    Other,
+    Same,
+}
+
+/// The system folders every reader sees, read-only (when they exist).
+const SYSTEM: [&str; 7] = ["/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/etc"];
+
+/// The person's home as makibad has it.
+fn person_home() -> Option<PathBuf> {
+    std::env::var_os("HOME")
+        .filter(|h| !h.is_empty())
+        .map(PathBuf::from)
+}
+
+/// `p` with a leading `~` read as the person's home.
+fn expand(p: &Path, home: Option<&Path>) -> Option<PathBuf> {
+    match (p.strip_prefix("~"), home) {
+        (Ok(rest), Some(h)) => Some(h.join(rest)),
+        (Ok(_), None) => None,
+        (Err(_), _) => Some(std::path::absolute(p).unwrap_or_else(|_| p.to_path_buf())),
+    }
+}
+
+/// `$var`, else `<home>/<default>`: a reader's own configuration folder.
+fn config_dir(var: &str, home: Option<&Path>, default: &str) -> Option<PathBuf> {
+    std::env::var_os(var)
+        .filter(|v| !v.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| home.map(|h| h.join(default)))
+}
+
+/// The places no reader may see, also where a folder it is given holds them: the keys, the
+/// state folder, the person's credentials, the base's folders and both readers' configuration.
+fn denied(places: &Places, home: Option<&Path>) -> Vec<PathBuf> {
+    let (cred_dirs, cred_files) = super::prepare::credentials();
+    let mut out: Vec<PathBuf> = vec![crate::cli::person_key_path(), crate::cli::gate_key_path()];
+    if let Some(state) = places.state_db.parent() {
+        out.push(state.to_path_buf());
+    }
+    out.extend(cred_dirs.into_iter().chain(cred_files));
+    let base = crate::base::worker_denies();
+    out.extend(base.resolved.into_iter().chain(base.folders));
+    out.push(PathBuf::from("~/.claude.json"));
+    out.extend(config_dir("CODEX_HOME", home, ".codex"));
+    out.extend(config_dir("CLAUDE_CONFIG_DIR", home, ".claude"));
+    with_real(
+        out.into_iter()
+            .filter_map(|p| expand(&p, home))
+            .map(|p| std::path::absolute(&p).unwrap_or(p))
+            .collect(),
+    )
+}
+
+/// The person's home, by its path and by its real path, where it lies in a folder given whole
+/// (a home under `/usr`): what the system binds would otherwise show of it.
+fn home_masks(given: &[PathBuf], home: Option<&Path>) -> Vec<PathBuf> {
+    let Some(h) = home else { return vec![] };
+    let mut out: Vec<PathBuf> = vec![];
+    for p in with_real(vec![
+        std::path::absolute(h).unwrap_or_else(|_| h.to_path_buf()),
+    ]) {
+        if given.iter().any(|g| p.starts_with(g)) && !out.contains(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// `p` as the filesystem resolves it (links followed), or `p` when it does not resolve.
+fn real(p: &Path) -> PathBuf {
+    std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Each path and, where a link leads elsewhere, the place it leads to: a denied place reached
+/// through a link is denied where it really is.
+fn with_real(paths: Vec<PathBuf>) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = vec![];
+    for p in paths {
+        let r = real(&p);
+        for q in [p, r] {
+            if !out.contains(&q) {
+                out.push(q);
+            }
+        }
+    }
+    out
+}
+
+/// Where a denied place shows inside the folders given: its own path under a given folder, and,
+/// when a given folder or the place is reached through a link, the path under the given folder
+/// at which its real place shows. Links themselves are left out: what they lead to is covered at
+/// its real place.
+fn masks(given: &[PathBuf], deny: &[PathBuf]) -> Vec<PathBuf> {
+    let mut out: Vec<PathBuf> = vec![];
+    for g in given {
+        let gr = real(g);
+        for q in deny {
+            let qr = real(q);
+            let mut seen = vec![];
+            if q.starts_with(g) {
+                seen.push(q.clone());
+            }
+            if let Ok(rel) = qr.strip_prefix(&gr) {
+                seen.push(g.join(rel));
+            }
+            for m in seen {
+                let link = m
+                    .symlink_metadata()
+                    .is_ok_and(|md| md.file_type().is_symlink());
+                if !link && !out.contains(&m) {
+                    out.push(m);
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The files a reader's program needs to start: the program as found, the file it leads to,
+/// and a script's interpreter (`#!/usr/bin/env NAME` read on makibad's PATH, or a path).
+fn program_files(program: &Path) -> Vec<PathBuf> {
+    let mut out = vec![];
+    let add = |p: PathBuf, out: &mut Vec<PathBuf>| {
+        if !out.contains(&p) {
+            out.push(p);
+        }
+    };
+    let found = std::path::absolute(program).unwrap_or_else(|_| program.to_path_buf());
+    add(found.clone(), &mut out);
+    let target = std::fs::canonicalize(&found).unwrap_or(found);
+    add(target.clone(), &mut out);
+    let mut head = [0u8; 256];
+    let n = std::fs::File::open(&target)
+        .and_then(|mut f| f.read(&mut head))
+        .unwrap_or(0);
+    let first = String::from_utf8_lossy(&head[..n]);
+    if let Some(line) = first.strip_prefix("#!").and_then(|l| l.lines().next()) {
+        let words: Vec<&str> = line.split_whitespace().collect();
+        let interpreter = match words.as_slice() {
+            [env, name, ..] if env.ends_with("/env") && !name.starts_with('-') => {
+                agents::on_path(name)
+            }
+            [path, ..] if path.starts_with('/') => Some(PathBuf::from(path)),
+            _ => None,
+        };
+        if let Some(i) = interpreter {
+            add(i.clone(), &mut out);
+            if let Ok(c) = std::fs::canonicalize(&i) {
+                add(c, &mut out);
+            }
+        }
+    }
+    out
+}
+
+/// The folder given for a program file: its folder, or that folder's parent when it is a `bin`
+/// (the install prefix); `None` when that folder is `/`, holds the home, or holds or lies in a
+/// denied place: then only the file is given.
+fn program_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<PathBuf> {
+    let dir = file.parent()?;
+    let root = if dir.file_name().is_some_and(|n| n == "bin") {
+        dir.parent()?
+    } else {
+        dir
+    };
+    (!too_wide(root, home, deny)).then(|| root.to_path_buf())
+}
+
+/// Is `root` too wide to give a reader: `/`, the home or an ancestor of it, or a folder that
+/// holds or lies in a denied place (judged by its own and its real path)?
+fn too_wide(root: &Path, home: Option<&Path>, deny: &[PathBuf]) -> bool {
+    let rr = real(root);
+    [root, rr.as_path()].iter().any(|r| {
+        *r == Path::new("/")
+            || home.is_some_and(|h| h.starts_with(r) || real(h).starts_with(r))
+            || deny.iter().any(|q| q.starts_with(r) || r.starts_with(q))
+    })
+}
+
+/// The outermost `node_modules` folder above `file`, when it is not too wide: Node looks for a
+/// package's dependencies in every `node_modules` up from it, so a dependency hoisted beside the
+/// package (npm's global install under a prefix the reader is not given whole) is found there.
+fn node_root(file: &Path, home: Option<&Path>, deny: &[PathBuf]) -> Option<PathBuf> {
+    let top = file
+        .ancestors()
+        .filter(|a| a.file_name().is_some_and(|n| n == "node_modules"))
+        .last()?;
+    (!too_wide(top, home, deny)).then(|| top.to_path_buf())
+}
+
+/// The empty file at `rel` in a reader's new home on which its login is bound: its folder is
+/// made new or is a real folder (never a link), and the file is made new (`O_EXCL`), so nothing
+/// already there (a link, a pipe) is followed or opened.
+fn place_login(round_home: &Path, rel: &str) -> Result<PathBuf, String> {
+    let dst = round_home.join(rel);
+    if let Some(d) = dst.parent()
+        && d != round_home
+    {
+        // A folder this call made for another login file is a real folder; anything else is not
+        // used.
+        match d.symlink_metadata() {
+            Ok(m) if m.file_type().is_dir() => {}
+            Ok(_) => return Err(format!("{}: not a folder", d.display())),
+            Err(_) => std::fs::create_dir(d).map_err(|e| format!("{}: {e}", d.display()))?,
+        }
+    }
+    std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&dst)
+        .map_err(|e| format!("{}: {e}", dst.display()))?;
+    Ok(dst)
+}
+
+/// The reader `program` started inside the boundary (Issue 262): a command of the boundary
+/// program whose arguments end with `--` and the program; the caller adds the reader's own.
+/// Nothing is visible but the system folders, the program's own folders, the round's tree
+/// (read-only), its scratch and settings, and a home of the round holding only the reader's
+/// login (and codex's configuration, read-only) from the person's home.
+fn bounded_reader(
+    boundary: &Path,
     program: &Path,
+    reader: Reader,
+    places: &Places,
+    snap: &Snapshot,
+) -> Result<Command, String> {
+    let home = person_home();
+    let deny = denied(places, home.as_deref());
+    let scratch = snap.dir.join("scratch");
+    // Each reader gets a home of its own, made new here: what a first reader left in its home
+    // (a link, a pipe) is never opened by makibad for the fallback.
+    let round_home = snap.dir.join(match reader {
+        Reader::Other => "home",
+        Reader::Same => "home-fallback",
+    });
+    let mkdir = |d: &Path| std::fs::create_dir_all(d).map_err(|e| format!("{}: {e}", d.display()));
+    mkdir(&scratch)?;
+    std::fs::create_dir(&round_home).map_err(|e| format!("{}: {e}", round_home.display()))?;
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let mut a: Vec<String> = [
+        "--unshare-pid",
+        "--unshare-ipc",
+        "--unshare-uts",
+        "--die-with-parent",
+        "--new-session",
+        "--proc",
+        "/proc",
+        "--dev",
+        "/dev",
+        "--tmpfs",
+        "/tmp",
+    ]
+    .map(String::from)
+    .to_vec();
+    let ro = |a: &mut Vec<String>, src: &Path, dst: &Path| {
+        a.extend(["--ro-bind".into(), s(src), s(dst)]);
+    };
+    // The folders given read-only before the masks: what a mask must cover.
+    let mut given: Vec<PathBuf> = vec![];
+    for d in SYSTEM.map(Path::new) {
+        match d.symlink_metadata() {
+            Err(_) => {}
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(d).map_err(|e| format!("{}: {e}", d.display()))?;
+                a.extend(["--symlink".into(), s(&to), s(d)]);
+            }
+            Ok(_) => {
+                ro(&mut a, d, d);
+                given.push(d.to_path_buf());
+            }
+        }
+    }
+    // A home that lies in a system folder is hidden before anything of it is given back.
+    for h in home_masks(&given, home.as_deref()) {
+        a.extend(["--tmpfs".into(), s(&h)]);
+    }
+    let in_system = |p: &Path| {
+        let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        SYSTEM.iter().any(|d| c.starts_with(d)) && SYSTEM.iter().any(|d| p.starts_with(d))
+    };
+    if let Ok(r) = std::fs::canonicalize("/etc/resolv.conf")
+        && !in_system(&r)
+    {
+        ro(&mut a, &r, &r);
+    }
+    let mut files: Vec<PathBuf> = vec![];
+    for f in program_files(program) {
+        if in_system(&f) {
+            continue;
+        }
+        let modules = node_root(&f, home.as_deref(), &deny);
+        match program_root(&f, home.as_deref(), &deny) {
+            Some(root) if !given.iter().any(|g| root.starts_with(g)) => {
+                ro(&mut a, &root, &root);
+                given.push(root);
+            }
+            Some(_) => {}
+            None => files.push(f),
+        }
+        if let Some(nm) = modules
+            && !given.iter().any(|g| nm.starts_with(g))
+        {
+            ro(&mut a, &nm, &nm);
+            given.push(nm);
+        }
+    }
+    for q in masks(&given, &deny) {
+        match q.symlink_metadata() {
+            Ok(m) if m.is_dir() => a.extend(["--tmpfs".into(), s(&q)]),
+            Ok(_) => ro(&mut a, Path::new("/dev/null"), &q),
+            Err(_) => {}
+        }
+    }
+    // A program that is a link (an npm `bin` entry) stays a link to its real place, which is
+    // given by its own folder or file above: bound as a file, a script would run away from the
+    // package it loads its parts from.
+    for f in &files {
+        if f.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            a.extend(["--symlink".into(), s(&real(f)), s(f)]);
+        } else {
+            ro(&mut a, f, f);
+        }
+    }
+    ro(&mut a, &snap.tree, &snap.tree);
+    a.extend(["--bind".into(), s(&scratch), s(&scratch)]);
+    let settings = snap.dir.join("settings.json");
+    if reader == Reader::Same && settings.exists() {
+        ro(&mut a, &settings, &settings);
+    }
+    a.extend(["--bind".into(), s(&round_home), s(&round_home)]);
+    // The reader's login, each a file of the person's, bound into the round's home.
+    let logins: Vec<(PathBuf, &str, bool)> = match reader {
+        Reader::Other => config_dir("CODEX_HOME", home.as_deref(), ".codex")
+            .map(|d| {
+                vec![
+                    (d.join("auth.json"), ".codex/auth.json", true),
+                    (d.join("config.toml"), ".codex/config.toml", false),
+                ]
+            })
+            .unwrap_or_default(),
+        Reader::Same => config_dir("CLAUDE_CONFIG_DIR", home.as_deref(), ".claude")
+            .map(|d| {
+                vec![(
+                    d.join(".credentials.json"),
+                    ".claude/.credentials.json",
+                    true,
+                )]
+            })
+            .unwrap_or_default(),
+    };
+    for (src, rel, rw) in logins {
+        if !src.is_file() {
+            continue;
+        }
+        let dst = place_login(&round_home, rel)?;
+        let opt = if rw { "--bind" } else { "--ro-bind" };
+        a.extend([opt.into(), s(&src), s(&dst)]);
+    }
+    a.extend(["--chdir".into(), s(&snap.tree), "--".into(), s(program)]);
+    let mut c = Command::new(boundary);
+    c.current_dir(&snap.tree)
+        .args(a)
+        .env("HOME", &round_home)
+        .env("TMPDIR", &scratch);
+    for v in [
+        "CODEX_HOME",
+        "CLAUDE_CONFIG_DIR",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "XDG_CACHE_HOME",
+    ] {
+        c.env_remove(v);
+    }
+    Ok(c)
+}
+
+fn run_other(
+    boundary: &Path,
+    program: &Path,
+    places: &Places,
     snap: &Snapshot,
     design: bool,
     until: Instant,
 ) -> Result<(Ran, Stream), String> {
-    let mut c = Command::new(program);
-    c.current_dir(&snap.tree).args([
+    let mut c = bounded_reader(boundary, program, Reader::Other, places, snap)?;
+    c.args([
         "exec",
         "--json",
         "--skip-git-repo-check",
@@ -810,6 +1254,7 @@ fn run_other(
 }
 
 fn run_same(
+    boundary: &Path,
     program: &Path,
     places: &Places,
     snap: &Snapshot,
@@ -817,9 +1262,8 @@ fn run_same(
     until: Instant,
 ) -> Result<(Ran, Stream), String> {
     let settings = same_settings(places, snap)?;
-    let mut c = Command::new(program);
-    c.current_dir(&snap.tree)
-        .env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
+    let mut c = bounded_reader(boundary, program, Reader::Same, places, snap)?;
+    c.env("CLAUDE_CODE_DISABLE_AUTO_MEMORY", "1")
         .args([
             "-p",
             "--output-format",
@@ -888,8 +1332,21 @@ fn judge(reader: String, ran: &Ran, read: Stream) -> Answer {
 /// timeout is above.
 pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answer {
     let until = Instant::now() + BOUND;
+    let boundary = match &plan.boundary {
+        Ok(b) => b.clone(),
+        Err(why) => {
+            return withheld(Answer {
+                established: false,
+                reader: "none".into(),
+                fallback_reason: None,
+                reason: Some(why.clone()),
+                findings: None,
+                text: String::new(),
+            });
+        }
+    };
     let fallback_reason = match &plan.other {
-        Ok(program) => match run_other(program, snap, design, until) {
+        Ok(program) => match run_other(&boundary, program, places, snap, design, until) {
             Ok((ran, read)) => {
                 // A failure before anything was read is the program not usable: fall back once.
                 if ran.ok || read.reads > 0 || plan.same.is_none() {
@@ -916,7 +1373,7 @@ pub fn run(plan: &Plan, places: &Places, snap: &Snapshot, design: bool) -> Answe
             text: String::new(),
         });
     };
-    let mut a = match run_same(same, places, snap, design, until) {
+    let mut a = match run_same(&boundary, same, places, snap, design, until) {
         Ok((ran, read)) => judge(FRESH.into(), &ran, read),
         Err(e) => Answer {
             established: false,
@@ -972,6 +1429,248 @@ fn withheld(mut a: Answer) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A reader's configuration reached through a link (the review of Issue 262): a program
+    /// folder holding its real place is not given, and where a given folder holds it, it is
+    /// covered at the path it shows at.
+    /// A home under a system folder (the review of Issue 262): it is hidden by its path and by
+    /// where it really is, and a home outside every given folder is left alone.
+    #[test]
+    fn a_home_in_a_system_folder_is_hidden() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let usr = t.join("usr");
+        let home = usr.join("local/home/someone");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(t.join("home")).unwrap();
+        let linked = t.join("home/someone");
+        std::os::unix::fs::symlink(&home, &linked).unwrap();
+        assert_eq!(
+            home_masks(std::slice::from_ref(&usr), Some(&home)),
+            vec![home.clone()]
+        );
+        assert_eq!(
+            home_masks(std::slice::from_ref(&usr), Some(&linked)),
+            vec![home.clone()]
+        );
+        assert!(home_masks(&[t.join("etc")], Some(&linked)).is_empty());
+        assert!(home_masks(&[usr], None).is_empty());
+    }
+
+    #[test]
+    fn a_denied_place_behind_a_link_is_denied_where_it_really_is() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        std::fs::create_dir_all(t.join("reader/bin")).unwrap();
+        std::fs::create_dir_all(t.join("reader/config/sessions")).unwrap();
+        std::fs::write(t.join("reader/bin/codex"), "").unwrap();
+        std::fs::create_dir_all(t.join("home")).unwrap();
+        std::os::unix::fs::symlink(t.join("reader/config"), t.join("home/.codex")).unwrap();
+        std::os::unix::fs::symlink(t.join("reader"), t.join("alias")).unwrap();
+        let deny = with_real(vec![t.join("home/.codex")]);
+        assert!(deny.contains(&t.join("reader/config")), "{deny:?}");
+        let home = t.join("home");
+        assert_eq!(
+            program_root(&t.join("reader/bin/codex"), Some(&home), &deny),
+            None
+        );
+        assert_eq!(
+            program_root(&t.join("alias/bin/codex"), Some(&home), &deny),
+            None
+        );
+        let m = masks(&[t.join("reader"), t.join("alias")], &deny);
+        assert!(m.contains(&t.join("reader/config")), "{m:?}");
+        assert!(m.contains(&t.join("alias/config")), "{m:?}");
+        assert!(!m.contains(&t.join("home/.codex")), "{m:?}");
+    }
+
+    /// A reader installed by npm under a prefix that also holds the state folder (the review of
+    /// Issue 262): the prefix is not given, the `bin` link stays a link to the script, and the
+    /// package the script lives in is given.
+    #[test]
+    fn a_linked_program_stays_a_link_to_its_package() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let local = t.join("local");
+        let package = local.join("lib/node_modules/@openai/codex");
+        std::fs::create_dir_all(package.join("bin")).unwrap();
+        std::fs::write(package.join("bin/codex.js"), "#!/bin/sh\n").unwrap();
+        std::fs::create_dir_all(local.join("bin")).unwrap();
+        let found = local.join("bin/codex");
+        std::os::unix::fs::symlink("../lib/node_modules/@openai/codex/bin/codex.js", &found)
+            .unwrap();
+        let state = local.join("state/makiba");
+        std::fs::create_dir_all(&state).unwrap();
+        let places = Places {
+            workers: t.join("workers"),
+            docs: t.join("docs"),
+            repos: t.join("repos"),
+            settings: state.join("settings"),
+            state_db: state.join("state.db"),
+        };
+        let dir = state.join("tmp/review-x");
+        std::fs::create_dir_all(dir.join("tree")).unwrap();
+        let snap = Snapshot {
+            tree: dir.join("tree"),
+            dir,
+            base: String::new(),
+            head: String::new(),
+            changed: vec![],
+            top: state.join("tmp"),
+        };
+        let c = bounded_reader(Path::new("bwrap"), &found, Reader::Other, &places, &snap).unwrap();
+        let args: Vec<String> = c
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        let has = |w: &[String]| args.windows(w.len()).any(|x| x == w);
+        let s = |p: &Path| p.display().to_string();
+        let target = package.join("bin/codex.js");
+        assert!(
+            has(&["--symlink".into(), s(&target), s(&found)]),
+            "{args:?}"
+        );
+        assert!(
+            has(&["--ro-bind".into(), s(&package), s(&package)]),
+            "{args:?}"
+        );
+        // A dependency npm hoisted beside the package is in the outermost node_modules.
+        let modules = local.join("lib/node_modules");
+        assert!(
+            has(&["--ro-bind".into(), s(&modules), s(&modules)]),
+            "{args:?}"
+        );
+        assert!(
+            !has(&["--ro-bind".into(), s(&local), s(&local)]),
+            "{args:?}"
+        );
+        assert!(
+            !has(&["--ro-bind".into(), s(&found), s(&found)]),
+            "{args:?}"
+        );
+    }
+
+    /// A program named by a relative path is kept as the absolute path it names from makibad's
+    /// folder (the review of Issue 262): the reader and the boundary start in the round's tree,
+    /// where the same relative path could name a file the worker committed.
+    #[test]
+    fn a_relative_program_is_resolved_from_makibads_folder() {
+        use std::os::unix::fs::PermissionsExt;
+        let here = std::env::current_dir().unwrap();
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let program = t.join("bin/bwrap");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        // Only its metadata is read; it is never run.
+        std::fs::write(&program, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o755)).unwrap();
+        // The same file named relative to the folder the test runs in, through the root.
+        let mut rel = PathBuf::from(".");
+        for _ in here.components().skip(1) {
+            rel.push("..");
+        }
+        rel.push(program.strip_prefix("/").unwrap());
+        let r = resolve(&rel).unwrap_or_else(|| panic!("{} not resolved", rel.display()));
+        assert!(r.is_absolute(), "{}", r.display());
+        assert_eq!(std::fs::canonicalize(&r).unwrap(), program);
+        assert_eq!(resolve(Path::new("./no/such/program")), None);
+        assert_eq!(
+            resolve(Path::new("/bin/sh")),
+            Some(PathBuf::from("/bin/sh"))
+        );
+    }
+
+    /// The fallback's home is not the first reader's (the review of Issue 262): a link and a pipe
+    /// the first reader leaves in its home are not opened when the fallback is prepared, and the
+    /// fallback's home is made new.
+    #[test]
+    fn the_fallback_gets_a_home_of_its_own() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let state = t.join("state");
+        let dir = state.join("tmp/review-x");
+        std::fs::create_dir_all(dir.join("tree")).unwrap();
+        let places = Places {
+            workers: t.join("workers"),
+            docs: t.join("docs"),
+            repos: t.join("repos"),
+            settings: state.join("settings"),
+            state_db: state.join("state.db"),
+        };
+        let snap = std::sync::Arc::new(Snapshot {
+            tree: dir.join("tree"),
+            dir: dir.clone(),
+            base: String::new(),
+            head: String::new(),
+            changed: vec![],
+            top: state.join("tmp"),
+        });
+        let home_of = |c: &Command| {
+            c.get_envs()
+                .find(|(k, _)| *k == "HOME")
+                .and_then(|(_, v)| v.map(PathBuf::from))
+                .unwrap()
+        };
+        let first = bounded_reader(
+            Path::new("bwrap"),
+            Path::new("/bin/sh"),
+            Reader::Other,
+            &places,
+            &snap,
+        )
+        .unwrap();
+        let first_home = home_of(&first);
+        // What a first reader could leave: its .claude a link out of the round, a pipe in it.
+        let outside = t.join("outside");
+        std::fs::create_dir_all(&outside).unwrap();
+        let _ = std::fs::remove_dir_all(first_home.join(".claude"));
+        std::os::unix::fs::symlink(&outside, first_home.join(".claude")).unwrap();
+        let fifo = std::ffi::CString::new(
+            outside
+                .join(".credentials.json")
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+        // SAFETY: a path this test owns, made a pipe.
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        // Placed again in that home, the login refuses at once and opens nothing.
+        let (ptx, prx) = std::sync::mpsc::channel();
+        let again = first_home.clone();
+        std::thread::spawn(move || {
+            let _ = ptx.send(place_login(&again, ".claude/.credentials.json"));
+        });
+        assert!(
+            prx.recv_timeout(Duration::from_secs(10))
+                .expect("placing a login blocked on a pipe")
+                .is_err()
+        );
+        let (tx, rx) = std::sync::mpsc::channel();
+        let (places2, snap2) = (places.clone(), snap.clone());
+        std::thread::spawn(move || {
+            let r = bounded_reader(
+                Path::new("bwrap"),
+                Path::new("/bin/sh"),
+                Reader::Same,
+                &places2,
+                &snap2,
+            )
+            .map(|c| {
+                c.get_envs()
+                    .find(|(k, _)| *k == "HOME")
+                    .and_then(|(_, v)| v.map(PathBuf::from))
+                    .unwrap()
+            });
+            let _ = tx.send(r);
+        });
+        let second_home = rx
+            .recv_timeout(Duration::from_secs(10))
+            .expect("preparing the fallback blocked")
+            .unwrap();
+        assert_ne!(second_home, first_home);
+        assert!(second_home.starts_with(&dir), "{}", second_home.display());
+        assert!(
+            !second_home
+                .join(".claude")
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+        );
+    }
 
     #[test]
     fn the_last_findings_line_counts() {

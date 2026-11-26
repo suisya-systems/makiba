@@ -235,7 +235,14 @@ impl Door {
 
     /// The readers of `review` (Issue 135): the other model's program and the same model's.
     pub fn with_review_programs(mut self, other: PathBuf, same: PathBuf) -> Door {
-        self.review = super::review::Programs { other, same };
+        self.review.other = other;
+        self.review.same = same;
+        self
+    }
+
+    /// The boundary the readers run in (Issue 262): a program taking bubblewrap's arguments.
+    pub fn with_review_boundary(mut self, boundary: PathBuf) -> Door {
+        self.review.boundary = boundary;
         self
     }
 
