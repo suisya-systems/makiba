@@ -371,7 +371,14 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
         println!("resumed: {}", resumed.join(" "));
     }
     if daemon_running(&dir)? {
-        println!("makibad: already running");
+        match stalled(&dir) {
+            Some((pid, age)) => println!(
+                "makibad: pid {pid} holds its lock but its heartbeat is {age:.0} s old: its tick \
+                 has stopped. Run makiba down; if it says makibad is still running after 20 s, \
+                 kill -KILL {pid}; then makiba up"
+            ),
+            None => println!("makibad: already running"),
+        }
         if secretary {
             // The running makibad's secretary pass takes the row up (Issue 46): it launches one
             // unless one runs, as at its start.
@@ -391,6 +398,15 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
             println!("secretary: not asked (--no-secretary)");
         }
     } else {
+        if let Some(u) = unrecorded(&dir) {
+            println!(
+                "makibad: the previous makibad (pid {}) stopped without recording it; its last \
+                 heartbeat was {}. How it stopped is not recorded: a kill, the machine stopping, \
+                 or a crash (see makibad.log and the system journal)",
+                u.pid,
+                u.heartbeat_at.as_deref().unwrap_or("unknown")
+            );
+        }
         start_daemon(&dir, secretary)?;
         println!("makibad: started");
         println!(
@@ -403,6 +419,35 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
         );
     }
     Ok(())
+}
+
+fn read_only(dir: &Path) -> Option<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        dir.join("state.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()
+}
+
+/// The running `makibad`'s pid and heartbeat age when the heartbeat is stale (Issue 563).
+fn stalled(dir: &Path) -> Option<(i64, f64)> {
+    let conn = read_only(dir)?;
+    let age = crate::status_local::heartbeat_age(&conn)?;
+    if age < crate::status_local::STALE.as_secs_f64() {
+        return None;
+    }
+    let pid = conn
+        .query_row("SELECT pid FROM dispatcher WHERE id = 1", [], |r| r.get(0))
+        .ok()?;
+    Some((pid, age))
+}
+
+/// The previous `makibad` when it stopped without recording it (Issue 563); asked only while no
+/// `makibad` holds the lock.
+fn unrecorded(dir: &Path) -> Option<crate::status_local::Unrecorded> {
+    crate::status_local::unrecorded_stop(&read_only(dir)?)
+        .ok()
+        .flatten()
 }
 
 /// A new launch for every `suspended` run with no launch under way (Issue 41): copied from its
