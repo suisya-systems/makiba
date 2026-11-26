@@ -3282,7 +3282,9 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 // run that shares the pull request, or registered a head another run's row
                 // watches), of the pull request's newest registered head first: a pull request
                 // registered again keeps its older row, behind another's newer one, and so does
-                // a head it returns to.
+                // a head it returns to. At that head a row still `watching` comes first, as
+                // `pull_requests[].ci` reads `running` while any is (rows of one head whose
+                // repository differs in case only are two rows).
                 let watch: Option<(String, Option<String>)> = c
                     .query_row(
                         &format!(
@@ -3290,6 +3292,7 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                              JOIN runs r ON r.id = ?1
                              WHERE {}
                              ORDER BY coalesce(lower(w.head_oid) = lower({}), 0) DESC,
+                                      w.status = 'watching' DESC,
                                       w.id DESC
                              LIMIT 1",
                             is_current_pr_sql("r", "w.repo", "w.pr"),
@@ -4989,5 +4992,74 @@ pub(in crate::daemon) mod tests {
             )
             .unwrap();
         assert_eq!(stage(), json!("ci"));
+    }
+
+    /// Two runs register one head of one pull request with the repository in another case, so
+    /// there are two watch rows of it: while either still watches, both items are at `ci`, as
+    /// `pull_requests[].ci` reads `running` (Issue 569, diff review round 1).
+    #[test]
+    fn a_watch_still_running_at_the_head_keeps_the_stage_at_ci() {
+        let (_dir, w) = org();
+        w.conn()
+            .execute(
+                "INSERT INTO ranges (id, project_id, at_once, budget_tasks, brief_head, proposed_by)
+                 VALUES (1, (SELECT id FROM projects WHERE slug = 'p'), 2, 9, 'h', 's')",
+                [],
+            )
+            .unwrap();
+        for (task, issue) in [("r1-1", 1), ("r1-2", 2)] {
+            w.upsert_run(&RunUpsert {
+                task_id: task,
+                project_slug: "p",
+                status: Some("review"),
+                ..Default::default()
+            })
+            .unwrap();
+            w.conn()
+                .execute("UPDATE runs SET range_id = 1 WHERE task_id = ?1", [task])
+                .unwrap();
+            w.append_event(&NewEvent {
+                kind: "belt_dispatched",
+                actor: Some("makibad"),
+                payload: Some(&json!({"range_id": 1, "issue": issue, "task_id": task})),
+                run_task_id: Some(task),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let h = "6".repeat(40);
+        super::super::prwatch::register(&w, "pr_opened", "r1-1", "o/p", 7, &h).unwrap();
+        super::super::prwatch::register(&w, "pr_opened", "r1-2", "O/P", 7, &h).unwrap();
+        let rows: i64 = w
+            .conn()
+            .query_row("SELECT count(*) FROM pr_watches WHERE pr = 7", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(rows, 2);
+        let stages = || -> Vec<Value> {
+            items(w.conn(), 1, &json!({}), &[])
+                .unwrap()
+                .iter()
+                .map(|i| i["stage"].clone())
+                .collect()
+        };
+        // The newer row concludes passed while the older one still watches.
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
+                 WHERE repo = 'O/P'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
+        w.conn()
+            .execute(
+                "UPDATE pr_watches SET status = 'completed', conclusion = 'passed'
+                 WHERE repo = 'o/p'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(stages(), vec![json!("to_land"), json!("to_land")]);
     }
 }
