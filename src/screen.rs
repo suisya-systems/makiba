@@ -645,14 +645,23 @@ fn place_words(c: &Ctx, place: &str) -> String {
 }
 
 /// The words of a stage or a `why` the screen knows; else the record's text as written.
-fn detail(c: &Ctx, item: &Value) -> Value {
+/// `repo` is the repository of the item's project, when recorded.
+fn detail(c: &Ctx, item: &Value, repo: Option<&str>) -> Value {
     let task = str_of(&item["task_id"]);
-    let pr_ci = task.and_then(|t| {
-        arr(&c.st["pull_requests"])
-            .iter()
-            .find(|p| p["task_id"] == t)
-            .map(|p| p["ci"].clone())
-    });
+    // The item's pull request: the row of its task, else the row of its own number in its
+    // project's repository. pull_requests[] lists one row per pull request, so a second run on
+    // a shared open pull request (no `items[].pr` yet) finds none: the read surface lacks the
+    // link (screen.md section 11).
+    let prs = arr(&c.st["pull_requests"]);
+    let by_task = task.and_then(|t| prs.iter().find(|p| p["task_id"] == t));
+    let by_number = || {
+        let (Some(r), Some(nr)) = (repo, item["pr"].as_i64()) else {
+            return None;
+        };
+        prs.iter()
+            .find(|p| p["pr"] == nr && str_of(&p["repo"]).is_some_and(|pr| eq_repo(pr, r)))
+    };
+    let pr_ci = by_task.or_else(by_number).map(|p| p["ci"].clone());
     // `<prefix> #12 #34`: every number, written "12, #34" into the key's `#{n}`.
     let waits = |s: &str, prefix: &str, key: &str| -> Option<String> {
         let rest = s.strip_prefix(prefix)?;
@@ -725,7 +734,7 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
             }
             let words = if did_not_start {
                 c.w.get("fail.did_not_start")
-            } else if let (Some(a), "in_work") = (anomaly, place) {
+            } else if let (Some(a), "in_work" | "review") = (anomaly, place) {
                 c.anomaly_words(str_of(&a["rule"]).unwrap_or(""))
             } else {
                 place_words(c, place)
@@ -755,7 +764,7 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
                 json!({
                     "issue": i["issue"], "ref": c.reference(&project, &i["issue"]),
                     "title": i["title"], "place": place, "words": words,
-                    "detail": detail(c, i), "age_s": c.age_s(at), "task_id": i["task_id"],
+                    "detail": detail(c, i, project.as_deref().and_then(|p| c.repo_of(p))), "age_s": c.age_s(at), "task_id": i["task_id"],
                     "did_not_start": did_not_start, "pr": i["pr"], "pr_title": i["pr_title"],
                 }),
             ));
@@ -1244,7 +1253,12 @@ fn views(c: &Ctx, failures: &Value, ready: &Value, one_off: &Value, prs: &Value)
         .count();
     let mut out = BTreeMap::new();
     out.insert("failures", view(f, f, 0));
-    out.insert("issues", view(arr(&ready["rows"]).len(), 0, 0));
+    // The Issues view: the ready count, with the Issues not ready and the projects not
+    // checked counted apart (screen.md 3.1, "14 · not ready 5 · 1 project unchecked").
+    let mut issues = view(arr(&ready["rows"]).len(), 0, 0);
+    issues["not_ready"] = json!(arr(&ready["not_ready"]).len());
+    issues["unchecked"] = json!(arr(&ready["unranked"]).len());
+    out.insert("issues", issues);
     out.insert("one_off", view(oo.len(), oo_failed, oo_wait));
     out.insert("pull_requests", view(p.len(), p_failed, 0));
     json!(out)
@@ -1499,5 +1513,76 @@ mod round3 {
         assert_eq!(h[0]["words"], w.get("hist.started.makiba"));
         assert_eq!(h[1]["words"], w.get("hist.started.makiba"));
         assert_eq!(h[2]["words"], w.get("hist.started.secretary"));
+    }
+}
+
+#[cfg(test)]
+mod round4 {
+    use super::*;
+
+    const NOW: i64 = 1_795_514_400_000;
+
+    fn base() -> Value {
+        json!({"makibad": {"running": true, "heartbeat_at": "2026-11-24T09:59:57.000Z"},
+               "projects": [{"slug": "loom", "repo": "example-org/loom"}],
+               "runs": [], "terminals": [], "anomalies": [], "pending": [],
+               "pull_requests": [], "next_work": null, "ranges": []})
+    }
+
+    fn review_item(issue: i64, task: &str, pr: Value) -> Value {
+        json!({"issue": issue, "place": "review", "stage": "ci", "why": null, "task_id": task,
+               "pr": pr, "since": "2026-11-24T09:00:00.000Z"})
+    }
+
+    #[test]
+    fn checks_are_found_by_task_else_by_the_items_own_number() {
+        let mut s = base();
+        // The one row of pull request 7 names task a; b's item names 7 itself; c's names none.
+        s["pull_requests"] = json!([{"repo": "Example-Org/Loom", "pr": 7, "task_id": "a",
+                                     "ci": "failed", "state": "open"}]);
+        s["ranges"] = json!([{"id": 1, "project": "loom", "status": "active", "places": {},
+            "items": [review_item(1, "a", Value::Null), review_item(2, "b", json!(7)),
+                      review_item(3, "c", Value::Null)]}]);
+        let m = model(&s, NOW, &Words::new("en"));
+        let failed = Words::new("en").get("stage.checks_failed");
+        let items = &m["ranges"][0]["items"];
+        assert_eq!(items[0]["detail"], failed.as_str());
+        assert_eq!(items[1]["detail"], failed.as_str());
+        assert_eq!(items[2]["detail"], Value::Null);
+    }
+
+    #[test]
+    fn a_review_item_with_an_open_anomaly_names_it() {
+        let mut s = base();
+        s["anomalies"] = json!([{"task_id": "a", "rule": "error",
+                                 "since": "2026-11-24T09:50:00.000Z"}]);
+        s["ranges"] = json!([{"id": 1, "project": "loom", "status": "active", "places": {},
+            "items": [review_item(1, "a", Value::Null)]}]);
+        let m = model(&s, NOW, &Words::new("en"));
+        assert_eq!(
+            m["ranges"][0]["items"][0]["words"],
+            Words::new("en").get("fail.error")
+        );
+        assert_eq!(m["ranges"][0]["items"][0]["age_s"], 600);
+    }
+
+    #[test]
+    fn the_issues_view_counts_not_ready_and_unchecked_apart() {
+        let mut s = base();
+        s["next_work"] = json!({"status": "no_candidates", "candidate_count": 0,
+            "candidates": [], "input_truncated": "", "candidates_not_recorded": 0,
+            "left_out_not_recorded": 0,
+            "left_out": [
+                {"project": "loom", "repo": "example-org/loom", "issue": 4, "kind": "blocked",
+                 "reason": "r", "title": "t"},
+                {"project": "loom", "repo": "example-org/loom", "issue": 5, "kind": "put_aside",
+                 "reason": "r", "title": "t"},
+                {"project": "atlas", "repo": null, "issue": null, "kind": "no_repository",
+                 "reason": "r", "title": null}]});
+        let m = model(&s, NOW, &Words::new("en"));
+        let v = &m["views"]["issues"];
+        assert_eq!(v["count"], 0);
+        assert_eq!(v["not_ready"], 2);
+        assert_eq!(v["unchecked"], 1);
     }
 }
