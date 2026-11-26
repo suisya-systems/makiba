@@ -9,6 +9,10 @@
 //!   after the path was replaced), filled once by the watcher thread; hashing a debug binary takes
 //!   seconds, so it never runs on the daemon's tick thread. The door's socket answers carry it.
 //! - `crate::build`: the digest and the client's line, without the database.
+//! - `started_path`: the path this process was started from, recorded once at `makibad`'s start
+//!   (Issue 352). Every launch path names it (the channel server's command, the role hooks' entry
+//!   point, the secret scanner's hooks) instead of asking `current_exe()` again, which says
+//!   `<path> (deleted)` after a replacement.
 //! - `Watch`: the watcher thread looks at the path every second. A file whose identity (device,
 //!   inode, size, modification time) has held still for one look is hashed through an opened
 //!   descriptor, and the result is kept only when the file did not change while it was read. Same
@@ -34,6 +38,32 @@ pub const RULE: &str = "binary_replaced";
 const LOOK: Duration = Duration::from_secs(1);
 
 static RUNNING: OnceLock<Option<String>> = OnceLock::new();
+static STARTED: OnceLock<Option<PathBuf>> = OnceLock::new();
+
+/// The path this process was started from, recorded at the first call (`makibad` makes it first
+/// thing in its start) and the same for the life of the process; `None` when it cannot be told.
+pub fn started_path() -> Option<&'static Path> {
+    STARTED
+        .get_or_init(|| {
+            let exe = std::env::current_exe().ok()?;
+            let running = running_file()
+                .and_then(|f| std::fs::metadata(f).ok())
+                .map(|m| (m.dev(), m.ino()));
+            Some(resolve(&exe, running))
+        })
+        .as_deref()
+}
+
+/// The path of `exe`, the name `current_exe()` gave: kept as it is when the file there is the
+/// running one (`running`: its device and inode), even when its name ends in ` (deleted)`;
+/// otherwise the path it was started from (`started_from`).
+fn resolve(exe: &Path, running: Option<(u64, u64)>) -> PathBuf {
+    let here = std::fs::metadata(exe).ok().map(|m| (m.dev(), m.ino()));
+    if here.is_some() && here == running {
+        return exe.to_path_buf();
+    }
+    started_from(exe)
+}
 
 /// `makibad`'s digest once the watcher has hashed it; `None` before, or when it could not.
 pub fn running_digest() -> Option<&'static str> {
@@ -109,7 +139,7 @@ impl Watch {
             found: Arc::clone(&found),
             written: false,
         };
-        let Ok(path) = std::env::current_exe().map(|p| started_from(&p)) else {
+        let Some(path) = started_path().map(Path::to_path_buf) else {
             eprintln!("makibad: cannot tell the path of its own executable; it is not watched");
             return w;
         };
@@ -312,6 +342,19 @@ mod tests {
         let p = Path::new("/opt/bin/makiba");
         assert_eq!(started_from(Path::new("/opt/bin/makiba (deleted)")), p);
         assert_eq!(started_from(p), p);
+    }
+
+    /// A live file whose own name ends in ` (deleted)` keeps its name (Issue 352).
+    #[test]
+    fn a_running_file_named_deleted_keeps_its_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let p = dir.path().join("makiba (deleted)");
+        std::fs::write(&p, b"x").unwrap();
+        let m = std::fs::metadata(&p).unwrap();
+        assert_eq!(resolve(&p, Some((m.dev(), m.ino()))), p);
+        if cfg!(target_os = "linux") {
+            assert_eq!(resolve(&p, None), dir.path().join("makiba"));
+        }
     }
 
     #[test]

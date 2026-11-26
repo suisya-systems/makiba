@@ -12,6 +12,9 @@
 //!
 //! A core that answers with another version than the pinned one stops `up` at once, before the
 //! ledger is opened and before the base is started, naming what to run (Issue 418): `up` never stops a core.
+//! A core of another version that the base's own start started (an older server found first,
+//! Issue 382) stops `up` too, before a run is resumed or `makibad` started; the message names the
+//! server's file (Linux) and its version, and the core is left running.
 
 use crate::agents::version;
 use crate::base::{self, BaseError};
@@ -105,7 +108,7 @@ fn with_ledger<T>(
 
 /// `claude --version` must be at or above the lowest supported version and not refused by name;
 /// a version newer than the newest checked one is said so in one line and accepted.
-fn check_claude() -> Result<(), Failure> {
+pub(crate) fn check_claude() -> Result<(), Failure> {
     let out = Command::new("claude")
         .arg("--version")
         .output()
@@ -130,7 +133,7 @@ fn check_claude() -> Result<(), Failure> {
 
 /// `git --version` must be at or above `run_repo::GIT_LOWEST` (Issue 241: `update` merges with
 /// `git merge-tree --write-tree`).
-fn check_git() -> Result<(), Failure> {
+pub(crate) fn check_git() -> Result<(), Failure> {
     let out = Command::new("git")
         .arg("--version")
         .output()
@@ -251,8 +254,7 @@ fn other_version(session: &str, found: &str) -> Failure {
                 .unwrap_or_else(|_| "makiba".into());
             format!(
                 "{head}, this makiba pins {pinned}. To take {pinned}: `{exe} base upgrade` (it asks \
-                 before ending the base's terminals; until that verb exists, the steps of \
-                 docs/upgrading-the-base.md)"
+                 before ending the base's terminals)"
             )
         }
         Some(Ordering::Greater) => format!(
@@ -264,7 +266,43 @@ fn other_version(session: &str, found: &str) -> Failure {
     (ErrorKind::Unavailable, text)
 }
 
-fn run(secretary: bool) -> Result<(), Failure> {
+/// After the base's start: the version of the core that answers, when it is not the pinned one
+/// (Issue 382). While nothing listens yet it asks again every 100 ms for up to 5 s; anything
+/// else (the pinned version, still nothing, another error) is `None`, and `up` goes on as before.
+fn started_version(the_base: &dyn base::Base) -> Option<String> {
+    let until = Instant::now() + Duration::from_secs(5);
+    loop {
+        match the_base.hello() {
+            Err(BaseError::UnsupportedVersion { found, .. }) => return Some(found),
+            Err(BaseError::Unavailable(d)) if d.kind == "connect" && Instant::now() < until => {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            _ => return None,
+        }
+    }
+}
+
+/// The refusal of a core of session `session` that the base's own start started and that runs
+/// `found`, not the pinned release (Issue 382). The text is the base's
+/// (`base::started_other_version`); the way out is named by the path of this binary. It says
+/// what `up` left undone, which `base upgrade` (whose last step is `run`) passes on in its own
+/// failure.
+fn started_other_version(session: &str, found: &str) -> Failure {
+    let exe = std::env::current_exe()
+        .map(|p| p.display().to_string())
+        .unwrap_or_else(|_| "makiba".into());
+    (
+        ErrorKind::Unavailable,
+        format!(
+            "{}. `up` stopped there: no run was resumed and makibad was not started",
+            base::started_other_version(session, found, &exe)
+        ),
+    )
+}
+
+/// Everything `up` does but take the session lock, which `main` takes shared and
+/// `base upgrade` (which calls this at its last step) holds exclusively.
+pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     if let Some(v) = agent_variable() {
         return Err((
             ErrorKind::Denied,
@@ -316,6 +354,13 @@ fn run(secretary: bool) -> Result<(), Failure> {
             format!("cannot start the base: {e}"),
         )
     })?;
+    // The core the base's start started may be an older server found first (Issue 382):
+    // refused before a run is resumed or `makibad` started. Not stopped: `up` never stops a core.
+    if probe.is_some()
+        && let Some(found) = started_version(&*the_base)
+    {
+        return Err(started_other_version(&session, &found));
+    }
     // Printed only: the app's machine list is the person's (Issue 196).
     println!(
         "app: to see this organization in the app, run on the app's machine: {}",
@@ -400,6 +445,16 @@ pub fn main(args: &[String]) -> ExitCode {
         eprint!("makiba: bad arguments for up\n{USAGE}");
         return ExitCode::from(ErrorKind::Usage.exit_code() as u8);
     }
+    // Held until `up` ends: no `base upgrade` stops or replaces the base meanwhile, and none
+    // that runs lets this `up` start the old core between its stop and its rename (Issue 422).
+    let session = crate::daemon::base_session();
+    let _lock = match crate::base::upgrade::up_lock(&session) {
+        Ok(lock) => lock,
+        Err((kind, message)) => {
+            eprintln!("makiba: {}: {message}", kind.as_str());
+            return ExitCode::from(kind.exit_code() as u8);
+        }
+    };
     match run(!args.iter().any(|a| a == "--no-secretary")) {
         Ok(()) => ExitCode::SUCCESS,
         Err((kind, message)) => {

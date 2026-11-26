@@ -225,61 +225,32 @@ fn in_process_without_the_helpers_variable_fails_with_the_message() {
 }
 
 /// Every test target starts `makibad` only through the helpers: no target calls
-/// `makiba::daemon::run*` or runs `makiba daemon` / `makiba up` itself. Code only, not comments;
-/// this file is left out (its patterns are data).
+/// `makiba::daemon::run*` or runs `makiba daemon` / `makiba up` itself. Code only, not comments.
+/// The scan is the library's (`makiba::hooks::test_commit`, Issue 322), the one the commit-msg
+/// hook runs on a test commit's declared tests; this file is scanned too.
 #[test]
 fn no_test_target_starts_makibad_outside_the_helpers() {
-    let tests = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests");
-    let mut targets: Vec<PathBuf> = Vec::new();
+    use makiba::hooks::test_commit::{direct_starts, is_test_target};
+    let root = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let tests = root.join("tests");
+    let mut targets: Vec<String> = Vec::new();
     for e in std::fs::read_dir(&tests).unwrap().flatten() {
-        let p = e.path();
-        if p.extension().is_some_and(|x| x == "rs") {
-            targets.push(p);
-        } else if p.join("main.rs").is_file() && p.file_name().is_some_and(|n| n != "common") {
-            targets.push(p.join("main.rs"));
+        let name = e.file_name().to_string_lossy().into_owned();
+        for rel in [format!("tests/{name}"), format!("tests/{name}/main.rs")] {
+            if is_test_target(&rel) && root.join(&rel).is_file() {
+                targets.push(rel);
+            }
         }
     }
     targets.sort();
     assert!(targets.len() > 10, "the test targets were found");
-    let me = tests.join("knowledge_isolation.rs");
-    let direct = [
-        "daemon::run(",
-        "daemon::run_with(",
-        "daemon::run_until(",
-        "daemon::main(",
-        "\"daemon\"",
-        "arg(\"up\")",
-        "args([\"up\"",
-        "args(&[\"up\"",
-        "makiba(&[\"up\"",
-    ];
+    assert!(!is_test_target("tests/common/main.rs"));
+    assert!(!is_test_target("tests/common/makibad.rs"));
     let mut found = Vec::new();
-    for t in targets.iter().filter(|t| **t != me) {
-        let text = std::fs::read_to_string(t).unwrap();
-        let mut in_use = false;
-        for (i, line) in text.lines().enumerate() {
-            let code = line.split("//").next().unwrap_or("");
-            let code = code.trim();
-            // `use makiba::daemon::{..., run_until, ...}` and its continuation lines.
-            if code.starts_with("use makiba::daemon::") || code.starts_with("use makiba::daemon;") {
-                in_use = !code.ends_with(';');
-            }
-            let imported = (code.starts_with("use makiba::daemon::") || in_use)
-                && ["run", "run_with", "run_until", "main"].iter().any(|f| {
-                    code.split(|c: char| !(c.is_alphanumeric() || c == '_'))
-                        .any(|w| w == *f)
-                });
-            if code.ends_with(';') {
-                in_use = false;
-            }
-            if imported || direct.iter().any(|p| code.contains(p)) {
-                found.push(format!(
-                    "{}:{}: {}",
-                    t.strip_prefix(&tests).unwrap().display(),
-                    i + 1,
-                    code
-                ));
-            }
+    for t in &targets {
+        let text = std::fs::read_to_string(root.join(t)).unwrap();
+        for (line, code) in direct_starts(&text) {
+            found.push(format!("{t}:{line}: {code}"));
         }
     }
     assert!(
@@ -287,4 +258,20 @@ fn no_test_target_starts_makibad_outside_the_helpers() {
         "start makibad through tests/common/makibad.rs, not directly:\n{}",
         found.join("\n")
     );
+    // The scan itself still finds what it found before the move.
+    let call = format!(
+        "    makiba::{}{}::run_until(&dir, &base, stop);",
+        "dae", "mon"
+    );
+    assert_eq!(
+        direct_starts(&format!("fn a() {{\n{call}\n}}\n")),
+        vec![(2, call.trim().to_string())]
+    );
+    let import = format!("use makiba::{}{}::{{curator, run_until}};", "dae", "mon");
+    assert_eq!(direct_starts(&import).len(), 1);
+    assert!(
+        direct_starts(&format!("// {call}")).is_empty(),
+        "a comment is not code"
+    );
+    assert!(direct_starts("    makibad::run_until(&dir, &base, stop);").is_empty());
 }

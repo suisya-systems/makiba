@@ -29,6 +29,10 @@ use crate::db::writer::StateWriter;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
+/// The folder under the scanner's hooks folder that holds the design markers (Issue 337), one file
+/// per task, read by the worker's commit hook.
+pub const DESIGN_WAIT: &str = "design-wait";
+
 /// The folders preparation writes into.
 #[derive(Clone)]
 pub struct Places {
@@ -256,6 +260,68 @@ impl Prepare {
         Ok(())
     }
 
+    /// Issue 337 (line L-K13): the marker `<state>/git-hooks/design-wait/<task>` that the worker's
+    /// commit hook reads (`hooks::test_commit::design_wait`), kept in agreement with the ledger
+    /// for every run dispatched design-first: present, holding the reason, while
+    /// `push::design_wait` gives one and the run is not completed or abandoned; absent otherwise.
+    /// Run each pass after `pass`, from committed records only, so an approval is seen at the next
+    /// pass after its transaction and a write that failed is tried again. The marker is a
+    /// projection of the ledger: `makibad` never reads it for a decision; the push holds the line.
+    pub fn design_markers(&self, w: &StateWriter) -> Result<()> {
+        let tasks: Vec<String> = w
+            .conn()
+            .prepare(
+                "SELECT DISTINCT r.task_id FROM events e JOIN runs r ON r.id = e.run_id
+                 WHERE e.kind = 'delegate_sent'
+                   AND json_extract(e.payload_json, '$.design_first') = 1",
+            )?
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        for task in tasks {
+            if let Err(e) = self.design_marker(w, &task) {
+                eprintln!("makibad: the design marker of {task}: {e}");
+            }
+        }
+        Ok(())
+    }
+
+    /// The marker of `task` made to agree with the ledger (`design_markers`).
+    fn design_marker(&self, w: &StateWriter, task: &str) -> std::result::Result<(), String> {
+        let db = |e: rusqlite::Error| format!("the design approval of {task}: {e}");
+        let open: bool = w
+            .conn()
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM runs WHERE task_id = ?1
+                                AND status NOT IN ('completed', 'abandoned'))",
+                [task],
+                |r| r.get(0),
+            )
+            .map_err(db)?;
+        let why = if open {
+            super::push::design_wait(w.conn(), task).map_err(|e| e.to_string())?
+        } else {
+            None
+        };
+        let dir = self.hooks_dir()?.join(DESIGN_WAIT);
+        let marker = dir.join(task);
+        match why {
+            Some(why) => {
+                if std::fs::read_to_string(&marker).ok().as_deref() != Some(why.as_str()) {
+                    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+                    std::fs::write(&marker, why)
+                        .map_err(|e| format!("{}: {e}", marker.display()))?;
+                }
+            }
+            None => match std::fs::remove_file(&marker) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+                    return Err(format!("{}: {e}", marker.display()));
+                }
+                _ => {}
+            },
+        }
+        Ok(())
+    }
+
     /// `Ok(false)`: a stage update found the launch moved by somebody else; nothing more is done.
     fn prepare(&self, w: &StateWriter, l: &Launch) -> std::result::Result<bool, String> {
         let db = |e: crate::db::Error| e.to_string();
@@ -326,6 +392,8 @@ impl Prepare {
         if let Some(task) = l.task.as_deref().filter(|_| l.kind != "document") {
             let repo = self.places.repos.join(&l.project);
             deny_write_dirs.push(self.install_scanner(&repo)?);
+            // Issue 337: the commit hook's marker is there before the worker starts.
+            self.design_marker(w, task)?;
             // The clone's configuration, by makiba's own entry (Issue 140).
             deny_write_files.push(repo.join(".git").join("config"));
             // The run's own repository (Issue 241): every launch, a resume's too, is checked.
@@ -443,8 +511,9 @@ impl Prepare {
             ));
         }
         let dir = self.hooks_dir()?;
-        let exe = std::env::current_exe().map_err(|e| format!("the scanner's program: {e}"))?;
-        crate::hooks::git_hook::install(&dir, &exe)
+        let exe = super::exe::started_path()
+            .ok_or("the scanner's program: cannot tell the path of makiba's own executable")?;
+        crate::hooks::git_hook::install(&dir, exe)
             .map_err(|e| format!("the secret scanner's hooks in {}: {e}", dir.display()))?;
         let want = dir.to_string_lossy().into_owned();
         let local = git(&["config", "--local", "--get", "core.hooksPath"])?;
@@ -567,13 +636,14 @@ fn start_of(
 /// executable ones named by the run's `git_hook::PROJECT_KEY`, a relative folder read in the
 /// workplace as git would.
 fn say_project_hooks(task: &str, gitdir: &Path, workplace: &Path) {
-    use crate::hooks::git_hook::{FORWARDED, NAMES, PROJECT_KEY};
+    use crate::hooks::git_hook::{FLAG_HOOK, FORWARDED, NAMES, PROJECT_KEY};
     use std::os::unix::fs::PermissionsExt;
     let Ok(dir) = run_repo::read(gitdir, workplace, &["config", "--get", PROJECT_KEY]) else {
         return;
     };
     let names: Vec<&str> = NAMES
         .iter()
+        .chain([FLAG_HOOK].iter())
         .chain(FORWARDED.iter())
         .copied()
         .filter(|n| {

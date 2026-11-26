@@ -15,11 +15,12 @@ use std::process::{Command, Stdio};
 const ROLES: [&str; 3] = ["secretary", "worker", "curator"];
 
 /// Every hook a role's settings may name; `deny-base` is M4-1's.
-const HOOKS: [&str; 7] = [
+const HOOKS: [&str; 8] = [
     "deny-base",
     "deny-push",
     "deny-dangerous-git",
     "deny-no-verify",
+    "deny-no-verify-code-run",
     "deny-workers-delete",
     "worker-boundary",
     "deny-foreground-subagent",
@@ -236,7 +237,7 @@ fn every_line_in_lines_md_names_a_holder_that_exists() {
         }
         lines.push(id);
     }
-    let expected: Vec<String> = (1..=12)
+    let expected: Vec<String> = (1..=13)
         .map(|n| format!("L-K{n}"))
         .chain((1..=9).map(|n| format!("L-N{n}")))
         .collect();

@@ -80,6 +80,8 @@ makiba's merge gate holds it, git only, since makibad runs no project code. A pu
 
 Limits: whether the check would really refuse the other test is not judged (every open test commit holds); two pull requests that both add a check and both have test commits hold each other, and the person decides their order; a check added without touching those paths (a new test target that scans `tests/` alone) is not seen; pull requests makibad does not follow are not seen.
 
+An order the person sets (Issue 338, [`docs/design/merge-order.md`](design/merge-order.md) section 6) is a second reason for the same hold: "pull request A merges only after Issue or pull request B has landed", recorded with the `merge` tool's action `order`. While B has not landed (read from makiba's own records of landings), the gate refuses A with verdict `merge_order` under either merge approval mode, naming B; once B has landed it allows A as before. `makiba status --json` shows the order on A (`pull_requests[].merge_order`). Test: [`tests/merge_order_person.rs`](../tests/merge_order_person.rs).
+
 ## The landing gate
 
 [`.github/acceptance-check`](../.github/acceptance-check) holds one line, `acceptance`: the name of the job above. When it is on the base branch, claude-org-ja's landing gate (`tools/acceptance_gate.py`) takes that job's success at head as the test-first evidence. Rename the job and the file together; `tests/test_acceptance_check.py` checks that they match.

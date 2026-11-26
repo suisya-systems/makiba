@@ -28,6 +28,8 @@ Call mcp__makiba__dispatch with:
 - `branch` (optional): the branch name, when the person or the repository wants one.
 - `issue` (optional): the Issue number the task works on. Give it whenever the task is one Issue: a range of the project then does not dispatch that Issue again (`makibad` reads it from the run). A task without it is invisible to a range.
 
+- `design_first` (optional): `true` when the person must read the task's design before its test is fixed: a task on a trust boundary (git, the sandbox, keys, the push line, the merge gate or the acceptance checker), or one the person asked to see the design of. `makibad` then refuses the task's test commit (a commit with an `Acceptance-Test:` trailer), at the push and in the worker's commit hook, until the person answers `yes` to a pending entry of the task with `stop_kind` `design` (Issue 337, line L-K13). When the worker reports its design blocked, add that question with mcp__makiba__pending (`add` with the five parts, `stop_kind` `design`, `recommend_answer`; then `escalate`), and ask the person to answer it in their own shell with `makiba answer <id> yes` (their key). Do not carry their yes with mcp__makiba__answer: an answer through your tool is recorded as yours, does not open the test commit, and closes the entry. If that happened, add the design question again (a new entry), escalate it and ask the person to answer that one. A design you approve yourself, within one module, is not dispatched with `design_first`.
+
 A refusal names its kind: `usage` (fix the arguments), `conflict` (the task id is in use: pick another), `unavailable` (`makibad` is not running: tell the person once and wait).
 
 ## The brief
@@ -35,7 +37,7 @@ A refusal names its kind: `usage` (fix the arguments), `conflict` (the task id i
 Give the task one worker with an exact scope. Write it in English:
 
 1. What to change, and why, in a few sentences.
-2. What not to touch.
+2. What not to touch. A change to an existing test, a file under `.github/`, a script, the merge gate, the acceptance checker, or the language check (`tools/language-allowlist.txt`, or `tools/check_language.py`, its scope) needs the person: the brief says the worker stops and asks before making one (Issue 339).
 3. How to check it: the repository's own tests and lint, and any test the task adds.
 4. How to report: `report` `done` with what changed, the commit, how it was checked and what was not done; `blocked` with one question when it cannot go on.
 5. The commit form the repository uses. Workers never push: you do (the pull-request skill).

@@ -9,6 +9,7 @@ use std::time::Duration;
 
 mod herdr;
 pub mod stub;
+pub mod upgrade;
 pub mod uses;
 pub mod version;
 
@@ -47,6 +48,15 @@ pub fn app_labels(org: &str, name: &str) -> BTreeMap<String, String> {
 /// (`makiba up`, Issue 196). Measured with herdr-app on Windows and the base in WSL.
 pub fn app_register_command(session: &str) -> String {
     format!("hc.exe machine add wsl --name {session} --session {session}")
+}
+
+/// What `makiba up` says when the core that `Base::start` started for `session` runs `found`, not
+/// the pinned release (Issue 382): the versions, the file and pid of the process serving the
+/// socket (Linux), and the way out, naming makiba by `exe`.
+pub fn started_other_version(session: &str, found: &str, exe: &str) -> String {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let server = herdr::server_process(&herdr::socket_path(runtime.as_deref(), session));
+    herdr::started_other_version(session, found, exe, server)
 }
 
 /// The real base of `session`, which `Base::start` can start (`makiba up`).

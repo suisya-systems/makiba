@@ -312,11 +312,13 @@ impl Org {
     /// Approve range `id` with the person key, on the read the read surface shows.
     fn approve(&self, id: i64) {
         wait("the read of the draft", || self.read_done(id));
-        let read = self.range(id)["read_id"].clone();
+        let range = self.range(id);
+        // The mode the read surface shows is the one the approval binds (Issue 326).
+        let (read, mode) = (range["read_id"].clone(), range["approves_under"].clone());
         self.call(
             &self.person,
             "range",
-            json!({"action": "approve", "id": id, "read": read}),
+            json!({"action": "approve", "id": id, "read": read, "approval_mode": mode}),
         );
     }
 

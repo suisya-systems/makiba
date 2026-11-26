@@ -5,6 +5,7 @@
 pub mod ahead;
 pub mod anomalies;
 pub mod belt;
+mod call;
 mod close;
 mod crash;
 pub mod curator;
@@ -83,7 +84,8 @@ pub fn base_session() -> String {
 }
 
 /// The base this process uses: the stand-in when `MAKIBA_BASE=stub` (tests; its first `Resync`
-/// comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`), otherwise the real one, scoped to this state
+/// comes after `MAKIBA_STUB_SUBSCRIBE_DELAY_MS`, and each launch's argv goes to the file
+/// `MAKIBA_STUB_LAUNCHES` names, Issue 352), otherwise the real one, scoped to this state
 /// folder so two organizations on one base do not adopt each other's terminals.
 pub(crate) fn connect_base(state: &Path) -> Box<dyn Base> {
     if std::env::var("MAKIBA_BASE").as_deref() == Ok("stub") {
@@ -91,7 +93,11 @@ pub(crate) fn connect_base(state: &Path) -> Box<dyn Base> {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
-        return Box::new(Stub::new().with_subscribe_delay(Duration::from_millis(ms)));
+        let mut stub = Stub::new().with_subscribe_delay(Duration::from_millis(ms));
+        if let Some(f) = std::env::var_os("MAKIBA_STUB_LAUNCHES").filter(|f| !f.is_empty()) {
+            stub = stub.with_launch_record(Path::new(&f));
+        }
+        return Box::new(stub);
     }
     let session = base_session();
     let org = std::fs::canonicalize(state).unwrap_or_else(|_| state.to_path_buf());
@@ -260,6 +266,8 @@ fn serve_until(
     door: Option<(door::Config, crate::channel::Hub)>,
     stop: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    // Issue 352: the path this process was started from, recorded before any launch can ask.
+    exe::started_path();
     std::fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     let lock = take_lock(dir)?;
     crash::arm(dir);
@@ -272,6 +280,8 @@ fn serve_until(
         eprintln!("makibad: cannot clear the earlier binary_replaced: {e}");
     }
     let mut exe_watch = exe::Watch::start(Arc::clone(&stop));
+    // Issue 272: calling the person back; its seams are read now.
+    let mut person_call = call::Call::new(dir);
     let base = connect();
     // Not subscribed yet: the row says so, and the heartbeat already runs.
     w.conn()
@@ -408,6 +418,10 @@ fn serve_until(
         if let Err(e) = exe_watch.pass(&w) {
             eprintln!("makibad: the executable's watch: {e}");
         }
+        // Needs only state.db as well: the person is called without waiting for the base's records.
+        if let Err(e) = person_call.pass(&w) {
+            eprintln!("makibad: the call to the person: {e}");
+        }
         // Not before the subscription is recorded: the first Resync's records come after it.
         if started_recorded {
             monitor.drain(&w);
@@ -442,6 +456,9 @@ fn serve_until(
             }
             if let Err(e) = prepare.pass(&w) {
                 eprintln!("makibad: prepare: {e}");
+            }
+            if let Err(e) = prepare.design_markers(&w) {
+                eprintln!("makibad: design markers: {e}");
             }
             // No launch step runs until the start pass has looked for every launch's terminal.
             if !resumed {
@@ -503,6 +520,7 @@ fn serve_until(
     }
 
     // A stop: end the pollers (their `gh` children too), say so, release the lock, leave no pid behind.
+    person_call.stop(&w);
     drop(prwatch);
     drop(triage);
     drop(belt);

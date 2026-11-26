@@ -33,6 +33,140 @@ pub struct Herdr {
     session: Option<String>,
 }
 
+/// The process that serves `socket` (Issue 382): its pid, and the file it runs when that can be
+/// read. Linux only: the peer's pid by `SO_PEERCRED` on a connection that writes nothing, then
+/// `/proc/<pid>/exe`. Nothing is run and nothing is sent to the core. `None` when nothing
+/// listens, or on another system.
+#[cfg(target_os = "linux")]
+pub fn server_process(socket: &Path) -> Option<(u32, Option<PathBuf>)> {
+    use std::os::fd::AsRawFd;
+    let stream = UnixStream::connect(socket).ok()?;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: the buffer is a ucred of the length given, owned by this frame.
+    let rc = unsafe {
+        libc::getsockopt(
+            stream.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            (&mut cred as *mut libc::ucred).cast(),
+            &mut len,
+        )
+    };
+    if rc != 0 || cred.pid <= 0 {
+        return None;
+    }
+    let pid = cred.pid as u32;
+    Some((pid, std::fs::read_link(format!("/proc/{pid}/exe")).ok()))
+}
+
+#[cfg(not(target_os = "linux"))]
+pub fn server_process(_socket: &Path) -> Option<(u32, Option<PathBuf>)> {
+    None
+}
+
+/// The `hc` that `start` runs (`$HC_BIN`, else `hc` on `PATH`), as a file, when it is found. On
+/// `PATH`, as the lookup that runs it: the first regular file with an execute bit.
+fn hc_file() -> Option<PathBuf> {
+    use std::os::unix::fs::PermissionsExt;
+    let hc = PathBuf::from(std::env::var_os("HC_BIN").unwrap_or_else(|| "hc".into()));
+    if hc.components().count() > 1 {
+        return Some(hc);
+    }
+    std::env::split_paths(&std::env::var_os("PATH")?)
+        .map(|d| d.join(&hc))
+        .find(|p| {
+            std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+        })
+}
+
+/// The text of `base::started_other_version` (Issue 382). `server` is what `server_process` read.
+pub fn started_other_version(
+    session: &str,
+    found: &str,
+    exe: &str,
+    server: Option<(u32, Option<PathBuf>)>,
+) -> String {
+    let pinned = super::version::PINNED;
+    let hc = std::env::var("HC_BIN").unwrap_or_else(|_| "hc".into());
+    let named = match &server {
+        Some((pid, Some(f))) => format!("its server is {} (pid {pid})", f.display()),
+        Some((pid, None)) => format!("its server's file could not be read (pid {pid})"),
+        None => "its server's file could not be read".into(),
+    };
+    let same = |a: &Path, b: &Path| match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    let is_hc = match (server.and_then(|(_, f)| f), hc_file()) {
+        (Some(f), Some(h)) => same(&f, &h),
+        _ => false,
+    };
+    let head = format!("`{hc} server start` started a base of session {session} that runs {found}");
+    // The way out depends on the direction, as for a core found running (Issue 418): only an older
+    // server is replaced by this makiba's pin; a newer one means this makiba is the older part.
+    match super::version::compare_with_pinned(found) {
+        Some(std::cmp::Ordering::Less) => {
+            let mut text = format!(
+                "{head}, this makiba pins {pinned}; {named}. Stop it with `{exe} down --stop-base`, \
+                 then install {pinned} with `bash scripts/install-base.sh PREFIX` and fix what it \
+                 names until it exits 0 (it names a herdr-core or hc that HC_BIN or PATH finds \
+                 before the installed one), then run `{exe} up` again"
+            );
+            if is_hc {
+                text.push_str(
+                    "; HC_BIN or PATH names that file as hc: point HC_BIN at PREFIX/bin/hc or unset it",
+                );
+            }
+            text
+        }
+        Some(std::cmp::Ordering::Greater) => format!(
+            "{head}, this makiba pins {pinned}; {named}. This makiba is older than that server: \
+             run the makiba that pins {found} by its path"
+        ),
+        _ => format!("{head}, which this makiba cannot compare with {pinned}; {named}"),
+    }
+}
+
+#[cfg(test)]
+mod started_tests {
+    use super::*;
+
+    /// Issue 382: the way out follows the direction of the started server's version.
+    #[test]
+    fn the_way_out_follows_the_direction() {
+        let pinned = crate::base::version::PINNED;
+        let (a, b, c) = {
+            let p: Vec<u64> = pinned.split('.').map(|x| x.parse().unwrap()).collect();
+            (p[0], p[1], p[2])
+        };
+        let server = || Some((7, Some(PathBuf::from("/x/herdr-core"))));
+        let newer = format!("{a}.{b}.{}", c + 1);
+        let text = started_other_version("s", &newer, "/m/makiba", server());
+        assert!(text.contains("older than that server"), "{text}");
+        assert!(
+            text.contains(&format!("pins {newer} by its path")),
+            "{text}"
+        );
+        assert!(!text.contains("install-base.sh"), "{text}");
+        assert!(text.contains("/x/herdr-core (pid 7)"), "{text}");
+        let odd = format!("{pinned}-rc.1");
+        let text = started_other_version("s", &odd, "/m/makiba", server());
+        assert!(text.contains("cannot compare"), "{text}");
+        assert!(!text.contains("install-base.sh"), "{text}");
+        if c > 0 {
+            let older = format!("{a}.{b}.{}", c - 1);
+            let text = started_other_version("s", &older, "/m/makiba", server());
+            assert!(text.contains("install-base.sh"), "{text}");
+            assert!(text.contains("/m/makiba down --stop-base"), "{text}");
+        }
+    }
+}
+
 /// `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`; `/tmp` when the variable is not set, as the base does.
 pub fn socket_path(runtime_dir: Option<&Path>, session: &str) -> PathBuf {
     runtime_dir
