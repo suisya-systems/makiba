@@ -259,6 +259,9 @@ impl Hub {
             // once, so it learns it watches without waiting out a hold.
             let extra = self.extra(&agent);
             if !extra.is_empty() && before.is_none_or(|b| start > b) {
+                // The older session's held request goes, as a replacement would make it: its
+                // receiver disconnects and it answers 409, so nothing is pushed to it.
+                slots.remove(&agent);
                 drop((slots, newest));
                 let _ = respond_with(&mut s, "204 No Content", &extra, "");
                 return;
@@ -720,7 +723,7 @@ mod tests {
         assert!(head.starts_with("HTTP/1.1 204"), "{head}");
         assert!(head.contains(&format!("{BEAT_HEADER}: 1.5\r\n")), "{head}");
         // The same session asks again: now it is held, as before.
-        let _held = status_of(addr, "100-1");
+        let held = status_of(addr, "100-1");
         let until = Instant::now() + Duration::from_secs(5);
         while !hub.connected(crate::spec::AGENT_SECRETARY) && Instant::now() < until {
             std::thread::sleep(Duration::from_millis(10));
@@ -738,5 +741,17 @@ mod tests {
             std::thread::sleep(Duration::from_millis(10));
         }
         assert!(hub.connected("w-t1"), "the worker's request was not held");
+
+        // A newer session's first request, answered at once, still ends the older session's
+        // held request: it answers 409 and no push reaches it.
+        let mut old = held;
+        let head = head_of(&mut status_of(addr, "300-3"));
+        assert!(head.starts_with("HTTP/1.1 204"), "{head}");
+        assert_eq!(code(&mut old), "409", "the older session's held request");
+        assert!(!hub.connected(crate::spec::AGENT_SECRETARY));
+        assert!(
+            hub.push(crate::spec::AGENT_SECRETARY, "x").is_err(),
+            "a push reached a superseded session"
+        );
     }
 }
