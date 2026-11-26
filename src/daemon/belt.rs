@@ -1421,6 +1421,20 @@ pub(crate) fn current_pr_sql(alias: &str, field: &str) -> String {
     )
 }
 
+/// The newest registered head of the pull request `repo`, `pr` (SQL expressions; Issue 569): the
+/// `head_oid` of the newest `pr_opened` or `fix_pushed` of that repository (any case) and number,
+/// of any run, so that a run that replaced another on the same pull request gives its head to
+/// both. Null when none was registered.
+pub(crate) fn pr_head_sql(repo: &str, pr: &str) -> String {
+    format!(
+        "(SELECT json_extract(ph.payload_json, '$.head_oid') FROM events ph
+          WHERE ph.kind IN ('pr_opened', 'fix_pushed')
+            AND lower(json_extract(ph.payload_json, '$.repo')) = lower({repo})
+            AND json_extract(ph.payload_json, '$.pr') = {pr}
+          ORDER BY ph.id DESC LIMIT 1)"
+    )
+}
+
 /// Whether the pull request `repo`, `pr` (SQL expressions) is the current pull request of the run
 /// `alias`: the same repository (any case, as GitHub reads it) and number.
 pub(super) fn is_current_pr_sql(alias: &str, repo: &str, pr: &str) -> String {
@@ -3173,7 +3187,8 @@ fn newest_event_at(c: &Connection, run: i64, kind: &str) -> rusqlite::Result<Opt
 
 fn item(issue: &Value, title: Value, place: &str) -> Value {
     json!({"issue": issue, "title": title, "place": place, "why": null, "stage": null,
-           "since": null, "task_id": null, "pr": null, "pr_title": null})
+           "since": null, "task_id": null, "pr": null, "pr_title": null, "current_repo": null,
+           "current_pr": null})
 }
 
 /// The item of the run of `task`, dispatched for `issue` (belt.md 7.1): its place, stage, why and
@@ -3193,6 +3208,23 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
     let mut it = item(&json!(issue), json!(title), "in_work");
     it["task_id"] = json!(task);
     it["since"] = json!(dispatched);
+    // Issue 569: the current pull request of a run not closed, so that a reader finds the row of
+    // a pull request another run is listed with. A closed run's landing is `pr`.
+    if !matches!(status.as_str(), "completed" | "abandoned") {
+        let (repo, pr): (Option<String>, Option<i64>) = c.query_row(
+            &format!(
+                "SELECT {}, {} FROM runs r WHERE r.id = ?1",
+                current_pr_sql("r", "repo"),
+                current_pr_sql("r", "pr")
+            ),
+            [run],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if let (Some(repo), Some(pr)) = (repo, pr) {
+            it["current_repo"] = json!(repo);
+            it["current_pr"] = json!(pr);
+        }
+    }
     let stop: Option<(String, String)> = c
         .query_row(
             "SELECT coalesce(json_extract(context_json, '$.stop_line'), 'decision') || ': '
@@ -3246,23 +3278,22 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 if let Some(at) = newest_event_at(c, run, "run_in_review")? {
                     it["since"] = json!(at);
                 }
-                // The watch of its current pull request (Issue 357), of its current head
-                // first: a pull request registered again keeps its older row, behind another's
-                // newer one, and so does a head it returns to.
+                // The watch of its current pull request (Issue 357), of any run (Issue 569: a
+                // run that shares the pull request, or registered a head another run's row
+                // watches), of the pull request's newest registered head first: a pull request
+                // registered again keeps its older row, behind another's newer one, and so does
+                // a head it returns to.
                 let watch: Option<(String, Option<String>)> = c
                     .query_row(
                         &format!(
                             "SELECT w.status, w.conclusion FROM pr_watches w
-                             JOIN runs r ON r.id = w.run_id
-                             WHERE w.run_id = ?1 AND {}
-                             ORDER BY coalesce(w.head_oid = (
-                                        SELECT json_extract(ch.payload_json, '$.head_oid')
-                                        FROM events ch WHERE ch.run_id = r.id
-                                          AND ch.kind IN ('pr_opened', 'fix_pushed')
-                                        ORDER BY ch.id DESC LIMIT 1), 0) DESC,
+                             JOIN runs r ON r.id = ?1
+                             WHERE {}
+                             ORDER BY coalesce(lower(w.head_oid) = lower({}), 0) DESC,
                                       w.id DESC
                              LIMIT 1",
-                            is_current_pr_sql("r", "w.repo", "w.pr")
+                            is_current_pr_sql("r", "w.repo", "w.pr"),
+                            pr_head_sql("w.repo", "w.pr")
                         ),
                         [run],
                         |r| Ok((r.get(0)?, r.get(1)?)),

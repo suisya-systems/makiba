@@ -658,7 +658,8 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 }
 
 /// One entry of `pull_requests[]`: `repo`, `pr`, `task_id`; `title` (the newest recorded one);
-/// `head_oid` (the merged head, else the run's newest recorded head of this pull request);
+/// `head_oid` (the merged head, else the newest recorded head of this pull request by any run,
+/// Issue 569, else the run's newest watch of it);
 /// `ci` (`running` while a watch of the head is under way, else the newest result of that
 /// repository, number and head after the newest `pr_closed` unless the head was recorded again
 /// since, else null); `state` (`merged`, `closed` or `open`); `merged_via`, `merged_by`; and
@@ -690,15 +691,13 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
         Some(h) => Some(h.to_string()),
         None => conn
             .query_row(
-                "SELECT coalesce(
-                   (SELECT json_extract(payload_json, '$.head_oid') FROM events
-                    WHERE run_id = ?1 AND kind IN ('pr_opened', 'fix_pushed')
-                      AND lower(json_extract(payload_json, '$.repo')) = lower(?2)
-                      AND json_extract(payload_json, '$.pr') = ?3
-                    ORDER BY id DESC LIMIT 1),
-                   (SELECT head_oid FROM pr_watches
-                    WHERE run_id = ?1 AND lower(repo) = lower(?2) AND pr = ?3
-                    ORDER BY id DESC LIMIT 1))",
+                &format!(
+                    "SELECT coalesce({},
+                       (SELECT head_oid FROM pr_watches
+                        WHERE run_id = ?1 AND lower(repo) = lower(?2) AND pr = ?3
+                        ORDER BY id DESC LIMIT 1))",
+                    crate::daemon::belt::pr_head_sql("?2", "?3")
+                ),
                 params![row["id"].as_i64(), repo, pr],
                 |r| r.get(0),
             )
