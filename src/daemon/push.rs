@@ -75,6 +75,8 @@ struct Readiness {
 struct Before {
     default_branch: String,
     failed: BTreeSet<String>,
+    /// Issue 337: why the task's test commit may not go yet (`design_wait`), read at job start.
+    design: Option<String>,
 }
 
 impl Before {
@@ -94,8 +96,64 @@ impl Before {
         Ok(Before {
             default_branch,
             failed,
+            design: design_wait(c, task)?,
         })
     }
+}
+
+/// Issue 337 (line L-K13): why the test commit of `task` may not be committed or pushed yet, or
+/// `None`. A task needs the person's approval of its design when its `delegate_sent` carries
+/// `design_first` (the secretary's `dispatch`, or a range proposed with it); the approval is a
+/// pending entry of the task of stop kind `design` answered `yes` by the person's key. A later
+/// design entry does not take an approval back. Read by the push's check before CI, and by
+/// `prepare` for the marker the worker's commit hook reads.
+pub fn design_wait(c: &rusqlite::Connection, task: &str) -> Result<Option<String>> {
+    let marked: bool = c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events e JOIN runs r ON r.id = e.run_id
+                        WHERE r.task_id = ?1 AND e.kind = 'delegate_sent'
+                          AND json_extract(e.payload_json, '$.design_first') = 1)",
+        [task],
+        |r| r.get(0),
+    )?;
+    if !marked {
+        return Ok(None);
+    }
+    let mut st = c.prepare(
+        "SELECT p.id, p.status, p.answer, p.answered_by FROM pending p
+         JOIN runs r ON r.id = p.run_id
+         WHERE r.task_id = ?1 AND p.kind = 'question'
+           AND json_extract(p.context_json, '$.kind') = 'design'
+         ORDER BY p.id",
+    )?;
+    let entries: Vec<(i64, String, Option<String>, Option<String>)> = st
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<std::result::Result<_, _>>()?;
+    let approved = |(_, status, answer, by): &(i64, String, Option<String>, Option<String>)| {
+        status == "answered"
+            && answer.as_deref() == Some("yes")
+            && by.as_deref() == Some(crate::spec::AGENT_PERSON)
+    };
+    if entries.iter().any(approved) {
+        return Ok(None);
+    }
+    if entries.is_empty() {
+        return Ok(Some(format!(
+            "task {task} was dispatched design-first and no pending entry of stop kind design \
+             is recorded for it: its design needs the person's yes"
+        )));
+    }
+    let seen: Vec<String> = entries
+        .iter()
+        .map(|(id, status, answer, by)| match (answer, by) {
+            (Some(a), Some(b)) => format!("pending entry {id}: {status}, answered {a} by {b}"),
+            _ => format!("pending entry {id}: {status}"),
+        })
+        .collect();
+    Ok(Some(format!(
+        "task {task} was dispatched design-first and its design entries ({}) hold no yes by \
+         the person",
+        seen.join("; ")
+    )))
 }
 
 /// The base the check before CI judges against, fetched from origin first: the project's default
@@ -129,7 +187,24 @@ fn before_ci(dir: &Path, j: &Job, base: &str, sent: &str) -> std::result::Result
         &|sha| j.before.failed.contains(sha),
         "on this task's pull requests",
     )
-    .map_err(|e| format!("{}; nothing was pushed", e.0))
+    .map_err(|e| format!("{}; nothing was pushed", e.0))?;
+    // Issue 337: a declared test cannot change after its test commit, so it does not go before
+    // the design it tests is approved.
+    if let Some(why) = &j.before.design
+        && let Some((m, paths)) = gate::find_manifest(dir, base, sent)
+            .map_err(|e| format!("{}; nothing was pushed", e.0))?
+    {
+        return Err(format!(
+            "commit {} declares an acceptance test ({}: {}) and {why}. A declared test cannot \
+             change after its test commit, so it goes to origin only after the design is \
+             approved: add the design question with pending add, stop_kind design, escalate it, \
+             and the person answers yes. Line L-K13; nothing was pushed",
+            &m[..m.len().min(12)],
+            gate::TRAILER,
+            paths.join(", ")
+        ));
+    }
+    Ok(())
 }
 
 /// What a thread did.

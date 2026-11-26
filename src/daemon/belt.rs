@@ -300,6 +300,14 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
             .as_bool()
             .ok_or_else(|| usage("design_ahead is true or false"))?,
     };
+    // Issue 337: every task of the range needs the person's approval of its design before its
+    // test commit, kept in `range_proposed` and carried into each task's `delegate_sent`.
+    let design_first = match args.get("design_first") {
+        None | Some(Value::Null) => false,
+        Some(v) => v
+            .as_bool()
+            .ok_or_else(|| usage("design_first is true or false"))?,
+    };
     let head = str_arg(args, "brief_head")?;
     if head.trim().is_empty() {
         return Err(usage("the brief head is not empty"));
@@ -343,7 +351,8 @@ fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {
             "range_proposed",
             actor,
             None,
-            json!({"range_id": id, "project": slug, "replaces": replaces.as_ref().map(|g| g.id)}),
+            json!({"range_id": id, "project": slug, "replaces": replaces.as_ref().map(|g| g.id),
+                   "design_first": design_first}),
         )?;
         // A draft replaced by a newer draft ends now; an active or paused one at the approval.
         if let Some(old) = replaces.as_ref().filter(|g| g.status == "proposed") {
@@ -1770,13 +1779,11 @@ fn dispatch(
          VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?2, 'code', ?3, ?4, ?5)",
         params![task, spawn, agent, brief(head, n), worktree],
     )?;
-    event(
-        w,
-        "delegate_sent",
-        "makibad",
-        Some(&task),
-        json!({"task_id": task, "spawn_id": spawn, "kind": "code"}),
-    )?;
+    let mut sent = json!({"task_id": task, "spawn_id": spawn, "kind": "code"});
+    if design_first(w.conn(), id)? {
+        sent["design_first"] = json!(true);
+    }
+    event(w, "delegate_sent", "makibad", Some(&task), sent)?;
     event(
         w,
         "belt_dispatched",
@@ -1799,6 +1806,17 @@ fn dispatch(
         },
     )?;
     Ok(task)
+}
+
+/// Whether the range `id` was proposed `design_first` (Issue 337): its `range_proposed` says so.
+fn design_first(c: &Connection, id: i64) -> rusqlite::Result<bool> {
+    c.query_row(
+        "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'range_proposed'
+                        AND json_extract(payload_json, '$.range_id') = ?1
+                        AND json_extract(payload_json, '$.design_first') = 1)",
+        [id],
+        |r| r.get(0),
+    )
 }
 
 /// Put the next tasks of every active range in while there is room (belt.md 3.4), and end a range
@@ -3081,6 +3099,7 @@ fn one_range(c: &Connection, id: i64) -> rusqlite::Result<Value> {
             }))
         },
     )?;
+    v["design_first"] = json!(design_first(c, id)?);
     let read: Option<(i64, String, bool)> = c
         .query_row(
             "SELECT id, occurred_at, coalesce(json_extract(payload_json, '$.complete'), 0) = 1
@@ -3571,6 +3590,77 @@ pub(in crate::daemon) mod tests {
                     "approval_mode": super::super::gate::merge_approval_mode()}),
         );
         assert_eq!(r.unwrap()["status"], json!("active"));
+    }
+
+    /// Issue 337: a range proposed `design_first` says so in its read, and each task the belt
+    /// dispatches from it carries the mark in its `delegate_sent`; a range without it does not.
+    #[test]
+    fn a_design_first_range_marks_each_task_it_dispatches() {
+        let (_dir, w) = org();
+        let propose = |design_first: Option<bool>| {
+            let mut args = json!({"action": "propose", "project": "p", "issues": [1],
+                                  "at_once": 1, "budget_tasks": 1, "brief_head": "h"});
+            if let Some(d) = design_first {
+                args["design_first"] = json!(d);
+            }
+            range(&w, "secretary", Role::Secretary, &args).unwrap()["id"]
+                .as_i64()
+                .unwrap()
+        };
+        let marked = propose(Some(true));
+        let plain = propose(None);
+        assert!(
+            range(
+                &w,
+                "secretary",
+                Role::Secretary,
+                &json!({"action": "propose", "project": "p", "issues": [1], "at_once": 1,
+                        "budget_tasks": 1, "brief_head": "h", "design_first": "yes"}),
+            )
+            .is_err()
+        );
+        let next = |issue: i64| Next {
+            issue,
+            title: "t".into(),
+            body: String::new(),
+            comments: String::new(),
+            waits: None,
+            landed: Vec::new(),
+        };
+        let first = dispatch(&w, "fake", marked, "p", "h", &next(1)).unwrap();
+        let second = dispatch(&w, "fake", plain, "p", "h", &next(2)).unwrap();
+        let mark = |task: &str| -> Option<bool> {
+            w.conn()
+                .query_row(
+                    "SELECT json_extract(e.payload_json, '$.design_first') FROM events e
+                     JOIN runs r ON r.id = e.run_id
+                     WHERE e.kind = 'delegate_sent' AND r.task_id = ?1",
+                    [task],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        assert_eq!(mark(&first), Some(true));
+        assert_eq!(mark(&second), None);
+        assert_eq!(
+            one_range(w.conn(), marked).unwrap()["design_first"],
+            json!(true)
+        );
+        assert_eq!(
+            one_range(w.conn(), plain).unwrap()["design_first"],
+            json!(false)
+        );
+        // Not approved by the person, not dispatched for its design yet: the push holds it.
+        assert!(
+            super::super::push::design_wait(w.conn(), &first)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            super::super::push::design_wait(w.conn(), &second)
+                .unwrap()
+                .is_none()
+        );
     }
 
     /// A candidate whose dependency is written in words is left out as `dependency_unreadable`,

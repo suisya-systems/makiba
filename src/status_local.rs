@@ -958,13 +958,13 @@ pub fn events_main(after: i64, limit: Option<u32>, task: Option<&str>, as_json: 
 /// What no output of the read surface shows: the person key and the merge gate's key, as their
 /// files hold them, and every run of 64 hex characters that is a key whose SHA-256 `agents`
 /// stores. Each becomes `<key>`.
-struct Mask {
+pub(crate) struct Mask {
     literals: Vec<String>,
     hashes: std::collections::HashSet<String>,
 }
 
 impl Mask {
-    fn new(conn: &Connection) -> Mask {
+    pub(crate) fn new(conn: &Connection) -> Mask {
         let literals = [crate::cli::person_key_path(), crate::cli::gate_key_path()]
             .iter()
             .filter_map(|f| std::fs::read_to_string(f).ok())
@@ -978,7 +978,7 @@ impl Mask {
         Mask { literals, hashes }
     }
 
-    fn text(&self, s: &str) -> String {
+    pub(crate) fn text(&self, s: &str) -> String {
         let mut s = s.to_string();
         for k in &self.literals {
             s = s.replace(k.as_str(), "<key>");
