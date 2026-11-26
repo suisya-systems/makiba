@@ -14,9 +14,6 @@
       "Edit(~/.config/makiba/base/**)",
       "Read(~/.config/makiba/person.key)",
       "Edit(~/.config/makiba/person.key)",
-      "Bash(git commit *--no-veri*)",
-      "Bash(git commit -n*)",
-      "Bash(git commit * -n*)",
       "Edit(~/.local/share/makiba/**)",
       "Edit(~/.claude/settings.json)",
       "Edit(.claude/settings*.json)",
@@ -49,7 +46,7 @@
           },
           {
             "type": "command",
-            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-no-verify"
+            "command": "\"${MAKIBA_SHARE_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/makiba}/makiba\" hook deny-no-verify-code-run"
           },
           {
             "type": "command",

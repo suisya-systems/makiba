@@ -319,7 +319,7 @@ fn an_open_pull_request_with_checks_running_shows_its_title_and_merge_state() {
         org.must(repo, 5),
         json!({"repo": repo, "pr": 5, "task_id": "t1", "title": TITLE, "head_oid": h1,
                "ci": "running", "state": "open", "merged_via": null, "merged_by": null,
-               "merge_state": "blocked"})
+               "merge_state": "blocked", "merge_order": []})
     );
 }
 

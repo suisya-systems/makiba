@@ -18,7 +18,7 @@ pub mod refs;
 
 use effort::{compute_priority, estimate_effort, milestone_title};
 use refs::{
-    Canon, QualRef, canon_repo, classify_q, cross_keyword_refs, dependency_line_unread,
+    Canon, QualRef, canon_repo, classify_q, cross_keyword_refs, dependency_line_unreadable,
     dependency_text, has_block_label, is_home_disp, label_names, pr_close_refs, pr_referenced_refs,
     ref_to_disp, ref_to_json, unparsed_dependency_line,
 };
@@ -815,9 +815,9 @@ pub fn scan_repos(
                     "repo": disp_repo(repo, collapse_repo), "issue": number, "line": line,
                 }));
             }
-            // A dependency in words (no Issue number on its keyword line) is no candidate.
+            // A dependency line that cannot be read whole is no candidate (Issues 299, 356).
             if let Some(line) =
-                dependency_line_unread(issue.get("body").and_then(Value::as_str).unwrap_or(""))
+                dependency_line_unreadable(issue.get("body").and_then(Value::as_str).unwrap_or(""))
             {
                 excluded_unreadable.push(json!({
                     "repo": disp_repo(repo, collapse_repo), "issue": number, "line": line,

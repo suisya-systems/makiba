@@ -732,10 +732,19 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
         _ => Value::Null,
     };
     let of_merge = |k: &str| merged.as_ref().map_or(Value::Null, |m| m[k].clone());
+    // Issue 338: the merge orders the person set on it, each with whether it has landed.
+    let merge_order: Vec<Value> = crate::daemon::gate::person_orders(conn, repo, pr)?
+        .into_iter()
+        .map(|o| {
+            json!({"event_id": o.event_id, "after": o.after, "number": o.number,
+                   "reason": o.reason, "by": o.by, "landed": o.landed})
+        })
+        .collect();
     Ok(
         json!({"repo": repo, "pr": pr, "task_id": row["task_id"], "title": title,
               "head_oid": head, "ci": ci, "state": state, "merged_via": of_merge("merged_via"),
-              "merged_by": of_merge("merged_by"), "merge_state": merge_state}),
+              "merged_by": of_merge("merged_by"), "merge_state": merge_state,
+              "merge_order": merge_order}),
     )
 }
 

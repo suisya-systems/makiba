@@ -81,6 +81,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "belt_dispatched",
     "belt_skipped",
     "belt_stopped",
+    "merge_order_set",
 ];
 
 /// The exit code of a request that was done or accepted.
@@ -162,6 +163,7 @@ pub fn worker_agent_id(task_id: &str) -> String {
 pub enum Verb {
     Up,
     Down,
+    Base,
     Status,
     Dispatch,
     Close,
@@ -193,6 +195,7 @@ impl Verb {
     pub const ALL: &[Verb] = &[
         Verb::Up,
         Verb::Down,
+        Verb::Base,
         Verb::Status,
         Verb::Dispatch,
         Verb::Close,
@@ -224,6 +227,7 @@ impl Verb {
         match self {
             Verb::Up => "up",
             Verb::Down => "down",
+            Verb::Base => "base",
             Verb::Status => "status",
             Verb::Dispatch => "dispatch",
             Verb::Close => "close",

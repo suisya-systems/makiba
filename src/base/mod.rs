@@ -9,6 +9,7 @@ use std::time::Duration;
 
 mod herdr;
 pub mod stub;
+pub mod upgrade;
 pub mod uses;
 pub mod version;
 
