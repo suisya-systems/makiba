@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod db;
 pub mod down;
 pub mod hooks;
+pub mod screen;
 pub mod spec;
 pub mod status_local;
 pub mod up;
