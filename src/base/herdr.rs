@@ -106,18 +106,65 @@ pub fn started_other_version(
         (Some(f), Some(h)) => same(&f, &h),
         _ => false,
     };
-    let mut text = format!(
-        "`{hc} server start` started a base of session {session} that runs {found}, this makiba \
-         pins {pinned}; {named}. Stop it with `{exe} down --stop-base`, then install {pinned} with \
-         `bash scripts/install-base.sh PREFIX` and fix what it names until it exits 0 (it names a \
-         herdr-core or hc that HC_BIN or PATH finds before the installed one), then run `{exe} up` again"
-    );
-    if is_hc {
-        text.push_str(
-            "; HC_BIN or PATH names that file as hc: point HC_BIN at PREFIX/bin/hc or unset it",
-        );
+    let head = format!("`{hc} server start` started a base of session {session} that runs {found}");
+    // The way out depends on the direction, as for a core found running (Issue 418): only an older
+    // server is replaced by this makiba's pin; a newer one means this makiba is the older part.
+    match super::version::compare_with_pinned(found) {
+        Some(std::cmp::Ordering::Less) => {
+            let mut text = format!(
+                "{head}, this makiba pins {pinned}; {named}. Stop it with `{exe} down --stop-base`, \
+                 then install {pinned} with `bash scripts/install-base.sh PREFIX` and fix what it \
+                 names until it exits 0 (it names a herdr-core or hc that HC_BIN or PATH finds \
+                 before the installed one), then run `{exe} up` again"
+            );
+            if is_hc {
+                text.push_str(
+                    "; HC_BIN or PATH names that file as hc: point HC_BIN at PREFIX/bin/hc or unset it",
+                );
+            }
+            text
+        }
+        Some(std::cmp::Ordering::Greater) => format!(
+            "{head}, this makiba pins {pinned}; {named}. This makiba is older than that server: \
+             run the makiba that pins {found} by its path"
+        ),
+        _ => format!("{head}, which this makiba cannot compare with {pinned}; {named}"),
     }
-    text
+}
+
+#[cfg(test)]
+mod started_tests {
+    use super::*;
+
+    /// Issue 382: the way out follows the direction of the started server's version.
+    #[test]
+    fn the_way_out_follows_the_direction() {
+        let pinned = crate::base::version::PINNED;
+        let (a, b, c) = {
+            let p: Vec<u64> = pinned.split('.').map(|x| x.parse().unwrap()).collect();
+            (p[0], p[1], p[2])
+        };
+        let server = || Some((7, Some(PathBuf::from("/x/herdr-core"))));
+        let newer = format!("{a}.{b}.{}", c + 1);
+        let text = started_other_version("s", &newer, "/m/makiba", server());
+        assert!(text.contains("older than that server"), "{text}");
+        assert!(
+            text.contains(&format!("pins {newer} by its path")),
+            "{text}"
+        );
+        assert!(!text.contains("install-base.sh"), "{text}");
+        assert!(text.contains("/x/herdr-core (pid 7)"), "{text}");
+        let odd = format!("{pinned}-rc.1");
+        let text = started_other_version("s", &odd, "/m/makiba", server());
+        assert!(text.contains("cannot compare"), "{text}");
+        assert!(!text.contains("install-base.sh"), "{text}");
+        if c > 0 {
+            let older = format!("{a}.{b}.{}", c - 1);
+            let text = started_other_version("s", &older, "/m/makiba", server());
+            assert!(text.contains("install-base.sh"), "{text}");
+            assert!(text.contains("/m/makiba down --stop-base"), "{text}");
+        }
+    }
 }
 
 /// `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`; `/tmp` when the variable is not set, as the base does.
