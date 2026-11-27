@@ -252,6 +252,16 @@ fail closed.
    `pending_id`, under both modes, with no new entry: the person's one answer was over that method,
    head and those warnings. A warning not among them makes a new pending entry, as today. Another
    head has no approval: the ask starts again.
+4. **A retry at the same head.** When the attempt the approval authorized ends without a landing
+   (`merge_failed`, `merge_unknown` with any `observed` but `merged`, or `merge_dequeued`: GitHub
+   refused it, or the queue removed it), the approval's **content** still stands for that head:
+   condition (a)'s refusals for its `changed` paths stay held back, with the checks of (1) and (b) by
+   its first route, as in (3). Its **authorization** is spent. So the next `merge request` at that
+   head, under both modes, makes a new pending merge entry carrying the warning `acceptance failed by
+   construction, approved in pending <id>: <set>` beside any other warning. The person's `makiba
+   merge approve` of that entry is an ordinary approval (no new signature: `acceptance` is already
+   green at that head) and writes `merge_attempted` with that entry's `pending_id`, as any approved
+   entry does. Each retry asks the person once; none acts on the spent authorization.
 
 State: no memory beside the ledger. `acceptance_approved` is the record and the authorization; a
 restart loses nothing (the comment is the secretary's to post, again if needed: a second identical
@@ -363,7 +373,10 @@ recorded, the rerun fails again, and the lift remains.
    with `approved_by` `person` and no new entry; a second request does not write a second attempt; a
    new warning makes a new entry; another head or method has no approval; a stale `shown` writes
    nothing; at the landing, a head whose acceptance check did not succeed is refused even when the
-   fallback of (b) would pass, and so is one whose `.github/` differs from the base.
+   fallback of (b) would pass, and so is one whose `.github/` differs from the base; after the
+   attempt ends in `merge_failed`, and again after `merge_dequeued`, the next request at the same
+   head makes a new pending entry naming the earlier approval (not a refusal by condition (a), and
+   no `merge_attempted` without the person), and its `merge approve` writes one `merge_attempted`.
 5. **The owner's `.github/` change (by hand, after 1 and 3 have landed).** `.github/acceptance-approvers`
    with `approval.key`'s public line; `ci.yml`'s acceptance step reads the approval comments and passes
    `--approvals`; job permission `pull-requests: read`. Test `tests/test_ci_acceptance_approval.py`
@@ -444,3 +457,8 @@ which the secretary files.
   Held as a fact, written as a known limit (section 9) with its judgment: the same code can already
   make today's job pass, so the signature adds no new opening; the hardening (a verification job
   that runs no project code) is proposed as a follow-up.
+- Round 4 (codex, passed, major 1), on eed8ef2, held and taken in: an approval spent on an attempt
+  that GitHub refused or the queue removed left no route at the same head, since `acceptance` is
+  green there and the ask no longer runs. 4.4 (4) keeps the approval's content for that head and asks
+  the person once more by an ordinary pending entry; build Issue 4 tests both endings under both
+  modes. No review read the commit that takes this in.
