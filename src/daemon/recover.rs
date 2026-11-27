@@ -95,18 +95,36 @@ fn core_restarted(w: &StateWriter, ours: &[&Terminal]) -> Result<bool> {
 
 /// The runs a restart suspends and resumes: those at work (`down::AT_WORK`), and every
 /// `suspended` run with a launch that had a terminal (the relaunch of an earlier restart). A
-/// suspended run whose launch has no terminal yet (`makiba up`'s own relaunch) goes on as it is.
-fn restart_runs(w: &StateWriter) -> Result<Vec<i64>> {
+/// suspended run whose launch has no terminal yet (`makiba up`'s own relaunch) goes on as it is,
+/// and so does a run whose newest launch's terminal in the list exited with a code (it finished on
+/// its own: its gone fails it as before). An earlier launch's exited terminal does not count.
+fn restart_runs(w: &StateWriter, ours: &[&Terminal]) -> Result<Vec<i64>> {
+    let exited: Vec<[&String; 2]> = ours
+        .iter()
+        .filter(|t| !t.alive && t.exit_code.is_some())
+        .filter_map(|t| {
+            Some([
+                t.tags.get("makiba.task_id")?,
+                t.tags.get(crate::spec::TAG_SPAWN)?,
+            ])
+        })
+        .collect();
+    let exited = json!(exited).to_string();
     let ids = w
         .conn()
         .prepare(&format!(
-            "SELECT id FROM runs r WHERE {}
+            "SELECT id FROM runs r WHERE ({}
                OR (r.status = 'suspended' AND EXISTS (SELECT 1 FROM run_launch l
-                   WHERE l.run_id = r.id AND l.stage IN ('launched', 'dialog_passed')))
+                   WHERE l.run_id = r.id AND l.stage IN ('launched', 'dialog_passed'))))
+               AND NOT EXISTS (SELECT 1 FROM json_each(?1) j
+                   WHERE json_extract(j.value, '$[0]') = r.task_id
+                     AND json_extract(j.value, '$[1]') =
+                         (SELECT spawn_id FROM run_launch WHERE run_id = r.id
+                          ORDER BY id DESC LIMIT 1))
              ORDER BY id",
             crate::down::AT_WORK
         ))?
-        .query_map([], |r| r.get(0))?
+        .query_map([&exited], |r| r.get(0))?
         .collect::<std::result::Result<_, _>>()?;
     Ok(ids)
 }
@@ -159,7 +177,7 @@ pub(super) fn rebuild(
     // Step 0: a core restart suspends and resumes the runs at work instead of failing them.
     let restart = core_restarted(w, &ours)?;
     if restart {
-        let runs = restart_runs(w)?;
+        let runs = restart_runs(w, &ours)?;
         if !runs.is_empty() {
             crate::down::suspend_runs(w, &runs, "the core restarted")?;
             crate::up::resume_as(w, "makibad", Some(&runs))?;
@@ -675,6 +693,43 @@ mod tests {
             );
             assert_eq!(status(&w, task), "suspended");
         }
+    }
+
+    /// Issue 579: in a restart, a run whose terminal exited with a code (it finished on its own,
+    /// before the restart) is not resumed: it fails by the gone anomaly, the others are resumed.
+    #[test]
+    fn a_restart_leaves_a_run_whose_program_exited_with_a_code() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        let run = w
+            .upsert_run(&crate::db::writer::RunUpsert {
+                task_id: "t3",
+                project_slug: "p",
+                status: Some("in_use"),
+                ..Default::default()
+            })
+            .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage)
+                 VALUES (?1, 't3-a', 'fake', 'b', 'w', 'verified')",
+                [run],
+            )
+            .unwrap();
+        let mut list = workers([false, false]);
+        let mut exited = of("a3", "worker", Some("t3"), "t3-a", false);
+        exited.exit_code = Some(1);
+        list.push(exited);
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(list))
+            .unwrap();
+        assert!(last_restart(&w));
+        anomalies(&w);
+        for task in ["t1", "t2"] {
+            assert_eq!(status(&w, task), "suspended", "{task}");
+            assert_eq!(launches(&w, task).len(), 2, "{task}");
+        }
+        assert_eq!(status(&w, "t3"), "failed");
+        assert_eq!(launches(&w, "t3").len(), 1);
     }
 
     /// Issue 579: a restart's suspend and resume leave the session row as it is.
