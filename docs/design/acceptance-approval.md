@@ -253,8 +253,13 @@ fail closed.
    head and those warnings. A warning not among them makes a new pending entry, as today. Another
    head has no approval: the ask starts again.
 4. **A retry at the same head.** When the attempt the approval authorized ends without a landing
-   (`merge_failed`, `merge_unknown` with any `observed` but `merged`, or `merge_dequeued`: GitHub
-   refused it, or the queue removed it), the approval's **content** still stands for that head:
+   (`merge_failed`; `merge_unknown` with `observed` `open`, `closed`, `merged_other_head` or
+   `unreadable`; or `merge_dequeued`: GitHub refused it, or the queue removed it), the approval's
+   **content** still stands for that head. A `merge_unknown` with `observed` `enqueued`, like a
+   `merge_enqueued`, is an attempt still in the queue, as `door.rs` `act_awaiting` reads it (about
+   lines 4281-4282): until a `merge_dequeued` or a `pr_merged` follows it, no retry entry is made and
+   no second `merge_attempted` is written (the request is `conflict` while the act awaits). Once the
+   attempt has ended:
    condition (a)'s refusals for its `changed` paths stay held back, with the checks of (1) and (b) by
    its first route, as in (3). Its **authorization** is spent. So the next `merge request` at that
    head, under both modes, makes a new pending merge entry carrying the warning `acceptance failed by
@@ -376,7 +381,10 @@ recorded, the rerun fails again, and the lift remains.
    fallback of (b) would pass, and so is one whose `.github/` differs from the base; after the
    attempt ends in `merge_failed`, and again after `merge_dequeued`, the next request at the same
    head makes a new pending entry naming the earlier approval (not a refusal by condition (a), and
-   no `merge_attempted` without the person), and its `merge approve` writes one `merge_attempted`.
+   no `merge_attempted` without the person), and its `merge approve` writes one `merge_attempted`;
+   after a `merge_unknown` with `observed` `enqueued`, a request at the same head writes no pending
+   entry and no second `merge_attempted` (`conflict`), and after a following `merge_dequeued` the next
+   request makes the retry entry.
 5. **The owner's `.github/` change (by hand, after 1 and 3 have landed).** `.github/acceptance-approvers`
    with `approval.key`'s public line; `ci.yml`'s acceptance step reads the approval comments and passes
    `--approvals`; job permission `pull-requests: read`. Test `tests/test_ci_acceptance_approval.py`
@@ -462,3 +470,7 @@ which the secretary files.
   green there and the ask no longer runs. 4.4 (4) keeps the approval's content for that head and asks
   the person once more by an ordinary pending entry; build Issue 4 tests both endings under both
   modes. No review read the commit that takes this in.
+- Round 5 (codex, passed, major 1), on 7697edc, held and taken in: 4.4 (4) counted a `merge_unknown`
+  with `observed` `enqueued` as an ended attempt, while `door.rs` `act_awaiting` reads it as still in
+  the queue. The retry endings now exclude it until `merge_dequeued` or `pr_merged`; build Issue 4
+  tests it.
