@@ -94,6 +94,12 @@ pub fn sessions() -> Result<Vec<String>, String> {
     sessions_in(dir)
 }
 
+/// The socket of `session`: `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`.
+pub fn session_socket(session: &str) -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    herdr::socket_path(runtime.as_deref(), session)
+}
+
 /// The sessions whose socket (`<session>.sock`) is in `dir`, sorted.
 fn sessions_in(dir: &Path) -> Result<Vec<String>, String> {
     let entries = match std::fs::read_dir(dir) {

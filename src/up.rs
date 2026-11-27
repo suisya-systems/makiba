@@ -461,6 +461,14 @@ fn approval_key(dir: &Path, on_base: Result<Vec<String>, String>) {
                 ),
                 Err(e) => println!("approval key: warning: {e}"),
             }
+            match &on_base {
+                Ok(agents) if agents.is_empty() => {}
+                Ok(agents) => println!(
+                    "approval key: warning: agents on the base may read it: {}; {way}",
+                    agents.join(", ")
+                ),
+                Err(e) => println!("approval key: warning: {e}"),
+            }
         }
         Ok(false) => {
             // A makibad already running may be one from before the key, whose launches would
@@ -520,9 +528,16 @@ fn organization(dir: &Path) -> String {
 fn base_agents_that_may_read(dir: &Path) -> Result<Vec<String>, String> {
     let mut per_session = Vec::new();
     for session in base::sessions()? {
+        // Only a socket nothing listens at, or one gone, is a stopped session: the base's own
+        // error names every failure to connect alike, so the socket is tried here first.
+        if let Err(e) = std::os::unix::net::UnixStream::connect(base::session_socket(&session)) {
+            if stopped_session(e.kind()) {
+                continue;
+            }
+            return Err(format!("cannot connect to session {session}: {e}"));
+        }
         match base::connect_session(&session, Duration::from_secs(5)).list() {
             Ok(ts) => per_session.push((session, ts)),
-            Err(BaseError::Unavailable(d)) if d.kind == "connect" => {}
             Err(e) => {
                 return Err(format!(
                     "cannot list the terminals of session {session}: {e}"
@@ -543,6 +558,15 @@ fn base_agents_that_may_read(dir: &Path) -> Result<Vec<String>, String> {
         &organization(dir),
         &denies,
     ))
+}
+
+/// Whether a failure to connect to a session's socket means the session is stopped: refused (no
+/// listener) or the socket gone. Any other (denied, out of resources) leaves it unknown.
+fn stopped_session(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
 }
 
 /// Of the terminals of each session, the makiba agents (a live program in a terminal with a
@@ -719,6 +743,19 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("makibad.lock"), lock_pid.to_string()).unwrap();
         dir
+    }
+
+    /// Issue 590: only a refused or a missing socket is a stopped session; a socket this user may
+    /// not reach, or any other failure, leaves the session unknown, so the approval key is not
+    /// made (a sandbox that refuses every socket, `PermissionDenied`, is such a case).
+    #[test]
+    fn only_a_refused_or_missing_socket_is_a_stopped_session() {
+        use std::io::ErrorKind as K;
+        assert!(stopped_session(K::ConnectionRefused));
+        assert!(stopped_session(K::NotFound));
+        for kind in [K::PermissionDenied, K::OutOfMemory, K::TimedOut, K::Other] {
+            assert!(!stopped_session(kind), "{kind:?}");
+        }
     }
 
     /// Issue 590: every agent of another organization, in any session, and every agent of this
