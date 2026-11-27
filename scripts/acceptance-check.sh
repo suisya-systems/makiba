@@ -499,7 +499,13 @@ while read -r kind t n; do
   elif [ "$(ran)" = 0 ] || [ -z "$res" ]; then
     no "$t runs no test at head $head"
   elif ! printf '%s\n' "$res" | grep -q '; 0 ignored;'; then
-    approvable "ignored $t $(printf '%s\n' "$res" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')" "$t" "$t ignores a test at head $head: $res"
+    # Approvable only when at least one test passed: a target whose every test is ignored runs no
+    # test at head, which keeps the lift.
+    if printf '%s\n' "$res" | grep -qE '^test result: ok\. [1-9][0-9]* passed; 0 failed; [1-9][0-9]* ignored;'; then
+      approvable "ignored $t $(printf '%s\n' "$res" | sed -n 's/.*; \([0-9][0-9]*\) ignored;.*/\1/p')" "$t" "$t ignores a test at head $head: $res"
+    else
+      no "$t ignores a test at head $head: $res"
+    fi
   elif printf '%s\n' "$res" | grep -qE '^test result: ok\. [1-9][0-9]* passed; 0 failed; 0 ignored;'; then
     echo "acceptance-check: $t passes at head"
   else

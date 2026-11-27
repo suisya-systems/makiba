@@ -28,7 +28,7 @@ Some pull requests fail `acceptance` by construction: a declared test that had t
 **Canonical lines.** On a fail, before the last line, the checker prints each failure once more in a form that holds no duration, no test output and no sha (the note's 4.1):
 
 - `acceptance-check: approvable changed <path>`: rule 4, for a declared path, for a path the test commit changed, or for `scripts/acceptance-check.sh`;
-- `acceptance-check: approvable ignored <path> <n>`: rule 3, a declared Cargo target that ignores `n` tests at head (`<path>` as declared);
+- `acceptance-check: approvable ignored <path> <n>`: rule 3, a declared Cargo target that ignores `n` tests at head while at least one passes and none fails (`<path>` as declared);
 - `acceptance-check: not approvable`, once, when any other failure was found. This also covers a path with a byte outside printable ASCII without space (`0x21` to `0x7e`): such a name could split a record or pass for another, so it keeps the lift.
 
 The records (`changed <path>`, `ignored <path> <n>`), sorted bytewise and each followed by a newline, are the **failure set**. Its SHA-256 is the **failure digest**. Without `--approvals` nothing else changes: the same failure lines, the same last line, the same exit status.
@@ -37,7 +37,7 @@ The records (`changed <path>`, `ignored <path> <n>`), sorted bytewise and each f
 
 - a declared path or a path the test commit changed, changed after the test commit, whether it is a test target, a declared non-target file or a helper the test commit changed;
 - this checker changed after the test commit;
-- a declared Cargo target that ignores a test at head.
+- a declared Cargo target that ignores a test at head while at least one of its tests passes (one whose every test is ignored runs no test, and keeps the lift).
 
 Never approvable, whatever else the path is: anything under `.github/` and test infrastructure by file name (`INFRA_NAMES`, `INFRA_PREFIXES`). Also not approvable, so still by the lift:
 
