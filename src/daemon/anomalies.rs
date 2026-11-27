@@ -9,7 +9,9 @@
 //! cache of that, changed only after a commit and dropped when a write fails.
 //!
 //! What the scenes are made of: the run's `terminal_status`, `terminal_turn` and `terminal_gone`
-//! events since its latest launch (`run_launch.created_at`; none: no `no_status`), and its reports
+//! events since its latest launch (`run_launch.created_at`; none: no `no_status`), with an
+//! `observation_lost` of kind `terminal_gone` (the gone the database refused) counted as a gone
+//! at its `observed_at` (#560), and its reports
 //! (`messages` of kind `report_done` / `report_blocked`). The secretary has no run: its records are
 //! the events whose `role` is `secretary`, one terminal generation per `agents` row of
 //! `secretary`, and a renewal under way is a `renew` row of `commands` that is `accepted`, or
@@ -238,6 +240,20 @@ fn ms(col: &str) -> String {
     format!("CAST(ROUND((julianday({col}) - 2440587.5) * 86400000.0) AS INTEGER)")
 }
 
+/// An event that says a terminal is gone: its `terminal_gone`, or the `observation_lost` the
+/// monitor records when the database refused that write (#560). `e` is the events table.
+const GONE_EVENT: &str = "(e.kind = 'terminal_gone'
+    OR (e.kind = 'observation_lost'
+        AND json_extract(e.payload_json, '$.kind') = 'terminal_gone'))";
+
+/// When a gone event says the terminal went, in milliseconds: a lost observation's
+/// `observed_at`, since it is recorded later; else when it was recorded.
+fn gone_at() -> String {
+    ms("CASE WHEN e.kind = 'observation_lost'
+          THEN COALESCE(json_extract(e.payload_json, '$.observed_at'), e.occurred_at)
+          ELSE e.occurred_at END")
+}
+
 impl Anomalies {
     pub fn new() -> Anomalies {
         Anomalies {
@@ -448,12 +464,13 @@ fn run_scene(w: &StateWriter, run: i64) -> Result<RunScene> {
     // earlier terminal ended while its replacement runs is no gone of the run (Issue 41).
     let gone: bool = c.query_row(
         &format!(
-            "SELECT EXISTS (SELECT 1 FROM events
-             WHERE run_id = ?1 AND kind = 'terminal_gone' AND {at} >= ?2
-               AND (json_extract(payload_json, '$.spawn_id') IS NULL
-                    OR json_extract(payload_json, '$.spawn_id') IS
+            "SELECT EXISTS (SELECT 1 FROM events e
+             WHERE e.run_id = ?1 AND {GONE_EVENT} AND {} >= ?2
+               AND (json_extract(e.payload_json, '$.spawn_id') IS NULL
+                    OR json_extract(e.payload_json, '$.spawn_id') IS
                        (SELECT spawn_id FROM run_launch WHERE run_id = ?1
-                        ORDER BY id DESC LIMIT 1)))"
+                        ORDER BY id DESC LIMIT 1)))",
+            gone_at()
         ),
         params![run, since],
         |r| r.get(0),
@@ -565,14 +582,16 @@ fn secretary_scene(w: &StateWriter, launched: i64, spawn: Option<&str>) -> Resul
     // A gone inside a renewal (under way, or done and the gone came in while it took) is no gone,
     // when it is the gone of the terminal the renewal replaces (`old` of its result, Issue 46): the
     // replacement's own end is a gone.
+    let gone_at = gone_at();
     let gone: bool = c.query_row(
         &format!(
-            "SELECT EXISTS (SELECT 1 FROM events e WHERE kind = 'terminal_gone'
-               AND json_extract(payload_json, '$.role') = 'secretary' AND {at} >= ?1 {mine}
+            "SELECT EXISTS (SELECT 1 FROM events e WHERE {GONE_EVENT}
+               AND json_extract(e.payload_json, '$.role') = 'secretary'
+               AND {gone_at} >= ?1 {mine}
                AND NOT EXISTS (SELECT 1 FROM commands c
                  WHERE c.verb = 'renew' AND c.status IN ('accepted', 'done')
-                   AND {} <= {at}
-                   AND (c.finished_at IS NULL OR {at} <= {})
+                   AND {} <= {gone_at}
+                   AND (c.finished_at IS NULL OR {gone_at} <= {})
                    AND json_extract(e.payload_json, '$.spawn_id')
                        IS json_extract(c.result_json, '$.result.old')))",
             ms("c.received_at"),
@@ -673,5 +692,127 @@ mod tests {
             )
             .unwrap();
         assert_eq!(open_entry_at(&w).unwrap(), Some(at));
+    }
+
+    fn at_ms(w: &StateWriter, at: &str) -> i64 {
+        w.conn()
+            .query_row(&format!("SELECT {}", ms("?1")), [at], |r| r.get(0))
+            .unwrap()
+    }
+
+    /// An `observation_lost` of kind `terminal_gone`, recorded at `recorded`, of a terminal
+    /// seen gone at `observed`.
+    fn lost(w: &StateWriter, task: Option<&str>, p: Value, recorded: &str) {
+        use crate::db::writer::NewEvent;
+        w.append_event(&NewEvent {
+            kind: "observation_lost",
+            actor: Some("makibad"),
+            payload: Some(&p),
+            occurred_at: Some(recorded),
+            run_task_id: task,
+            ..Default::default()
+        })
+        .unwrap();
+    }
+
+    /// #560: a gone the database refused is counted from its `observation_lost`, at the time it
+    /// was observed: before the run's newest launch it is not that launch's gone.
+    #[test]
+    fn a_lost_gone_counts_for_the_launch_it_was_observed_in() {
+        use crate::db::writer::RunUpsert;
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.ensure_project("p", None, None).unwrap();
+        w.upsert_run(&RunUpsert {
+            task_id: "t1",
+            project_slug: "p",
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        let run: i64 = w
+            .conn()
+            .query_row("SELECT id FROM runs WHERE task_id = 't1'", [], |r| r.get(0))
+            .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage,
+                                         created_at)
+                 VALUES (?1, 's2', 'document', 'fake', 'b', 'w', 'verified',
+                         '2026-01-01T00:00:10.000Z')",
+                [run],
+            )
+            .unwrap();
+        let p = |observed: &str| {
+            json!({"kind": "terminal_gone", "task_id": "t1", "role": "worker",
+                "observed_at": observed, "error": "refused"})
+        };
+        // Observed before the launch, recorded after it: an earlier terminal's.
+        lost(
+            &w,
+            Some("t1"),
+            p("2026-01-01T00:00:05.000Z"),
+            "2026-01-01T00:00:20.000Z",
+        );
+        assert!(!run_scene(&w, run).unwrap().gone);
+        // Another kind of lost observation is no gone.
+        lost(
+            &w,
+            Some("t1"),
+            json!({"kind": "terminal_status", "task_id": "t1",
+                "observed_at": "2026-01-01T00:00:15.000Z"}),
+            "2026-01-01T00:00:20.000Z",
+        );
+        assert!(!run_scene(&w, run).unwrap().gone);
+        lost(
+            &w,
+            Some("t1"),
+            p("2026-01-01T00:00:15.000Z"),
+            "2026-01-01T00:00:20.000Z",
+        );
+        let scene = run_scene(&w, run).unwrap();
+        assert!(scene.gone);
+        assert!(run_rules(&scene, at_ms(&w, "2026-01-01T00:00:20.000Z")).contains(&Rule::Gone));
+    }
+
+    /// #560: the secretary's lost gone counts, at the time it was observed, and is no gone when
+    /// it was observed inside a renewal of that terminal, however late it was recorded.
+    #[test]
+    fn a_lost_secretary_gone_counts_unless_a_renewal_replaced_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let launched = at_ms(&w, "2026-01-01T00:00:00.000Z");
+        w.conn()
+            .execute(
+                "INSERT INTO commands (received_at, actor, verb, status, result_json, finished_at)
+                 VALUES ('2026-01-01T00:00:10.000Z', 'secretary', 'renew', 'done',
+                         '{\"result\": {\"old\": \"s1\"}}', '2026-01-01T00:00:20.000Z')",
+                [],
+            )
+            .unwrap();
+        let p = |spawn: &str, observed: &str| {
+            json!({"kind": "terminal_gone", "role": "secretary", "spawn_id": spawn,
+                "observed_at": observed, "error": "refused"})
+        };
+        // Observed inside the renewal of s1, recorded after it ended.
+        lost(
+            &w,
+            None,
+            p("s1", "2026-01-01T00:00:15.000Z"),
+            "2026-01-01T00:00:30.000Z",
+        );
+        assert!(!secretary_scene(&w, launched, Some("s1")).unwrap().gone);
+        // Observed after the renewal ended: a gone.
+        lost(
+            &w,
+            None,
+            p("s1", "2026-01-01T00:00:25.000Z"),
+            "2026-01-01T00:00:30.000Z",
+        );
+        let scene = secretary_scene(&w, launched, Some("s1")).unwrap();
+        assert!(scene.gone);
+        assert!(secretary_rules(&scene, false, None, launched).contains(&Rule::SecretaryGone));
+        // Another terminal's is not this one's.
+        assert!(!secretary_scene(&w, launched, Some("s9")).unwrap().gone);
     }
 }

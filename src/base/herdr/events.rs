@@ -322,9 +322,11 @@ fn event_of(
             if patch {
                 overlay(kind, data, &mut t);
             }
+            // A kept terminal is restarted with the machine's shell, not with makibad's program
+            // (#560): the program is gone, with no exit code.
             match kind {
                 "finished" | "lost" => t.alive = false,
-                "restarted" => (t.alive, t.exit_code) = (true, None),
+                "restarted" => (t.alive, t.exit_code) = (false, None),
                 _ => {}
             }
             if !mine(&t, org) {
@@ -333,7 +335,7 @@ fn event_of(
                 return was_known.then(|| TerminalEvent::Removed(TerminalRef(id.into())));
             }
             known.insert(id.into(), t.clone());
-            Some(if matches!(kind, "finished" | "lost") {
+            Some(if matches!(kind, "finished" | "lost" | "restarted") {
                 TerminalEvent::Exited(t)
             } else {
                 TerminalEvent::StatusChanged(t)
@@ -564,5 +566,19 @@ mod tests {
             if !t.alive && t.exit_code == Some(0) && t.name == "n"));
         let removed = json!({"type": "removed", "terminal": "t1", "data": {}});
         assert!(matches!(notice(removed), Some(TerminalEvent::Removed(r)) if r.0 == "t1"));
+    }
+
+    /// A kept terminal the base restarts runs the machine's shell, not the program (#560): the
+    /// notice is the program's exit, with no exit code.
+    #[test]
+    fn a_restarted_terminal_is_an_exit() {
+        let mut known = BTreeMap::new();
+        let mut notice = |v: Value| event_of(&v, None, &mut known);
+        let created = json!({"type": "created", "seq": 1, "terminal": "t1",
+            "data": {"address": "t1", "name": "n", "state": "live", "labels": {}, "status": null}});
+        assert!(notice(created).is_some());
+        let restarted = json!({"type": "restarted", "terminal": "t1", "data": {}});
+        assert!(matches!(notice(restarted), Some(TerminalEvent::Exited(t))
+            if !t.alive && t.exit_code.is_none() && t.name == "n"));
     }
 }

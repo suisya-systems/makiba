@@ -23,6 +23,59 @@ const GENERATION: u64 = 1;
 /// The tag every terminal of an organization carries (`spec::TAG_ORG`): its state folder.
 const TAG_ORG: &str = crate::spec::TAG_ORG;
 
+/// The label `launch` adds: a mark of the argv it sent (`argv_mark`). It is the base's own, not
+/// one of the spec's tags, and `terminal_of` keeps it out of `Terminal::tags`. A kept terminal
+/// whose program the base replaced with the machine's shell stays `live`, with the shell's argv:
+/// a terminal whose argv no longer has this mark is not running what makibad launched (#560).
+const LABEL_ARGV: &str = "makiba.argv";
+
+/// The first 32 hex digits of the SHA-256 of the argv's JSON.
+fn argv_mark<S: AsRef<str>>(argv: &[S]) -> String {
+    use sha2::{Digest, Sha256};
+    let argv: Vec<&str> = argv.iter().map(AsRef::as_ref).collect();
+    let text = serde_json::to_string(&argv).expect("a list of strings is JSON");
+    Sha256::digest(text.as_bytes())[..16]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The base's own reading of a terminal: not finished, as far as its reply says.
+fn running(v: &Value) -> bool {
+    let exit_code = v
+        .get("exit_code")
+        .or_else(|| v.pointer("/exit/code"))
+        .and_then(Value::as_i64);
+    let exited = v.get("exit").is_some_and(|e| !e.is_null());
+    v.get("alive").and_then(Value::as_bool).unwrap_or(
+        !exited
+            && exit_code.is_none()
+            && !matches!(text_of(v, "state"), Some("finished" | "exited")),
+    )
+}
+
+/// The terminal's argv is not the one makibad launched it with: its program was replaced. A
+/// terminal without the mark, or a reply without an argv of strings, is not judged.
+fn replaced(v: &Value) -> bool {
+    let Some(mark) = v
+        .get("labels")
+        .and_then(|l| l.get(LABEL_ARGV))
+        .and_then(Value::as_str)
+    else {
+        return false;
+    };
+    let argv = v
+        .get("argv")
+        .and_then(Value::as_array)
+        .and_then(|a| a.iter().map(Value::as_str).collect::<Option<Vec<&str>>>());
+    argv.is_some_and(|argv| argv_mark(&argv) != mark)
+}
+
+/// The terminal object of a reply that may wrap it in `terminal`.
+fn unwrapped(v: &Value) -> &Value {
+    v.get("terminal").filter(|t| t.is_object()).unwrap_or(v)
+}
+
 #[derive(Clone)]
 pub struct Herdr {
     socket: PathBuf,
@@ -296,10 +349,7 @@ impl Herdr {
 
 /// A terminal's labels, where `terminal_of` reads them, are absent, null or an object of strings.
 fn check_labels(item: &Value) -> Result<(), BaseError> {
-    let v = item
-        .get("terminal")
-        .filter(|t| t.is_object())
-        .unwrap_or(item);
+    let v = unwrapped(item);
     let readable = match v.get("labels") {
         None | Some(Value::Null) => true,
         Some(Value::Object(o)) => o.values().all(Value::is_string),
@@ -372,13 +422,14 @@ fn id_of(v: &Value) -> Option<&str> {
 /// The base's terminal object. The shape is read from the binary's schema text, not yet seen on
 /// the wire (scripts/check-terminals-wire.sh shows it), so the readings are generous.
 fn terminal_of(v: &Value) -> Result<Terminal, BaseError> {
-    let v = v.get("terminal").filter(|t| t.is_object()).unwrap_or(v);
+    let v = unwrapped(v);
     let id = id_of(v).ok_or_else(|| other("reply", "a terminal without an id"))?;
     let tags = v
         .get("labels")
         .and_then(Value::as_object)
         .map(|o| {
             o.iter()
+                .filter(|(k, _)| k.as_str() != LABEL_ARGV)
                 .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                 .collect()
         })
@@ -414,12 +465,9 @@ fn terminal_of(v: &Value) -> Result<Terminal, BaseError> {
         .or_else(|| v.pointer("/exit/code"))
         .and_then(Value::as_i64)
         .map(|c| c as i32);
-    let exited = v.get("exit").is_some_and(|e| !e.is_null());
-    let alive = v.get("alive").and_then(Value::as_bool).unwrap_or(
-        !exited
-            && exit_code.is_none()
-            && !matches!(text_of(v, "state"), Some("finished" | "exited")),
-    );
+    // Alive: the program makibad launched runs. A replaced one does not, though the base keeps
+    // its terminal live; its exit code is not known.
+    let alive = running(v) && !replaced(v);
     Ok(Terminal {
         id: TerminalRef(id.into()),
         name: text_of(v, "name").unwrap_or(id).into(),
@@ -462,6 +510,7 @@ impl Base for Herdr {
             }
         }
         argv.extend(spec.argv.iter().map(String::as_str));
+        labels.insert(LABEL_ARGV.into(), argv_mark(&argv));
         let result = self.call(
             "terminal.run",
             json!({
@@ -494,7 +543,8 @@ impl Base for Herdr {
         Ok(mine)
     }
 
-    /// `terminal.list` without labels: every terminal of the session, the live ones kept. A
+    /// `terminal.list` without labels: every terminal of the session, the ones the base runs kept
+    /// (a terminal whose program was replaced runs the shell, and is kept). A
     /// terminal whose labels cannot be read refuses the whole list, so that an unreadable
     /// organization's tag is never taken for "no tag".
     fn list_session(&self) -> Result<Vec<Terminal>, BaseError> {
@@ -503,7 +553,7 @@ impl Base for Herdr {
         for item in &items {
             check_labels(item)?;
             let t = terminal_of(item)?;
-            if t.alive {
+            if running(unwrapped(item)) {
                 live.push(t);
             }
         }
@@ -656,5 +706,41 @@ mod wire_tests {
         let killed = json!({"address": "t1", "state": "finished", "reason": "killed",
             "exit_code": null, "status": null});
         assert!(!terminal_of(&killed).unwrap().alive);
+    }
+
+    /// A kept terminal as hc 0.1.22 shows it before and after the base replaced its program with
+    /// the machine's shell (#560): still `live`, `reason` and `exit_code` null, the same labels,
+    /// and the shell's argv.
+    #[test]
+    fn a_kept_terminal_whose_program_was_replaced_is_not_alive() {
+        let launched = ["env", "-u", "X", "agent", "--worker"];
+        let mark = argv_mark(&launched);
+        assert_eq!(mark.len(), 32);
+        let labels = json!({"makiba.org": "o", "makiba.spawn": "s", LABEL_ARGV: mark});
+        let before = json!({"address": "t1", "state": "live", "reason": null, "exit_code": null,
+            "status": {"state": "working"}, "argv": launched, "labels": labels,
+            "foreground": {"argv": launched, "name": "env", "pid": 10}});
+        let t = terminal_of(&before).unwrap();
+        assert!(t.alive && t.exit_code.is_none());
+        assert!(!t.tags.contains_key(LABEL_ARGV) && t.tags["makiba.spawn"] == "s");
+        let shell = json!({"address": "t1", "state": "live", "reason": null, "exit_code": null,
+            "signal": null, "finished_ms": null, "status": null, "reported": false,
+            "argv": ["/usr/bin/zsh"], "labels": labels,
+            "foreground": {"argv": ["/usr/bin/zsh"], "name": "zsh", "pid": 11}});
+        let t = terminal_of(&shell).unwrap();
+        assert!(!t.alive && t.exit_code.is_none() && t.tags["makiba.org"] == "o");
+        assert!(!terminal_of(&json!({"terminal": shell})).unwrap().alive);
+        // Without the mark, or without an argv, nothing is judged: a terminal launched before.
+        let unmarked = json!({"address": "t1", "state": "live", "argv": ["/usr/bin/zsh"],
+            "labels": {"makiba.org": "o"}});
+        assert!(terminal_of(&unmarked).unwrap().alive);
+        let no_argv = json!({"address": "t1", "state": "live", "labels": labels});
+        assert!(terminal_of(&no_argv).unwrap().alive);
+        // The base still runs the shell: the session's inventory keeps it.
+        assert!(running_in_base(&shell));
+    }
+
+    fn running_in_base(v: &Value) -> bool {
+        running(unwrapped(v))
     }
 }
