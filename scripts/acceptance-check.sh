@@ -331,24 +331,34 @@ run_rs() { # run_rs <tree> <name> <where>: output in $work/out, Cargo's exit sta
 # pytest looks above the worktree too: for a config file (whose folder then becomes the rootdir,
 # and conftest.py files up to it are loaded) when the worktree has none. Above the worktree is the
 # checkout, in CI the head, which would then shape the test commit's run (Issue 558). So no
-# conftest.py above the worktree is loaded (--confcutdir), and a worktree with no pytest config on
-# the path from the test up to it gets an empty one (-c, --rootdir) instead of the checkout's.
-py_config() { # py_config <tree> <test path>: a pytest config on the path from the test's folder up to <tree>
-  local d f
-  d=$1/$(dirname "$2")
-  while :; do
-    for f in pytest.ini .pytest.ini pytest.toml .pytest.toml; do [ -f "$d/$f" ] && return 0; done
-    # TOML allows blanks around a table header and its dots; pytest 9 also reads [tool.pytest].
-    [ -f "$d/pyproject.toml" ] &&
-      grep -qE '^[[:space:]]*\[[[:space:]]*tool[[:space:]]*\.[[:space:]]*pytest([[:space:]]*\.[[:space:]]*ini_options)?[[:space:]]*\]' "$d/pyproject.toml" &&
-      return 0
-    [ -f "$d/tox.ini" ] && grep -q '^\[pytest\]' "$d/tox.ini" && return 0
-    [ -f "$d/setup.cfg" ] && grep -q '^\[tool:pytest\]' "$d/setup.cfg" && return 0
-    [ "$d" = "$1" ] && return 1
-    d=$(dirname "$d")
-  done
-}
+# conftest.py above the worktree is loaded (--confcutdir), and unless the config file the installed
+# pytest picks lies inside the worktree, the run gets an empty one (-c, --rootdir) instead. Which
+# file pytest picks is asked of pytest itself, by a plugin that writes config.inipath and exits
+# before collection (no test module is imported): its rules (empty tables, quoted TOML keys, the
+# version's file names) are not copied here.
 : >"$work/empty-pytest.ini" # a name pytest's own search never takes
+mkdir "$work/py-probe" && cat >"$work/py-probe/acceptance_check_probe.py" <<'PY'
+import os
+
+import pytest
+
+
+def pytest_configure(config):
+    path = config.inipath
+    with open(os.environ["ACCEPTANCE_CHECK_PROBE"], "w", encoding="utf-8") as f:
+        f.write(str(path) if path else "")
+    pytest.exit("acceptance-check: config probe", returncode=0)
+PY
+py_config() { # py_config <tree> <test path>: the config file pytest picks for the run lies inside <tree>
+  local f
+  rm -f "$work/py-probe/inipath"
+  (cd "$1" && ACCEPTANCE_CHECK_PROBE="$work/py-probe/inipath" PYTHONPATH="$work/py-probe${PYTHONPATH:+:$PYTHONPATH}" \
+    python3 -m pytest --collect-only -p no:cacheprovider -p acceptance_check_probe --confcutdir="$1" "$2") >/dev/null 2>&1 ||
+    return 1
+  f=$(cat "$work/py-probe/inipath" 2>/dev/null) && [ -n "$f" ] || return 1
+  f=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/${f##*/} || return 1
+  under "$f" "$1"
+}
 run_py() { # run_py <tree> <test path>: output in $work/out, pytest's exit status returned
   local opts=(--confcutdir="$1")
   py_config "$1" "$2" || opts+=(-c "$work/empty-pytest.ini" --rootdir="$1")

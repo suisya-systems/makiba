@@ -253,6 +253,8 @@ def test_checkout_pytest_ini_that_deselects_does_not_reach_the_test_commit(tmp_p
         ("pytest.ini", "[pytest]\npython_functions = check_*\n"),
         ("pyproject.toml", '[tool.pytest.ini_options]\npython_functions = ["check_*"]\n'),
         ("pyproject.toml", '  [ tool.pytest.ini_options ]\npython_functions = ["check_*"]\n'),
+        ("pyproject.toml", '[tool."pytest".ini_options]\npython_functions = ["check_*"]\n'),
+        ("tox.ini", "[pytest]\naddopts = -qq\npython_functions = check_*\n"),
         pytest.param(
             "pyproject.toml",
             '[tool.pytest]\npython_functions = ["check_*"]\n',
@@ -283,5 +285,22 @@ def test_worktree_own_pytest_config_is_still_used(tmp_path, rel, text):
     rc, out = check(repo, base, head)
     assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
     assert "acceptance-check: tests/test_answer.py fails at the test commit (expected)" in out, out
+    assert "tests/test_answer.py passes at head" in out, out
+    left_nothing(common_dir(repo), repo, out)
+
+
+def test_empty_tool_pytest_table_lets_no_checkout_config_in(tmp_path):
+    # pytest takes an empty [tool.pytest] table for no config and searches on, up into the
+    # checkout; the checker asks pytest which file it picks, so the checkout's never decides.
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    write(repo, "pyproject.toml", "[tool.pytest]\n")
+    base, head = branch(repo)
+    checkout_holds(repo, {"pytest.ini": "[pytest]\naddopts = -k nothing_matches\n"})
+    rc, out = check(repo, base, head)
+    assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
+    assert "acceptance-check: tests/test_answer.py fails at the test commit (expected)" in out, out
+    assert "collects no test" not in out, out
     assert "tests/test_answer.py passes at head" in out, out
     left_nothing(common_dir(repo), repo, out)
