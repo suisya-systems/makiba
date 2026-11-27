@@ -38,32 +38,52 @@ pub struct Summary {
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
+/// A run at work, for a suspend, over `runs r`: `in_use`, `review`, or `queued` with a launch
+/// under way.
+pub const AT_WORK: &str = "(r.status IN ('in_use', 'review')
+    OR (r.status = 'queued' AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
+        AND l.stage IN ('worktree_ready', 'settings_ready', 'launched', 'dialog_passed'))))";
+
+/// The runs `ids` become `suspended`, their launches under way are failed with `reason`, and
+/// their workers' keys are revoked. No other run is touched, and the session row is not written:
+/// `suspend` writes it for `makiba down`; a core restart that `makibad` saw (Issue 579,
+/// `daemon/recover.rs`) suspends only the runs it replaces.
+pub fn suspend_runs(w: &StateWriter, ids: &[i64], reason: &str) -> Result<()> {
+    let ids = serde_json::json!(ids).to_string();
+    w.conn().execute(
+        "UPDATE runs SET status = 'suspended' WHERE id IN (SELECT value FROM json_each(?1))",
+        [&ids],
+    )?;
+    w.conn().execute(
+        "UPDATE run_launch SET stage = 'failed', failed_reason = ?2
+         WHERE stage IN ('worktree_ready', 'settings_ready', 'launched', 'dialog_passed')
+           AND run_id IN (SELECT value FROM json_each(?1))",
+        params![ids, reason],
+    )?;
+    w.conn().execute(
+        &format!(
+            "UPDATE agents SET revoked_at = {NOW} WHERE role = 'worker' AND revoked_at IS NULL
+             AND run_id IN (SELECT value FROM json_each(?1))"
+        ),
+        [&ids],
+    )?;
+    Ok(())
+}
+
 /// Record the state: the runs at work become `suspended` (see the module comment). Returns the
 /// task ids of every suspended run. Also used by `makiba up` after a stop of the base.
 pub fn suspend(w: &StateWriter) -> Result<Vec<String>> {
     w.transaction(|w| {
-        let under_way = "EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = runs.id
-            AND l.stage IN ('worktree_ready', 'settings_ready', 'launched', 'dialog_passed'))";
-        w.conn().execute(
-            &format!(
-                "UPDATE runs SET status = 'suspended'
-                 WHERE status IN ('in_use', 'review') OR (status = 'queued' AND {under_way})"
-            ),
-            [],
-        )?;
-        w.conn().execute(
-            "UPDATE run_launch SET stage = 'failed', failed_reason = 'makiba down'
-             WHERE stage IN ('worktree_ready', 'settings_ready', 'launched', 'dialog_passed')
-               AND run_id IN (SELECT id FROM runs WHERE status = 'suspended')",
-            [],
-        )?;
-        w.conn().execute(
-            &format!(
-                "UPDATE agents SET revoked_at = {NOW} WHERE role = 'worker' AND revoked_at IS NULL
-                 AND run_id IN (SELECT id FROM runs WHERE status = 'suspended')"
-            ),
-            [],
-        )?;
+        // The runs at work, and every run already suspended: their launches under way fail and
+        // their workers' keys are revoked too.
+        let ids: Vec<i64> = w
+            .conn()
+            .prepare(&format!(
+                "SELECT id FROM runs r WHERE {AT_WORK} OR r.status = 'suspended' ORDER BY id"
+            ))?
+            .query_map([], |r| r.get(0))?
+            .collect::<std::result::Result<_, _>>()?;
+        suspend_runs(w, &ids, "makiba down")?;
         let tasks: Vec<String> = w
             .conn()
             .prepare("SELECT task_id FROM runs WHERE status = 'suspended' ORDER BY id")?

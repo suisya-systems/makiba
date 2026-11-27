@@ -16,14 +16,16 @@
 //! 6. `base_resynced`, last, with `restart` saying whether step 0 judged a core restart.
 //!
 //! Step 0, first (Issue 579): a core stop and start replaces every kept terminal's program with
-//! the machine's shell (#560 reads each as not alive). The list is judged a core restart when no
-//! terminal of ours in it is alive, at least two are not, and at least one of those has no
-//! `terminal_gone` recorded (it is newly lost). One lost program while another of ours runs is no
-//! restart, and its run fails as before; a lone terminal cannot be judged. On a restart, when a
-//! run is at work (`down::suspend`'s set, or a suspended run with a launch that had a terminal:
-//! the relaunch of an earlier restart), the runs are suspended and resumed as `makiba up` does
-//! (`down::suspend`, `up::resume_as`), in this transaction: the anomaly pass then fails none, and
-//! each relaunch ends the shell its run left. Nothing is kept in memory for it.
+//! the machine's shell (#560 reads each as not alive, with no exit code). The list is judged a
+//! core restart when no terminal of ours in it is alive, at least two are replaced (not alive, no
+//! exit code; one that exited with a code finished on its own and is not counted), and at least
+//! one of those has no `terminal_gone` recorded (it is newly lost). One lost program while
+//! another of ours runs is no restart, and its run fails as before; a lone terminal cannot be
+//! judged. On a restart, the runs at work (`down::AT_WORK`) and the suspended runs with a launch
+//! that had a terminal (the relaunch of an earlier restart) are suspended (`down::suspend_runs`,
+//! those runs only) and resumed as `makiba up` does (`up::resume_as`), in this transaction: the
+//! anomaly pass then fails none, and each relaunch ends the shell its run left. A suspended run
+//! whose launch has no terminal yet is left to go on. Nothing is kept in memory for it.
 
 use super::monitor::{Memory, append, mine, parse_kind, parse_state, spawn_of};
 use crate::base::{Terminal, TerminalRef};
@@ -71,12 +73,18 @@ fn gone_recorded(
 }
 
 /// Whether the list shows a core restart (step 0): none of our terminals alive, two or more
-/// not alive, and one of those newly lost.
+/// replaced (not alive with no exit code, as #560 reads a shell in place of the program), and one
+/// of those newly lost. A terminal whose program exited with a code finished on its own: it
+/// neither counts nor stops the judgment.
 fn core_restarted(w: &StateWriter, ours: &[&Terminal]) -> Result<bool> {
-    if ours.len() < 2 || ours.iter().any(|t| t.alive) {
+    if ours.iter().any(|t| t.alive) {
         return Ok(false);
     }
-    for t in ours {
+    let replaced: Vec<&&Terminal> = ours.iter().filter(|t| t.exit_code.is_none()).collect();
+    if replaced.len() < 2 {
+        return Ok(false);
+    }
+    for t in replaced {
         let (task, role, spawn) = key(t);
         if !gone_recorded(w, &task, Some(&role), &spawn)? {
             return Ok(true);
@@ -85,19 +93,22 @@ fn core_restarted(w: &StateWriter, ours: &[&Terminal]) -> Result<bool> {
     Ok(false)
 }
 
-/// Whether a run is at work for a restart's suspend: `down::suspend`'s set (`in_use`, `review`,
-/// `queued` with a launch under way), or a `suspended` run with a launch that had a terminal (the
-/// relaunch of an earlier restart). `makiba up`'s own relaunches, before a terminal, go on.
-fn at_work(w: &StateWriter) -> Result<bool> {
-    Ok(w.conn().query_row(
-        "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.status IN ('in_use', 'review')
-           OR (r.status = 'queued' AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
-               AND l.stage IN ('worktree_ready', 'settings_ready', 'launched', 'dialog_passed')))
-           OR (r.status = 'suspended' AND EXISTS (SELECT 1 FROM run_launch l
-               WHERE l.run_id = r.id AND l.stage IN ('launched', 'dialog_passed'))))",
-        [],
-        |r| r.get(0),
-    )?)
+/// The runs a restart suspends and resumes: those at work (`down::AT_WORK`), and every
+/// `suspended` run with a launch that had a terminal (the relaunch of an earlier restart). A
+/// suspended run whose launch has no terminal yet (`makiba up`'s own relaunch) goes on as it is.
+fn restart_runs(w: &StateWriter) -> Result<Vec<i64>> {
+    let ids = w
+        .conn()
+        .prepare(&format!(
+            "SELECT id FROM runs r WHERE {}
+               OR (r.status = 'suspended' AND EXISTS (SELECT 1 FROM run_launch l
+                   WHERE l.run_id = r.id AND l.stage IN ('launched', 'dialog_passed')))
+             ORDER BY id",
+            crate::down::AT_WORK
+        ))?
+        .query_map([], |r| r.get(0))?
+        .collect::<std::result::Result<_, _>>()?;
+    Ok(ids)
 }
 
 fn restore(w: &StateWriter, mem: &mut Memory, t: &Terminal) -> Result<()> {
@@ -147,9 +158,12 @@ pub(super) fn rebuild(
 
     // Step 0: a core restart suspends and resumes the runs at work instead of failing them.
     let restart = core_restarted(w, &ours)?;
-    if restart && at_work(w)? {
-        crate::down::suspend(w)?;
-        crate::up::resume_as(w, "makibad")?;
+    if restart {
+        let runs = restart_runs(w)?;
+        if !runs.is_empty() {
+            crate::down::suspend_runs(w, &runs, "the core restarted")?;
+            crate::up::resume_as(w, "makibad", Some(&runs))?;
+        }
     }
 
     let vanished: Vec<TerminalRef> = mem
@@ -661,6 +675,69 @@ mod tests {
             );
             assert_eq!(status(&w, task), "suspended");
         }
+    }
+
+    /// Issue 579: two programs that finished on their own (an exit code) while unsubscribed are
+    /// no restart: both runs fail by the gone anomaly.
+    #[test]
+    fn programs_that_exited_with_a_code_are_no_restart() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        let list: Vec<Terminal> = workers([false, false])
+            .into_iter()
+            .map(|mut t| {
+                t.exit_code = Some(1);
+                t
+            })
+            .collect();
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(list))
+            .unwrap();
+        assert!(!last_restart(&w));
+        anomalies(&w);
+        for task in ["t1", "t2"] {
+            assert_eq!(status(&w, task), "failed", "{task}");
+            assert_eq!(launches(&w, task).len(), 1, "{task}");
+        }
+    }
+
+    /// Issue 579: a restart that suspends a run at work leaves another suspended run's pending
+    /// relaunch (no terminal yet) and its keys as they are.
+    #[test]
+    fn a_restart_leaves_a_pending_relaunch_of_another_run() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        w.conn()
+            .execute_batch(
+                "UPDATE runs SET status = 'suspended' WHERE task_id = 't2';
+                 INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage)
+                   VALUES ((SELECT id FROM runs WHERE task_id = 't2'), 't2-b', 'fake', 'b', 'w',
+                           'worktree_ready');
+                 INSERT INTO agents (agent_id, role, key_sha256, run_id, spawn_id)
+                   VALUES ('w-t2', 'worker', 'h2', (SELECT id FROM runs WHERE task_id = 't2'),
+                           't2-b');",
+            )
+            .unwrap();
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(workers([false, false])))
+            .unwrap();
+        assert!(last_restart(&w));
+        assert_eq!(status(&w, "t1"), "suspended");
+        assert_eq!(launches(&w, "t1").len(), 2);
+        assert_eq!(
+            launches(&w, "t2"),
+            [
+                ("t2-a".to_string(), "verified".to_string()),
+                ("t2-b".to_string(), "worktree_ready".to_string())
+            ]
+        );
+        let revoked: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM agents WHERE spawn_id = 't2-b' AND revoked_at IS NOT NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(revoked, 0, "the pending relaunch's key was revoked");
     }
 
     /// Issue 579: `makiba up`'s own relaunches (before a terminal) are not suspended again by
