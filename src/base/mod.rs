@@ -158,6 +158,8 @@ pub struct Terminal {
     /// `None` while the program has not reported.
     pub status: Option<Status>,
     pub turn: Option<u64>,
+    /// The program makiba launched runs. A kept terminal whose program the base replaced with
+    /// the machine's shell is not alive, though the base lists it as live (#560).
     pub alive: bool,
     pub exit_code: Option<i32>,
 }
