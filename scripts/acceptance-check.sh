@@ -331,50 +331,62 @@ run_rs() { # run_rs <tree> <name> <where>: output in $work/out, Cargo's exit sta
 # pytest looks above the worktree too: for a config file (whose folder then becomes the rootdir,
 # and conftest.py files up to it are loaded) when the worktree has none. Above the worktree is the
 # checkout, in CI the head, which would then shape the test commit's run (Issue 558). So no
-# conftest.py above the worktree is loaded (--confcutdir), and unless the config file the installed
-# pytest picks lies inside the worktree, the run gets an empty one (-c, --rootdir) instead. Which
-# file pytest picks is asked of pytest itself, by a plugin that writes config.inipath and exits
-# before collection (no test module is imported): its rules (empty tables, quoted TOML keys, the
-# version's file names) are not copied here.
+# conftest.py above the worktree is loaded (--confcutdir), and unless the config file pytest's
+# discovery picks lies inside the worktree, the run gets an empty one (-c, --rootdir) instead.
+# Which file that is, is asked of pytest's own discovery function (locate_config), which reads
+# files and starts nothing: no plugin, no pythonpath, no conftest. Its rules (empty tables, quoted
+# TOML keys, the version's file names) are not copied here. It runs from the work folder, so no
+# module of a worktree can shadow what it imports; when it cannot be asked, the check fails.
 : >"$work/empty-pytest.ini" # a name pytest's own search never takes
-mkdir "$work/py-probe" && cat >"$work/py-probe/acceptance_check_probe.py" <<'PY'
-import os
+py_found() { # py_found <tree> <test path>: prints the config file pytest's discovery picks, or nothing
+  (cd "$work" && python3 - "$1" "$1/$2" 2>"$work/py-err" <<'PY'
+import inspect
+import sys
+from pathlib import Path
 
-import pytest
+from _pytest.config.findpaths import locate_config
 
-
-def pytest_configure(config):
-    path = config.inipath
-    with open(os.environ["ACCEPTANCE_CHECK_PROBE"], "w", encoding="utf-8") as f:
-        f.write(str(path) if path else "")
-    pytest.exit("acceptance-check: config probe", returncode=0)
+tree, test = Path(sys.argv[1]), [Path(sys.argv[2])]
+n = len(inspect.signature(locate_config).parameters)
+if n == 2:
+    found = locate_config(tree, test)
+elif n == 1:
+    found = locate_config(test)
+else:
+    raise SystemExit(f"locate_config takes {n} parameters")
+print(found[1] or "")
 PY
-py_config() { # py_config <tree> <test path>: the config file pytest picks for the run lies inside <tree>
-  local f
-  rm -f "$work/py-probe/inipath"
-  (cd "$1" && ACCEPTANCE_CHECK_PROBE="$work/py-probe/inipath" PYTHONPATH="$work/py-probe${PYTHONPATH:+:$PYTHONPATH}" \
-    python3 -m pytest --collect-only -p no:cacheprovider -p acceptance_check_probe --confcutdir="$1" "$2") >/dev/null 2>&1 ||
-    return 1
-  f=$(cat "$work/py-probe/inipath" 2>/dev/null) && [ -n "$f" ] || return 1
-  f=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/${f##*/} || return 1
-  under "$f" "$1"
+  )
 }
-run_py() { # run_py <tree> <test path>: output in $work/out, pytest's exit status returned
-  local opts=(--confcutdir="$1")
-  py_config "$1" "$2" || opts+=(-c "$work/empty-pytest.ini" --rootdir="$1")
-  (cd "$1" && python3 -m pytest -q -p no:cacheprovider "${opts[@]}" "$2") >"$work/out" 2>&1
+own_config() { # own_config <tree> <config file or empty>: the file lies inside <tree>
+  local f=$2
+  [ -n "$f" ] && f=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/${f##*/} && under "$f" "$1"
 }
+run_py() { # run_py <tree> <test path> <config file or empty>: output in $work/out, pytest's exit status returned
+  if own_config "$1" "$3"; then
+    (cd "$1" && python3 -m pytest -q -p no:cacheprovider --confcutdir="$1" "$2") >"$work/out" 2>&1
+  else
+    (cd "$1" && python3 -m pytest -q -p no:cacheprovider --confcutdir="$1" -c "$work/empty-pytest.ini" --rootdir="$1" "$2") >"$work/out" 2>&1
+  fi
+}
+cannot_ask() { no "cannot ask pytest which config file $1 uses at $2: $(tail -1 "$work/py-err")"; }
 ran() { sed -n 's/^running \([0-9][0-9]*\) tests\{0,1\}$/\1/p' "$work/out" | head -1; }
 while read -r kind t n; do
   [ -n "$kind" ] || continue
   if [ "$kind" = py ]; then
-    run_py "$work/t" "$t"
-    case $? in
-      0) no "$t passes at the test commit $first; it must fail before the fix" ;;
-      5) no "$t collects no test at the test commit $first; it must fail before the fix" ;;
-      *) echo "acceptance-check: $t fails at the test commit (expected)" ;;
-    esac
-    if run_py "$work/h" "$t"; then
+    if ! cfg_t=$(py_found "$work/t" "$t"); then
+      cannot_ask "$t" "the test commit $first"
+    else
+      run_py "$work/t" "$t" "$cfg_t"
+      case $? in
+        0) no "$t passes at the test commit $first; it must fail before the fix" ;;
+        5) no "$t collects no test at the test commit $first; it must fail before the fix" ;;
+        *) echo "acceptance-check: $t fails at the test commit (expected)" ;;
+      esac
+    fi
+    if ! cfg_h=$(py_found "$work/h" "$t"); then
+      cannot_ask "$t" "head $head"
+    elif run_py "$work/h" "$t" "$cfg_h"; then
       echo "acceptance-check: $t passes at head"
     else
       no "$t fails at head $head:"; sed 's/^/  /' "$work/out" | tail -20

@@ -304,3 +304,59 @@ def test_empty_tool_pytest_table_lets_no_checkout_config_in(tmp_path):
     assert "collects no test" not in out, out
     assert "tests/test_answer.py passes at head" in out, out
     left_nothing(common_dir(repo), repo, out)
+
+
+def test_checkout_config_plugin_never_runs(tmp_path):
+    # The checkout's pytest.ini puts the checkout on sys.path and loads a plugin from it; finding
+    # which config a run uses must start nothing, and the run itself does not read that config.
+    marker = tmp_path / "plugin-ran"
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    base, head = branch(repo)
+    checkout_holds(
+        repo,
+        {
+            "pytest.ini": "[pytest]\npythonpath = .\naddopts = -p checkout_plugin\n",
+            "checkout_plugin.py": f"from pathlib import Path\n\nPath({str(marker)!r}).write_text('ran')\n",
+        },
+    )
+    rc, out = check(repo, base, head)
+    assert (rc, last(out)) == (0, "ACCEPTANCE: pass"), out
+    assert "acceptance-check: tests/test_answer.py fails at the test commit (expected)" in out, out
+    assert not marker.exists(), out
+    left_nothing(common_dir(repo), repo, out)
+
+
+def test_worktree_own_required_plugins_still_fail_the_run(tmp_path):
+    # The worktree's own config requires a plugin that is not installed: its run fails, as the
+    # tests job's would; the config is not swapped for the empty one.
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    write(repo, "pytest.ini", "[pytest]\nrequired_plugins = pytest-acceptance-not-installed\n")
+    base, head = branch(repo)
+    rc, out = check(repo, base, head)
+    assert (rc, last(out)) == (1, "ACCEPTANCE: fail"), out
+    assert f"acceptance-check: tests/test_answer.py fails at head {head}:" in out, out
+    assert "pytest-acceptance-not-installed" in out, out
+    left_nothing(common_dir(repo), repo, out)
+
+
+def test_pytest_that_cannot_be_asked_fails_the_check(tmp_path):
+    # A _pytest without locate_config shadows the installed one: the checker cannot ask which
+    # config a run uses, and says so, instead of choosing one silently.
+    fake = tmp_path / "fake"
+    write(fake, "_pytest/__init__.py", "")
+    write(fake, "_pytest/config/__init__.py", "")
+    write(fake, "_pytest/config/findpaths.py", "")
+    repo = tmp_path / "r"
+    repo.mkdir()
+    git(repo, "init", "-q", "-b", "main")
+    base, head = branch(repo)
+    rc, out = check(repo, base, head, PYTHONPATH=str(fake))
+    assert (rc, last(out)) == (1, "ACCEPTANCE: fail"), out
+    assert "acceptance-check: cannot ask pytest which config file tests/test_answer.py uses at the test commit" in out, out
+    assert f"acceptance-check: cannot ask pytest which config file tests/test_answer.py uses at head {head}" in out, out
+    assert "fails at the test commit (expected)" not in out and "passes at head" not in out, out
+    left_nothing(common_dir(repo), repo, out)
