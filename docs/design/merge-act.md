@@ -335,6 +335,10 @@ bound against merging around makibad stays GitHub's branch protection, set by th
 
 ## 7. The PR watch: classification and notices
 
+A queue act whose entry GitHub marks `UNMERGEABLE` is taken out of the queue by makibad itself
+and waits for the entries ahead; then the secretary is told to update it (Issue 575):
+docs/design/queue-unmergeable.md.
+
 `prwatch.rs` stays the only watcher. Changes to `apply_state` (`prwatch.rs:1026-1110`):
 
 - **Classification.** On `MERGED`, `merged_via` is read from the act records of that pull request

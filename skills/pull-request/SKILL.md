@@ -49,6 +49,10 @@ For a pull request it follows, `makibad` judges whether the head is ready for th
 
 A move of main that changes nothing the checks check sends nothing: the head stays ready.
 
+- **"makibad took <repo>#<pr> at <head> out of the merge queue: GitHub marked its entry UNMERGEABLE ..."** (docs/design/queue-unmergeable.md): do not queue it and do not call update yet. `makibad` waits for the entries it names to land or leave the queue, then tells you to update it.
+- **"makibad's wait for <repo>#<pr> at <head> has ended: ... call update with task <task> and base <base> ..."**: call mcp__makiba__update with that task and base. When its notice says it pushed a new head, record that head with pr pushed as the notice says; the new head's "can be queued" notice follows once its CI passes. When it merged nothing, the same head's "can be queued" notice follows. On a conflict, the update-branch skill, step 5. When the notice says the run has no code worktree, do as it says. Ask with merge only on a "can be queued" notice.
+- **"makibad could not take <repo>#<pr> ... out of the merge queue":** tell the person, who takes it out on GitHub; the PR watch tells you when it leaves the queue.
+
 ## A rerun of failed jobs
 
 When a check failed for a cause outside the change (a flaky test) and you rerun its failed jobs with `gh run rerun <run> --failed`, call mcp__makiba__pr with `state` `rerun` and the same `repo`, `pr`, `head` and `task` in the same turn, then end your turn. The watch of that head starts again and sends you a notice of the rerun's result, as for a first run; the merge gate reads that newest result. `rerun` is refused for a head never recorded (`not_found`), for a head that is not the pull request's current one, and for a head whose CI already passed (`conflict`); while the head is still watched, it changes nothing. It records no new head: a new commit is `pushed`, never `rerun`.
