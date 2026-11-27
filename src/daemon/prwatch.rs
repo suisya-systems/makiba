@@ -3415,6 +3415,15 @@ impl PrWatch {
         use super::ready::Reading;
         let key = told_key(&d.repo, d.pr, &d.head);
         let decision = match &d.result {
+            // Issue 573: a held head is never `unknown`, which no later reading judges again: its
+            // update when a pull request it names lands is read from the ledger, not from git.
+            Err(why) if d.watch && !d.key.watch => {
+                eprintln!(
+                    "makibad: pr watch {}#{}: queue readiness of a held head not read: {why}",
+                    d.repo, d.pr
+                );
+                return Ok(());
+            }
             Err(why) => {
                 let first = *self
                     .read_failing
@@ -3597,6 +3606,7 @@ fn decide_with(
             Decision::Lifted { hold, .. } if c.held.as_ref().map(|h| h.id) != Some(*hold) => {
                 return Ok(false);
             }
+            Decision::Unknown { .. } if c.held.is_some() => return Ok(false),
             _ => {}
         }
         let (repo, pr, base) = (c.f.repo.as_str(), c.f.pr, c.base.as_str());
@@ -3711,9 +3721,13 @@ fn decide_with(
                         } else {
                             "ready for the queue"
                         };
+                        let what = if files.is_empty() {
+                            "it conflicts (git names no file)".to_string()
+                        } else {
+                            format!("it conflicts in {}", some_files(files))
+                        };
                         format!(
-                            "it conflicts in {} with {repo}#{} at {}, which is {place} before it",
-                            some_files(files),
+                            "{what} with {repo}#{} at {}, which is {place} before it",
                             p.pr,
                             short(&p.head)
                         )
@@ -3732,10 +3746,14 @@ fn decide_with(
                     pr: after, files, ..
                 } = d
                 {
-                    format!(
-                        "{repo}#{after}, which it conflicted with in {}, landed",
-                        some_files(files)
-                    )
+                    if files.is_empty() {
+                        format!("{repo}#{after}, which it conflicted with, landed")
+                    } else {
+                        format!(
+                            "{repo}#{after}, which it conflicted with in {}, landed",
+                            some_files(files)
+                        )
+                    }
                 } else if let Decision::Update {
                     reason: "conflict", ..
                 } = d
@@ -4997,6 +5015,86 @@ esac"#,
         assert_eq!(written(&w), 0);
         assert!(decide(&w, &repos, &key, "ready", &ready).unwrap());
         assert_eq!(written(&w), 1);
+    }
+
+    /// Issue 573: a held head is never made `unknown`, neither by a failing reading past the
+    /// budget nor by a decision written for it, so its update when a pull request it names lands
+    /// is never lost.
+    #[test]
+    fn a_held_head_is_never_unknown() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let repos = dir.path().join("repos");
+        std::fs::create_dir_all(repos.join("p/.git")).unwrap();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t",
+            project_slug: "p",
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "a".repeat(40);
+        register(&w, "pr_opened", "t", "o/r", 5, &head).unwrap();
+        for (kind, payload) in [
+            (
+                "ci_completed",
+                json!({"repo": "o/r", "pr": 5, "head_oid": head, "status": "passed"}),
+            ),
+            (
+                "queue_readiness",
+                json!({"repo": "o/r", "pr": 5, "head_oid": head, "verdict": "hold",
+                       "reason": "overlap", "base_tip": "b".repeat(40),
+                       "holds": [{"pr": 4, "task": "u", "head": "c".repeat(40), "queued": true,
+                                  "files": ["x.md"]}]}),
+            ),
+        ] {
+            w.append_event(&NewEvent {
+                kind,
+                actor: Some("makibad"),
+                payload: Some(&payload),
+                run_task_id: Some("t"),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        let c = ready_candidates(w.conn(), &repos, Some("t")).unwrap();
+        assert_eq!(c.len(), 1);
+        assert!(c[0].held.is_some(), "{:?}", c[0]);
+        let key = c[0].key();
+        let unknown = Decision::Unknown {
+            reason: "fetch failed".into(),
+        };
+        assert!(!decide(&w, &repos, &key, "ready", &unknown).unwrap());
+        let mut p = PrWatch::from_env();
+        p.budget = Duration::ZERO;
+        let failed = ReadDone {
+            key: key.clone(),
+            task: "t".into(),
+            repo: "o/r".into(),
+            pr: 5,
+            head: head.clone(),
+            watch: true,
+            result: Err("fetch failed".into()),
+        };
+        p.merges
+            .insert("t".into(), merge_read(&key.f, &head, "CLEAN"));
+        for _ in 0..2 {
+            p.ready_done(&w, &failed).unwrap();
+        }
+        let verdicts: Vec<String> = {
+            let mut q = w
+                .conn()
+                .prepare(
+                    "SELECT json_extract(payload_json, '$.verdict') FROM events
+                     WHERE kind = 'queue_readiness' ORDER BY id",
+                )
+                .unwrap();
+            q.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .map(|v| v.unwrap())
+                .collect()
+        };
+        assert_eq!(verdicts, vec!["hold".to_string()]);
     }
 
     /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two
