@@ -334,8 +334,15 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     with_ledger(&dir, |w| {
         person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
     })?;
-    // Issue 590: outside the ledger's lock, so ssh-keygen never lengthens a hold of it.
-    approval_key(&dir);
+    // Issue 590: outside the ledger's lock, so ssh-keygen never lengthens a hold of it. Another
+    // organization may share the key's place: its agents run in this base's terminals. A stopped
+    // base runs none; with the stand-in (`MAKIBA_BASE=stub`) nothing was probed and none is read.
+    let others = match &probe {
+        None => Ok(Vec::new()),
+        Some(_) if stopped => Ok(Vec::new()),
+        Some(_) => other_organizations(&*the_base, &organization(&dir)),
+    };
+    approval_key(&dir, others);
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
@@ -424,8 +431,9 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
 
 /// The approval key (Issue 590, docs/design/acceptance-approval.md section 3): kept private when
 /// it exists, made when it is absent and nothing that could read it runs, its line printed. `up`
-/// goes on whatever happens here: without the key no approval can be signed.
-fn approval_key(dir: &Path) {
+/// goes on whatever happens here: without the key no approval can be signed. `others`: the other
+/// organizations whose agents run on the base (`other_organizations`).
+fn approval_key(dir: &Path, others: Result<Vec<String>, String>) {
     let key = crate::cli::approval_key_path();
     let staging = crate::cli::approval_staging_path();
     let way = "run makiba down --secretary, then makiba up";
@@ -459,6 +467,17 @@ fn approval_key(dir: &Path) {
             // not deny it: the key is made only by an `up` that starts makibad itself.
             let not_made = if !matches!(daemon_running(dir), Ok(false)) {
                 Some("makibad is running".to_string())
+            } else if let Err(e) = &others {
+                Some(e.clone())
+            } else if let Ok(orgs) = &others
+                && !orgs.is_empty()
+            {
+                // Their launches may come from a makiba before the key, and are not in this
+                // organization's ledger.
+                Some(format!(
+                    "agents of another organization run on the base: {}",
+                    orgs.join(" ")
+                ))
             } else {
                 match &lacking {
                     Ok(ids) if ids.is_empty() => None,
@@ -483,6 +502,39 @@ fn approval_key(dir: &Path) {
         }
         Err(e) => eprintln!("approval key: {e}"),
     }
+}
+
+/// This organization's `makiba.org` tag: the state folder's absolute path, as `makibad` and
+/// `down` write and read it.
+fn organization(dir: &Path) -> String {
+    std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The `makiba.org` tags of the base's makiba agents (a terminal with a `makiba.role` tag) that
+/// are not `org`'s, each once, sorted; an agent with no `makiba.org` tag counts as `(none)`.
+fn other_organizations(base: &dyn base::Base, org: &str) -> Result<Vec<String>, String> {
+    let terminals = base
+        .list()
+        .map_err(|e| format!("cannot list the base's terminals: {e}"))?;
+    let mut out: Vec<String> = Vec::new();
+    for t in terminals {
+        if !t.tags.contains_key(crate::spec::TAG_ROLE) {
+            continue;
+        }
+        let theirs = t
+            .tags
+            .get(crate::spec::TAG_ORG)
+            .cloned()
+            .unwrap_or_else(|| "(none)".into());
+        if theirs != org && !out.contains(&theirs) {
+            out.push(theirs);
+        }
+    }
+    out.sort();
+    Ok(out)
 }
 
 fn read_only(dir: &Path) -> Option<rusqlite::Connection> {
@@ -623,6 +675,61 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("makibad.lock"), lock_pid.to_string()).unwrap();
         dir
+    }
+
+    /// Issue 590: the agents of another organization on the same base are named, so the approval
+    /// key is not made beside them; this organization's agents and a terminal that is no makiba
+    /// agent are not.
+    #[test]
+    fn the_agents_of_another_organization_on_the_base_are_named() {
+        use crate::base::{Base, LaunchSpec};
+        use std::collections::BTreeMap;
+        let stub = crate::base::stub::Stub::new();
+        let launch = |name: &str, tags: &[(&str, &str)]| {
+            stub.launch(&LaunchSpec {
+                argv: vec!["true".into()],
+                cwd: std::env::temp_dir(),
+                name: name.into(),
+                tags: tags
+                    .iter()
+                    .map(|(k, v)| (k.to_string(), v.to_string()))
+                    .collect::<BTreeMap<_, _>>(),
+                env: BTreeMap::new(),
+                unset: vec![],
+            })
+            .unwrap();
+        };
+        launch(
+            "secretary",
+            &[
+                (crate::spec::TAG_ROLE, "secretary"),
+                (crate::spec::TAG_ORG, "/org/a"),
+            ],
+        );
+        launch("a shell", &[]);
+        assert_eq!(
+            other_organizations(&stub, "/org/a").unwrap(),
+            Vec::<String>::new()
+        );
+        launch(
+            "w-t1",
+            &[
+                (crate::spec::TAG_ROLE, "worker"),
+                (crate::spec::TAG_ORG, "/org/b"),
+            ],
+        );
+        launch("curator", &[(crate::spec::TAG_ROLE, "curator")]);
+        launch(
+            "secretary-b",
+            &[
+                (crate::spec::TAG_ROLE, "secretary"),
+                (crate::spec::TAG_ORG, "/org/b"),
+            ],
+        );
+        assert_eq!(
+            other_organizations(&stub, "/org/a").unwrap(),
+            vec!["(none)".to_string(), "/org/b".to_string()]
+        );
     }
 
     /// Issue 563: a stale row is a stall only when it is the lock holder's; a makibad that has

@@ -102,13 +102,33 @@ pub fn keep_approval(path: &Path, staging: &Path) -> Result<bool, String> {
     private_folder_of(path, "approval key")?;
     std::fs::set_permissions(path, Permissions::from_mode(0o600))
         .map_err(|e| format!("cannot chmod {}: {e}", path.display()))?;
-    if let Ok(entries) = std::fs::read_dir(staging) {
-        for e in entries.flatten() {
-            std::fs::remove_file(e.path())
-                .map_err(|err| format!("cannot remove {}: {err}", e.path().display()))?;
+    if staging_folder(staging)? {
+        for e in std::fs::read_dir(staging)
+            .map_err(|e| format!("cannot read {}: {e}", staging.display()))?
+            .flatten()
+        {
+            // Only what `make_approval` writes there: `key-<pid>` and its `.pub`.
+            if e.file_name().to_string_lossy().starts_with("key-") {
+                std::fs::remove_file(e.path())
+                    .map_err(|err| format!("cannot remove {}: {err}", e.path().display()))?;
+            }
         }
     }
     Ok(true)
+}
+
+/// Whether the staging folder `staging` exists, refused when it is anything but a folder of its
+/// own (a link is never followed: what it leads to is not the key's to chmod or clear).
+fn staging_folder(staging: &Path) -> Result<bool, String> {
+    match std::fs::symlink_metadata(staging) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(format!("cannot read {}: {e}", staging.display())),
+        Ok(m) if m.file_type().is_dir() => Ok(true),
+        Ok(_) => Err(format!(
+            "the staging folder {} is not a folder (a link or a file): remove it",
+            staging.display()
+        )),
+    }
 }
 
 /// Make the approval key at `path`: `ssh-keygen` writes it into the staging folder `staging`
@@ -117,6 +137,7 @@ pub fn keep_approval(path: &Path, staging: &Path) -> Result<bool, String> {
 /// in the staging folder are removed; no `.pub` is kept beside the key.
 pub fn make_approval(path: &Path, staging: &Path) -> Result<(), String> {
     private_folder_of(path, "approval key")?;
+    staging_folder(staging)?;
     private_folder(staging)?;
     let tmp = staging.join(format!("key-{}", std::process::id()));
     let public = PathBuf::from(format!("{}.pub", tmp.display()));
@@ -332,5 +353,49 @@ mod tests {
         let w = writer();
         assert!(ensure(&w, &file).is_err());
         assert!(person_rows(&w).is_empty());
+    }
+
+    /// A staging folder that is a link is neither followed nor cleared: the files where it leads
+    /// stay, keeping or making the key is refused, and the folder it leads to keeps its mode.
+    #[test]
+    fn a_linked_staging_folder_is_never_followed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = tmp.path().join("cfg/approval.key");
+        std::fs::create_dir_all(key.parent().unwrap()).unwrap();
+        let elsewhere = tmp.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        std::fs::set_permissions(&elsewhere, Permissions::from_mode(0o755)).unwrap();
+        for f in ["notes.txt", "key-1"] {
+            std::fs::write(elsewhere.join(f), "the person's\n").unwrap();
+        }
+        let staging = tmp.path().join("cfg/approval.key.new");
+        std::os::unix::fs::symlink(&elsewhere, &staging).unwrap();
+        assert!(make_approval(&key, &staging).is_err());
+        assert!(!key.exists());
+        std::fs::write(&key, "a key\n").unwrap();
+        assert!(keep_approval(&key, &staging).is_err());
+        for f in ["notes.txt", "key-1"] {
+            assert!(elsewhere.join(f).exists(), "{f} was removed");
+        }
+        assert_eq!(mode(&elsewhere), 0o755);
+    }
+
+    /// Clearing a staging folder of its own removes what a broken try left (`key-*`) and nothing
+    /// else.
+    #[test]
+    fn keeping_the_key_clears_only_the_staged_copies() {
+        let tmp = tempfile::tempdir().unwrap();
+        let key = tmp.path().join("cfg/approval.key");
+        let staging = tmp.path().join("cfg/approval.key.new");
+        std::fs::create_dir_all(&staging).unwrap();
+        std::fs::write(&key, "a key\n").unwrap();
+        for f in ["key-7", "key-7.pub", "other"] {
+            std::fs::write(staging.join(f), "x\n").unwrap();
+        }
+        assert!(keep_approval(&key, &staging).unwrap());
+        assert!(!staging.join("key-7").exists());
+        assert!(!staging.join("key-7.pub").exists());
+        assert!(staging.join("other").exists());
+        assert_eq!(mode(&key), 0o600);
     }
 }
