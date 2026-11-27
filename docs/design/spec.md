@@ -56,7 +56,7 @@ Test seam of verification (M3-6): `MAKIBA_VERIFY_TIMEOUT_MS`, read by `makibad` 
 
 Test seam of dispatch (Issue 143): the launch `dispatch` creates names the agent module `claude_code`, unless `makibad` was started with `MAKIBA_LAUNCH_AGENT=fake`, which names the test agent. The variable is read once, when `makibad` starts, from its own environment: no request, argument or tool of any role chooses the agent, and nothing in the role files, `makiba up` or any launch sets it. Any other value stops the start.
 
-Test seam of the monitor (Issue 181): `MAKIBA_WRITE_RETRY_MS`, read by `makibad` at start, is how long an event the database refused is tried again, in milliseconds (section 10; default 60 seconds, 0 for one attempt).
+Test seam of the monitor (Issue 181): `MAKIBA_WRITE_RETRY_MS`, read by `makibad` at start, is how long an event the database refused is tried again, in milliseconds (section 10; default 60 seconds, 0 for one attempt). With `MAKIBA_WRITE_LOST_MARK` naming a file, read by `makibad` at start, the monitor appends to it, when it drops an event, one JSON line per `observation_lost` record it will write (the record's payload), before that record is written (Issue 571): a test that holds the write lock reads it to know the event is dropped. Unset, nothing is marked; nothing in the role files, `makiba up` or any launch sets either variable.
 
 Test seam of the merge gate (Issue 512): `MAKIBA_GATE_READ_WAIT_MS`, read by `makibad` at each read of GitHub the gate makes, is the wait in milliseconds between two tries of a read that failed (default 5000). A read is tried at most 3 times, and no new try starts 60 seconds after its first began; nothing in the role files, `makiba up` or any launch sets it.
 
