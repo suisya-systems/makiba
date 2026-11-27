@@ -11,8 +11,8 @@
 //!
 //! A reading may also read the head against its peers (Issue 573, docs/design/queue-overlap.md):
 //! the followed pull requests of the same repository before it in the queue's order, which the
-//! PR watch lists. Each peer's branch is fetched in the same fetch, and a peer whose head
-//! conflicts with the head by `git merge-tree` is an overlap.
+//! PR watch lists. Each peer's branch is fetched after the base and the head, and a peer whose
+//! head conflicts with the head by `git merge-tree` (its exit status) is an overlap.
 
 use super::run_repo::HOOKS_OFF;
 use std::path::Path;
@@ -243,9 +243,9 @@ pub fn peer_ref(task: &str, pr: i64) -> String {
     format!("refs/makiba/ready/{task}/peer/{pr}")
 }
 
-/// As `read`; with `peers` given (Issue 573), their branches are fetched in the same fetch, the
-/// base is read whole whatever `covered` says, and the reading is `Overlaps`. A peer whose
-/// branch at origin is not at its head makes the reading `Stale`.
+/// As `read`; with `peers` given (Issue 573), their branches are fetched too, the base is read
+/// whole whatever `covered` says, and the reading is `Overlaps`. A peer whose branch at origin
+/// cannot be fetched or is not at its head makes the reading `Stale`.
 #[allow(clippy::too_many_arguments)]
 pub fn read_with_peers(
     repo: &Path,
@@ -274,7 +274,7 @@ pub fn read_with_peers(
         .zip(&peer_refs)
         .map(|(p, r)| format!("+refs/heads/{}:{r}", p.branch))
         .collect();
-    let mut fetch: Vec<&str> = vec![
+    let fetch: Vec<&str> = vec![
         "fetch",
         "-q",
         "--no-write-fetch-head",
@@ -283,11 +283,17 @@ pub fn read_with_peers(
         // No opportunistic update of `refs/remotes/origin/*` from origin's configured refspec.
         "--refmap=",
         "origin",
-        &base_spec,
-        &head_spec,
     ];
-    fetch.extend(peer_specs.iter().map(String::as_str));
-    g.run(&fetch)?;
+    g.run(&[fetch.as_slice(), &[base_spec.as_str(), head_spec.as_str()]].concat())?;
+    // The peers' branches in a fetch of their own: a peer's branch gone at origin (deleted once it
+    // landed, before its landing is recorded) makes the reading stale, read again once the peers
+    // change, never a failure that counts against the head's budget.
+    if !peer_specs.is_empty() {
+        let specs: Vec<&str> = peer_specs.iter().map(String::as_str).collect();
+        if g.run(&[fetch.as_slice(), &specs].concat()).is_err() {
+            return Ok(Reading::Stale);
+        }
+    }
     let id = |r: &str| g.run(&["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
     let at = id(&head_ref)?;
     if !at.eq_ignore_ascii_case(head) {
@@ -328,8 +334,7 @@ pub fn read_with_peers(
     };
     let mut overlaps = Vec::new();
     for p in peers {
-        let files = conflicts(&g, &p.head, head)?;
-        if !files.is_empty() {
+        if let Some(files) = conflicts(&g, &p.head, head)? {
             overlaps.push(Overlap { pr: p.pr, files });
         }
     }
@@ -342,9 +347,9 @@ pub fn read_with_peers(
     })
 }
 
-/// The files in which the heads `theirs` and `ours` conflict by `git merge-tree` (none: they
-/// merge).
-fn conflicts(g: &Git, theirs: &str, ours: &str) -> Result<Vec<String>, String> {
+/// Whether the heads `theirs` and `ours` conflict by `git merge-tree`: the files it names (a
+/// conflict may name none), or none when they merge.
+fn conflicts(g: &Git, theirs: &str, ours: &str) -> Result<Option<Vec<String>>, String> {
     let args = [
         "merge-tree",
         "--write-tree",
@@ -353,9 +358,17 @@ fn conflicts(g: &Git, theirs: &str, ours: &str) -> Result<Vec<String>, String> {
         theirs,
         ours,
     ];
-    match g.run_status(&args)? {
-        (0, _) => Ok(Vec::new()),
-        (1, out) => {
+    let (code, out) = g.run_status(&args)?;
+    conflict_files(code, &out).ok_or_else(|| format!("git {} exited {code}", args.join(" ")))
+}
+
+/// What `git merge-tree --write-tree --name-only --no-messages` said by its exit code and output:
+/// `Some(None)` they merge (0); `Some(Some(files))` a conflict (1), its exit status alone deciding,
+/// with the files after the tree line; `None` any other code (git failed).
+fn conflict_files(code: i32, out: &str) -> Option<Option<Vec<String>>> {
+    match code {
+        0 => Some(None),
+        1 => {
             let mut files: Vec<String> = out
                 .lines()
                 .skip(1)
@@ -365,9 +378,9 @@ fn conflicts(g: &Git, theirs: &str, ours: &str) -> Result<Vec<String>, String> {
                 .collect();
             files.sort();
             files.dedup();
-            Ok(files)
+            Some(Some(files))
         }
-        (code, _) => Err(format!("git {} exited {code}", args.join(" "))),
+        _ => None,
     }
 }
 
@@ -558,6 +571,77 @@ jobs:
             git_t(&clone, &["rev-parse", "refs/makiba/ready/t1/base"]),
             main
         );
+    }
+
+    /// Issue 573: `git merge-tree`'s exit status alone says whether two heads conflict; the files
+    /// it names are kept sorted, and a conflict that names none is still a conflict.
+    #[test]
+    fn a_merge_tree_conflict_is_its_exit_status_even_with_no_file_named() {
+        assert_eq!(conflict_files(0, "tree"), Some(None));
+        assert_eq!(conflict_files(1, "tree"), Some(Some(Vec::new())));
+        assert_eq!(
+            conflict_files(1, "tree\nb.md\na.md\nb.md"),
+            Some(Some(vec!["a.md".to_string(), "b.md".to_string()]))
+        );
+        assert_eq!(conflict_files(128, ""), None);
+    }
+
+    /// Issue 573: a reading against a peer names the file both heads change in the same line; a
+    /// peer whose branch is gone at origin makes the reading stale, not a failure.
+    #[test]
+    fn a_peer_is_read_with_merge_tree_and_a_gone_branch_is_stale() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, clone) = (dir.path().join("origin"), dir.path().join("clone"));
+        std::fs::create_dir_all(&origin).unwrap();
+        git_t(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("a"), "a\n").unwrap();
+        git_t(&origin, &["add", "a"]);
+        git_t(&origin, &["commit", "-q", "-m", "a"]);
+        let mut heads = Vec::new();
+        for b in ["b", "p"] {
+            git_t(&origin, &["checkout", "-q", "-b", b, "main"]);
+            std::fs::write(origin.join("a"), format!("{b}\n")).unwrap();
+            git_t(&origin, &["commit", "-q", "-am", b]);
+            heads.push(git_t(&origin, &["rev-parse", "HEAD"]));
+        }
+        git_t(&origin, &["checkout", "-q", "main"]);
+        git_t(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+        let peer = |branch: &str| Peer {
+            pr: 9,
+            task: "t9".into(),
+            branch: branch.into(),
+            head: heads[1].clone(),
+            queued: true,
+        };
+        let cancel = AtomicBool::new(false);
+        let read_against = |p: Peer| {
+            read_with_peers(
+                &clone,
+                "t1",
+                "main",
+                "b",
+                &heads[0],
+                None,
+                Some(&[p]),
+                &cancel,
+            )
+            .unwrap()
+        };
+        let r = read_against(peer("p"));
+        assert!(
+            matches!(&r, Reading::Overlaps { overlaps, .. }
+                if *overlaps == vec![Overlap { pr: 9, files: vec!["a".into()] }]),
+            "{r:?}"
+        );
+        assert_eq!(read_against(peer("gone")), Reading::Stale);
     }
 
     #[test]
