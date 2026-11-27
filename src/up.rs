@@ -334,6 +334,8 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     with_ledger(&dir, |w| {
         person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
     })?;
+    // Issue 590: outside the ledger's lock, so ssh-keygen never lengthens a hold of it.
+    approval_key(&dir);
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
@@ -418,6 +420,69 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
         );
     }
     Ok(())
+}
+
+/// The approval key (Issue 590, docs/design/acceptance-approval.md section 3): kept private when
+/// it exists, made when it is absent and nothing that could read it runs, its line printed. `up`
+/// goes on whatever happens here: without the key no approval can be signed.
+fn approval_key(dir: &Path) {
+    let key = crate::cli::approval_key_path();
+    let staging = crate::cli::approval_staging_path();
+    let way = "run makiba down --secretary, then makiba up";
+    // The live agents whose settings do not deny the key, as the ledger knows them.
+    let lacking = match read_only(dir) {
+        None => Ok(Vec::new()),
+        Some(c) => person_key::agents_without_approval_deny(&c, &dir.join("settings"), &key)
+            .map_err(|e| format!("cannot read the agents of the ledger: {e}")),
+    };
+    let print = |how: &str| match person_key::approval_signer_line(&key) {
+        Ok(line) => println!(
+            "approval key: {} ({how}); its line for .github/acceptance-approvers: {line}",
+            key.display()
+        ),
+        Err(e) => eprintln!("approval key: {} ({how}); {e}", key.display()),
+    };
+    match person_key::keep_approval(&key, &staging) {
+        Ok(true) => {
+            print("kept");
+            match &lacking {
+                Ok(ids) if ids.is_empty() => {}
+                Ok(ids) => println!(
+                    "approval key: warning: agents launched without its deny rule: {}; {way}",
+                    ids.join(" ")
+                ),
+                Err(e) => println!("approval key: warning: {e}"),
+            }
+        }
+        Ok(false) => {
+            // A makibad already running may be one from before the key, whose launches would
+            // not deny it: the key is made only by an `up` that starts makibad itself.
+            let not_made = if !matches!(daemon_running(dir), Ok(false)) {
+                Some("makibad is running".to_string())
+            } else {
+                match &lacking {
+                    Ok(ids) if ids.is_empty() => None,
+                    Ok(ids) => Some(format!(
+                        "agents launched without its deny rule: {}",
+                        ids.join(" ")
+                    )),
+                    Err(e) => Some(e.clone()),
+                }
+            };
+            match not_made {
+                Some(why) => println!("approval key: not made: {why}; {way}"),
+                None => match person_key::make_approval(&key, &staging) {
+                    Ok(()) => print("created"),
+                    Err(e) => eprintln!(
+                        "approval key: cannot make {}: {e}; makiba merge approve cannot sign an \
+                         acceptance approval until it exists",
+                        key.display()
+                    ),
+                },
+            }
+        }
+        Err(e) => eprintln!("approval key: {e}"),
+    }
 }
 
 fn read_only(dir: &Path) -> Option<rusqlite::Connection> {

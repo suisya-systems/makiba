@@ -967,7 +967,7 @@ pub fn events_main(after: i64, limit: Option<u32>, task: Option<&str>, as_json: 
 }
 
 /// What no output of the read surface shows: the person key and the merge gate's key, as their
-/// files hold them, and every run of 64 hex characters that is a key whose SHA-256 `agents`
+/// files hold them, the approval key and each of its lines (Issue 590), and every run of 64 hex characters that is a key whose SHA-256 `agents`
 /// stores. Each becomes `<key>`.
 pub(crate) struct Mask {
     literals: Vec<String>,
@@ -981,6 +981,8 @@ impl Mask {
             .filter_map(|f| std::fs::read_to_string(f).ok())
             .map(|k| k.trim().to_string())
             .filter(|k| !k.is_empty())
+            // The approval key (Issue 590): its whole content first, then each of its lines.
+            .chain(crate::daemon::person_key::approval_key_literals())
             .collect();
         let hashes = conn
             .prepare("SELECT key_sha256 FROM agents")

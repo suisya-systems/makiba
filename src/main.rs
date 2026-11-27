@@ -29,6 +29,7 @@ fn main() -> ExitCode {
             task,
             json,
         } => makiba::status_local::events_main(after, limit, task.as_deref(), json),
+        Command::ApprovalKey => makiba::cli::approval_key_main(),
         other => makiba::cli::main(other),
     }
 }
