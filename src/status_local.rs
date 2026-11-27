@@ -12,6 +12,58 @@ use std::time::Duration;
 /// A heartbeat older than this means `makibad` is not running.
 pub const STALE: Duration = Duration::from_secs(30);
 
+/// The age of the dispatcher's heartbeat in seconds, by the clock of SQLite that wrote it; `None`
+/// when there is no row or no heartbeat.
+pub fn heartbeat_age(conn: &Connection) -> Option<f64> {
+    conn.query_row(
+        "SELECT (julianday('now') - julianday(heartbeat_at)) * 86400.0 FROM dispatcher WHERE id = 1",
+        [],
+        |r| r.get::<_, Option<f64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// `heartbeat_age` of the `state.db` at `path`, read-only (the door's answers to the secretary,
+/// Issue 563).
+pub fn heartbeat_age_at(path: &Path) -> Option<f64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(Duration::from_secs(2)).ok()?;
+    heartbeat_age(&conn)
+}
+
+/// The `makibad` of the dispatcher row, when it stopped without recording it (Issue 563).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unrecorded {
+    pub pid: i64,
+    pub started_at: String,
+    pub heartbeat_at: Option<String>,
+}
+
+/// The dispatcher row's `makibad`, when no `dispatcher_stopped` of its pid came at or after its
+/// `started_at` and no `dispatcher_stop_unrecorded` names it yet. Asked only while no `makibad`
+/// holds the lock: the row is then the last one that got as far as writing it.
+pub fn unrecorded_stop(conn: &Connection) -> rusqlite::Result<Option<Unrecorded>> {
+    conn.query_row(
+        "SELECT d.pid, d.started_at, d.heartbeat_at FROM dispatcher d
+         WHERE d.id = 1 AND d.pid IS NOT NULL AND d.started_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'dispatcher_stopped'
+                 AND json_extract(e.payload_json, '$.pid') = d.pid AND e.occurred_at >= d.started_at)
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'dispatcher_stop_unrecorded'
+                 AND json_extract(e.payload_json, '$.pid') = d.pid
+                 AND json_extract(e.payload_json, '$.started_at') = d.started_at)",
+        [],
+        |r| {
+            Ok(Unrecorded {
+                pid: r.get(0)?,
+                started_at: r.get(1)?,
+                heartbeat_at: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn main(as_json: bool) -> ExitCode {
     let path = crate::daemon::state_dir().join("state.db");
     if as_json {
@@ -1105,18 +1157,21 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     };
     let fresh = age < STALE.as_secs_f64();
     let pid = pid.map_or("unknown".to_string(), |p| p.to_string());
-    let mut text = format!(
+    // A stale heartbeat is the first thing the person reads (Issue 563).
+    let mut text = if fresh {
+        String::new()
+    } else {
+        "makibad is not running: the heartbeat is older than 30 s\n".to_string()
+    };
+    text.push_str(&format!(
         "makibad: pid {pid}\nheartbeat: {beat} ({age:.0} s ago)\nsubscribed: {}\n",
         if subscribed == 1 { "yes" } else { "no" }
-    );
+    ));
     text.push_str(&mode_line(
         recorded_mode(&conn, fresh).as_deref(),
         fresh,
         mode_here(),
     ));
-    if !fresh {
-        text.push_str("makibad is not running: the heartbeat is older than 30 s\n");
-    }
     // The secretary (Issue 43): its newest launch, and how the person attaches to it.
     let stage: Option<String> = conn
         .query_row(
