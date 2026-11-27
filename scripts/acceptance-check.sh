@@ -16,9 +16,9 @@
 #     `cargo test --locked --test <name>`; a Python test is tests/**/test_*.py (a directory: every
 #     test_*.py under it), run as `python3 -m pytest <path>`. See docs/acceptance-check.md;
 #   - the test commit is not a merge, and the branch's own commits after it leave the declared
-#     paths, every path the test commit changed, the test infrastructure under tests/ (gate.rs
-#     INFRA_NAMES, INFRA_PREFIXES), every file under tests/ that is not a test target and not a
-#     test helper, .github/ and this script unchanged. A test helper the test commit left alone may change, be
+#     paths, every path the test commit changed, the test infrastructure by file name wherever it
+#     is (gate.rs INFRA_NAMES, INFRA_PREFIXES; Issue 576), every file under tests/ that is not a
+#     test target and not a test helper, .github/ and this script unchanged. A test helper the test commit left alone may change, be
 #     added or be deleted; each is named before the last line, and the person accepts it at the
 #     merge (Issue 514). A base merge counts only for its own resolution: what differs from the
 #     clean merge of its parents, or a conflict not resolved as the branch's own version.
@@ -183,12 +183,13 @@ fi
 # the base) counts only for its own resolution (merge_own). Names are read unquoted and kept
 # NUL-delimited to the end (-z), so a non-ASCII helper is still seen and a name holding a newline
 # stays one name. A failed git fails the function (pipefail), so it is not read as "nothing changed".
-# The gate's test-infrastructure names (src/daemon/gate.rs INFRA_NAMES, INFRA_PREFIXES): a helper
-# whose file name is one of them stays protected. tests/test_acceptance_helper_change.py checks
+# The gate's test-infrastructure names (src/daemon/gate.rs INFRA_NAMES, INFRA_PREFIXES): a file
+# whose name is one of them stays protected wherever it is (a root pytest.ini, a helper
+# tests/common/conftest.py; Issue 576). tests/test_acceptance_helper_change.py checks
 # that the two lists are equal.
 INFRA_NAMES='conftest.py pytest.ini .pytest.ini pytest.toml .pytest.toml pyproject.toml setup.cfg tox.ini package.json'
 INFRA_PREFIXES='vitest.config. vitest.workspace. vite.config.'
-is_infra() { # by file name, as gate.rs is_infra; rule 4 asks it only of files under tests/
+is_infra() { # by file name at any depth, as gate.rs is_infra
   local n=${1##*/} x
   for x in $INFRA_NAMES; do [ "$n" = "$x" ] && return 0; done
   for x in $INFRA_PREFIXES; do case $n in "$x"*) return 0 ;; esac; done
@@ -237,9 +238,10 @@ for c in $(printf '%s\n' "$commits" | tail -n +2); do
   done
 done
 # Rule 4 (Issue 514): protected are the declared paths, every path the test commit changed,
-# .github/, this script, the test infrastructure under tests/ and every other file under tests/
-# that is not a test target; a test helper by place that the test commit left alone may change, be added or be
-# deleted, and is named before the last line (the person accepts it at the merge).
+# .github/, this script, the test infrastructure by file name at any depth (Issue 576) and every
+# other file under tests/ that is not a test target; a test helper by place that the test commit
+# left alone may change, be added or be deleted, and is named before the last line (the person
+# accepts it at the merge).
 declare -A in_test_commit=()
 helpers_changed=()
 list=$(mktemp) || exit 2
@@ -252,9 +254,9 @@ own_changes >"$list" || no "cannot list the changes of the commits after the tes
 while IFS= read -r -d '' f; do
   [ -n "$f" ] || continue
   if is_declared "$f" || [ -n "${in_test_commit[$f]+x}" ] || under "$f" .github ||
-    [ "$f" = scripts/acceptance-check.sh ] || { is_test_file "$f" && is_infra "$f"; } ||
+    [ "$f" = scripts/acceptance-check.sh ] || is_infra "$f" ||
     { is_test_file "$f" && ! is_helper "$f"; }; then
-    no "$f changed after the test commit (declared tests, paths the test commit changed, test infrastructure under tests/, test files outside tests/common/ and tests/fixtures/, .github/ and this script are protected)"
+    no "$f changed after the test commit (declared tests, paths the test commit changed, test infrastructure by file name anywhere, test files outside tests/common/ and tests/fixtures/, .github/ and this script are protected)"
   elif is_helper "$f"; then
     helpers_changed+=("$f")
   fi
