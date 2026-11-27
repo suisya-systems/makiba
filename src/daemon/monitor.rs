@@ -14,17 +14,27 @@
 //! its arrival time as `occurred_at`, for the retry window (`RETRY`, Issue 181); after it the event
 //! is dropped, said in the log and recorded as `observation_lost` once the database takes writes.
 //! A `Resync` is never dropped.
+//!
+//! Test seam (Issue 571): with `MAKIBA_WRITE_LOST_MARK` naming a file, the monitor appends to it,
+//! when it drops an event, one JSON line per record it will write as `observation_lost`, before
+//! that record is written. A test that holds the write lock reads it to know the event is dropped,
+//! which nothing in the ledger can show while the lock is held.
 
 use crate::base::{BaseEvent, BlockKind, State, Terminal, TerminalEvent, TerminalRef};
 use crate::db::writer::{NewEvent, StateWriter};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::io::Write;
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// How long an event the database refused is tried again before it is recorded as lost.
 pub const RETRY: Duration = Duration::from_secs(60);
 /// The test seam that sets the retry window in milliseconds (spec section 10).
 pub const RETRY_ENV: &str = "MAKIBA_WRITE_RETRY_MS";
+
+/// The test seam that names the file the monitor marks a dropped event in (spec section 2).
+pub const LOST_MARK_ENV: &str = "MAKIBA_WRITE_LOST_MARK";
 
 /// The retry window: the seam when it holds a number, otherwise `RETRY`.
 pub fn retry_from_env() -> Duration {
@@ -71,6 +81,8 @@ pub struct Monitor {
     /// `observation_lost` payloads not yet written.
     lost: Vec<Value>,
     window: Duration,
+    /// The file a dropped event is marked in (`LOST_MARK_ENV`), if set.
+    mark: Option<PathBuf>,
 }
 
 /// The identity of a terminal in the records: its `makiba.spawn` tag as it is, `None` without one.
@@ -131,6 +143,9 @@ impl Monitor {
             queue: VecDeque::new(),
             lost: Vec::new(),
             window,
+            mark: std::env::var_os(LOST_MARK_ENV)
+                .filter(|v| !v.is_empty())
+                .map(PathBuf::from),
         }
     }
 
@@ -185,14 +200,19 @@ impl Monitor {
                     "makibad: lost a terminal event after {} ms of retries: {e}",
                     since.elapsed().as_millis()
                 );
-                let lost = self.mem.unwritten(&self.org, &q.event);
-                self.lost
-                    .extend(lost.into_iter().map(|(kind, task, role, spawn)| {
+                let lost: Vec<Value> = self
+                    .mem
+                    .unwritten(&self.org, &q.event)
+                    .into_iter()
+                    .map(|(kind, task, role, spawn)| {
                         json!({
                             "kind": kind, "task_id": task, "role": role, "spawn_id": spawn,
                             "observed_at": q.at, "error": e.to_string(),
                         })
-                    }));
+                    })
+                    .collect();
+                self.mark_dropped(&lost);
+                self.lost.extend(lost);
                 continue;
             }
             if first {
@@ -201,6 +221,26 @@ impl Monitor {
             break;
         }
         self.write_lost(w);
+    }
+
+    /// The test seam: one line per record of a dropped event, appended to the mark file if one is
+    /// named. A mark that cannot be written is said in the log; the drop goes on.
+    fn mark_dropped(&self, lost: &[Value]) {
+        let Some(path) = &self.mark else {
+            return;
+        };
+        let text: String = lost.iter().map(|p| format!("{p}\n")).collect();
+        let written = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .and_then(|mut f| f.write_all(text.as_bytes()));
+        if let Err(e) = written {
+            eprintln!(
+                "makibad: cannot mark a dropped event in {}: {e}",
+                path.display()
+            );
+        }
     }
 
     /// The losses recorded so far, each once; one the database refuses waits for the next tick.
