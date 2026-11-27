@@ -452,3 +452,22 @@ in this text: the blocker, that the reader had only a delta against a note not o
 (answered by committing this note whole); a no-op update of any base would release the hold (rule
 5 (a) requires `pr_base`); a run without a code worktree cannot run `update` (its own notice and
 rule 5 (b)).
+
+## 11. The merge with Issue 573 (docs/design/queue-overlap.md)
+
+Issue 573 landed first, with a new verdict `hold` (reason `overlap`) and a new `update` reason
+(`overlap_landed`). Section 2's reading, written before it, holds: both write the same
+`queue_readiness` record and meet only in `ready_candidates` and the record's field list. The
+merge keeps both:
+
+- `ready_candidates` rule 5: a newest record `ready` is watched and `hold` is held (573); one of
+  reason `unmergeable`, `waiting` false, released by `wait_released`, is a first judgement (no
+  base tip covered, no `ready` id, not held), so its peers are found as for any first judgement
+  and it may be judged `ready`, `update` or `hold`. Every other newest record ends nothing.
+- A waiting or closing `unmergeable` record is not `ready`, so the pull request it names is no
+  one's peer, and its queue act is ended by the `merge_dequeued`, so it is not a queued peer
+  either.
+- `door::merge_check` refuses `update` and `hold` alike, so the head stays out of the queue
+  during the wait and after it until judged again.
+- `recovering` keeps a dequeued pull request followed until a `ready` or `unknown` record of it
+  is a day old; a head held by 573 stays followed meanwhile, which a held head needs.

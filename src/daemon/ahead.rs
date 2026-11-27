@@ -370,14 +370,26 @@ fn landing(c: &Connection, task: &str) -> rusqlite::Result<(Option<Value>, Optio
 /// Withdraw the questions `settle` wrote for the waiting run `task` that are still open: about
 /// the task of `issue`, or all of them.
 fn withdraw(w: &StateWriter, task: &str, issue: Option<i64>) -> Result<()> {
-    w.conn().execute(
-        "UPDATE pending SET status = 'withdrawn',
-           context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
-         WHERE status IN ('open', 'escalated')
+    const OPEN: &str = "FROM pending WHERE status IN ('open', 'escalated')
            AND json_extract(context_json, '$.ahead_task') = ?1
-           AND (?2 IS NULL OR json_extract(context_json, '$.ahead_issue') = ?2)",
+           AND (?2 IS NULL OR json_extract(context_json, '$.ahead_issue') = ?2)";
+    // Read first (Issue 578): a write statement takes the write lock even when it changes nothing,
+    // and `settle` runs on every pass of the belt.
+    let any: bool = w.conn().query_row(
+        &format!("SELECT EXISTS (SELECT 1 {OPEN})"),
         rusqlite::params![task, issue],
+        |r| r.get(0),
     )?;
+    if any {
+        w.conn().execute(
+            &format!(
+                "UPDATE pending SET status = 'withdrawn',
+                   context_json = json_set(context_json, '$.withdrawn_by', 'makibad')
+                 WHERE id IN (SELECT id {OPEN})"
+            ),
+            rusqlite::params![task, issue],
+        )?;
+    }
     Ok(())
 }
 
