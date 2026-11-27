@@ -327,6 +327,9 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     let stopped = matches!(&probe, Some(Err(BaseError::Unavailable(d))) if d.kind == "connect");
     let dir = daemon::state_dir();
     std::fs::create_dir_all(&dir).map_err(unavailable("cannot create the state folder"))?;
+    // Issue 563: a stalled makibad may hold the ledger's write lock, so it is named before any
+    // ledger write, and `up` writes and starts nothing.
+    refuse_stalled(&dir)?;
     // The key file is written under the ledger's lock; a try that waited finds it there and keeps it.
     with_ledger(&dir, |w| {
         person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
@@ -371,7 +374,10 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
         println!("resumed: {}", resumed.join(" "));
     }
     if daemon_running(&dir)? {
-        println!("makibad: already running");
+        match stalled(&dir) {
+            Some((pid, age)) => println!("{}", stall_line(pid, age)),
+            None => println!("makibad: already running"),
+        }
         if secretary {
             // The running makibad's secretary pass takes the row up (Issue 46): it launches one
             // unless one runs, as at its start.
@@ -391,6 +397,15 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
             println!("secretary: not asked (--no-secretary)");
         }
     } else {
+        if let Some(u) = unrecorded(&dir) {
+            println!(
+                "makibad: the previous makibad (pid {}) stopped without recording it; its last \
+                 heartbeat was {}. How it stopped is not recorded: a kill, the machine stopping, \
+                 or a crash (see makibad.log and the system journal)",
+                u.pid,
+                u.heartbeat_at.as_deref().unwrap_or("unknown")
+            );
+        }
         start_daemon(&dir, secretary)?;
         println!("makibad: started");
         println!(
@@ -403,6 +418,66 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
         );
     }
     Ok(())
+}
+
+fn read_only(dir: &Path) -> Option<rusqlite::Connection> {
+    rusqlite::Connection::open_with_flags(
+        dir.join("state.db"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    )
+    .ok()
+}
+
+/// A stalled `makibad` may hold the ledger's write lock, so it is named before any ledger write
+/// and `up` writes and starts nothing (Issue 563). Reads only.
+fn refuse_stalled(dir: &Path) -> Result<(), Failure> {
+    if daemon_running(dir)?
+        && let Some((pid, age)) = stalled(dir)
+    {
+        println!("{}", stall_line(pid, age));
+        return Err((
+            ErrorKind::Unavailable,
+            "makibad is stalled: up wrote and started nothing".into(),
+        ));
+    }
+    Ok(())
+}
+
+/// What `up` says of a stalled `makibad` and the way out (Issue 563).
+fn stall_line(pid: i64, age: f64) -> String {
+    format!(
+        "makibad: pid {pid} holds its lock but its heartbeat is {age:.0} s old: its tick has \
+         stopped. Run makiba down; if it says makibad is still running after 20 s, kill -KILL \
+         {pid}; then makiba up"
+    )
+}
+
+/// The running `makibad`'s pid and heartbeat age when the heartbeat is stale (Issue 563). Only
+/// when the dispatcher row names the pid in the lock file: a `makibad` that has taken the lock
+/// but not yet written its row is starting, not stalled, and the row's pid may be an old one.
+fn stalled(dir: &Path) -> Option<(i64, f64)> {
+    let holder: i64 = std::fs::read_to_string(dir.join("makibad.lock"))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()?;
+    let conn = read_only(dir)?;
+    let age = crate::status_local::heartbeat_age(&conn)?;
+    if age < crate::status_local::STALE.as_secs_f64() {
+        return None;
+    }
+    let pid: i64 = conn
+        .query_row("SELECT pid FROM dispatcher WHERE id = 1", [], |r| r.get(0))
+        .ok()?;
+    (pid == holder).then_some((pid, age))
+}
+
+/// The previous `makibad` when it stopped without recording it (Issue 563); asked only while no
+/// `makibad` holds the lock.
+fn unrecorded(dir: &Path) -> Option<crate::status_local::Unrecorded> {
+    crate::status_local::unrecorded_stop(&read_only(dir)?)
+        .ok()
+        .flatten()
 }
 
 /// A new launch for every `suspended` run with no launch under way (Issue 41): copied from its
@@ -461,5 +536,62 @@ pub fn main(args: &[String]) -> ExitCode {
             eprintln!("makiba: {}: {message}", kind.as_str());
             ExitCode::from(kind.exit_code() as u8)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A state folder whose dispatcher row names `row_pid` with a heartbeat a minute old, and
+    /// whose lock file holds `lock_pid`.
+    fn folder(row_pid: i64, lock_pid: i64) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO dispatcher (id, pid, started_at, heartbeat_at, subscribed)
+                 VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now','-120 seconds'),
+                         strftime('%Y-%m-%dT%H:%M:%fZ','now','-60 seconds'), 1)",
+                [row_pid],
+            )
+            .unwrap();
+        std::fs::write(dir.path().join("makibad.lock"), lock_pid.to_string()).unwrap();
+        dir
+    }
+
+    /// Issue 563: a stale row is a stall only when it is the lock holder's; a makibad that has
+    /// taken the lock but not yet written its row is starting, and the row's pid is not named.
+    #[test]
+    fn a_stale_row_of_another_pid_than_the_lock_holder_is_no_stall() {
+        let starting = folder(111, 222);
+        assert_eq!(stalled(starting.path()), None);
+        let stalled_one = folder(333, 333);
+        let (pid, age) = stalled(stalled_one.path()).expect("a stall");
+        assert_eq!(pid, 333);
+        assert!(age >= 59.0, "{age}");
+    }
+
+    /// Issue 563: while a stalled makibad holds its lock and the ledger's write lock, up names it
+    /// at once, before any ledger write could wait on that lock.
+    #[test]
+    fn a_stall_is_named_while_the_ledger_is_locked() {
+        let dir = folder(444, 444);
+        let lock = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(dir.path().join("makibad.lock"))
+            .unwrap();
+        lock.try_lock().unwrap();
+        let writer = rusqlite::Connection::open(dir.path().join("state.db")).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let asked = Instant::now();
+        let refused = refuse_stalled(dir.path()).expect_err("a stalled makibad is refused");
+        assert!(
+            asked.elapsed() < Duration::from_secs(2),
+            "it waited on the ledger"
+        );
+        assert_eq!(refused.0, ErrorKind::Unavailable);
+        writer.execute_batch("ROLLBACK").unwrap();
     }
 }

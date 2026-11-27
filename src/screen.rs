@@ -648,12 +648,18 @@ fn place_words(c: &Ctx, place: &str) -> String {
 /// `repo` is the repository of the item's project, when recorded.
 fn detail(c: &Ctx, item: &Value, repo: Option<&str>) -> Value {
     let task = str_of(&item["task_id"]);
-    // The item's pull request: the row of its task, else the row of its own number in its
-    // project's repository. pull_requests[] lists one row per pull request, so a second run on
-    // a shared open pull request (no `items[].pr` yet) finds none: the read surface lacks the
-    // link (screen.md section 11).
+    // The item's pull request: the row of its current pull request (`current_repo`,
+    // `current_pr`, Issue 569: also a second run on a shared open pull request, which
+    // pull_requests[] lists once, with another task), else the row of its task, else the row of
+    // its own landed number in its project's repository.
     let prs = arr(&c.st["pull_requests"]);
-    let by_task = task.and_then(|t| prs.iter().find(|p| p["task_id"] == t));
+    let by_current = match (str_of(&item["current_repo"]), item["current_pr"].as_i64()) {
+        (Some(r), Some(nr)) => prs
+            .iter()
+            .find(|p| p["pr"] == nr && str_of(&p["repo"]).is_some_and(|pr| eq_repo(pr, r))),
+        _ => None,
+    };
+    let by_task = by_current.or_else(|| task.and_then(|t| prs.iter().find(|p| p["task_id"] == t)));
     let by_number = || {
         let (Some(r), Some(nr)) = (repo, item["pr"].as_i64()) else {
             return None;
