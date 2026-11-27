@@ -65,8 +65,9 @@ written; every launched code run has one, `prepare.rs`), where:
 4. the newest merge read of that head (`self.merges`, begun after the CI result was received, as
    `merge_of` requires; after a restart, any read) has a computed class other than `draft`;
 5. the head has no `queue_readiness` yet (**first judgement**), or its newest one is `ready`
-   (**watched**). A head decided `update` or `unknown` is not judged again; its next judgement is
-   of the new head.
+   (**watched**), or (Issue 573) `hold` (**held**: it conflicts with a pull request before it in
+   the queue's order, docs/design/queue-overlap.md). A head decided `update` or `unknown` is not
+   judged again; its next judgement is of the new head.
 
 ### 3.2 The readers (git, on threads)
 
@@ -111,6 +112,10 @@ the reader stopped by the pass):
 | nothing counts, watching | none | nothing; `covered` is set to `B` in memory |
 | `stale` | none | nothing (a newer head is coming) |
 | git failed | none, or `unknown` | nothing, read again next interval; after 300 s from the head's first failure in this process (the PR watch's budget) the event with verdict `unknown` and one notice |
+
+Issue 573 adds the rows of a reading against the head's peers (`hold`, and `ready` for a held head
+whose peers no longer conflict) and the update of a held head when a pull request it names lands:
+docs/design/queue-overlap.md section 3.3 and 3.5.
 
 A reading is decided on the head's merge state at the time it is written (the newest read of
 that head, begun after its CI result): a draft or a state not computed writes nothing (the reader
