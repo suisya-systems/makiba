@@ -490,8 +490,9 @@ pub fn resume(w: &StateWriter) -> crate::db::Result<Vec<String>> {
 }
 
 /// `resume`, with the relaunches taken by `actor`, of the runs `only` when given (every suspended
-/// run otherwise): `makibad` resumes the runs it suspended after a core restart it saw (Issue
-/// 579, `daemon/recover.rs`).
+/// run otherwise, and then the session row goes back to `ACTIVE`): `makibad` resumes the runs it
+/// suspended after a core restart it saw (Issue 579, `daemon/recover.rs`), and leaves the session
+/// row as it is.
 pub fn resume_as(
     w: &StateWriter,
     actor: &str,
@@ -516,13 +517,16 @@ pub fn resume_as(
         for (_, from, conversation) in &runs {
             daemon::launch::add_relaunch(w, *from, conversation.as_deref(), actor)?;
         }
-        w.conn().execute(
-            "UPDATE org_sessions SET status = 'ACTIVE',
-               resumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = 1 AND status = 'SUSPENDED'",
-            [],
-        )?;
+        // The session row is the whole organization's: only a resume of every run writes it.
+        if only.is_none() {
+            w.conn().execute(
+                "UPDATE org_sessions SET status = 'ACTIVE',
+                   resumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = 1 AND status = 'SUSPENDED'",
+                [],
+            )?;
+        }
         Ok(runs.into_iter().map(|(task, _, _)| task).collect())
     })
 }

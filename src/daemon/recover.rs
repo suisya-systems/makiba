@@ -677,6 +677,34 @@ mod tests {
         }
     }
 
+    /// Issue 579: a restart's suspend and resume leave the session row as it is.
+    #[test]
+    fn a_restart_leaves_the_session_row() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        w.conn()
+            .execute(
+                "UPDATE org_sessions SET status = 'SUSPENDED', resumed_at = NULL WHERE id = 1",
+                [],
+            )
+            .unwrap();
+        let row = |w: &StateWriter| -> (String, Option<String>, Option<String>) {
+            w.conn()
+                .query_row(
+                    "SELECT status, resumed_at, suspended_at FROM org_sessions WHERE id = 1",
+                    [],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                )
+                .unwrap()
+        };
+        let before = row(&w);
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(workers([false, false])))
+            .unwrap();
+        assert!(last_restart(&w));
+        assert_eq!(launches(&w, "t1").len(), 2);
+        assert_eq!(row(&w), before);
+    }
+
     /// Issue 579: two programs that finished on their own (an exit code) while unsubscribed are
     /// no restart: both runs fail by the gone anomaly.
     #[test]
