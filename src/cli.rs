@@ -90,6 +90,41 @@ pub fn approval_staging_path() -> PathBuf {
     PathBuf::from(staged)
 }
 
+/// The namespace an acceptance approval is signed in, and the head of the allowed-signers line.
+pub const APPROVAL_NAMESPACE: &str = "makiba-acceptance-approval";
+
+/// The approval key's line for `.github/acceptance-approvers`, from the private key itself
+/// (`ssh-keygen -y`): `makiba-owner namespaces="makiba-acceptance-approval" <type> <base64>`.
+/// Here, not in `daemon::person_key`, so that the person's command reaches no database module.
+pub fn approval_signer_line(path: &Path) -> Result<String, String> {
+    let out = std::process::Command::new("ssh-keygen")
+        .arg("-y")
+        .arg("-f")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ssh-keygen cannot read {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = text.split_whitespace().take(2).collect();
+    if fields.len() < 2 {
+        return Err(format!(
+            "ssh-keygen printed no public key for {}",
+            path.display()
+        ));
+    }
+    Ok(format!(
+        "makiba-owner namespaces=\"{APPROVAL_NAMESPACE}\" {}",
+        fields.join(" ")
+    ))
+}
+
 /// `makiba approval-key`: the approval key's line for `.github/acceptance-approvers`, read from
 /// the key; it makes, changes and removes nothing.
 pub fn approval_key_main() -> ExitCode {
@@ -101,7 +136,7 @@ pub fn approval_key_main() -> ExitCode {
         );
         return exit(ErrorKind::NotFound.exit_code());
     }
-    match crate::daemon::person_key::approval_signer_line(&path) {
+    match approval_signer_line(&path) {
         Ok(line) => {
             println!("{line}");
             exit(EXIT_OK)

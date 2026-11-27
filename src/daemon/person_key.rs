@@ -18,8 +18,7 @@ use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-/// The namespace an acceptance approval is signed in, and the head of the allowed-signers line.
-pub const APPROVAL_NAMESPACE: &str = "makiba-acceptance-approval";
+use crate::cli::APPROVAL_NAMESPACE;
 
 /// The folder of the key file `path`, made when absent and set to mode 0700.
 fn private_folder_of<'a>(path: &'a Path, what: &str) -> Result<&'a Path, String> {
@@ -199,37 +198,6 @@ pub fn approval_key_literals() -> Vec<String> {
         .map(String::from)
         .collect();
     std::iter::once(whole).chain(lines).collect()
-}
-
-/// The approval key's line for `.github/acceptance-approvers`, from the private key itself
-/// (`ssh-keygen -y`): `makiba-owner namespaces="makiba-acceptance-approval" <type> <base64>`.
-pub fn approval_signer_line(path: &Path) -> Result<String, String> {
-    let out = Command::new("ssh-keygen")
-        .arg("-y")
-        .arg("-f")
-        .arg(path)
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
-    if !out.status.success() {
-        return Err(format!(
-            "ssh-keygen cannot read {}: {}",
-            path.display(),
-            String::from_utf8_lossy(&out.stderr).trim()
-        ));
-    }
-    let text = String::from_utf8_lossy(&out.stdout);
-    let fields: Vec<&str> = text.split_whitespace().take(2).collect();
-    if fields.len() < 2 {
-        return Err(format!(
-            "ssh-keygen printed no public key for {}",
-            path.display()
-        ));
-    }
-    Ok(format!(
-        "makiba-owner namespaces=\"{APPROVAL_NAMESPACE}\" {}",
-        fields.join(" ")
-    ))
 }
 
 /// The ids of the live agents (a key of theirs not revoked) whose launch's settings file in

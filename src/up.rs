@@ -443,7 +443,7 @@ fn approval_key(dir: &Path, on_base: Result<Vec<String>, String>) {
         Some(c) => person_key::agents_without_approval_deny(&c, &dir.join("settings"), &key)
             .map_err(|e| format!("cannot read the agents of the ledger: {e}")),
     };
-    let print = |how: &str| match person_key::approval_signer_line(&key) {
+    let print = |how: &str| match crate::cli::approval_signer_line(&key) {
         Ok(line) => println!(
             "approval key: {} ({how}); its line for .github/acceptance-approvers: {line}",
             key.display()
