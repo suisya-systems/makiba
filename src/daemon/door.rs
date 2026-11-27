@@ -445,6 +445,13 @@ impl Door {
                 Ok(None) => {}
             }
         }
+        // Issue 578: a peek reads the base, and the answer of a prompt reads it and presses its
+        // key, with no transaction open, so the base's waits never hold the write lock. The
+        // door's lock stays held: no other request of the door comes between.
+        let peeked = (v == Verb::Peek).then(|| peek(&w, &*self.base, &args));
+        if v == Verb::Answer && matches!(question(&w, &args), Ok(None)) {
+            return answer_prompt(&w, &*self.base, &actor, &args, idem);
+        }
         // The verb's writes and its record are one transaction (a verb's own transaction joins it).
         // IMMEDIATE takes the write lock first: a deferred one that reads, then writes after
         // makibad's loop has written, fails at once with `database is locked` (WAL snapshot).
@@ -459,16 +466,10 @@ impl Door {
             Verb::Candidate => candidate(&w, &actor, &args, &mut undo),
             Verb::Goal => goal(&w, &actor, &args, &mut undo),
             Verb::Dispatch => dispatch(&w, &self.agent, &actor, &args, issue.as_ref()),
-            _ => run(
-                &w,
-                &*self.base,
-                &self.agent,
-                &actor,
-                role,
-                v,
-                &args,
-                base_merge,
-            ),
+            Verb::Peek => {
+                peeked.unwrap_or_else(|| Err(internal("peek is read by the door's handle")))
+            }
+            _ => run(&w, &self.agent, &actor, role, v, &args, base_merge),
         };
         if r.is_err() && w.rollback().is_ok() {
             let _ = begin_as(&w, &label);
@@ -694,7 +695,6 @@ fn record(
 #[allow(clippy::too_many_arguments)]
 fn run(
     w: &StateWriter,
-    base: &dyn Base,
     agent: &str,
     actor: &str,
     role: Role,
@@ -706,9 +706,10 @@ fn run(
         // Its Issue is read before the transaction (Issue 317): `handle` calls `dispatch`.
         Verb::Dispatch => Err(internal("dispatch is handled by the door's handle")),
         Verb::Status => status(w),
-        Verb::Peek => peek(w, base, args),
+        // Read before the transaction (Issue 578): `handle` calls `peek`.
+        Verb::Peek => Err(internal("peek is read by the door's handle")),
         Verb::Pending => pending(w, args),
-        Verb::Answer => answer(w, base, actor, args),
+        Verb::Answer => answer(w, actor, args),
         Verb::Renew => renew(w, args),
         Verb::Handover => handover(w, args),
         Verb::Send => {
@@ -1194,21 +1195,50 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
     }))
 }
 
-/// `answer` (spec sections 7 and 12). A question: its answer is queued to the worker and the
-/// entry is answered, in the caller's transaction. A prompt (M6-8): exactly one key, and only
-/// while the same episode's prompt is on a fresh read of the screen; any difference is `stale`
-/// and nothing is pressed.
-fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Response {
-    if let Some(q) = question(w, args)? {
-        // A parked worker is woken by its answer, named as such (Issue 283).
-        if q.to != crate::spec::AGENT_SECRETARY
-            && let Some(task) = &q.task
-        {
-            super::park::unpark(w, task, "answer", json!(q.id)).map_err(internal)?;
-        }
-        let id = store_message(w, actor, &q.to, "message", q.task.as_deref(), &q.body)?;
-        return q.answered(w, actor, id);
+/// `answer` (spec sections 7 and 12) of a question: its answer is queued to the worker and the
+/// entry is answered, in the caller's transaction. The answer of a prompt is `answer_prompt`,
+/// called by `handle` before any transaction (Issue 578).
+fn answer(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let Some(q) = question(w, args)? else {
+        return Err(internal(
+            "the answer of a prompt is handled by the door's handle",
+        ));
+    };
+    // A parked worker is woken by its answer, named as such (Issue 283).
+    if q.to != crate::spec::AGENT_SECRETARY
+        && let Some(task) = &q.task
+    {
+        super::park::unpark(w, task, "answer", json!(q.id)).map_err(internal)?;
     }
+    let id = store_message(w, actor, &q.to, "message", q.task.as_deref(), &q.body)?;
+    q.answered(w, actor, id)
+}
+
+/// What the answer of a prompt read before its reservation: the entry, its episode and the key.
+struct Pressing {
+    id: i64,
+    task: String,
+    sum: String,
+    created: String,
+    spawn: String,
+    answer: String,
+    terminal: crate::base::TerminalRef,
+    key: &'static str,
+}
+
+fn prompt_stale(id: i64, why: String) -> DoorError {
+    refuse(
+        ErrorKind::Stale,
+        format!("pending entry {id}: {why}; nothing was typed"),
+        "list the pending entries again (an entry whose prompt changed can be withdrawn; \
+         makibad then records the prompt shown now)",
+    )
+}
+
+/// The reads of a prompt's answer (M6-8), with no transaction open: the entry, the same episode
+/// (the launch recorded, no status since the entry), the terminal blocked on that prompt and the
+/// prompt on a fresh read of its screen. Any difference is `stale`.
+fn prompt_read(w: &StateWriter, base: &dyn Base, args: &Value) -> Result<Pressing, DoorError> {
     let id = id_arg(args)?;
     let answer = str_arg(args, "answer")?;
     let (task, sum, created): (String, Option<String>, String) = w
@@ -1220,31 +1250,26 @@ fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Respon
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(internal)?;
-    let stale = |why: String| {
-        refuse(
-            ErrorKind::Stale,
-            format!("pending entry {id}: {why}; nothing was typed"),
-            "list the pending entries again (an entry whose prompt changed can be withdrawn; \
-             makibad then records the prompt shown now)",
-        )
-    };
     let base_err =
         |e: crate::base::BaseError| refuse(ErrorKind::Unavailable, format!("the base: {e}"), "");
     let Some(sum) = sum else {
-        return Err(stale("it holds no recognized prompt".into()));
+        return Err(prompt_stale(id, "it holds no recognized prompt".into()));
     };
-    // The same episode: the launch is the one recorded, and no status came since the entry.
     let scene = super::prompts::scene(w, &task).map_err(internal)?;
     let Some(scene) = scene.filter(|s| s.blocked_since.as_ref().is_some_and(|at| *at <= created))
     else {
-        return Err(stale(format!("{task} is no longer blocked on that prompt")));
+        return Err(prompt_stale(
+            id,
+            format!("{task} is no longer blocked on that prompt"),
+        ));
     };
     let t = match super::delivery::find_terminal(base, &worker_agent_id(&task)) {
         Ok(Some(t)) if super::prompts::blocked_terminal(&t, &scene.spawn) => t,
         Ok(_) => {
-            return Err(stale(format!(
-                "{task}'s terminal is not blocked on that prompt"
-            )));
+            return Err(prompt_stale(
+                id,
+                format!("{task}'s terminal is not blocked on that prompt"),
+            ));
         }
         Err(e) => return Err(base_err(e)),
     };
@@ -1255,40 +1280,201 @@ fn answer(w: &StateWriter, base: &dyn Base, actor: &str, args: &Value) -> Respon
         .recognize_prompt(&screen)
         .filter(|v| sha256_hex(&v.text) == sum)
     else {
-        return Err(stale(format!(
-            "the prompt on {task}'s screen is not the one recorded"
-        )));
+        return Err(prompt_stale(
+            id,
+            format!("the prompt on {task}'s screen is not the one recorded"),
+        ));
     };
     let key = if answer == "yes" {
         view.yes_key
     } else {
         view.no_key
     };
-    base.keys(&t.id, &[key]).map_err(base_err)?;
-    let changed = w
-        .conn()
-        .execute(
-            "UPDATE pending SET status = 'answered', answer = ?1, answered_by = ?2,
-               answered_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = ?3 AND status IN ('open','escalated')",
-            params![answer, actor, id],
-        )
-        .map_err(internal)?;
-    if changed != 1 {
-        return Err(internal(format!(
-            "pending entry {id} changed while it was answered"
-        )));
-    }
-    let payload = json!({"pending_id": id, "prompt_sum": sum, "key": key});
-    w.append_event(&NewEvent {
-        kind: "prompt_answered",
-        actor: Some(actor),
-        payload: Some(&payload),
-        run_task_id: Some(&task),
-        ..Default::default()
+    Ok(Pressing {
+        id,
+        task,
+        sum,
+        created,
+        spawn: scene.spawn,
+        answer: answer.to_string(),
+        terminal: t.id,
+        key,
     })
-    .map_err(internal)?;
-    Ok(json!({"id": id, "status": "answered", "key": key}))
+}
+
+/// `request` and its record in one transaction of its own: a refusal of a request whose reads ran
+/// with no transaction open.
+#[track_caller]
+fn record_alone(
+    w: &StateWriter,
+    actor: &str,
+    verb: &str,
+    args: &Value,
+    idem: Option<&str>,
+    r: Response,
+) -> Response {
+    if let Err(e) = begin_as(w, &format!("door {verb}")) {
+        return Err(internal(e));
+    }
+    if !record(w, actor, verb, args, idem, &r) || w.conn().is_autocommit() {
+        let _ = w.rollback();
+        return Err(internal(
+            "the request could not be recorded; nothing was done",
+        ));
+    }
+    if let Err(e) = w.commit() {
+        let _ = w.rollback();
+        return Err(internal(e));
+    }
+    r
+}
+
+/// The `commands` row `id`, recorded `accepted`, finished with `r` (as a typed send's is).
+fn finish_command(w: &StateWriter, id: i64, r: &Response) -> rusqlite::Result<usize> {
+    let status = status_of(r).unwrap_or("failed");
+    w.conn().execute(
+        "UPDATE commands SET status = ?1, result_json = ?2, error_kind = ?3,
+           finished_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?4",
+        params![
+            status,
+            line(r).to_string(),
+            r.as_ref().err().map(|e| e.kind.as_str()),
+            id
+        ],
+    )
+}
+
+/// `answer` of a prompt (M6-8, Issue 578): exactly one key, and only while the same episode's
+/// prompt is on a fresh read of the screen. The base is read and the key pressed with no
+/// transaction open, so its waits never hold the write lock:
+///
+/// 1. the reads (`prompt_read`); a refusal is recorded alone;
+/// 2. the reservation, in one transaction: the entry still open or escalated with the same prompt
+///    and episode, then `answered`, its `prompt_answered`, and the command `accepted` with an
+///    outcome not known (so a retry of the same idem after a crash never presses again). The
+///    prompts pass withdraws only open or escalated entries, so it leaves a reserved one alone;
+/// 3. the key;
+/// 4. the command finished: `done`; or, when the base refused and nothing was pressed, the entry
+///    back to what it was and its event gone, in one transaction; or, when the outcome of the
+///    press is not known, the entry answered and the command `failed`.
+fn answer_prompt(
+    w: &StateWriter,
+    base: &dyn Base,
+    actor: &str,
+    args: &Value,
+    idem: Option<&str>,
+) -> Response {
+    const VERB: &str = "answer";
+    let p = match prompt_read(w, base, args) {
+        Ok(p) => p,
+        Err(e) => return record_alone(w, actor, VERB, args, idem, Err(e)),
+    };
+    let unknown: Response = Err(internal(
+        "the outcome of an earlier answer with this idem is not known; no key is pressed again",
+    ));
+    if let Err(e) = begin_as(w, "door answer") {
+        return Err(internal(e));
+    }
+    let reserved = (|| -> Result<(String, i64, i64), DoorError> {
+        let was: Option<String> = w
+            .conn()
+            .query_row(
+                "SELECT status FROM pending WHERE id = ?1 AND prompt_sum = ?2
+                   AND status IN ('open','escalated')",
+                params![p.id, p.sum],
+                |r| r.get(0),
+            )
+            .optional()
+            .map_err(internal)?;
+        let same = super::prompts::scene(w, &p.task)
+            .map_err(internal)?
+            .is_some_and(|s| {
+                s.spawn == p.spawn && s.blocked_since.as_ref().is_some_and(|at| *at <= p.created)
+            });
+        let Some(was) = was.filter(|_| same) else {
+            return Err(prompt_stale(
+                p.id,
+                format!("the entry or {}'s prompt changed while it was read", p.task),
+            ));
+        };
+        w.conn()
+            .execute(
+                "UPDATE pending SET status = 'answered', answer = ?1, answered_by = ?2,
+                   answered_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = ?3",
+                params![p.answer, actor, p.id],
+            )
+            .map_err(internal)?;
+        let payload = json!({"pending_id": p.id, "prompt_sum": p.sum, "key": p.key});
+        let event = w
+            .append_event(&NewEvent {
+                kind: "prompt_answered",
+                actor: Some(actor),
+                payload: Some(&payload),
+                run_task_id: Some(&p.task),
+                ..Default::default()
+            })
+            .map_err(internal)?;
+        let command = insert_command(w, actor, VERB, args, idem, "accepted", &unknown)
+            .ok_or_else(|| internal("cannot record the request"))?;
+        Ok((was, event, command))
+    })();
+    let (was, event, command) = match reserved {
+        Ok(r) => r,
+        Err(e) => {
+            let _ = w.rollback();
+            return record_alone(w, actor, VERB, args, idem, Err(e));
+        }
+    };
+    if w.conn().is_autocommit() {
+        return Err(internal(
+            "the request could not be recorded; nothing was done",
+        ));
+    }
+    if let Err(e) = w.commit() {
+        let _ = w.rollback();
+        return Err(internal(e));
+    }
+    use crate::base::BaseError;
+    let r: Response = match base.keys(&p.terminal, &[p.key]) {
+        Ok(()) => Ok(json!({"id": p.id, "status": "answered", "key": p.key})),
+        // The base refused: nothing was pressed, so the entry is open again for another answer.
+        Err(
+            e @ (BaseError::StatusMismatch(_)
+            | BaseError::Blocked(_)
+            | BaseError::Finished(_)
+            | BaseError::NotFound(_)),
+        ) => {
+            let r = Err(refuse(
+                ErrorKind::Unavailable,
+                format!("the base: {e}; no key was pressed"),
+                "",
+            ));
+            let undone = w.transaction(|w| {
+                w.conn().execute(
+                    "UPDATE pending SET status = ?1, answer = NULL, answered_by = NULL,
+                       answered_at = NULL WHERE id = ?2 AND status = 'answered'",
+                    params![was, p.id],
+                )?;
+                w.conn()
+                    .execute("DELETE FROM events WHERE id = ?1", [event])?;
+                finish_command(w, command, &r)?;
+                Ok(())
+            });
+            if let Err(e) = undone {
+                eprintln!("makibad: cannot reopen pending entry {}: {e}", p.id);
+            }
+            return r;
+        }
+        Err(e) => Err(internal(format!(
+            "pending entry {}: the outcome of the key press is not known: {e}",
+            p.id
+        ))),
+    };
+    if let Err(e) = finish_command(w, command, &r) {
+        eprintln!("makibad: cannot finish command {command}: {e}");
+    }
+    r
 }
 
 /// A name that becomes a path component and part of an agent id: `[A-Za-z0-9._-]`, not starting

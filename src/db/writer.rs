@@ -43,6 +43,12 @@ fn site(at: &Location<'_>) -> String {
     format!("{}:{}", at.file(), at.line())
 }
 
+/// SQLite refused a statement because another connection holds the write lock, or committed
+/// since this transaction began reading (`SQLITE_BUSY` and its extended codes).
+fn busy(e: &rusqlite::Error) -> bool {
+    e.sqlite_error_code() == Some(rusqlite::ErrorCode::DatabaseBusy)
+}
+
 /// Rolls a transaction back when dropped inside one: on an error, and on a panic that unwinds past it.
 struct RollbackOnDrop<'a>(&'a StateWriter);
 
@@ -276,6 +282,63 @@ impl StateWriter {
             return f(self);
         }
         self.open_at(site(Location::caller()))?;
+        let _rollback = RollbackOnDrop(self);
+        let out = f(self)?;
+        self.commit()?;
+        Ok(out)
+    }
+
+    /// As `transaction`, taking the write lock only when `f` writes (Issue 578): a pass that
+    /// often has nothing to write does not ask for the lock on every tick.
+    ///
+    /// Inside a transaction already open, `f` joins it. Otherwise `f` first runs in a deferred
+    /// transaction, whose reads take no lock. When it returns `Ok` and wrote nothing (the
+    /// connection never became a write transaction, a write that changed no row included), that
+    /// transaction ends and nothing was locked. When it wrote, or a write was refused because
+    /// another connection holds the lock or committed since this one began reading (SQLite then
+    /// answers busy at once, without the busy timeout: Issue 181), it is rolled back and `f`
+    /// runs again in `transaction` (`BEGIN IMMEDIATE`, timed as every write transaction is), so
+    /// what it writes is written as before. `f` may thus run twice: it must change nothing but
+    /// the database. The attempt thrown away held the lock from its first write to its rollback;
+    /// one of `SLOW_HOLD` or more is logged with its site, timed from its begin (an upper bound).
+    #[track_caller]
+    pub fn transaction_read_first<T>(&self, mut f: impl FnMut(&Self) -> Result<T>) -> Result<T> {
+        if !self.conn.is_autocommit() {
+            return f(self);
+        }
+        let at = site(Location::caller());
+        // A transaction SQLite ended by itself left its hold behind: that hold ends now.
+        self.end_hold();
+        self.conn.execute_batch("BEGIN DEFERRED")?;
+        let since = Instant::now();
+        {
+            let _rollback = RollbackOnDrop(self);
+            let out = f(self);
+            let wrote = !self.conn.is_autocommit()
+                && self.conn.transaction_state(None::<&str>)? == rusqlite::TransactionState::Write;
+            match out {
+                Ok(v) if !wrote => {
+                    if !self.conn.is_autocommit() {
+                        self.conn.execute_batch("COMMIT")?;
+                    }
+                    return Ok(v);
+                }
+                Err(crate::db::Error::Sqlite(e)) if !busy(&e) => {
+                    return Err(crate::db::Error::Sqlite(e));
+                }
+                Err(e @ crate::db::Error::InTransaction(_)) => return Err(e),
+                // It wrote, or a write was refused busy: rolled back as `_rollback` drops.
+                _ => {}
+            }
+        }
+        let held = since.elapsed();
+        if held >= SLOW_HOLD {
+            (self.hold_log)(&format!(
+                "state.db: the write lock was held {:.1} s by {at} (read first, from its begin)",
+                held.as_secs_f64(),
+            ));
+        }
+        self.open_at(at)?;
         let _rollback = RollbackOnDrop(self);
         let out = f(self)?;
         self.commit()?;

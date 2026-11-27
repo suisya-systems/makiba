@@ -2334,7 +2334,8 @@ impl Belt {
         }
         // The catch-all: a design-only wait settled by what changed elsewhere (a dependency
         // abandoned or failed), a slot freed where no fill ran (a restart, a launch settled).
-        w.transaction(|w| {
+        // Read first (Issue 578): a pass with nothing to settle or fill takes no write lock.
+        w.transaction_read_first(|w| {
             super::ahead::settle(w)?;
             fill(w, &self.agent)
         })?;
