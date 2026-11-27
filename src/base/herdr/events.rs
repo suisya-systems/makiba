@@ -11,7 +11,7 @@
 //! The field names below are makiba's reading of the base's own descriptions of the method; they
 //! are checked on the real base by `scripts/check-events-wire.sh`.
 
-use super::{Herdr, TAG_ORG, terminal_of};
+use super::{Herdr, LABEL_ARGV, TAG_ORG, terminal_of};
 use crate::base::{
     BaseError, BaseEvent, Detail, EventStream, Terminal, TerminalEvent, TerminalRef,
 };
@@ -363,8 +363,10 @@ fn overlay(kind: &str, data: &Value, t: &mut Terminal) {
         "labels" => {
             let labels = data.get("labels").unwrap_or(data).as_object();
             if let Some(m) = labels {
+                // The argv mark is the base's own label, never a tag (as `terminal_of`).
                 t.tags = m
                     .iter()
+                    .filter(|(k, _)| k.as_str() != LABEL_ARGV)
                     .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                     .collect();
             }
@@ -577,6 +579,12 @@ mod tests {
         let created = json!({"type": "created", "seq": 1, "terminal": "t1",
             "data": {"address": "t1", "name": "n", "state": "live", "labels": {}, "status": null}});
         assert!(notice(created).is_some());
+        let labels = json!({"type": "labels", "terminal": "t1",
+            "data": {"labels": {"makiba.org": "o", LABEL_ARGV: "0123"}}});
+        assert!(
+            matches!(notice(labels), Some(TerminalEvent::StatusChanged(t))
+            if !t.tags.contains_key(LABEL_ARGV) && t.tags["makiba.org"] == "o")
+        );
         let restarted = json!({"type": "restarted", "terminal": "t1", "data": {}});
         assert!(matches!(notice(restarted), Some(TerminalEvent::Exited(t))
             if !t.alive && t.exit_code.is_none() && t.name == "n"));
