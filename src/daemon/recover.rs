@@ -13,7 +13,17 @@
 //!    identity is already a `terminal_gone`. Failing the run is Issue 18's;
 //! 5. an unknown terminal (ours by `makiba.org`, not the secretary or the curator, with no run) is
 //!    reported once to the secretary as an anomaly and a `notice`, and left alone;
-//! 6. `base_resynced`, last.
+//! 6. `base_resynced`, last, with `restart` saying whether step 0 judged a core restart.
+//!
+//! Step 0, first (Issue 579): a core stop and start replaces every kept terminal's program with
+//! the machine's shell (#560 reads each as not alive). The list is judged a core restart when no
+//! terminal of ours in it is alive, at least two are not, and at least one of those has no
+//! `terminal_gone` recorded (it is newly lost). One lost program while another of ours runs is no
+//! restart, and its run fails as before; a lone terminal cannot be judged. On a restart, when a
+//! run is at work (`down::suspend`'s set, or a suspended run with a launch that had a terminal:
+//! the relaunch of an earlier restart), the runs are suspended and resumed as `makiba up` does
+//! (`down::suspend`, `up::resume_as`), in this transaction: the anomaly pass then fails none, and
+//! each relaunch ends the shell its run left. Nothing is kept in memory for it.
 
 use super::monitor::{Memory, append, mine, parse_kind, parse_state, spawn_of};
 use crate::base::{Terminal, TerminalRef};
@@ -60,6 +70,36 @@ fn gone_recorded(
     Ok(last.as_deref() == Some("terminal_gone"))
 }
 
+/// Whether the list shows a core restart (step 0): none of our terminals alive, two or more
+/// not alive, and one of those newly lost.
+fn core_restarted(w: &StateWriter, ours: &[&Terminal]) -> Result<bool> {
+    if ours.len() < 2 || ours.iter().any(|t| t.alive) {
+        return Ok(false);
+    }
+    for t in ours {
+        let (task, role, spawn) = key(t);
+        if !gone_recorded(w, &task, Some(&role), &spawn)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+/// Whether a run is at work for a restart's suspend: `down::suspend`'s set (`in_use`, `review`,
+/// `queued` with a launch under way), or a `suspended` run with a launch that had a terminal (the
+/// relaunch of an earlier restart). `makiba up`'s own relaunches, before a terminal, go on.
+fn at_work(w: &StateWriter) -> Result<bool> {
+    Ok(w.conn().query_row(
+        "SELECT EXISTS (SELECT 1 FROM runs r WHERE r.status IN ('in_use', 'review')
+           OR (r.status = 'queued' AND EXISTS (SELECT 1 FROM run_launch l WHERE l.run_id = r.id
+               AND l.stage IN ('worktree_ready', 'settings_ready', 'launched', 'dialog_passed')))
+           OR (r.status = 'suspended' AND EXISTS (SELECT 1 FROM run_launch l
+               WHERE l.run_id = r.id AND l.stage IN ('launched', 'dialog_passed'))))",
+        [],
+        |r| r.get(0),
+    )?)
+}
+
 fn restore(w: &StateWriter, mem: &mut Memory, t: &Terminal) -> Result<()> {
     let (task, role, spawn) = key(t);
     let status: Option<String> = w
@@ -104,6 +144,13 @@ pub(super) fn rebuild(
 ) -> Result<()> {
     let ours: Vec<&Terminal> = list.iter().filter(|t| mine(org, &t.tags)).collect();
     let present: HashSet<&TerminalRef> = ours.iter().map(|t| &t.id).collect();
+
+    // Step 0: a core restart suspends and resumes the runs at work instead of failing them.
+    let restart = core_restarted(w, &ours)?;
+    if restart && at_work(w)? {
+        crate::down::suspend(w)?;
+        crate::up::resume_as(w, "makibad")?;
+    }
 
     let vanished: Vec<TerminalRef> = mem
         .tracked
@@ -206,7 +253,7 @@ pub(super) fn rebuild(
         report_unknown(w, t)?;
     }
 
-    let payload = json!({"reason": reason, "terminals": ours.len()});
+    let payload = json!({"reason": reason, "terminals": ours.len(), "restart": restart});
     w.append_event(&NewEvent {
         kind: "base_resynced",
         actor: Some("makibad"),
@@ -410,5 +457,226 @@ mod tests {
         resync();
         let ids: Vec<Value> = lost().iter().map(|p| p["spawn_id"].clone()).collect();
         assert_eq!(ids, [Value::Null, "s1".into(), "s2".into()]);
+    }
+
+    /// A terminal of `me` at `id` for `role`, `task` and `spawn`, as #560 reads a replaced one
+    /// (not alive, no exit code) or a running one.
+    fn of(id: &str, role: &str, task: Option<&str>, spawn: &str, alive: bool) -> Terminal {
+        let mut tags = BTreeMap::from([
+            ("makiba.org".to_string(), "me".to_string()),
+            ("makiba.role".to_string(), role.to_string()),
+            ("makiba.spawn".to_string(), spawn.to_string()),
+        ]);
+        if let Some(task) = task {
+            tags.insert("makiba.task_id".into(), task.into());
+        }
+        Terminal {
+            id: TerminalRef(id.into()),
+            name: id.into(),
+            tags,
+            status: None,
+            turn: None,
+            alive,
+            exit_code: None,
+        }
+    }
+
+    /// Runs `t1` and `t2`, `status`, each with a launch `<task>-a` at `stage`.
+    fn two_runs(status: &str, stage: &str) -> (tempfile::TempDir, StateWriter) {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        for task in ["t1", "t2"] {
+            let run = w
+                .upsert_run(&crate::db::writer::RunUpsert {
+                    task_id: task,
+                    project_slug: "p",
+                    status: Some(status),
+                    ..Default::default()
+                })
+                .unwrap();
+            w.conn()
+                .execute(
+                    "INSERT INTO run_launch (run_id, spawn_id, agent, brief, worktree, stage)
+                     VALUES (?1, ?2, 'fake', 'b', 'w', ?3)",
+                    params![run, format!("{task}-a"), stage],
+                )
+                .unwrap();
+        }
+        (dir, w)
+    }
+
+    fn workers(alive: [bool; 2]) -> Vec<Terminal> {
+        vec![
+            of("a1", "worker", Some("t1"), "t1-a", alive[0]),
+            of("a2", "worker", Some("t2"), "t2-a", alive[1]),
+        ]
+    }
+
+    fn status(w: &StateWriter, task: &str) -> String {
+        w.conn()
+            .query_row("SELECT status FROM runs WHERE task_id = ?1", [task], |r| {
+                r.get(0)
+            })
+            .unwrap()
+    }
+
+    /// The run's launches, oldest first: (spawn id, stage).
+    fn launches(w: &StateWriter, task: &str) -> Vec<(String, String)> {
+        let mut q = w
+            .conn()
+            .prepare(
+                "SELECT l.spawn_id, l.stage FROM run_launch l JOIN runs r ON r.id = l.run_id
+                 WHERE r.task_id = ?1 ORDER BY l.id",
+            )
+            .unwrap();
+        q.query_map([task], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
+    fn last_restart(w: &StateWriter) -> bool {
+        w.conn()
+            .query_row(
+                "SELECT json_extract(payload_json, '$.restart') FROM events
+                 WHERE kind = 'base_resynced' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// One anomaly pass, a minute after now.
+    fn anomalies(w: &StateWriter) {
+        let now: String = w
+            .conn()
+            .query_row(
+                "SELECT strftime('%Y-%m-%dT%H:%M:%fZ','now','+60 seconds')",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        super::super::anomalies::Anomalies::new()
+            .pass_at(w, &now)
+            .unwrap();
+    }
+
+    /// Issue 579: every program replaced at once is a core restart: both runs are suspended and
+    /// get a relaunch taken by makibad, and the anomaly pass fails neither.
+    #[test]
+    fn a_restart_suspends_and_relaunches_the_runs_at_work() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(workers([false, false])))
+            .unwrap();
+        assert!(last_restart(&w));
+        anomalies(&w);
+        for task in ["t1", "t2"] {
+            assert_eq!(status(&w, task), "suspended");
+            let l = launches(&w, task);
+            assert_eq!(l.len(), 2, "{task}: {l:?}");
+            assert_eq!(l[1].1, "worktree_ready");
+        }
+        let takers: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM events WHERE kind = 'run_taken' AND actor = 'makibad'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(takers, 2);
+    }
+
+    /// Issue 579: one program lost while another runs is no restart; its run fails by the gone
+    /// anomaly as #560 makes it, and the other is left as it is.
+    #[test]
+    fn one_loss_beside_a_running_program_is_no_restart() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(workers([false, true])))
+            .unwrap();
+        assert!(!last_restart(&w));
+        anomalies(&w);
+        assert_eq!(status(&w, "t1"), "failed");
+        assert_eq!(status(&w, "t2"), "in_use");
+        assert_eq!(launches(&w, "t2").len(), 1);
+    }
+
+    /// Issue 579, the known limit: a lone terminal cannot be told from a core restart; its run
+    /// fails.
+    #[test]
+    fn a_lone_lost_worker_is_no_restart() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        Monitor::new("me")
+            .handle(
+                &w,
+                BaseEvent::Resync(vec![of("a1", "worker", Some("t1"), "t1-a", false)]),
+            )
+            .unwrap();
+        assert!(!last_restart(&w));
+        anomalies(&w);
+        assert_eq!(status(&w, "t1"), "failed");
+    }
+
+    /// Issue 579: a restart while the secretary's loss is already recorded (its renewal pending)
+    /// is still a restart: the worker's run is resumed, not failed.
+    #[test]
+    fn a_restart_with_a_recorded_secretary_loss_resumes_the_worker() {
+        let (_dir, w) = two_runs("in_use", "verified");
+        let secretary = of("s", "secretary", None, "sec-1", false);
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(vec![secretary.clone()]))
+            .unwrap();
+        let mut list = vec![secretary];
+        list.extend(workers([false, true]).into_iter().take(1));
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(list))
+            .unwrap();
+        assert!(last_restart(&w));
+        anomalies(&w);
+        assert_eq!(status(&w, "t1"), "suspended");
+        assert_eq!(launches(&w, "t1").len(), 2);
+    }
+
+    /// Issue 579: a second restart while the relaunches are launched but not verified fails them
+    /// and relaunches again.
+    #[test]
+    fn a_second_restart_replaces_launched_relaunches() {
+        let (_dir, w) = two_runs("suspended", "launched");
+        let list = vec![
+            of("a1", "worker", Some("t1"), "t1-a", false),
+            of("a2", "worker", Some("t2"), "t2-a", false),
+        ];
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(list))
+            .unwrap();
+        assert!(last_restart(&w));
+        for task in ["t1", "t2"] {
+            let l = launches(&w, task);
+            assert_eq!(
+                l.iter().map(|(_, s)| s.as_str()).collect::<Vec<_>>(),
+                ["failed", "worktree_ready"],
+                "{task}"
+            );
+            assert_eq!(status(&w, task), "suspended");
+        }
+    }
+
+    /// Issue 579: `makiba up`'s own relaunches (before a terminal) are not suspended again by
+    /// makibad's first resync after it, though the shells of the stopped core are listed.
+    #[test]
+    fn ups_relaunches_are_left_to_go_on() {
+        let (_dir, w) = two_runs("suspended", "worktree_ready");
+        Monitor::new("me")
+            .handle(&w, BaseEvent::Resync(workers([false, false])))
+            .unwrap();
+        assert!(last_restart(&w));
+        for task in ["t1", "t2"] {
+            assert_eq!(
+                launches(&w, task),
+                [(format!("{task}-a"), "worktree_ready".to_string())]
+            );
+        }
     }
 }
