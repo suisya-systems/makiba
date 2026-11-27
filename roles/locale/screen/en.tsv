@@ -98,6 +98,7 @@ act.abandon	Abandon and close…
 act.abandon_confirm	This abandons the task: its work is not landed, and you are recorded as the one who abandoned it.
 act.show_question	Show the question
 act.in_shell	In your shell:
+act.type_id	Type {id} to show its line.
 place.merged	merged
 place.closed	closed, not merged
 place.needs_you	needs you

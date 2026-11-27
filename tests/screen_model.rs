@@ -1331,11 +1331,9 @@ fn t13_lines_to_type_carry_no_record_text() {
         sh.run(entry["lines"]["yes"].as_str().unwrap()),
         ["answer", "21", "yes"]
     );
-    let approve = find(&m["ranges"], "id", &json!(4))["lines"]["approve"]
-        .as_str()
-        .unwrap();
+    let approve = screen::confirmed(&find(&m["ranges"], "id", &json!(4))["approve"], "4");
     assert_eq!(
-        sh.run(approve),
+        sh.run(approve.as_str().unwrap()),
         ["range", "approve", "4", "--read", "77", "--mode", "human"]
     );
     let loom = find(&m["ready"]["rows"], "ref", &json!("loom#56"));
@@ -1380,9 +1378,10 @@ fn t13_lines_to_type_carry_no_record_text() {
         ]
     );
     let abandon = control("r3-56", "act.abandon");
-    assert!(abandon["confirm"].is_string());
+    assert!(abandon["confirm"].is_object());
+    assert_eq!(abandon["line"], Value::Null);
     assert_eq!(
-        sh.run(abandon["line"].as_str().unwrap()),
+        sh.run(screen::confirmed(&abandon, "r3-56").as_str().unwrap()),
         ["close", "r3-56", "--abandon"]
     );
     for t in ["a b", "--help"] {
@@ -1392,6 +1391,12 @@ fn t13_lines_to_type_carry_no_record_text() {
             "{t}"
         );
         assert_eq!(control(t, "act.abandon")["line"], Value::Null, "{t}");
+        assert_eq!(control(t, "act.abandon")["confirm"], Value::Null, "{t}");
+        assert_eq!(
+            screen::confirmed(&control(t, "act.abandon"), t),
+            Value::Null,
+            "{t}"
+        );
     }
     let silent = find(rows, "kind", &json!("makibad_silent"));
     let ups: Vec<&Value> = silent["controls"]
@@ -1520,4 +1525,169 @@ fn t15_history_names_each_event_by_its_kind_and_payload() {
     );
     assert_eq!(rows[3]["detail"], w.get("hist.review.passed"));
     assert_eq!(rows[4]["detail"], w.fill("hist.review.found", &[n(3)]));
+}
+
+/// Issue 570 (P1a of docs/design/screen-acts.md): the two lines that need a typed confirmation,
+/// approve and abandon, are not in the model; `screen::confirmed` gives each only when the typed
+/// text equals the id shown, approve with `--read` and `--mode` and never `--yes`, and no line
+/// carries `--via` or record text.
+#[test]
+fn t16_confirmed_lines_wait_for_the_typed_id() {
+    let sh = Shell::new();
+    let evil = format!("Evil \" ' ` $(touch {})", sh.pwned().display());
+    let mut s = status();
+    push(
+        &mut s,
+        "projects",
+        project("loom", Some("example-org/loom")),
+    );
+    let mut r4 = range(
+        4,
+        "loom",
+        "proposed",
+        vec![item(80, "not_in", None, None, Some(&evil))],
+    );
+    r4["items"][0]["title"] = json!(evil.clone());
+    r4["brief_head"] = json!(evil.clone());
+    r4["takes"] = json!(evil.clone());
+    r4["read_id"] = json!(77);
+    r4["approves_under"] = json!("human");
+    r4["candidates"] = json!([{"issue": 80, "title": evil.clone(), "admitted": false,
+                               "left_out_why": evil.clone(), "design_only_waits": null}]);
+    push(&mut s, "ranges", r4);
+    for (id, read, mode, status) in [
+        (5, json!(78), json!("acceptance"), "proposed"),
+        (6, json!(79), Value::Null, "proposed"),
+        (7, Value::Null, json!("human"), "proposed"),
+        (8, json!(80), Value::Null, "active"),
+    ] {
+        let mut r = range(
+            id,
+            "loom",
+            status,
+            vec![item(90 + id, "not_in", None, None, None)],
+        );
+        r["read_id"] = read;
+        r["approves_under"] = mode;
+        push(&mut s, "ranges", r);
+    }
+    for t in ["r3-56", "a b"] {
+        let mut r = run(t, "loom", "failed", "failed", None);
+        r["title"] = json!(evil.clone());
+        r["failed_reason"] = json!(evil.clone());
+        push(&mut s, "runs", r);
+    }
+    let m = model(&s);
+    let w = en();
+
+    // 1. Neither line is in the model.
+    for l in lines(&m) {
+        assert!(!l.contains("range approve"), "{l:?}");
+        assert!(!l.contains("--abandon"), "{l:?}");
+    }
+    let r4 = find(&m["ranges"], "id", &json!(4));
+    assert!(r4["lines"].get("approve").is_none(), "{}", r4["lines"]);
+    let approve = &r4["approve"];
+    assert_eq!(approve["line"], Value::Null);
+    let rows = &m["failures"]["rows"];
+    let abandon = |task: &str| -> Value {
+        find(
+            &find(rows, "task_id", &json!(task))["controls"],
+            "key",
+            &json!("act.abandon"),
+        )
+        .clone()
+    };
+    let ab = abandon("r3-56");
+    assert_eq!(ab["line"], Value::Null);
+
+    let mut given = Vec::new();
+    // 2. Approve: only the exact range id gives its line.
+    for t in ["", "3", "4 ", " 4", "04", "44", "77", "r3-56", "4\n"] {
+        assert_eq!(screen::confirmed(approve, t), Value::Null, "{t:?}");
+    }
+    let l4 = screen::confirmed(approve, "4");
+    let l4 = l4.as_str().expect("the approve line once 4 is typed");
+    assert_eq!(
+        sh.run(l4),
+        ["range", "approve", "4", "--read", "77", "--mode", "human"]
+    );
+    given.push(l4.to_string());
+    // 5. What the person is asked to type.
+    assert_eq!(
+        approve["confirm"]["type_words"],
+        w.fill("act.type_id", &[("id", "4".to_string())])
+    );
+
+    // 3. The mode the screen showed, and no line without a read or a known mode.
+    let r5 = &find(&m["ranges"], "id", &json!(5))["approve"];
+    assert_eq!(screen::confirmed(r5, "4"), Value::Null);
+    let l5 = screen::confirmed(r5, "5");
+    let l5 = l5.as_str().expect("the approve line of range 5");
+    assert_eq!(
+        sh.run(l5),
+        [
+            "range",
+            "approve",
+            "5",
+            "--read",
+            "78",
+            "--mode",
+            "acceptance"
+        ]
+    );
+    given.push(l5.to_string());
+    for id in [6, 7, 8] {
+        assert_eq!(
+            find(&m["ranges"], "id", &json!(id))["approve"],
+            Value::Null,
+            "range {id}"
+        );
+    }
+
+    // 4. Abandon: under its sentence, only the exact task id gives its line.
+    assert_eq!(ab["confirm"]["words"], w.get("act.abandon_confirm"));
+    assert_eq!(
+        ab["confirm"]["type_words"],
+        w.fill("act.type_id", &[("id", "r3-56".to_string())])
+    );
+    for t in ["", "r3-5", "R3-56", "r3-56 ", "4"] {
+        assert_eq!(screen::confirmed(&ab, t), Value::Null, "{t:?}");
+    }
+    assert_eq!(screen::confirmed(approve, "r3-56"), Value::Null);
+    let la = screen::confirmed(&ab, "r3-56");
+    let la = la.as_str().expect("the abandon line once r3-56 is typed");
+    assert_eq!(sh.run(la), ["close", "r3-56", "--abandon"]);
+    given.push(la.to_string());
+    let bad = abandon("a b");
+    assert_eq!(bad["confirm"], Value::Null);
+    assert_eq!(screen::confirmed(&bad, "a b"), Value::Null);
+
+    // 6. A control the model did not give yields nothing, even typed to match.
+    let mut t = approve.clone();
+    t["confirm"]["id"] = json!(evil.clone());
+    assert_eq!(screen::confirmed(&t, &evil), Value::Null);
+    let mut t = approve.clone();
+    t["confirm"]["mode"] = json!("human; touch x");
+    assert_eq!(screen::confirmed(&t, "4"), Value::Null);
+    let mut t = approve.clone();
+    t["confirm"]["read_id"] = json!("77");
+    assert_eq!(screen::confirmed(&t, "4"), Value::Null);
+    let mut t = approve.clone();
+    t["confirm"]["act"] = json!("dispatch");
+    assert_eq!(screen::confirmed(&t, "4"), Value::Null);
+    let mut t = ab.clone();
+    t["confirm"]["id"] = json!("--help");
+    assert_eq!(screen::confirmed(&t, "--help"), Value::Null);
+
+    // 7. No line given carries --yes, --via or record text, and none runs anything else.
+    given.extend(lines(&m));
+    assert!(given.len() > 3);
+    for l in &given {
+        for bad in ["--yes", "--via", "Evil", "\"", "`", "$(", "pwned"] {
+            assert!(!l.contains(bad), "{l:?} holds {bad:?}");
+        }
+        sh.run(l);
+        assert!(!sh.pwned().exists(), "{l} made a file");
+    }
 }

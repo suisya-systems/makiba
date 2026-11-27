@@ -93,6 +93,7 @@ act.history	経過を見る
 act.abandon	放棄して閉じる…
 act.show_question	質問を見る
 act.in_shell	シェルで実行:
+act.type_id	{id} と入力すると、実行する行を表示します。
 place.merged	マージ済み
 place.closed	マージせず終了
 place.needs_you	判断待ち
