@@ -296,7 +296,14 @@ fn t1_wording_files_parse_and_japanese_falls_back_to_english() {
     let ja = Words::new("ja");
     assert_ne!(ja.get("answer.yes"), en().get("answer.yes"));
     assert!(!ja.get("answer.yes").is_ascii());
-    assert_eq!(ja.get("fail.replaced"), en().get("fail.replaced"));
+    // A key the Japanese table lacks is shown in English: the first such key of en.tsv, read
+    // from the two tables, so the check does not depend on which key the owner has translated.
+    let ja_keys: BTreeSet<&String> = ja_t.iter().map(|(k, _)| k).collect();
+    let untranslated = en_keys
+        .iter()
+        .find(|k| !ja_keys.contains(*k))
+        .expect("every key has Japanese: no key left to show the fallback");
+    assert_eq!(ja.get(untranslated), en().get(untranslated));
     assert_eq!(en().get("no.such.key"), "no.such.key");
     assert_eq!(ja.get("no.such.key"), "no.such.key");
 }
