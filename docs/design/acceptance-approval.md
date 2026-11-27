@@ -219,9 +219,16 @@ fail closed.
    takes the `approvable` records and `not approvable`. Any `not
    approvable`, no record, or a log it cannot read: refused, as today. Then the gate is evaluated as
    for a passed head, every rule unchanged (the manifest, condition (a), `check_first`, the review,
-   edited tests, the helper lists, the language and order checks), except two: condition (b) is not
-   judged (no route of it, the fallback included, can stand in for the failed acceptance), and
-   condition (a)'s refusals for exactly the paths of `changed` records are held back. Allowed: the
+   edited tests, the helper lists, the language and order checks), except two: condition (b)'s
+   verdict is not judged (no route of it, the fallback included, can stand in for the failed
+   acceptance), and condition (a)'s refusals for exactly the paths of `changed` records are held
+   back. Two checks stand in their place, both from git and the gate's own rules, never from the log:
+   **no path under `.github/` differs between base and head** (stricter than (b)'s comparison of
+   `.github/workflows/`: a pull request's `pull_request` workflow is its own, so a changed workflow
+   could print any record and pass its rerun without verifying a signature), and **every record is
+   valid by section 5**: a `changed` path is `scripts/acceptance-check.sh`, or is declared or changed
+   by the test commit, and is neither under `.github/` nor test infrastructure (`is_infra`); an
+   `ignored` path is a declared Cargo target. One invalid record refuses the whole ask. Allowed: the
    answer carries the warning `acceptance fails by construction: <set>` beside the gate's other
    warnings, so it is the existing pending merge entry (Issue 432) under both modes; its text names
    the pull request, the head, the method, each record, every other warning, and the approval text.
@@ -236,7 +243,10 @@ fail closed.
 3. **The landing, on the same answer.** When the rerun's `ci_completed` passes at that head, the
    secretary asks `merge request` again with the same method. With an `acceptance_approved` of that
    repository, pull request, head and method, the door evaluates the gate as for any passed head,
-   with condition (a)'s refusals for the approval's `changed` paths held back. When the gate allows
+   with condition (a)'s refusals for the approval's `changed` paths held back, the two checks of (1)
+   again, and condition (b) by its first route only: the repository's acceptance check succeeded at
+   head and `.github/workflows/` at head equals the base; the fallback of (b) does not count on this
+   path. When the gate allows
    with no warning outside the approval's recorded warnings (the rule `merge approve` applies: those,
    or fewer), the request writes `merge_attempted` with `approved_by` `person` and the approval's
    `pending_id`, under both modes, with no new entry: the person's one answer was over that method,
@@ -328,7 +338,11 @@ recorded, the rerun fails again, and the lift remains.
    a runner timestamp): a log with only approvable records gives an allowance with the acceptance
    warning naming the set; a timestamped indented line is not read; `not approvable`, no record or an unreadable
    log is refused; a fabricated indented line is not read; a declared path outside the set is still
-   refused by (a); a head whose acceptance failed is not allowed by the fallback of (b). Changes
+   refused by (a); a head whose acceptance failed is not allowed by the fallback of (b); a head that
+   changes `.github/workflows/ci.yml` (or any other file under `.github/`) and whose log holds only
+   approvable records is refused; a log naming a `changed` path that is neither declared, changed by
+   the test commit nor the checker, or an `ignored` path that is not a declared Cargo target, is
+   refused. Changes
    `docs/design/spec.md` (the `acceptance_gate` payload).
 3. **The approval key.** `src/cli.rs` (`approval_key_path`, `$MAKIBA_APPROVAL_KEY`), `makiba up`
    (creates it with `ssh-keygen`, prints the public line), a read-only `makiba approval-key`;
@@ -348,7 +362,8 @@ recorded, the rerun fails again, and the lift remains.
    the notice after `approve`; the next request at the same head and method writes `merge_attempted`
    with `approved_by` `person` and no new entry; a second request does not write a second attempt; a
    new warning makes a new entry; another head or method has no approval; a stale `shown` writes
-   nothing.
+   nothing; at the landing, a head whose acceptance check did not succeed is refused even when the
+   fallback of (b) would pass, and so is one whose `.github/` differs from the base.
 5. **The owner's `.github/` change (by hand, after 1 and 3 have landed).** `.github/acceptance-approvers`
    with `approval.key`'s public line; `ci.yml`'s acceptance step reads the approval comments and passes
    `--approvals`; job permission `pull-requests: read`. Test `tests/test_ci_acceptance_approval.py`
@@ -370,6 +385,20 @@ acceptance checker and `.github/`), so each stops after its design for the owner
   their builds and build Issue 1 above must be ordered so no two change `scripts/acceptance-check.sh` at once.
 - The owner's terminal must reach `approval.key` when they approve; a person on another machine
   cannot approve this way.
+- **The pull request's code runs in the same job as the verification.** The checker builds and runs
+  the head's tests before it compares failure sets and verifies the signature, on one runner. Code
+  that runs there (a test, a build script) can change what later steps of the job execute or read:
+  put a `git` or `ssh-keygen` shim on a writable `PATH`, hand over another signers file, or simply
+  make the job print `ACCEPTANCE: pass` and exit 0. The last of these is open **today**, with no
+  approval at all, so the signature does not make the job's verdict stronger against hostile pull
+  request code than it is now: against that, the bound is still makiba's gate, which judges from git
+  outside the runner (condition (a), the review, and on this route the two checks of 4.4 (1)), and
+  the person's reading of the entry. What the signature does stop is an approval made by an agent
+  for a pull request whose code is not hostile. Hardening, proposed as a follow-up rather than part of
+  build Issues 1 to 5: run the verification and the failure-set comparison in a separate job that
+  checks out nothing of the head's tree beyond git objects, runs no project code, takes the
+  canonical records of the test-running job as data and recomputes the git-only records (`changed`)
+  itself, so only `ignored` records still come from a runner that ran the pull request's code.
 
 ## 10. Design review
 
@@ -400,3 +429,18 @@ every agent, signing when the person runs `makiba merge approve <id>` (Q2, Q5); 
 the approval as a pull request comment and reruns `acceptance` (Q4); the allowed kinds of section 5,
 (a), (b) and (c), everything else keeping the lift (Q3); and the five build Issues of section 8,
 which the secretary files.
+
+## 12. Diff review of this note
+
+- Round 1 (codex, passed, major 2), both held and taken in: a downloaded job log puts the runner's
+  timestamp before every line (4.4 (1) strips one such token); section 5 named every non-helper file
+  under `tests/` unapprovable, declared test targets included (section 5 states the precedence).
+- Round 2 (codex, passed, blocker 1), held and taken in: not judging condition (b) dropped its
+  comparison of `.github/workflows/` with the base. The ask and the landing require no `.github/`
+  change at head, check every record against section 5 from git, and the landing takes (b) by its
+  first route only.
+- Round 3 (codex, passed, blocker 1) read the round-2 head again (the round-2 fix was not yet
+  committed): the pull request's code runs in the job before the verification and can subvert it.
+  Held as a fact, written as a known limit (section 9) with its judgment: the same code can already
+  make today's job pass, so the signature adds no new opening; the hardening (a verification job
+  that runs no project code) is proposed as a follow-up.
