@@ -920,7 +920,7 @@ The read surface (Issue 168). A program outside `makibad` reads `makiba status -
 | `pull_requests[].pr` | its number |
 | `pull_requests[].task_id` | `runs.task_id` of the run (of a merge, the run of its event, else its `task_id`) |
 | `pull_requests[].title` | `title` of the newest `pr_read`, `pr_closed` or `pr_merged` of the pull request, null when none |
-| `pull_requests[].head_oid` | `head_oid` of its `pr_merged` when merged and set; else of the run's newest `pr_opened` or `fix_pushed` of that pull request, else of the run's newest watch of it; null when none |
+| `pull_requests[].head_oid` | `head_oid` of its `pr_merged` when merged and set; else of the newest `pr_opened` or `fix_pushed` of that pull request (repository in any case, and number) of any run (Issue 569: a run that replaced another on it gives its head to the one row), else of the run's newest watch of it; null when none |
 | `pull_requests[].ci` | `running` while a `pr_watches` row of that repository, number and head is `watching`; else `status` (`passed` or `failed`) of the newest `ci_completed` of them written after the newest `pr_closed` of the pull request, or of any time when that head was recorded again (`pr_opened`, `fix_pushed`) after that close; else null |
 | `pull_requests[].state` | `merged` with a `pr_merged` of that pull request (repository in any case, and number), of any run; else `closed` when the newest of its `pr_closed`, `pr_reopened`, `pr_opened` and `fix_pushed` (repository in any case, and number), of any run, is a `pr_closed` (Issue 491); else `open` |
 | `pull_requests[].merged_via` | `merged_via` of its `pr_merged` as written (section 10: since Issue 424 the PR watch writes `hand` for every merge, an allowance of the gate being no proof that its command ran; `gate` comes only from `makibad`'s own act records, docs/design/merge-act.md section 7, and from rows written before Issue 424), else null |
@@ -1013,11 +1013,13 @@ The ranges of `status --json` (Issue 257, section 5.8). `tests/belt.rs` compares
 | `ranges[].items[].title` | the run's title, else the candidate's |
 | `ranges[].items[].place` | `waiting_person` (an escalated entry), `in_work` (`queued`, `in_use`, `suspended`, `failed`), `review`, `landed` (`completed` with a `pr_merged` of its current pull request, `belt::current_pr_sql`), `closed` (`completed` with no merge of its current pull request recorded), `skipped` (skipped, or `abandoned`), `not_in` (no run) |
 | `ranges[].items[].why` | the stop's line and question, the left-out reason, `no_slot`, `budget`, `no merge recorded`, the skip's reason |
-| `ranges[].items[].stage` | `launching`, `at_work`, `launch_failed`, `design_only` (a design-only run before its design report) in work; `no_pr`, `ci`, `to_land` (from the watch of its current pull request, at its newest registered head first), `waits_landing #<n>` (a design-only run that reported its design and waits for the landing) in review; `parked` waiting for the person with its terminal let go |
+| `ranges[].items[].stage` | `launching`, `at_work`, `launch_failed`, `design_only` (a design-only run before its design report) in work; `no_pr`, `ci`, `to_land` (`no_pr` with no watch of its current pull request of any run; else the CI that `pull_requests[].ci` reads at the pull request's newest registered head of any run, `running` and `failed` as `ci` and `passed` as `to_land`, Issue 569; where that read has none, the watch at that head first: `to_land` when it completed `passed`), `waits_landing #<n>` (a design-only run that reported its design and waits for the landing) in review; `parked` waiting for the person with its terminal let go |
 | `ranges[].items[].since` | the dispatch (in work), the move into review (its newest `run_in_review`; for a design-only run waiting for its landing, its newest `design_reported`; a run moved into review before Issue 414 keeps the dispatch), the stop, the close or the skip |
 | `ranges[].items[].task_id` | `runs.task_id` |
 | `ranges[].items[].pr` | `pr_merged.pr` of the current pull request's merge |
 | `ranges[].items[].pr_title` | `pr_merged.title` of the current pull request's merge |
+| `ranges[].items[].current_repo` | of a run not `completed` or `abandoned`, the repository of its current pull request (`belt::current_pr_sql`, as registered; Issue 569), so that a reader finds the `pull_requests[]` row of a pull request another run is listed with; else null |
+| `ranges[].items[].current_pr` | its number; null as `current_repo` |
 | `ranges[].places` | the items per place, every place named |
 | `ranges[].stops[].id` | `pending.id` of every entry of the range with `stop_line` `decision`, any status |
 | `ranges[].stops[].task_id` | `runs.task_id` |

@@ -658,7 +658,8 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 }
 
 /// One entry of `pull_requests[]`: `repo`, `pr`, `task_id`; `title` (the newest recorded one);
-/// `head_oid` (the merged head, else the run's newest recorded head of this pull request);
+/// `head_oid` (the merged head, else the newest recorded head of this pull request by any run,
+/// Issue 569, else the run's newest watch of it);
 /// `ci` (`running` while a watch of the head is under way, else the newest result of that
 /// repository, number and head after the newest `pr_closed` unless the head was recorded again
 /// since, else null); `state` (`merged`, `closed` or `open`); `merged_via`, `merged_by`; and
@@ -690,15 +691,13 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
         Some(h) => Some(h.to_string()),
         None => conn
             .query_row(
-                "SELECT coalesce(
-                   (SELECT json_extract(payload_json, '$.head_oid') FROM events
-                    WHERE run_id = ?1 AND kind IN ('pr_opened', 'fix_pushed')
-                      AND lower(json_extract(payload_json, '$.repo')) = lower(?2)
-                      AND json_extract(payload_json, '$.pr') = ?3
-                    ORDER BY id DESC LIMIT 1),
-                   (SELECT head_oid FROM pr_watches
-                    WHERE run_id = ?1 AND lower(repo) = lower(?2) AND pr = ?3
-                    ORDER BY id DESC LIMIT 1))",
+                &format!(
+                    "SELECT coalesce({},
+                       (SELECT head_oid FROM pr_watches
+                        WHERE run_id = ?1 AND lower(repo) = lower(?2) AND pr = ?3
+                        ORDER BY id DESC LIMIT 1))",
+                    crate::daemon::belt::pr_head_sql("?2", "?3")
+                ),
                 params![row["id"].as_i64(), repo, pr],
                 |r| r.get(0),
             )
@@ -719,7 +718,7 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
     };
     let ci = match &head {
         None => Value::Null,
-        Some(h) => ci_of(conn, repo, pr, h)?,
+        Some(h) => crate::daemon::belt::pr_ci(conn, repo, pr, h)?.map_or(Value::Null, Value::from),
     };
     let merge_state = match (&head, state) {
         (Some(h), "open") => newest("'pr_read'")?
@@ -746,46 +745,6 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
               "merged_by": of_merge("merged_by"), "merge_state": merge_state,
               "merge_order": merge_order}),
     )
-}
-
-/// The CI of `repo#pr` at `head`: `running` while a watch of it is `watching`; else the status of
-/// its newest `ci_completed` written after the newest `pr_closed` of the pull request (any, when
-/// the head was recorded again after that close); else null.
-fn ci_of(conn: &Connection, repo: &str, pr: i64, head: &str) -> rusqlite::Result<Value> {
-    let running: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM pr_watches WHERE status = 'watching'
-           AND lower(repo) = lower(?1) AND pr = ?2 AND lower(head_oid) = lower(?3))",
-        params![repo, pr, head],
-        |r| r.get(0),
-    )?;
-    if running {
-        return Ok(json!("running"));
-    }
-    let of = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
-              AND json_extract(payload_json, '$.pr') = ?2";
-    let head_is = "lower(json_extract(payload_json, '$.head_oid')) = lower(?3)";
-    let status: Option<String> = conn
-        .query_row(
-            &format!(
-                "SELECT json_extract(payload_json, '$.status') FROM events
-                 WHERE kind = 'ci_completed' AND {of} AND {head_is}
-                   AND id > (SELECT CASE WHEN EXISTS (
-                                 SELECT 1 FROM events g WHERE g.kind IN ('pr_opened', 'fix_pushed')
-                                   AND lower(json_extract(g.payload_json, '$.repo')) = lower(?1)
-                                   AND json_extract(g.payload_json, '$.pr') = ?2
-                                   AND lower(json_extract(g.payload_json, '$.head_oid')) = lower(?3)
-                                   AND g.id > c.cut)
-                               THEN 0 ELSE c.cut END
-                             FROM (SELECT coalesce(max(id), 0) AS cut FROM events
-                                   WHERE kind = 'pr_closed' AND {of}) c)
-                 ORDER BY id DESC LIMIT 1"
-            ),
-            params![repo, pr, head],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(status.map_or(Value::Null, Value::from))
 }
 
 /// The newest triage scan (Issue 256), null before the first: what the secretary would propose
