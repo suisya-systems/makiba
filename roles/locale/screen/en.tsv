@@ -23,11 +23,18 @@ range.approve	Approve exactly this
 range.change	Ask to change it
 range.would_start	It would start, in this order
 range.not_now	not now
+range.may_let_in	It may let in
+range.fixes	asks you after every {n} fixes of a task
+range.follow_ups	New Issues found on the way
+range.follow_ups.inside	let in without asking, from the same budget
+range.follow_ups.ask	asked of you first, as new approved work
+range.brief_head	Every task starts from
 ready.title	Ready to start
 ready.not_approved	{n} Issues, not yet approved
 ready.ask	Ask to start
 ready.suggested	suggested first
 ready.no_goal	no goal
+ready.goal	goal {x}
 ready.size	size {x}
 ready.size_estimated	size {x} (estimate)
 ready.none	No Issue is ready to start
@@ -41,6 +48,7 @@ notready.set_aside	Set aside by a label
 notready.no_goals	No goals written for this project
 notready.goals_error	The project's goals cannot be read
 notready.no_repo	No repository recorded for this project
+issues.unchecked	projects not checked: {n}
 notready.unreadable	A line naming what it waits for names no Issue
 tab.failures	Failures
 tab.approved_items	All approved items
@@ -64,6 +72,9 @@ answer.yes	Answer yes
 answer.no	Answer no
 answer.discuss	Discuss it first
 fail.title	Failures
+fail.fold_stuck	{n} stuck ({x})
+fail.degree_stuck	stuck, nobody on it
+fail.reason	makiba's record: “{x}”
 fail.did_not_start	did not start
 fail.silent	silent since it started
 fail.gone	its terminal is gone
@@ -74,7 +85,7 @@ fail.stuck_permission	stopped at a permission prompt
 fail.no_report	finished without a report
 fail.secretary_gone	The secretary's terminal is gone
 fail.secretary_still	The secretary has not moved
-fail.replaced	makiba was updated while running
+fail.replaced	runs a copy other than the one installed
 who.nobody	Nobody is on it
 who.no_sign	No sign that anyone is on it
 who.secretary	With the secretary
@@ -87,6 +98,7 @@ act.abandon	Abandon and close…
 act.abandon_confirm	This abandons the task: its work is not landed, and you are recorded as the one who abandoned it.
 act.show_question	Show the question
 act.in_shell	In your shell:
+act.type_id	Type {id} to show its line.
 place.merged	merged
 place.closed	closed, not merged
 place.needs_you	needs you
@@ -141,3 +153,5 @@ hist.checks.failed	Checks failed
 hist.merged	Merged
 hist.closed.completed	Closed
 hist.closed.abandoned	Abandoned
+task.kind.document	document task
+task.kind.code	code task

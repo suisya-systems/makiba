@@ -66,3 +66,49 @@ while time.time() < end:
         print(line.decode())
 PY
 wait
+
+# Issue 560: three kept terminals as makiba launches them (`keep`, labels), read with
+# `terminal.list`: one never lost, one whose program is killed (SIGKILL), and one across a core stop
+# and start. A kept terminal whose program is lost is replaced with the machine's shell and stays
+# `live`; src/base/herdr.rs reads it by its `argv` against the `makiba.argv` label. Compare `state`,
+# `reason`, `exit_code`, `argv`, `foreground` and `labels` of each with that reading.
+rpc() {
+  python3 -I - "$sock" "$1" "$2" <<'PY'
+import json, socket, sys
+s = socket.socket(socket.AF_UNIX)
+s.settimeout(5)
+s.connect(sys.argv[1])
+req = {"jsonrpc": "2.0", "id": 1, "method": sys.argv[2], "params": json.loads(sys.argv[3])}
+s.sendall((json.dumps(req) + "\n").encode())
+buf = b""
+while b"\n" not in buf:
+    chunk = s.recv(65536)
+    if not chunk:
+        break
+    buf += chunk
+print(json.dumps(json.loads(buf.split(b"\n", 1)[0]), indent=1, sort_keys=True))
+PY
+}
+kept() {
+  echo "=== run $1"
+  rpc terminal.run "{\"argv\": [\"sleep\", \"600\"], \"cwd\": \"$root\", \"name\": \"$1\",
+    \"labels\": {\"makiba.check\": \"$1\"}, \"keep\": true, \"no_parent\": true, \"no_notify\": true}"
+}
+kept never-lost
+killed="$(kept killed-kept | tee /dev/stderr | python3 -I -c '
+import json, sys
+text = sys.stdin.read().split("\n", 1)[1]
+r = json.loads(text)["result"]
+print(r.get("terminal", r)["pid"])')"
+sleep 1
+kill -KILL "$killed" || true
+sleep 2
+echo "=== list after SIGKILL"
+rpc terminal.list '{"all": true}'
+kept restart-kept
+sleep 1
+"$HC_BIN" server stop >/dev/null
+"$HC_BIN" server start >/dev/null
+sleep 2
+echo "=== list after stop and start"
+rpc terminal.list '{"all": true}'

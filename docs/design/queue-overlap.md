@@ -89,6 +89,10 @@ A pull request that two runs follow is one peer: the run that registered it last
 `pr_opened` or `fix_pushed`), so a reading never fetches two branches into one peer ref (diff
 review of the rebuilt branch).
 
+A reading against peers follows the rule of Issue 567 as any reading does: it carries the head's
+`own_checks`, a landed test counts for a head that changes a check (`tests_landed`), and a `hold`
+records `own_checks`; a `hold` without it, like a `ready` without it, covers no base tip.
+
 A held head is never made `unknown` (no later reading would judge it again, and its update on the
 landing would be lost): a failing reading of a held head is read again without the budget, and a
 reading that comes back after a pull request its hold names has landed writes neither `ready` nor

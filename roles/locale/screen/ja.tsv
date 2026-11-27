@@ -23,11 +23,18 @@ range.approve	この内容で承認する
 range.change	変更を頼む
 range.would_start	この順に着手する予定
 range.not_now	今回は外す
+range.may_let_in	取り込める範囲
+range.fixes	修正 {n} 回ごとに確認を求める
+range.follow_ups	途中で見つかった Issue
+range.follow_ups.inside	確認なしで取り込む（同じ予算から）
+range.follow_ups.ask	取り込む前に確認する（新しい承認として）
+range.brief_head	各タスクの指示の冒頭
 ready.title	着手できる Issue
 ready.not_approved	未承認の Issue {n} 件
 ready.ask	着手を頼む
 ready.suggested	おすすめ
-ready.no_goal	目標なし
+ready.no_goal	ゴールなし
+ready.goal	ゴール {x}
 ready.size	規模 {x}
 ready.size_estimated	規模 {x}（見積もり）
 ready.none	着手できる Issue はありません
@@ -36,9 +43,10 @@ ready.no_check	まだ確認していません
 notready.title	まだ着手できない
 notready.waits	他の Issue 待ち
 notready.set_aside	ラベルで保留
-notready.no_goals	このプロジェクトに目標が未記入
-notready.goals_error	目標を読み取れない
+notready.no_goals	このプロジェクトにゴールが未記入
+notready.goals_error	ゴールを読み取れない
 notready.no_repo	リポジトリが未登録
+issues.unchecked	未確認のプロジェクト {n} 件
 tab.failures	失敗
 tab.approved_items	承認済みの全件
 tab.issues	着手できる Issue
@@ -61,6 +69,9 @@ answer.yes	はいと答える
 answer.no	いいえと答える
 answer.discuss	先に相談する
 fail.title	失敗
+fail.fold_stuck	停止中 {n} 件（{x}）
+fail.degree_stuck	停止中、誰も対応していない
+fail.reason	makiba の記録：「{x}」
 fail.did_not_start	起動できなかった
 fail.silent	起動後に応答なし
 fail.gone	端末が消えた
@@ -70,6 +81,7 @@ fail.stuck_login	ログインで停止
 fail.no_report	報告なしで終了
 fail.secretary_gone	窓口の端末が消えた
 fail.secretary_still	窓口が動いていない
+fail.replaced	インストール済みとは別のバージョンで動いている
 who.nobody	誰も対応していない
 who.no_sign	対応している形跡なし
 who.secretary	窓口が対応中
@@ -81,6 +93,7 @@ act.history	経過を見る
 act.abandon	放棄して閉じる…
 act.show_question	質問を見る
 act.in_shell	シェルで実行:
+act.type_id	{id} と入力すると、実行する行を表示します。
 place.merged	マージ済み
 place.closed	マージせず終了
 place.needs_you	判断待ち
@@ -114,3 +127,5 @@ hist.checks.failed	CI 失敗
 hist.merged	マージ
 hist.closed.completed	終了
 hist.closed.abandoned	放棄
+task.kind.document	文書タスク
+task.kind.code	コードタスク

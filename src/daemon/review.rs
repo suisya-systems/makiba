@@ -19,7 +19,9 @@
 //! the round's tree (read-only), its scratch and settings, and a home of the round holding, of
 //! the person's home, only its login (and codex's configuration, read-only); the keys, the state
 //! folder, the credentials, the base's folders and both readers' configuration are covered where
-//! a folder given holds them. When the boundary cannot start, no reader runs (fail closed).
+//! a folder given holds them. A home that lies in a system folder is hidden, and the reader's own
+//! files installed under it are given back after it (Issue 568). When the boundary cannot start,
+//! no reader runs (fail closed).
 //!
 //! An answer is `passed` (established) only when the reader exited 0, opened at least one file
 //! of the change under review (the diff file or a file it changes; for a design the note), judged
@@ -1062,6 +1064,127 @@ fn place_login(round_home: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(dst)
 }
 
+/// Where the entry `p` itself lies: its folder's real path and its own name, a last link not
+/// followed. A link in a system folder that leads into a hidden home lies in the system folder.
+fn entry(p: &Path) -> PathBuf {
+    match (p.parent(), p.file_name()) {
+        (Some(d), Some(n)) => real(d).join(n),
+        _ => real(p),
+    }
+}
+
+/// Does a folder of `given` show `p`: one holds it, and every place of `hidden` that holds `p`
+/// (by its path or where the entry really lies) also holds that folder, which was then given
+/// back inside the hidden place after its tmpfs (Issue 568). A system bind does not show what
+/// lies under a home hidden in it.
+fn shown_by(p: &Path, given: &[PathBuf], hidden: &[PathBuf]) -> bool {
+    let pr = entry(p);
+    given.iter().any(|g| {
+        p.starts_with(g)
+            && hidden
+                .iter()
+                .filter(|h| p.starts_with(h) || pr.starts_with(h))
+                .all(|h| g.starts_with(h))
+    })
+}
+
+/// The mounts of the system folders and of a reader's program (Issue 262, Issue 568), for
+/// `bounded_reader`: each folder of `system` read-only (a link kept as a link), a tmpfs on a
+/// `home` that lies in one, `/etc/resolv.conf` where it leads elsewhere, the program's own
+/// folders and files, and the covers of the `deny` places the folders given hold. A program file
+/// or folder under the hidden home is given back after its tmpfs. makibad passes `SYSTEM`; a
+/// test passes a system folder of its own. It runs nothing: it reads the files' metadata, the
+/// program's first bytes and makibad's `PATH` (for a script's interpreter).
+#[doc(hidden)]
+pub fn program_mounts(
+    system: &[&Path],
+    program: &Path,
+    home: Option<&Path>,
+    deny: &[PathBuf],
+) -> Result<Vec<String>, String> {
+    let s = |p: &Path| p.to_string_lossy().into_owned();
+    let mut a: Vec<String> = vec![];
+    let ro = |a: &mut Vec<String>, from: &Path, to: &Path| {
+        a.extend(["--ro-bind".into(), s(from), s(to)]);
+    };
+    // The folders given read-only before the masks: what a mask must cover.
+    let mut given: Vec<PathBuf> = vec![];
+    for &d in system {
+        match d.symlink_metadata() {
+            Err(_) => {}
+            Ok(m) if m.file_type().is_symlink() => {
+                let to = std::fs::read_link(d).map_err(|e| format!("{}: {e}", d.display()))?;
+                a.extend(["--symlink".into(), s(&to), s(d)]);
+            }
+            Ok(_) => {
+                ro(&mut a, d, d);
+                given.push(d.to_path_buf());
+            }
+        }
+    }
+    // A home that lies in a system folder is hidden before anything of it is given back.
+    let hidden = home_masks(&given, home);
+    for h in &hidden {
+        a.extend(["--tmpfs".into(), s(h)]);
+    }
+    let under_hidden = |p: &Path| {
+        let r = entry(p);
+        hidden.iter().any(|h| p.starts_with(h) || r.starts_with(h))
+    };
+    let in_system = |p: &Path| {
+        let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
+        system.iter().any(|d| c.starts_with(d))
+            && system.iter().any(|d| p.starts_with(d))
+            && !under_hidden(p)
+    };
+    if let Ok(r) = std::fs::canonicalize("/etc/resolv.conf")
+        && !in_system(&r)
+    {
+        ro(&mut a, &r, &r);
+    }
+    let mut files: Vec<PathBuf> = vec![];
+    for f in program_files(program) {
+        if in_system(&f) {
+            continue;
+        }
+        let modules = node_root(&f, home, deny);
+        match program_root(&f, home, deny) {
+            Some(root) if !shown_by(&root, &given, &hidden) => {
+                ro(&mut a, &root, &root);
+                given.push(root);
+            }
+            Some(_) => {}
+            None => files.push(f),
+        }
+        if let Some(nm) = modules
+            && !shown_by(&nm, &given, &hidden)
+        {
+            ro(&mut a, &nm, &nm);
+            given.push(nm);
+        }
+    }
+    for q in masks(&given, deny) {
+        match q.symlink_metadata() {
+            Ok(m) if m.is_dir() => a.extend(["--tmpfs".into(), s(&q)]),
+            Ok(_) => ro(&mut a, Path::new("/dev/null"), &q),
+            Err(_) => {}
+        }
+    }
+    // A program that is a link (an npm `bin` entry) stays a link to its real place, which is
+    // given by its own folder or file above: bound as a file, a script would run away from the
+    // package it loads its parts from.
+    for f in &files {
+        if f.symlink_metadata()
+            .is_ok_and(|m| m.file_type().is_symlink())
+        {
+            a.extend(["--symlink".into(), s(&real(f)), s(f)]);
+        } else {
+            ro(&mut a, f, f);
+        }
+    }
+    Ok(a)
+}
+
 /// The reader `program` started inside the boundary (Issue 262): a command of the boundary
 /// program whose arguments end with `--` and the program; the caller adds the reader's own.
 /// Nothing is visible but the system folders, the program's own folders, the round's tree
@@ -1105,74 +1228,12 @@ fn bounded_reader(
     let ro = |a: &mut Vec<String>, src: &Path, dst: &Path| {
         a.extend(["--ro-bind".into(), s(src), s(dst)]);
     };
-    // The folders given read-only before the masks: what a mask must cover.
-    let mut given: Vec<PathBuf> = vec![];
-    for d in SYSTEM.map(Path::new) {
-        match d.symlink_metadata() {
-            Err(_) => {}
-            Ok(m) if m.file_type().is_symlink() => {
-                let to = std::fs::read_link(d).map_err(|e| format!("{}: {e}", d.display()))?;
-                a.extend(["--symlink".into(), s(&to), s(d)]);
-            }
-            Ok(_) => {
-                ro(&mut a, d, d);
-                given.push(d.to_path_buf());
-            }
-        }
-    }
-    // A home that lies in a system folder is hidden before anything of it is given back.
-    for h in home_masks(&given, home.as_deref()) {
-        a.extend(["--tmpfs".into(), s(&h)]);
-    }
-    let in_system = |p: &Path| {
-        let c = std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf());
-        SYSTEM.iter().any(|d| c.starts_with(d)) && SYSTEM.iter().any(|d| p.starts_with(d))
-    };
-    if let Ok(r) = std::fs::canonicalize("/etc/resolv.conf")
-        && !in_system(&r)
-    {
-        ro(&mut a, &r, &r);
-    }
-    let mut files: Vec<PathBuf> = vec![];
-    for f in program_files(program) {
-        if in_system(&f) {
-            continue;
-        }
-        let modules = node_root(&f, home.as_deref(), &deny);
-        match program_root(&f, home.as_deref(), &deny) {
-            Some(root) if !given.iter().any(|g| root.starts_with(g)) => {
-                ro(&mut a, &root, &root);
-                given.push(root);
-            }
-            Some(_) => {}
-            None => files.push(f),
-        }
-        if let Some(nm) = modules
-            && !given.iter().any(|g| nm.starts_with(g))
-        {
-            ro(&mut a, &nm, &nm);
-            given.push(nm);
-        }
-    }
-    for q in masks(&given, &deny) {
-        match q.symlink_metadata() {
-            Ok(m) if m.is_dir() => a.extend(["--tmpfs".into(), s(&q)]),
-            Ok(_) => ro(&mut a, Path::new("/dev/null"), &q),
-            Err(_) => {}
-        }
-    }
-    // A program that is a link (an npm `bin` entry) stays a link to its real place, which is
-    // given by its own folder or file above: bound as a file, a script would run away from the
-    // package it loads its parts from.
-    for f in &files {
-        if f.symlink_metadata()
-            .is_ok_and(|m| m.file_type().is_symlink())
-        {
-            a.extend(["--symlink".into(), s(&real(f)), s(f)]);
-        } else {
-            ro(&mut a, f, f);
-        }
-    }
+    a.extend(program_mounts(
+        &SYSTEM.map(Path::new),
+        program,
+        home.as_deref(),
+        &deny,
+    )?);
     ro(&mut a, &snap.tree, &snap.tree);
     a.extend(["--bind".into(), s(&scratch), s(&scratch)]);
     let settings = snap.dir.join("settings.json");
@@ -1429,6 +1490,34 @@ fn withheld(mut a: Answer) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launcher in the system folder that is a link into a hidden home (the review of Issue
+    /// 568): the link is shown by the system bind as it is (made again, bubblewrap would refuse
+    /// the link already there), and the program it leads to is given back after the home's tmpfs.
+    #[test]
+    fn a_system_launcher_into_a_hidden_home_stays_as_the_system_shows_it() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let usr = t.join("usr");
+        let home = usr.join("local/home/someone");
+        let program = home.join(".local/bin/codex");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, "").unwrap();
+        let launcher = usr.join("local/bin/codex");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../home/someone/.local/bin/codex", &launcher).unwrap();
+        let args = program_mounts(&[usr.as_path()], &launcher, Some(&home), &[]).unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let at = |w: &[String]| args.windows(w.len()).position(|x| x == w);
+        assert!(
+            !args.iter().skip(1).any(|a| *a == s(&launcher)),
+            "the launcher is mounted again: {args:?}"
+        );
+        let local = home.join(".local");
+        let tmpfs = at(&["--tmpfs".into(), s(&home)]).expect("no tmpfs on the home");
+        let bind = at(&["--ro-bind".into(), s(&local), s(&local)])
+            .unwrap_or_else(|| panic!("the program's folder is not given back: {args:?}"));
+        assert!(tmpfs < bind, "{args:?}");
+    }
 
     /// A reader's configuration reached through a link (the review of Issue 262): a program
     /// folder holding its real place is not given, and where a given folder holds it, it is

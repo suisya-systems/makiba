@@ -11,7 +11,7 @@
 //! The field names below are makiba's reading of the base's own descriptions of the method; they
 //! are checked on the real base by `scripts/check-events-wire.sh`.
 
-use super::{Herdr, TAG_ORG, terminal_of};
+use super::{Herdr, LABEL_ARGV, TAG_ORG, terminal_of};
 use crate::base::{
     BaseError, BaseEvent, Detail, EventStream, Terminal, TerminalEvent, TerminalRef,
 };
@@ -322,9 +322,11 @@ fn event_of(
             if patch {
                 overlay(kind, data, &mut t);
             }
+            // A kept terminal is restarted with the machine's shell, not with makibad's program
+            // (#560): the program is gone, with no exit code.
             match kind {
                 "finished" | "lost" => t.alive = false,
-                "restarted" => (t.alive, t.exit_code) = (true, None),
+                "restarted" => (t.alive, t.exit_code) = (false, None),
                 _ => {}
             }
             if !mine(&t, org) {
@@ -333,7 +335,7 @@ fn event_of(
                 return was_known.then(|| TerminalEvent::Removed(TerminalRef(id.into())));
             }
             known.insert(id.into(), t.clone());
-            Some(if matches!(kind, "finished" | "lost") {
+            Some(if matches!(kind, "finished" | "lost" | "restarted") {
                 TerminalEvent::Exited(t)
             } else {
                 TerminalEvent::StatusChanged(t)
@@ -361,8 +363,10 @@ fn overlay(kind: &str, data: &Value, t: &mut Terminal) {
         "labels" => {
             let labels = data.get("labels").unwrap_or(data).as_object();
             if let Some(m) = labels {
+                // The argv mark is the base's own label, never a tag (as `terminal_of`).
                 t.tags = m
                     .iter()
+                    .filter(|(k, _)| k.as_str() != LABEL_ARGV)
                     .filter_map(|(k, v)| Some((k.clone(), v.as_str()?.to_string())))
                     .collect();
             }
@@ -564,5 +568,25 @@ mod tests {
             if !t.alive && t.exit_code == Some(0) && t.name == "n"));
         let removed = json!({"type": "removed", "terminal": "t1", "data": {}});
         assert!(matches!(notice(removed), Some(TerminalEvent::Removed(r)) if r.0 == "t1"));
+    }
+
+    /// A kept terminal the base restarts runs the machine's shell, not the program (#560): the
+    /// notice is the program's exit, with no exit code.
+    #[test]
+    fn a_restarted_terminal_is_an_exit() {
+        let mut known = BTreeMap::new();
+        let mut notice = |v: Value| event_of(&v, None, &mut known);
+        let created = json!({"type": "created", "seq": 1, "terminal": "t1",
+            "data": {"address": "t1", "name": "n", "state": "live", "labels": {}, "status": null}});
+        assert!(notice(created).is_some());
+        let labels = json!({"type": "labels", "terminal": "t1",
+            "data": {"labels": {"makiba.org": "o", LABEL_ARGV: "0123"}}});
+        assert!(
+            matches!(notice(labels), Some(TerminalEvent::StatusChanged(t))
+            if !t.tags.contains_key(LABEL_ARGV) && t.tags["makiba.org"] == "o")
+        );
+        let restarted = json!({"type": "restarted", "terminal": "t1", "data": {}});
+        assert!(matches!(notice(restarted), Some(TerminalEvent::Exited(t))
+            if !t.alive && t.exit_code.is_none() && t.name == "n"));
     }
 }

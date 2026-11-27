@@ -9,6 +9,11 @@
 //! on 2026-11-25 over a line reader of the workflows (the design's Q2), which kept letting YAML
 //! edges through review after review; telling scheduling changes apart waits for a YAML parser.
 //!
+//! The other direction (Issue 567): a head whose own changes since that base touch a check
+//! (`landing::is_check_path`, the list the merge order of Issue 331 uses) is also not ready while
+//! a landing since added or changed a test (a file under `TESTS`, any test: the one that failed
+//! PR 534 reached the checker through `include_str!` without naming it).
+//!
 //! A reading may also read the head against its peers (Issue 573, docs/design/queue-overlap.md):
 //! the followed pull requests of the same repository before it in the queue's order, which the
 //! PR watch lists. Each peer's branch is fetched after the base and the head, and a peer whose
@@ -21,8 +26,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// The paths whose change by a landing makes a head not ready (docs/design/queue-ready.md
-/// section 1). `.github/` counts only for what `scheduling_only` cannot clear.
+/// section 1); every change under `.github/` counts. For a head that itself changes a check, a
+/// test added or changed under `TESTS` counts too (Issue 567).
 pub const CHECKED_PATHS: &[&str] = &["tests/common/", "tools/", ".github/"];
+/// Where a test lies (Issue 567): any file under it, of any language, fixtures included.
+pub const TESTS: &str = "tests/";
 
 /// A landing on the base that changed what the checks check, with the paths that count.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,11 +46,13 @@ pub enum Reading {
     Stale,
     /// The base tip is the one already covered: nothing to read.
     Unchanged,
-    /// The base tip `base_tip`, the base the head holds `ci_base`, and the landings since that
-    /// count (none: ready).
+    /// The base tip `base_tip`, the base the head holds `ci_base`, the paths of the head's own
+    /// changes since `ci_base` that are checks (`own_checks`, Issue 567), and the landings since
+    /// that count (none: ready).
     Read {
         base_tip: String,
         ci_base: String,
+        own_checks: Vec<String>,
         landings: Vec<Landing>,
     },
     /// As `Read`, with the head read against `peers` too (Issue 573): the base is read whole,
@@ -50,6 +60,7 @@ pub enum Reading {
     Overlaps {
         base_tip: String,
         ci_base: String,
+        own_checks: Vec<String>,
         landings: Vec<Landing>,
         peers: Vec<Peer>,
         overlaps: Vec<Overlap>,
@@ -319,6 +330,21 @@ pub fn read_with_peers(
         return Ok(Reading::Unchanged);
     }
     let ci_base = g.run(&["merge-base", head, &base_tip])?;
+    let own_checks: Vec<String> = g
+        .run(&[
+            "diff-tree",
+            "-r",
+            "-z",
+            "--no-renames",
+            "--no-commit-id",
+            "--name-only",
+            &ci_base,
+            head,
+        ])?
+        .split('\0')
+        .filter(|p| !p.is_empty() && super::landing::is_check_path(p))
+        .map(String::from)
+        .collect();
     let mut landings = Vec::new();
     let list = g.run(&[
         "rev-list",
@@ -327,7 +353,7 @@ pub fn read_with_peers(
         &format!("{ci_base}..{base_tip}"),
     ])?;
     for sha in list.lines().map(str::trim).filter(|l| !l.is_empty()) {
-        let paths = landing_paths(&g, sha)?;
+        let paths = landing_paths(&g, sha, !own_checks.is_empty())?;
         if !paths.is_empty() {
             landings.push(Landing {
                 sha: sha.to_string(),
@@ -339,6 +365,7 @@ pub fn read_with_peers(
         return Ok(Reading::Read {
             base_tip,
             ci_base,
+            own_checks,
             landings,
         });
     };
@@ -351,6 +378,7 @@ pub fn read_with_peers(
     Ok(Reading::Overlaps {
         base_tip,
         ci_base,
+        own_checks,
         landings,
         peers: peers.to_vec(),
         overlaps,
@@ -394,32 +422,53 @@ fn conflict_files(code: i32, out: &str) -> Option<Option<Vec<String>>> {
     }
 }
 
-/// The paths of the landing `sha` (against its first parent) that count.
-fn landing_paths(g: &Git, sha: &str) -> Result<Vec<String>, String> {
+/// The paths of the landing `sha` (against its first parent) that count: under `CHECKED_PATHS`,
+/// and, with `tests_count` (the head changes a check, Issue 567), a test added or changed under
+/// `TESTS` (a deletion cannot fail, so it does not count).
+fn landing_paths(g: &Git, sha: &str, tests_count: bool) -> Result<Vec<String>, String> {
     let parents = g.run(&["rev-list", "--parents", "-n", "1", sha])?;
-    let changed = match parents.split_whitespace().nth(1) {
+    // (status, path) of each change.
+    let changed: Vec<(String, String)> = match parents.split_whitespace().nth(1) {
         // A root commit on the base's line: every path is new.
-        None => g.run(&["ls-tree", "-r", "-z", "--name-only", sha])?,
-        Some(parent) => g.run(&[
-            "diff-tree",
-            "-r",
-            "-z",
-            "--no-renames",
-            "--no-commit-id",
-            "--name-only",
-            parent,
-            sha,
-        ])?,
+        None => g
+            .run(&["ls-tree", "-r", "-z", "--name-only", sha])?
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(|p| ("A".to_string(), p.to_string()))
+            .collect(),
+        Some(parent) => {
+            let out = g.run(&[
+                "diff-tree",
+                "-r",
+                "-z",
+                "--no-renames",
+                "--no-commit-id",
+                "--name-status",
+                parent,
+                sha,
+            ])?;
+            // `-z --name-status`: each change is its status, NUL, its path, NUL.
+            let fields: Vec<&str> = out.split('\0').filter(|f| !f.is_empty()).collect();
+            fields
+                .chunks(2)
+                .filter_map(|c| match c {
+                    [status, path] => Some((status.to_string(), path.to_string())),
+                    _ => None,
+                })
+                .collect()
+        }
     };
     Ok(changed
-        .split('\0')
-        .filter(|p| !p.is_empty() && checked(p))
-        .map(String::from)
+        .into_iter()
+        .filter(|(status, p)| {
+            checked(p) || (tests_count && p.starts_with(TESTS) && !status.starts_with('D'))
+        })
+        .map(|(_, p)| p)
         .collect())
 }
 
-/// Whether a change of `path` counts: it lies under one of `CHECKED_PATHS`.
-fn checked(path: &str) -> bool {
+/// Whether a change of `path` counts for every head: it lies under one of `CHECKED_PATHS`.
+pub(super) fn checked(path: &str) -> bool {
     CHECKED_PATHS.iter().any(|p| path.starts_with(p))
 }
 
@@ -501,8 +550,102 @@ jobs:
         let sha = git_t(d, &["rev-parse", "HEAD"]);
         let cancel = AtomicBool::new(false);
         let g = Git::new(d, &cancel);
-        assert_eq!(landing_paths(&g, &sha).unwrap(), vec![path.to_string()]);
-        assert_eq!(landing_paths(&g, &root).unwrap(), vec![path.to_string()]);
+        assert_eq!(
+            landing_paths(&g, &sha, false).unwrap(),
+            vec![path.to_string()]
+        );
+        assert_eq!(
+            landing_paths(&g, &root, false).unwrap(),
+            vec![path.to_string()]
+        );
+    }
+
+    /// Issue 567: for a head that changes a check, a test added or changed counts and a test
+    /// deleted does not; for any other head neither counts; a root commit's tests are added.
+    #[test]
+    fn a_landed_test_counts_only_for_a_check_changing_head_and_not_when_deleted() {
+        let dir = tempfile::tempdir().unwrap();
+        let d = dir.path();
+        git_t(d, &["init", "-q"]);
+        std::fs::create_dir_all(d.join("tests/fixtures")).unwrap();
+        std::fs::write(d.join("tests/old.rs"), "// old\n").unwrap();
+        std::fs::write(d.join("tests/kept.py"), "# kept\n").unwrap();
+        git_t(d, &["add", "-A"]);
+        git_t(d, &["commit", "-q", "-m", "root"]);
+        let root = git_t(d, &["rev-parse", "HEAD"]);
+        std::fs::remove_file(d.join("tests/old.rs")).unwrap();
+        std::fs::write(d.join("tests/kept.py"), "# changed\n").unwrap();
+        std::fs::write(d.join("tests/fixtures/conftest.py"), "x = 1\n").unwrap();
+        std::fs::write(d.join("README.md"), "docs\n").unwrap();
+        git_t(d, &["add", "-A"]);
+        git_t(d, &["commit", "-q", "-m", "two"]);
+        let sha = git_t(d, &["rev-parse", "HEAD"]);
+        let cancel = AtomicBool::new(false);
+        let g = Git::new(d, &cancel);
+        assert_eq!(
+            landing_paths(&g, &sha, true).unwrap(),
+            vec![
+                "tests/fixtures/conftest.py".to_string(),
+                "tests/kept.py".to_string()
+            ]
+        );
+        assert!(landing_paths(&g, &sha, false).unwrap().is_empty());
+        assert_eq!(
+            landing_paths(&g, &root, true).unwrap(),
+            vec!["tests/kept.py".to_string(), "tests/old.rs".to_string()]
+        );
+        assert!(landing_paths(&g, &root, false).unwrap().is_empty());
+    }
+
+    /// Issue 567: a head's own checks are its changes since the base it holds under
+    /// `landing::CHECKS`, a check renamed away included (as a deletion); a landing of a test then
+    /// counts for it.
+    #[test]
+    fn a_reading_names_the_heads_own_checks() {
+        let dir = tempfile::tempdir().unwrap();
+        let (origin, clone) = (dir.path().join("origin"), dir.path().join("clone"));
+        std::fs::create_dir_all(origin.join("tools")).unwrap();
+        git_t(&origin, &["init", "-q", "-b", "main"]);
+        std::fs::write(origin.join("tools/a.py"), "a").unwrap();
+        git_t(&origin, &["add", "-A"]);
+        git_t(&origin, &["commit", "-q", "-m", "a"]);
+        git_t(&origin, &["checkout", "-q", "-b", "b"]);
+        git_t(&origin, &["mv", "tools/a.py", "a.py"]);
+        git_t(&origin, &["commit", "-q", "-m", "moved"]);
+        let head = git_t(&origin, &["rev-parse", "b"]);
+        git_t(&origin, &["checkout", "-q", "main"]);
+        std::fs::create_dir_all(origin.join("tests")).unwrap();
+        std::fs::write(origin.join("tests/t.rs"), "// t").unwrap();
+        git_t(&origin, &["add", "-A"]);
+        git_t(&origin, &["commit", "-q", "-m", "t"]);
+        let landed = git_t(&origin, &["rev-parse", "main"]);
+        git_t(
+            dir.path(),
+            &[
+                "clone",
+                "-q",
+                &origin.to_string_lossy(),
+                &clone.to_string_lossy(),
+            ],
+        );
+        let cancel = AtomicBool::new(false);
+        let r = read(&clone, "t1", "main", "b", &head, None, &cancel).unwrap();
+        let Reading::Read {
+            own_checks,
+            landings,
+            ..
+        } = r
+        else {
+            panic!("{r:?}");
+        };
+        assert_eq!(own_checks, vec!["tools/a.py".to_string()]);
+        assert_eq!(
+            landings,
+            vec![Landing {
+                sha: landed,
+                paths: vec!["tests/t.rs".to_string()]
+            }]
+        );
     }
 
     /// `git` in `dir` for the tests: a fixed identity, no hook, no signing.
