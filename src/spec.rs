@@ -44,6 +44,7 @@ pub const EVENT_KINDS_CARRIED: &[&str] = &[
 pub const EVENT_KINDS_NEW: &[&str] = &[
     "dispatcher_started",
     "dispatcher_stopped",
+    "dispatcher_stop_unrecorded",
     "base_resynced",
     "terminal_status",
     "terminal_turn",
