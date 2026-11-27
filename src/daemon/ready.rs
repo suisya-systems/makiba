@@ -8,6 +8,11 @@
 //! a file under one of `CHECKED_PATHS`. Every change under `.github/` counts: the person chose it
 //! on 2026-11-25 over a line reader of the workflows (the design's Q2), which kept letting YAML
 //! edges through review after review; telling scheduling changes apart waits for a YAML parser.
+//!
+//! A reading may also read the head against its peers (Issue 573, docs/design/queue-overlap.md):
+//! the followed pull requests of the same repository before it in the queue's order, which the
+//! PR watch lists. Each peer's branch is fetched in the same fetch, and a peer whose head
+//! conflicts with the head by `git merge-tree` is an overlap.
 
 use super::run_repo::HOOKS_OFF;
 use std::path::Path;
@@ -40,6 +45,33 @@ pub enum Reading {
         ci_base: String,
         landings: Vec<Landing>,
     },
+    /// As `Read`, with the head read against `peers` too (Issue 573): the base is read whole,
+    /// whatever was covered, and `overlaps` are the peers whose heads conflict with it.
+    Overlaps {
+        base_tip: String,
+        ci_base: String,
+        landings: Vec<Landing>,
+        peers: Vec<Peer>,
+        overlaps: Vec<Overlap>,
+    },
+}
+
+/// A followed pull request before the head in the queue's order (Issue 573): in the merge queue
+/// (`queued`), or told ready before it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Peer {
+    pub pr: i64,
+    pub task: String,
+    pub branch: String,
+    pub head: String,
+    pub queued: bool,
+}
+
+/// A peer whose head conflicts with the head, with the files `git merge-tree` names.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Overlap {
+    pub pr: i64,
+    pub files: Vec<String>,
 }
 
 /// How long one git call may run before it is stopped (as `gh.rs` bounds a gh call).
@@ -67,6 +99,32 @@ impl<'a> Git<'a> {
     /// `git -C <dir> <args>` with no hook, prompt or replace object, in a process group of its
     /// own (a stop kills what it started too): its trimmed output, or git's message.
     fn run(&self, args: &[&str]) -> Result<String, String> {
+        let (code, stdout, stderr) = self.exec(args)?;
+        if code == Some(0) {
+            Ok(stdout)
+        } else {
+            Err(format!("git {}: {}", args.join(" "), stderr.trim()))
+        }
+    }
+
+    /// As `run`, for a command whose exit status says something (`git merge-tree` exits 1 on a
+    /// conflict and names the files on its output): the exit code and the trimmed output, or a
+    /// message when git could not run, was stopped, or ended by a signal.
+    fn run_status(&self, args: &[&str]) -> Result<(i32, String), String> {
+        let (code, stdout, stderr) = self.exec(args)?;
+        match code {
+            Some(c) => Ok((c, stdout)),
+            None => Err(format!(
+                "git {}: ended by a signal: {}",
+                args.join(" "),
+                stderr.trim()
+            )),
+        }
+    }
+
+    /// The call itself, under the timeout and the cancel: its exit code (none: a signal), its
+    /// trimmed output and its error output.
+    fn exec(&self, args: &[&str]) -> Result<(Option<i32>, String, String), String> {
         use std::io::Read;
         use std::os::unix::process::CommandExt;
         let mut cmd = Command::new(self.program);
@@ -149,15 +207,11 @@ impl<'a> Git<'a> {
             }
         };
         let (stdout, stderr) = (take(out)?, take(err)?);
-        if status.success() {
-            Ok(String::from_utf8_lossy(&stdout).trim_end().to_string())
-        } else {
-            Err(format!(
-                "git {}: {}",
-                args.join(" "),
-                String::from_utf8_lossy(&stderr).trim()
-            ))
-        }
+        Ok((
+            status.code(),
+            String::from_utf8_lossy(&stdout).trim_end().to_string(),
+            String::from_utf8_lossy(&stderr).to_string(),
+        ))
     }
 }
 
@@ -181,13 +235,46 @@ pub fn read(
     covered: Option<&str>,
     cancel: &AtomicBool,
 ) -> Result<Reading, String> {
+    read_with_peers(repo, task, base, branch, head, covered, None, cancel)
+}
+
+/// The ref a reading of `task` fetches the branch of its peer `pr` into (Issue 573).
+pub fn peer_ref(task: &str, pr: i64) -> String {
+    format!("refs/makiba/ready/{task}/peer/{pr}")
+}
+
+/// As `read`; with `peers` given (Issue 573), their branches are fetched in the same fetch, the
+/// base is read whole whatever `covered` says, and the reading is `Overlaps`. A peer whose
+/// branch at origin is not at its head makes the reading `Stale`.
+#[allow(clippy::too_many_arguments)]
+pub fn read_with_peers(
+    repo: &Path,
+    task: &str,
+    base: &str,
+    branch: &str,
+    head: &str,
+    covered: Option<&str>,
+    peers: Option<&[Peer]>,
+    cancel: &AtomicBool,
+) -> Result<Reading, String> {
     let g = Git::new(repo, cancel);
     let (base_ref, head_ref) = refs(task);
-    for r in [&base_ref, &head_ref] {
+    let listed: &[Peer] = peers.unwrap_or_default();
+    let peer_refs: Vec<String> = listed.iter().map(|p| peer_ref(task, p.pr)).collect();
+    for r in [&base_ref, &head_ref].into_iter().chain(&peer_refs) {
         g.run(&["check-ref-format", r])
             .map_err(|_| format!("{r} is not a ref name git takes"))?;
     }
-    g.run(&[
+    let (base_spec, head_spec) = (
+        format!("+refs/heads/{base}:{base_ref}"),
+        format!("+refs/heads/{branch}:{head_ref}"),
+    );
+    let peer_specs: Vec<String> = listed
+        .iter()
+        .zip(&peer_refs)
+        .map(|(p, r)| format!("+refs/heads/{}:{r}", p.branch))
+        .collect();
+    let mut fetch: Vec<&str> = vec![
         "fetch",
         "-q",
         "--no-write-fetch-head",
@@ -196,16 +283,23 @@ pub fn read(
         // No opportunistic update of `refs/remotes/origin/*` from origin's configured refspec.
         "--refmap=",
         "origin",
-        &format!("+refs/heads/{base}:{base_ref}"),
-        &format!("+refs/heads/{branch}:{head_ref}"),
-    ])?;
+        &base_spec,
+        &head_spec,
+    ];
+    fetch.extend(peer_specs.iter().map(String::as_str));
+    g.run(&fetch)?;
     let id = |r: &str| g.run(&["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
     let at = id(&head_ref)?;
     if !at.eq_ignore_ascii_case(head) {
         return Ok(Reading::Stale);
     }
+    for (p, r) in listed.iter().zip(&peer_refs) {
+        if !id(r)?.eq_ignore_ascii_case(&p.head) {
+            return Ok(Reading::Stale);
+        }
+    }
     let base_tip = id(&base_ref)?;
-    if covered.is_some_and(|c| c.eq_ignore_ascii_case(&base_tip)) {
+    if peers.is_none() && covered.is_some_and(|c| c.eq_ignore_ascii_case(&base_tip)) {
         return Ok(Reading::Unchanged);
     }
     let ci_base = g.run(&["merge-base", head, &base_tip])?;
@@ -225,11 +319,56 @@ pub fn read(
             });
         }
     }
-    Ok(Reading::Read {
+    let Some(peers) = peers else {
+        return Ok(Reading::Read {
+            base_tip,
+            ci_base,
+            landings,
+        });
+    };
+    let mut overlaps = Vec::new();
+    for p in peers {
+        let files = conflicts(&g, &p.head, head)?;
+        if !files.is_empty() {
+            overlaps.push(Overlap { pr: p.pr, files });
+        }
+    }
+    Ok(Reading::Overlaps {
         base_tip,
         ci_base,
         landings,
+        peers: peers.to_vec(),
+        overlaps,
     })
+}
+
+/// The files in which the heads `theirs` and `ours` conflict by `git merge-tree` (none: they
+/// merge).
+fn conflicts(g: &Git, theirs: &str, ours: &str) -> Result<Vec<String>, String> {
+    let args = [
+        "merge-tree",
+        "--write-tree",
+        "--name-only",
+        "--no-messages",
+        theirs,
+        ours,
+    ];
+    match g.run_status(&args)? {
+        (0, _) => Ok(Vec::new()),
+        (1, out) => {
+            let mut files: Vec<String> = out
+                .lines()
+                .skip(1)
+                .map(str::trim)
+                .filter(|l| !l.is_empty())
+                .map(String::from)
+                .collect();
+            files.sort();
+            files.dedup();
+            Ok(files)
+        }
+        (code, _) => Err(format!("git {} exited {code}", args.join(" "))),
+    }
 }
 
 /// The paths of the landing `sha` (against its first parent) that count.
