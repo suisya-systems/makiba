@@ -82,7 +82,13 @@ order**:
 
 Rule 1 wins over everything else: a pull request in the queue is a peer whatever its own newest
 verdict (`hold` included: a held pull request the person queues by hand holds the others). Out of
-the queue, a pull request held (`hold`), updating, or judged `update` or `unknown` is nobody's peer.
+the queue, a pull request held (`hold`), updating (an `update` of its task `accepted`, also after
+a `ready`), or judged `update` or `unknown` is nobody's peer.
+
+A held head is never made `unknown` (no later reading would judge it again, and its update on the
+landing would be lost): a failing reading of a held head is read again without the budget, and a
+reading that comes back after a pull request its hold names has landed writes neither `ready` nor
+`hold`; the pass's `overlap_landed` update comes first (diff review rounds 1 and 2).
 
 **A candidate in the queue gets no peers.** `ready_candidates` excludes a makibad act
 (`door::act_awaiting`) but not an open hand stay, so a pull request the person queued is still a
@@ -99,10 +105,12 @@ does today). So a pull request told ready or queued while a reader read is never
 
 ### 3.3 The reading and the decision
 
-The reader of X (`ready::read`, extended; one fetch as today) also fetches each peer's branch
-(`+refs/heads/<O branch>:refs/makiba/ready/<X task>/peer/<O pr>`, in the same `git fetch`), and a
-peer whose branch at origin is not at its recorded head makes the reading `stale` (nothing written,
-read again next interval). For each peer it runs the merge-tree of 3.1. The reading gains
+The reader of X (`ready::read`, extended) also fetches each peer's branch
+(`+refs/heads/<O branch>:refs/makiba/ready/<X task>/peer/<O pr>`, in a second `git fetch` after the
+base and the head: diff review round 1), and a peer whose branch at origin is not at its recorded
+head, or is gone there (`git ls-remote --exit-code` answers 2: deleted once it landed, before its
+landing is recorded), makes the reading `stale` (nothing written, read again next interval); any
+other failure of that fetch is the reading's failure (diff review round 3). For each peer it runs the merge-tree of 3.1. The reading gains
 `overlaps`: each conflicting peer with its files.
 
 The overlap is read on **every reader's first reading**, whatever `covered` says: the `Unchanged`

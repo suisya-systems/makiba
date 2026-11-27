@@ -2961,8 +2961,8 @@ fn held_of(c: &Connection, id: i64, base_tip: Option<String>) -> Result<Held> {
 
 /// The peers of `x` among the followed pull requests `all` (queue-overlap.md section 3.2): of the
 /// same repository, not read closed, at their newest recorded head, and in the merge queue, or
-/// told ready (their head's newest `queue_readiness`) before `x` was. None while `x` is itself
-/// in the queue.
+/// told ready (their head's newest `queue_readiness`) before `x` was and not being updated (no
+/// `update` of their task `accepted`). None while `x` is itself in the queue.
 fn peers_of(
     c: &Connection,
     all: &[Followed],
@@ -2984,7 +2984,12 @@ fn peers_of(
             let Some(r) = newest_readiness(c, &o.repo, o.pr, &head)? else {
                 continue;
             };
-            if r.verdict != "ready" || ready_id.is_some_and(|mine| mine < r.id) {
+            // A pull request out of the queue that is being updated holds nobody: its head will
+            // change, and its new head is judged again.
+            if r.verdict != "ready"
+                || ready_id.is_some_and(|mine| mine < r.id)
+                || update_running(c, &o.task)?.is_some()
+            {
                 continue;
             }
         }
@@ -5127,6 +5132,61 @@ esac"#,
             landed_peer(w.conn(), "o/r", &held).unwrap().map(|l| l.0),
             Some(4)
         );
+    }
+
+    /// Issue 573: a pull request told ready is a peer of a later one of the same repository until
+    /// an update of its task is started.
+    #[test]
+    fn a_ready_peer_being_updated_holds_nobody() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let repos = dir.path().join("repos");
+        std::fs::create_dir_all(repos.join("p/.git")).unwrap();
+        for (task, pr, head) in [("u", 4, "c".repeat(40)), ("t", 5, "a".repeat(40))] {
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: task,
+                project_slug: "p",
+                status: Some("review"),
+                ..Default::default()
+            })
+            .unwrap();
+            register(&w, "pr_opened", task, "o/r", pr, &head).unwrap();
+            w.append_event(&NewEvent {
+                kind: "ci_completed",
+                actor: Some("makibad"),
+                payload: Some(
+                    &json!({"repo": "o/r", "pr": pr, "head_oid": head, "status": "passed"}),
+                ),
+                run_task_id: Some(task),
+                ..Default::default()
+            })
+            .unwrap();
+        }
+        w.append_event(&NewEvent {
+            kind: "queue_readiness",
+            actor: Some("makibad"),
+            payload: Some(&json!({"repo": "o/r", "pr": 4, "head_oid": "c".repeat(40),
+                                  "verdict": "ready", "base_tip": "b".repeat(40)})),
+            run_task_id: Some("u"),
+            ..Default::default()
+        })
+        .unwrap();
+        let peers = |w: &StateWriter| -> Vec<i64> {
+            ready_candidates(w.conn(), &repos, Some("t")).unwrap()[0]
+                .peers
+                .iter()
+                .map(|p| p.pr)
+                .collect()
+        };
+        assert_eq!(peers(&w), vec![4]);
+        w.conn()
+            .execute(
+                "INSERT INTO commands (actor, verb, args_json)
+                 VALUES ('makibad', 'update', '{\"task\": \"u\"}')",
+                [],
+            )
+            .unwrap();
+        assert!(peers(&w).is_empty());
     }
 
     /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two

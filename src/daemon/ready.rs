@@ -287,11 +287,21 @@ pub fn read_with_peers(
     g.run(&[fetch.as_slice(), &[base_spec.as_str(), head_spec.as_str()]].concat())?;
     // The peers' branches in a fetch of their own: a peer's branch gone at origin (deleted once it
     // landed, before its landing is recorded) makes the reading stale, read again once the peers
-    // change, never a failure that counts against the head's budget.
+    // change, never a failure that counts against the head's budget. Any other failure of that
+    // fetch is the reading's failure.
     if !peer_specs.is_empty() {
         let specs: Vec<&str> = peer_specs.iter().map(String::as_str).collect();
-        if g.run(&[fetch.as_slice(), &specs].concat()).is_err() {
-            return Ok(Reading::Stale);
+        if let Err(why) = g.run(&[fetch.as_slice(), &specs].concat()) {
+            for p in listed {
+                let branch = format!("refs/heads/{}", p.branch);
+                // `--exit-code`: 2 when origin has no such ref.
+                let (code, _) =
+                    g.run_status(&["ls-remote", "--exit-code", "origin", branch.as_str()])?;
+                if code == 2 {
+                    return Ok(Reading::Stale);
+                }
+            }
+            return Err(why);
         }
     }
     let id = |r: &str| g.run(&["rev-parse", "--verify", &format!("{r}^{{commit}}")]);
@@ -642,6 +652,24 @@ jobs:
             "{r:?}"
         );
         assert_eq!(read_against(peer("gone")), Reading::Stale);
+        // A fetch of a peer branch that exists at origin and fails for another reason (here its
+        // local ref cannot be written, a folder of refs being in its place) is a failure.
+        git_t(&clone, &["update-ref", "-d", "refs/makiba/ready/t1/peer/9"]);
+        git_t(
+            &clone,
+            &["update-ref", "refs/makiba/ready/t1/peer/9/x", &heads[0]],
+        );
+        let failed = read_with_peers(
+            &clone,
+            "t1",
+            "main",
+            "b",
+            &heads[0],
+            None,
+            Some(&[peer("p")]),
+            &cancel,
+        );
+        assert!(failed.is_err(), "{failed:?}");
     }
 
     #[test]
