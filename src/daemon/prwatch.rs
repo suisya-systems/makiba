@@ -1040,6 +1040,11 @@ pub struct PrWatch {
     member_rx: Receiver<MemberRead>,
     /// Membership reads not written yet: kept until their transaction commits.
     member_queued: Vec<MemberRead>,
+    /// The next membership read's `seq`.
+    member_seq: u64,
+    /// The entries ahead each open wait's reads answered gone (`GoneSeen`). Memory only: lost
+    /// at a restart, which then costs at most one more membership interval.
+    gone_seen: GoneSeen,
     /// Whether a stay queued outside makibad whose entry turns `UNMERGEABLE` is taken out of the
     /// queue too (`MAKIBA_UNMERGEABLE_HAND` is `dequeue`, Issue 575).
     hand: bool,
@@ -1079,7 +1084,15 @@ struct Membership {
 struct MemberRead {
     m: Membership,
     waited: Vec<(i64, Value)>,
+    /// The order the reads were begun in (one counter per PrWatch): an earlier read has a
+    /// smaller one. Marks can be equal across reads; this cannot.
+    seq: u64,
 }
+
+/// By wait (its record's id), each entry ahead answered gone from the queue, with the `seq` of
+/// the earliest read in a row that answered it so (Issue 575): an entry answered `OPEN` out of
+/// the queue counts as gone only when an earlier read answered it gone too. Memory only.
+type GoneSeen = HashMap<i64, HashMap<i64, u64>>;
 
 impl PrWatch {
     /// `$MAKIBA_GH` (default `gh`), `$MAKIBA_PRWATCH_INTERVAL_MS`, `$MAKIBA_PRWATCH_BUDGET_MS`
@@ -1124,6 +1137,8 @@ impl PrWatch {
             member_tx,
             member_rx,
             member_queued: Vec::new(),
+            member_seq: 0,
+            gone_seen: HashMap::new(),
             hand: std::env::var(HAND_ENV).is_ok_and(|v| v == "dequeue"),
         }
     }
@@ -1156,7 +1171,9 @@ impl PrWatch {
             self.member_queued.push(m);
         }
         for m in std::mem::take(&mut self.member_queued) {
-            if let Err(e) = apply_entered(w, &m.m).and_then(|()| apply_waits(w, &m)) {
+            if let Err(e) =
+                apply_entered(w, &m.m).and_then(|()| apply_waits_seen(w, &m, &mut self.gone_seen))
+            {
                 eprintln!(
                     "makibad: pr watch {}: cannot record its merge queue entries: {e}",
                     m.m.repo
@@ -1429,6 +1446,8 @@ impl PrWatch {
             if self.members.contains_key(&key) {
                 continue;
             }
+            self.member_seq += 1;
+            let seq = self.member_seq;
             let cancel = Arc::new(AtomicBool::new(false));
             let handle = {
                 let (gh, tx, cancel) =
@@ -1453,6 +1472,7 @@ impl PrWatch {
                         let _ = tx.send(MemberRead {
                             m: Membership { repo, mark, reads },
                             waited: answers,
+                            seq,
                         });
                     }
                 })
@@ -2929,9 +2949,20 @@ fn gone_from_queue(v: &Value) -> Option<&'static str> {
 /// itself with its base (`baseRefName`) and out of the queue, end (`end_wait`). A wait with no
 /// entry ahead needs that answer too: no wait ends on the base the dequeue read. An entry not
 /// answered or still queued, or the pull request itself unanswered, without its base, or queued
-/// again, ends nothing.
+/// again, ends nothing. An entry answered `OPEN` out of the queue counts as gone only when an
+/// earlier read of the same wait (`seen`, a smaller `seq`) answered it gone too: one answer of a
+/// pull request that is landing may show it out of the queue before it shows it merged. How each
+/// entry left is this read's answer.
+#[cfg(test)]
 fn apply_waits(w: &StateWriter, read: &MemberRead) -> Result<()> {
-    for wait in open_waits(w.conn(), None)? {
+    apply_waits_seen(w, read, &mut HashMap::new())
+}
+
+/// `apply_waits`, with the entries ahead earlier reads answered gone (`seen`), which it updates.
+fn apply_waits_seen(w: &StateWriter, read: &MemberRead, seen: &mut GoneSeen) -> Result<()> {
+    let waits = open_waits(w.conn(), None)?;
+    seen.retain(|id, _| waits.iter().any(|o| o.id == *id));
+    for wait in waits {
         if !wait.f.repo.eq_ignore_ascii_case(&read.m.repo) || wait.id > read.m.mark {
             continue;
         }
@@ -2949,15 +2980,26 @@ fn apply_waits(w: &StateWriter, read: &MemberRead) -> Result<()> {
         if own["state"].as_str() != Some("OPEN") || own["isInMergeQueue"].as_bool() != Some(false) {
             continue;
         }
-        let left: Vec<(i64, &str)> = wait
-            .waits_for
-            .iter()
-            .map_while(|n| {
-                let (_, v) = read.waited.iter().find(|(p, _)| p == n)?;
-                Some((*n, gone_from_queue(v)?))
-            })
-            .collect();
-        if left.len() == wait.waits_for.len() {
+        let earlier = seen.entry(wait.id).or_default();
+        let mut left: Vec<(i64, &str)> = Vec::new();
+        let mut all = true;
+        for n in &wait.waits_for {
+            let Some((_, v)) = read.waited.iter().find(|(p, _)| p == n) else {
+                all = false;
+                continue;
+            };
+            let Some(how) = gone_from_queue(v) else {
+                earlier.remove(n);
+                all = false;
+                continue;
+            };
+            let first = *earlier.entry(*n).or_insert(read.seq);
+            if how == "left the queue" && first >= read.seq {
+                all = false;
+            }
+            left.push((*n, how));
+        }
+        if all {
             end_wait(w, &wait, &left, current)?;
         }
     }
@@ -6508,6 +6550,7 @@ esac"#,
                 mark,
                 reads: follows_now(&w),
             },
+            seq: next_seq(),
             waited: vec![
                 (
                     2,
@@ -6613,7 +6656,101 @@ esac"#,
                 reads: follows_now(w),
             },
             waited: answers,
+            seq: next_seq(),
         }
+    }
+
+    /// A membership read's `seq`, as the watch gives them: one larger per read.
+    fn next_seq() -> u64 {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The CI flake of the declared test (a read that shows a landing entry ahead out of the queue
+    /// before it shows it merged): one `OPEN` out-of-the-queue answer ends nothing; the next read
+    /// answering it `MERGED` ends the wait with "merged".
+    #[test]
+    fn a_torn_read_then_a_merged_read_ends_the_wait_as_merged() {
+        let (_dir, w) = org();
+        let head = "5".repeat(40);
+        waiting_run(&w, "t12", 18, &head);
+        unmergeable_wait(&w, "t12", "o/p", 18, &head, 0, &[2], Some("main")).unwrap();
+        let own = (
+            18,
+            json!({"number": 18, "state": "OPEN", "isInMergeQueue": false, "baseRefName": "main"}),
+        );
+        let mut seen = HashMap::new();
+        let torn = read_now(
+            &w,
+            vec![
+                (
+                    2,
+                    json!({"number": 2, "state": "OPEN", "isInMergeQueue": false}),
+                ),
+                own.clone(),
+            ],
+        );
+        apply_waits_seen(&w, &torn, &mut seen).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "one out-of-the-queue answer ends nothing"
+        );
+        let merged = read_now(
+            &w,
+            vec![
+                (
+                    2,
+                    json!({"number": 2, "state": "MERGED", "isInMergeQueue": false}),
+                ),
+                own,
+            ],
+        );
+        apply_waits_seen(&w, &merged, &mut seen).unwrap();
+        assert!(open_waits(w.conn(), None).unwrap().is_empty(), "ended");
+        assert_eq!(
+            last_readiness(&w)["left"],
+            json!([{"pr": 2, "how": "merged"}])
+        );
+    }
+
+    /// An entry ahead that really left the queue without landing ends the wait only on a second
+    /// read that answers it gone; the same read applied again ends nothing.
+    #[test]
+    fn one_out_of_the_queue_read_alone_ends_no_wait() {
+        let (_dir, w) = org();
+        let head = "4".repeat(40);
+        waiting_run(&w, "t13", 19, &head);
+        unmergeable_wait(&w, "t13", "o/p", 19, &head, 0, &[2], Some("main")).unwrap();
+        let answers = vec![
+            (
+                2,
+                json!({"number": 2, "state": "OPEN", "isInMergeQueue": false}),
+            ),
+            (
+                19,
+                json!({"number": 19, "state": "OPEN", "isInMergeQueue": false,
+                       "baseRefName": "main"}),
+            ),
+        ];
+        let mut seen = HashMap::new();
+        let first = read_now(&w, answers.clone());
+        apply_waits_seen(&w, &first, &mut seen).unwrap();
+        apply_waits_seen(&w, &first, &mut seen).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "one read, even applied twice, ends nothing"
+        );
+        apply_waits_seen(&w, &read_now(&w, answers), &mut seen).unwrap();
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "a second read ends it"
+        );
+        assert_eq!(
+            last_readiness(&w)["left"],
+            json!([{"pr": 2, "how": "left the queue"}])
+        );
     }
 
     /// Every current follow, as a membership read begun now carries them.

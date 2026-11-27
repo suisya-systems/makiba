@@ -204,7 +204,12 @@ head recorded since the read began; diff review round 3), that answers for every
 with its own `baseRefName` (the read names the pull request itself; a wait with `waits_for` empty
 needs that answer too, never the base the dequeue read). A number answered null, the pull request
 itself unanswered, without its base, or read queued again, or a failed read, ends nothing (it is
-read again next interval).
+read again next interval). An entry ahead answered `OPEN` out of the queue counts as gone only when
+an earlier membership read of the same wait (begun before it: each read has a sequence number)
+answered it gone too; `MERGED` and `CLOSED` count at once. One answer of a pull request that is
+landing may show it out of the queue before it shows it merged (the declared test's stand-in can
+answer so, and once did on CI); the next read then says `merged`. How each entry left (`left`) is
+the newest read's answer. An entry answered still queued forgets the earlier answers.
 
 The end, on the loop's thread, in one transaction (`end_wait`), after checking that the wait is
 still open for the same follow and head, that no act awaits the pull request's landing, that it
@@ -268,8 +273,10 @@ Memory only:
 - merge.rs: the threads of open requests, by request id, and the first failure of a read (the
   300 s budget), as for attempts; lost at a restart, when every open request of an earlier start
   is only read.
-- prwatch.rs: nothing new beyond the membership threads (the waits are read from the ledger each
-  pass).
+- prwatch.rs: beyond the membership threads (the waits are read from the ledger each pass), the
+  sequence number of the next membership read and, per open wait, the entries ahead earlier reads
+  answered gone with the earliest such read's number (`gone_seen`). Lost at a restart: an entry
+  then needs a second read again, so a wait ends at most one membership interval later.
 
 Ordering: the request is committed before anything is sent; the outcome, `merge_dequeued` and the
 wait record are one transaction; the end of the wait and its notice are one transaction; a
