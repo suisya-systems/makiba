@@ -4412,7 +4412,8 @@ fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError
         ));
     }
     // Issue 475 (docs/design/queue-ready.md section 6): no act under an update, nor on a head the
-    // PR watch judged not ready for the queue.
+    // PR watch judged not ready for the queue: to be updated, or held behind a pull request that
+    // conflicts with it (Issue 573, docs/design/queue-overlap.md section 3.8).
     if let Some(command) = super::prwatch::update_running(w.conn(), &task).map_err(internal)? {
         return Err(refuse(
             ErrorKind::Conflict,
@@ -4425,7 +4426,7 @@ fn merge_check(w: &StateWriter, repo: &str, pr: i64) -> Result<String, DoorError
     if let Some(head) = super::prwatch::newest_head(w.conn(), &task).map_err(internal)?
         && let Some(r) =
             super::prwatch::newest_readiness(w.conn(), repo, pr, &head).map_err(internal)?
-        && r.verdict == "update"
+        && matches!(r.verdict.as_str(), "update" | "hold")
     {
         return Err(refuse(
             ErrorKind::Conflict,

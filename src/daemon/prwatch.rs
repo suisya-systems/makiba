@@ -2889,14 +2889,151 @@ struct ReadyCand {
     has_worktree: bool,
     /// When the head's newest `queue_readiness` is `ready` (watched): its base tip.
     ready: Option<Option<String>>,
+    /// When the head's newest `queue_readiness` is `hold` (held, Issue 573): that hold.
+    held: Option<Held>,
+    /// The followed pull requests before it in the queue's order (Issue 573,
+    /// docs/design/queue-overlap.md section 3.2), by number; none while it is in the queue.
+    peers: Vec<super::ready::Peer>,
+}
+
+/// A head's newest `queue_readiness` `hold` (Issue 573): its event id, its base tip and the pull
+/// requests it named, each with its head and the files of the conflict.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Held {
+    id: i64,
+    base_tip: Option<String>,
+    holds: Vec<(i64, String, Vec<String>)>,
+}
+
+impl Held {
+    /// The pull requests and heads the hold named, by number.
+    fn set(&self) -> Vec<(i64, String)> {
+        let mut s: Vec<(i64, String)> = self
+            .holds
+            .iter()
+            .map(|(pr, head, _)| (*pr, head.to_lowercase()))
+            .collect();
+        s.sort();
+        s
+    }
+}
+
+/// The `hold` event `id` as a `Held`.
+fn held_of(c: &Connection, id: i64, base_tip: Option<String>) -> Result<Held> {
+    let raw: Option<String> = c
+        .query_row(
+            "SELECT json_extract(payload_json, '$.holds') FROM events WHERE id = ?1",
+            [id],
+            |q| q.get(0),
+        )
+        .optional()?
+        .flatten();
+    let listed: Value = raw
+        .and_then(|r| serde_json::from_str(&r).ok())
+        .unwrap_or(Value::Null);
+    let holds = listed
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|h| {
+                    Some((
+                        h["pr"].as_i64()?,
+                        h["head"].as_str()?.to_string(),
+                        h["files"]
+                            .as_array()
+                            .map(|f| {
+                                f.iter()
+                                    .filter_map(|x| x.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(Held {
+        id,
+        base_tip,
+        holds,
+    })
+}
+
+/// The peers of `x` among the followed pull requests `all` (queue-overlap.md section 3.2): of the
+/// same repository, not read closed, at their newest recorded head, and in the merge queue, or
+/// told ready (their head's newest `queue_readiness`) before `x` was. None while `x` is itself
+/// in the queue.
+fn peers_of(
+    c: &Connection,
+    all: &[Followed],
+    x: &Followed,
+    ready_id: Option<i64>,
+) -> Result<Vec<super::ready::Peer>> {
+    let mut out = Vec::new();
+    if x.act {
+        return Ok(out);
+    }
+    for o in all {
+        if o.task == x.task || o.pr == x.pr || o.closed || !o.repo.eq_ignore_ascii_case(&x.repo) {
+            continue;
+        }
+        let Some(head) = newest_head(c, &o.task)? else {
+            continue;
+        };
+        if !o.act {
+            let Some(r) = newest_readiness(c, &o.repo, o.pr, &head)? else {
+                continue;
+            };
+            if r.verdict != "ready" || ready_id.is_some_and(|mine| mine < r.id) {
+                continue;
+            }
+        }
+        let branch: String = c.query_row(
+            "SELECT COALESCE(branch, 'makiba/' || task_id) FROM runs WHERE task_id = ?1",
+            [&o.task],
+            |q| q.get(0),
+        )?;
+        out.push(super::ready::Peer {
+            pr: o.pr,
+            task: o.task.clone(),
+            branch,
+            head,
+            queued: o.act,
+        });
+    }
+    out.sort_by_key(|p| p.pr);
+    Ok(out)
+}
+
+/// The first pull request a hold named whose landing (`pr_merged`) was recorded after the hold:
+/// its number, its head as the hold named it, and the landing's event id.
+fn landed_peer(c: &Connection, repo: &str, h: &Held) -> Result<Option<(i64, String, i64)>> {
+    for (pr, head, _) in &h.holds {
+        let merged: Option<i64> = c
+            .query_row(
+                "SELECT id FROM events WHERE kind = 'pr_merged'
+                   AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2 AND id > ?3
+                 ORDER BY id LIMIT 1",
+                params![repo, pr, h.id],
+                |q| q.get(0),
+            )
+            .optional()?;
+        if let Some(m) = merged {
+            return Ok(Some((*pr, head.clone(), m)));
+        }
+    }
+    Ok(None)
 }
 
 /// The candidates (of `task` only, when given): a followed pull request, open, of a run whose
 /// project has a git repository in `repos`, at the run's newest recorded head, whose newest
 /// `ci_completed` is `passed`, with no merge act awaiting its landing and no `update` of the task
-/// `accepted`, and whose head has no `queue_readiness` yet or a `ready` one newest.
+/// `accepted`, and whose head has no `queue_readiness` yet, or a `ready` or (Issue 573) a `hold`
+/// one newest; each with its peers.
 fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<Vec<ReadyCand>> {
     let mut out = Vec::new();
+    let all = followed(c, None)?;
     for f in followed(c, task)? {
         if f.closed {
             continue;
@@ -2941,11 +3078,13 @@ fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<
         {
             continue;
         }
-        let ready = match newest_readiness(c, &f.repo, f.pr, &head)? {
-            None => None,
-            Some(r) if r.verdict == "ready" => Some(r.base_tip),
+        let (ready, ready_id, held) = match newest_readiness(c, &f.repo, f.pr, &head)? {
+            None => (None, None, None),
+            Some(r) if r.verdict == "ready" => (Some(r.base_tip), Some(r.id), None),
+            Some(r) if r.verdict == "hold" => (None, None, Some(held_of(c, r.id, r.base_tip)?)),
             Some(_) => continue,
         };
+        let peers = peers_of(c, &all, &f, ready_id)?;
         out.push(ReadyCand {
             f,
             head,
@@ -2954,6 +3093,8 @@ fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<
             dir,
             has_worktree: worktree.is_some(),
             ready,
+            held,
+            peers,
         });
     }
     Ok(out)
@@ -2983,9 +3124,25 @@ impl ReadyCand {
     }
 }
 
-/// A readiness reader: one per task, of one key.
+impl ReadyCand {
+    /// Whether its reader watches the base: a head told ready, or held (Issue 573).
+    fn watches(&self) -> bool {
+        self.ready.is_some() || self.held.is_some()
+    }
+
+    /// Whether its reader reads the head against its peers on its first reading (Issue 573): it
+    /// has peers, or it is held and not in the queue (a held head with no peers left is read so
+    /// that it is told ready).
+    fn reads_peers(&self) -> bool {
+        !self.f.act && (!self.peers.is_empty() || self.held.is_some())
+    }
+}
+
+/// A readiness reader: one per task, of one key, peers and mode.
 struct Reader {
     key: ReadKey,
+    peers: Vec<super::ready::Peer>,
+    held: bool,
     cancel: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
 }
@@ -3016,10 +3173,29 @@ enum Decision {
     Unknown {
         reason: String,
     },
+    /// Issue 573: the head conflicts with peers before it in the queue's order (`overlaps`, of
+    /// the `peers` it was read against).
+    Hold {
+        base_tip: String,
+        ci_base: String,
+        peers: Vec<super::ready::Peer>,
+        overlaps: Vec<super::ready::Overlap>,
+    },
+    /// Issue 573: a pull request the hold `hold` named landed (`pr` at `head`, the `pr_merged`
+    /// `merged`, the conflict's `files`): the head is updated.
+    Lifted {
+        hold: i64,
+        base_tip: Option<String>,
+        pr: i64,
+        head: String,
+        merged: i64,
+        files: Vec<String>,
+    },
 }
 
 /// A reader's thread: read until a reading decides (a first judgement's reading, a watched one
-/// that counts), sending each reading the loop needs; a failure is sent and read again.
+/// that counts), sending each reading the loop needs; a failure is sent and read again. A head
+/// with peers, or held, is read against its peers on its first reading (Issue 573).
 fn read_ready(
     c: ReadyCand,
     mut covered: Option<String>,
@@ -3028,7 +3204,8 @@ fn read_ready(
     tx: &Sender<ReadDone>,
 ) {
     use super::ready::Reading;
-    let watch = c.ready.is_some();
+    let watch = c.watches();
+    let mut first = c.reads_peers();
     // The last reading sent was a failure: the next reading that succeeds is sent too, so the
     // loop's failure budget starts again.
     let mut failing = false;
@@ -3036,14 +3213,16 @@ fn read_ready(
         if cancel.load(Ordering::SeqCst) {
             return;
         }
+        let peers = first.then_some(c.peers.as_slice());
         let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            super::ready::read(
+            super::ready::read_with_peers(
                 &c.dir,
                 &c.f.task,
                 &c.base,
                 &c.branch,
                 &c.head,
                 covered.as_deref(),
+                peers,
                 cancel,
             )
         }))
@@ -3056,6 +3235,17 @@ fn read_ready(
             Ok(Reading::Read {
                 base_tip, landings, ..
             }) => {
+                if watch && landings.is_empty() {
+                    covered = Some(base_tip.clone());
+                    Some(false)
+                } else {
+                    Some(true)
+                }
+            }
+            Ok(Reading::Overlaps {
+                base_tip, landings, ..
+            }) => {
+                first = false;
                 if watch && landings.is_empty() {
                     covered = Some(base_tip.clone());
                     Some(false)
@@ -3112,6 +3302,36 @@ impl PrWatch {
         let mut wanted: Vec<ReadyCand> = Vec::new();
         for c in candidates {
             let key = told_key(&c.f.repo, c.f.pr, &c.head);
+            // Issue 573 (queue-overlap.md section 3.5): a held head whose earlier pull request
+            // landed is updated at once, from the ledger, whatever its merge state reads.
+            if let Some(h) = c.held.as_ref().filter(|_| !c.f.act)
+                && let Some((pr, head, merged)) = landed_peer(w.conn(), &c.f.repo, h)?
+            {
+                let class = self
+                    .merges
+                    .get(&c.f.task)
+                    .filter(|r| r.f == c.f && r.head.eq_ignore_ascii_case(&c.head))
+                    .map_or_else(
+                        || "unknown".to_string(),
+                        |r| merge_class(&r.status, r.draft),
+                    );
+                let files = h
+                    .holds
+                    .iter()
+                    .find(|(p, _, _)| *p == pr)
+                    .map(|(_, _, f)| f.clone())
+                    .unwrap_or_default();
+                let d = Decision::Lifted {
+                    hold: h.id,
+                    base_tip: h.base_tip.clone(),
+                    pr,
+                    head,
+                    merged,
+                    files,
+                };
+                decide(w, &self.repos, &c.key(), &class, &d)?;
+                continue;
+            }
             let Some(r) = self.merges.get(&c.f.task).filter(|r| {
                 r.f == c.f
                     && r.head.eq_ignore_ascii_case(&c.head)
@@ -3128,7 +3348,8 @@ impl PrWatch {
                     .covered
                     .get(&key)
                     .cloned()
-                    .or_else(|| c.ready.clone().flatten());
+                    .or_else(|| c.ready.clone().flatten())
+                    .or_else(|| c.held.as_ref().and_then(|h| h.base_tip.clone()));
                 let d = Decision::Update {
                     reason: "conflict",
                     base_tip: tip,
@@ -3144,7 +3365,9 @@ impl PrWatch {
         for task in tasks {
             let keep = self.readers.get(&task).is_some_and(|r| {
                 !r.handle.as_ref().is_none_or(JoinHandle::is_finished)
-                    && wanted.iter().any(|c| c.key() == r.key)
+                    && wanted.iter().any(|c| {
+                        c.key() == r.key && c.peers == r.peers && c.held.is_some() == r.held
+                    })
             });
             // A reader no longer wanted is told to stop and let go: it may be in a fetch, which
             // the loop does not wait for; what it still sends is checked again when written.
@@ -3157,12 +3380,16 @@ impl PrWatch {
                 continue;
             }
             let key = told_key(&c.f.repo, c.f.pr, &c.head);
-            let covered = c
+            let start = c
                 .ready
+                .clone()
+                .or_else(|| c.held.as_ref().map(|h| h.base_tip.clone()));
+            let covered = start
                 .as_ref()
                 .and_then(|tip| self.covered.get(&key).cloned().or_else(|| tip.clone()));
             let cancel = Arc::new(AtomicBool::new(false));
             let (task, read_key) = (c.f.task.clone(), c.key());
+            let (peers, held) = (c.peers.clone(), c.held.is_some());
             let handle = {
                 let (tx, cancel, interval) =
                     (self.ready_tx.clone(), Arc::clone(&cancel), self.interval);
@@ -3172,6 +3399,8 @@ impl PrWatch {
                 task,
                 Reader {
                     key: read_key,
+                    peers,
+                    held,
                     cancel,
                     handle: Some(handle),
                 },
@@ -3225,10 +3454,51 @@ impl PrWatch {
                     }
                 }
             }
+            // Issue 573: a reading against the peers: a landing that counts updates, an overlap
+            // holds, and none makes the head ready unless it was told ready already.
+            Ok(Reading::Overlaps {
+                base_tip,
+                ci_base,
+                landings,
+                peers,
+                overlaps,
+            }) => {
+                self.read_failing.remove(&key);
+                if !landings.is_empty() {
+                    Decision::Update {
+                        reason: "checks_changed",
+                        base_tip: Some(base_tip.clone()),
+                        ci_base: Some(ci_base.clone()),
+                        landings: landings.clone(),
+                    }
+                } else if !overlaps.is_empty() {
+                    if d.watch {
+                        self.covered.insert(key.clone(), base_tip.clone());
+                    }
+                    Decision::Hold {
+                        base_tip: base_tip.clone(),
+                        ci_base: ci_base.clone(),
+                        peers: peers.clone(),
+                        overlaps: overlaps.clone(),
+                    }
+                } else if d.key.watch {
+                    self.covered.insert(key, base_tip.clone());
+                    return Ok(());
+                } else {
+                    Decision::Ready {
+                        base_tip: base_tip.clone(),
+                        ci_base: ci_base.clone(),
+                    }
+                }
+            }
             Ok(_) => {
                 self.read_failing.remove(&key);
                 return Ok(());
             }
+        };
+        let read = match &d.result {
+            Ok(Reading::Overlaps { peers, .. }) => Some(peers.as_slice()),
+            _ => None,
         };
         // A reading decides only on the head's merge state now, read after its CI result: a draft
         // or a state not computed waits (the reader is started again once it is), and a conflict
@@ -3244,7 +3514,7 @@ impl PrWatch {
             return Ok(());
         };
         let decision = on_merge_state(decision, &class, self.covered.get(&key).cloned());
-        if decide(w, &self.repos, &d.key, &class, &decision)? {
+        if decide_with(w, &self.repos, &d.key, read, &class, &decision)? {
             self.read_failing.remove(&key);
         }
         Ok(())
@@ -3264,6 +3534,10 @@ fn on_merge_state(d: Decision, class: &str, covered: Option<String>) -> Decision
             base_tip, ci_base, ..
         } => (base_tip, ci_base),
         Decision::Unknown { .. } => (covered, None),
+        Decision::Hold {
+            base_tip, ci_base, ..
+        } => (Some(base_tip), Some(ci_base)),
+        Decision::Lifted { base_tip, .. } => (base_tip, None),
     };
     Decision::Update {
         reason: "conflict",
@@ -3278,6 +3552,22 @@ fn on_merge_state(d: Decision, class: &str, covered: Option<String>) -> Decision
 /// in one transaction, only while `head` is still a candidate in the same mode (`watched`).
 /// Whether it was written.
 fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decision) -> Result<bool> {
+    decide_with(w, repos, key, None, class, d)
+}
+
+/// As `decide`, for a reading that was read against `read` (Issue 573; none: against no peers).
+/// A `ready` or `hold` is written only while the candidate's peers are those it was read against
+/// (with none read, only while it has no peers and is not held); a `hold` naming the same pull
+/// requests and heads as the candidate's hold writes nothing; and a lifted hold only while that
+/// hold is still the head's newest.
+fn decide_with(
+    w: &StateWriter,
+    repos: &Path,
+    key: &ReadKey,
+    read: Option<&[super::ready::Peer]>,
+    class: &str,
+    d: &Decision,
+) -> Result<bool> {
     let (task, watched) = (key.f.task.as_str(), key.watch);
     w.transaction(|w| {
         let Some(c) = ready_candidates(w.conn(), repos, Some(task))?
@@ -3286,6 +3576,29 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
         else {
             return Ok(false);
         };
+        let same_peers = match read {
+            None => c.peers.is_empty() && c.held.is_none(),
+            Some(p) => p == c.peers.as_slice(),
+        };
+        match d {
+            Decision::Ready { .. } if !same_peers => return Ok(false),
+            Decision::Hold { .. } if read.is_none() || !same_peers => return Ok(false),
+            Decision::Hold { overlaps, .. } => {
+                let mut set: Vec<(i64, String)> = overlaps
+                    .iter()
+                    .filter_map(|o| c.peers.iter().find(|p| p.pr == o.pr))
+                    .map(|p| (p.pr, p.head.to_lowercase()))
+                    .collect();
+                set.sort();
+                if c.held.as_ref().is_some_and(|h| h.set() == set) {
+                    return Ok(false);
+                }
+            }
+            Decision::Lifted { hold, .. } if c.held.as_ref().map(|h| h.id) != Some(*hold) => {
+                return Ok(false);
+            }
+            _ => {}
+        }
         let (repo, pr, base) = (c.f.repo.as_str(), c.f.pr, c.base.as_str());
         let (verdict, reason, base_tip, ci_base, landings) = match d {
             Decision::Ready { base_tip, ci_base } => (
@@ -3308,16 +3621,60 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
                 landings.clone(),
             ),
             Decision::Unknown { reason } => ("unknown", json!(reason), None, None, Vec::new()),
+            Decision::Hold {
+                base_tip, ci_base, ..
+            } => (
+                "hold",
+                json!("overlap"),
+                Some(base_tip.clone()),
+                Some(ci_base.clone()),
+                Vec::new(),
+            ),
+            Decision::Lifted { base_tip, .. } => (
+                "update",
+                json!("overlap_landed"),
+                base_tip.clone(),
+                None,
+                Vec::new(),
+            ),
         };
         let listed: Vec<Value> = landings
             .iter()
             .map(|l| json!({"sha": l.sha, "paths": l.paths}))
             .collect();
-        let payload = json!({
+        let mut payload = json!({
             "repo": repo, "pr": pr, "head_oid": c.head, "task_id": task, "base": base,
             "base_tip": base_tip, "ci_base": ci_base, "merge_state": class, "verdict": verdict,
             "reason": reason, "landings": listed, "watched": watched, "command": Value::Null,
         });
+        // Issue 573: the pull requests a hold names, each with the files of the conflict.
+        let holding: Vec<(&super::ready::Peer, &Vec<String>)> = match d {
+            Decision::Hold {
+                peers, overlaps, ..
+            } => overlaps
+                .iter()
+                .filter_map(|o| peers.iter().find(|p| p.pr == o.pr).map(|p| (p, &o.files)))
+                .collect(),
+            _ => Vec::new(),
+        };
+        if let Decision::Hold { .. } = d {
+            payload["holds"] = holding
+                .iter()
+                .map(|(p, files)| {
+                    json!({"pr": p.pr, "task": p.task, "head": p.head, "queued": p.queued,
+                           "files": files})
+                })
+                .collect();
+        }
+        if let Decision::Lifted {
+            pr: after,
+            head,
+            merged,
+            ..
+        } = d
+        {
+            payload["after"] = json!({"pr": after, "head": head, "merged": merged});
+        }
         let event = w.append_event(&NewEvent {
             kind: "queue_readiness",
             actor: Some("makibad"),
@@ -3328,17 +3685,71 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
         let short = |h: &str| h[..h.len().min(7)].to_string();
         let at = short(&c.head);
         let link = format!("https://github.com/{repo}/pull/{pr}");
+        let some_files = |files: &[String]| {
+            let mut named: Vec<&str> = files.iter().take(3).map(String::as_str).collect();
+            if files.len() > 3 {
+                named.push("...");
+            }
+            named.join(", ")
+        };
+        let lead = if watched {
+            format!("{repo}#{pr} at {at} is no longer ready for the queue: ")
+        } else {
+            String::new()
+        };
         let body = match d {
             Decision::Ready { ci_base, .. } => format!(
                 "{repo}#{pr} at {at} can be queued: its CI passed, the head holds {base} at {}, and no landing since changed what the checks check (docs/design/queue-ready.md). {link}",
                 short(ci_base)
             ),
-            Decision::Update {
-                reason, landings, ..
-            } => {
-                let why = if *reason == "conflict" {
+            Decision::Hold { .. } => {
+                let with: Vec<String> = holding
+                    .iter()
+                    .map(|(p, files)| {
+                        let place = if p.queued {
+                            "in the merge queue"
+                        } else {
+                            "ready for the queue"
+                        };
+                        format!(
+                            "it conflicts in {} with {repo}#{} at {}, which is {place} before it",
+                            some_files(files),
+                            p.pr,
+                            short(&p.head)
+                        )
+                    })
+                    .collect();
+                let names: Vec<String> = holding.iter().map(|(p, _)| format!("#{}", p.pr)).collect();
+                let verb = if names.len() > 1 { "land" } else { "lands" };
+                format!(
+                    "{lead}{repo}#{pr} at {at} is held from the merge queue: {}. makibad updates it when {} {verb} (docs/design/queue-overlap.md). {link}",
+                    with.join("; "),
+                    names.join(" and ")
+                )
+            }
+            Decision::Update { .. } | Decision::Lifted { .. } => {
+                let why = if let Decision::Lifted {
+                    pr: after, files, ..
+                } = d
+                {
+                    format!(
+                        "{repo}#{after}, which it conflicted with in {}, landed",
+                        some_files(files)
+                    )
+                } else if let Decision::Update {
+                    reason: "conflict", ..
+                } = d
+                {
                     "it conflicts with its base (DIRTY)".to_string()
                 } else {
+                    let landings: &[super::ready::Landing] = match d {
+                        Decision::Update { landings, .. } => landings,
+                        _ => &[],
+                    };
+                    let ci_base = match d {
+                        Decision::Update { ci_base, .. } => ci_base.as_deref(),
+                        _ => None,
+                    };
                     let named: Vec<String> = landings
                         .iter()
                         .map(|l| {
@@ -3352,14 +3763,9 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
                         .collect();
                     format!(
                         "landings since {base} at {}, which the head holds, changed what the checks check: {}",
-                        ci_base.as_deref().map(short).unwrap_or_default(),
+                        ci_base.map(short).unwrap_or_default(),
                         named.join(", ")
                     )
-                };
-                let lead = if watched {
-                    format!("{repo}#{pr} at {at} is no longer ready for the queue: ")
-                } else {
-                    String::new()
                 };
                 if c.has_worktree {
                     let args = json!({"task": task, "base": base, "repo": repo, "pr": pr,
