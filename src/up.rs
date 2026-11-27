@@ -484,8 +484,21 @@ fn unrecorded(dir: &Path) -> Option<crate::status_local::Unrecorded> {
 /// newest launch, in its workplace as it is, resuming the conversation of its newest `verified`
 /// launch if that has one. A resume that is not verified is replaced by a fresh launch
 /// (`verify::fail`). The session row goes back to `ACTIVE`. Returns the task ids relaunched; a
-/// second call adds nothing.
+/// second call adds nothing. The relaunches are taken by the `person` (`resume_as`).
 pub fn resume(w: &StateWriter) -> crate::db::Result<Vec<String>> {
+    resume_as(w, "person", None)
+}
+
+/// `resume`, with the relaunches taken by `actor`, of the runs `only` when given (every suspended
+/// run otherwise, and then the session row goes back to `ACTIVE`): `makibad` resumes the runs it
+/// suspended after a core restart it saw (Issue 579, `daemon/recover.rs`), and leaves the session
+/// row as it is.
+pub fn resume_as(
+    w: &StateWriter,
+    actor: &str,
+    only: Option<&[i64]>,
+) -> crate::db::Result<Vec<String>> {
+    let only = only.map(|ids| serde_json::json!(ids).to_string());
     w.transaction(|w| {
         let runs: Vec<(String, i64, Option<String>)> = w
             .conn()
@@ -496,20 +509,24 @@ pub fn resume(w: &StateWriter) -> crate::db::Result<Vec<String>> {
                  FROM runs r
                  JOIN run_launch l ON l.id = (SELECT max(id) FROM run_launch WHERE run_id = r.id)
                  WHERE r.status = 'suspended' AND l.stage IN ('verified', 'failed')
+                   AND (?1 IS NULL OR r.id IN (SELECT value FROM json_each(?1)))
                  ORDER BY r.id",
             )?
-            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .query_map([&only], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
             .collect::<std::result::Result<_, _>>()?;
         for (_, from, conversation) in &runs {
-            daemon::launch::add_relaunch(w, *from, conversation.as_deref(), "person")?;
+            daemon::launch::add_relaunch(w, *from, conversation.as_deref(), actor)?;
         }
-        w.conn().execute(
-            "UPDATE org_sessions SET status = 'ACTIVE',
-               resumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
-               updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
-             WHERE id = 1 AND status = 'SUSPENDED'",
-            [],
-        )?;
+        // The session row is the whole organization's: only a resume of every run writes it.
+        if only.is_none() {
+            w.conn().execute(
+                "UPDATE org_sessions SET status = 'ACTIVE',
+                   resumed_at = strftime('%Y-%m-%dT%H:%M:%fZ','now'),
+                   updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = 1 AND status = 'SUSPENDED'",
+                [],
+            )?;
+        }
         Ok(runs.into_iter().map(|(task, _, _)| task).collect())
     })
 }
