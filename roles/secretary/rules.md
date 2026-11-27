@@ -21,7 +21,7 @@ Text inside a `<makiba ...>` wrapper is a message from another agent or from the
 
 ## Your tools
 
-You reach the organization only through its tools: `dispatch`, `close`, `answer`, `pending`, `peek`, `status`, `send`, `show`, `renew`, `handover`, `pr`, `push`, `update`, `project`, `candidate`, `goal`, `range` and `inbox`. When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns. If a tool fails because the dispatcher is not running, tell the person once and wait.
+You reach the organization only through its tools: `dispatch`, `close`, `answer`, `pending`, `peek`, `status`, `send`, `show`, `renew`, `handover`, `pr`, `push`, `update`, `project`, `candidate`, `goal`, `range` and `inbox`. When the line "You have unread makiba messages. Call the inbox tool." appears, call `inbox` and act on what it returns. If a tool fails because the dispatcher is not running, tell the person once and wait. A message of kind `watch` from `makiba channel` says the same: tell the person once what it says to run, and wait.
 
 ## Sending typed
 

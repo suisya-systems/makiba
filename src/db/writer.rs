@@ -4,7 +4,10 @@
 //! committed by SQLite at once. `None` in an option means "the caller did not supply this": an
 //! update never clears a column by omission (use `Patch::Clear` where clearing is allowed).
 
+use std::cell::Cell;
+use std::panic::Location;
 use std::path::Path;
+use std::time::{Duration, Instant};
 
 use rusqlite::types::Value as Sql;
 use rusqlite::{Connection, OptionalExtension, params, params_from_iter};
@@ -14,19 +17,46 @@ use super::{Result, Row, migrate, queries};
 
 const NOW: &str = "strftime('%Y-%m-%dT%H:%M:%fZ','now')";
 
+/// A hold of the write lock this long or longer is logged with its call site (Issue 561).
+const SLOW_HOLD: Duration = Duration::from_secs(1);
+
 /// A write handle on a migrated `state.db`.
+///
+/// Every write transaction it opens is timed from its `BEGIN IMMEDIATE` to its end (commit,
+/// rollback, or the handle dropped): a hold of `SLOW_HOLD` or more is logged as
+/// `state.db: the write lock was held {secs:.1} s by {site}`, the site being the caller's
+/// `file:line`, or `<label> (<file>:<line>)` from `begin_as`. The log is stderr unless
+/// `with_hold_log` gives another; the time lives only in this handle, not in the ledger.
 pub struct StateWriter {
     conn: Connection,
+    /// The open transaction's start and site; `None` in autocommit.
+    hold: Cell<Option<Hold>>,
+    hold_log: Box<dyn Fn(&str) + Send>,
+}
+
+struct Hold {
+    since: Instant,
+    site: String,
+}
+
+fn site(at: &Location<'_>) -> String {
+    format!("{}:{}", at.file(), at.line())
 }
 
 /// Rolls a transaction back when dropped inside one: on an error, and on a panic that unwinds past it.
-struct RollbackOnDrop<'a>(&'a Connection);
+struct RollbackOnDrop<'a>(&'a StateWriter);
 
 impl Drop for RollbackOnDrop<'_> {
     fn drop(&mut self) {
-        if !self.0.is_autocommit() {
-            let _ = self.0.execute_batch("ROLLBACK");
-        }
+        let _ = self.0.rollback();
+    }
+}
+
+impl Drop for StateWriter {
+    /// A transaction still open is rolled back (as closing the connection would), and its hold
+    /// ends here.
+    fn drop(&mut self) {
+        let _ = self.rollback();
     }
 }
 
@@ -145,7 +175,17 @@ impl StateWriter {
     pub fn new(mut conn: Connection) -> Result<Self> {
         migrate(&mut conn)?;
         super::configure(&conn)?;
-        Ok(StateWriter { conn })
+        Ok(StateWriter {
+            conn,
+            hold: Cell::new(None),
+            hold_log: Box::new(|line| eprintln!("{line}")),
+        })
+    }
+
+    /// The same handle, logging its slow holds to `log` instead of stderr (a test reads them).
+    pub fn with_hold_log(mut self, log: impl Fn(&str) + Send + 'static) -> Self {
+        self.hold_log = Box::new(log);
+        self
     }
 
     /// Open (or create) the database at `path`, migrated.
@@ -164,35 +204,79 @@ impl StateWriter {
     /// `IMMEDIATE` takes the write lock first, waiting the busy timeout for it. A deferred one that
     /// reads, then writes, holds a WAL snapshot when it asks for the lock, and SQLite then answers
     /// `database is locked` at once, without waiting (Issue 181).
+    #[track_caller]
     pub fn begin(&self) -> Result<()> {
         if self.conn.is_autocommit() {
-            self.conn.execute_batch("BEGIN IMMEDIATE")?;
+            self.open_at(site(Location::caller()))?;
         }
         Ok(())
+    }
+
+    /// As `begin`, with `label` in the site its hold is logged with. It opens a transaction and
+    /// never joins one: with one already open it is refused with `InTransaction`.
+    #[track_caller]
+    pub fn begin_as(&self, label: &str) -> Result<()> {
+        if !self.conn.is_autocommit() {
+            return Err(super::Error::InTransaction("begin_as"));
+        }
+        self.open_at(format!("{label} ({})", site(Location::caller())))
+    }
+
+    fn open_at(&self, site: String) -> Result<()> {
+        // A transaction SQLite ended by itself left its hold behind: that hold ends now.
+        self.end_hold();
+        self.conn.execute_batch("BEGIN IMMEDIATE")?;
+        self.hold.set(Some(Hold {
+            since: Instant::now(),
+            site,
+        }));
+        Ok(())
+    }
+
+    /// The hold is over once the connection is back in autocommit; a slow one is logged.
+    fn end_hold(&self) {
+        if !self.conn.is_autocommit() {
+            return;
+        }
+        if let Some(h) = self.hold.take() {
+            let held = h.since.elapsed();
+            if held >= SLOW_HOLD {
+                (self.hold_log)(&format!(
+                    "state.db: the write lock was held {:.1} s by {}",
+                    held.as_secs_f64(),
+                    h.site
+                ));
+            }
+        }
     }
 
     pub fn commit(&self) -> Result<()> {
         if !self.conn.is_autocommit() {
             self.conn.execute_batch("COMMIT")?;
         }
+        self.end_hold();
         Ok(())
     }
 
+    /// Roll back the open transaction. With none open it only ends the hold a transaction SQLite
+    /// rolled back by itself left.
     pub fn rollback(&self) -> Result<()> {
         if !self.conn.is_autocommit() {
             self.conn.execute_batch("ROLLBACK")?;
         }
+        self.end_hold();
         Ok(())
     }
 
     /// Run `f` in a transaction: commit if it returns `Ok`, roll back if it returns `Err` or panics.
     /// Inside a transaction already open, `f` joins it and whoever opened it commits or rolls back.
+    #[track_caller]
     pub fn transaction<T>(&self, f: impl FnOnce(&Self) -> Result<T>) -> Result<T> {
         if !self.conn.is_autocommit() {
             return f(self);
         }
-        self.begin()?;
-        let _rollback = RollbackOnDrop(&self.conn);
+        self.open_at(site(Location::caller()))?;
+        let _rollback = RollbackOnDrop(self);
         let out = f(self)?;
         self.commit()?;
         Ok(out)

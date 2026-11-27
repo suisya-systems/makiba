@@ -12,6 +12,58 @@ use std::time::Duration;
 /// A heartbeat older than this means `makibad` is not running.
 pub const STALE: Duration = Duration::from_secs(30);
 
+/// The age of the dispatcher's heartbeat in seconds, by the clock of SQLite that wrote it; `None`
+/// when there is no row or no heartbeat.
+pub fn heartbeat_age(conn: &Connection) -> Option<f64> {
+    conn.query_row(
+        "SELECT (julianday('now') - julianday(heartbeat_at)) * 86400.0 FROM dispatcher WHERE id = 1",
+        [],
+        |r| r.get::<_, Option<f64>>(0),
+    )
+    .ok()
+    .flatten()
+}
+
+/// `heartbeat_age` of the `state.db` at `path`, read-only (the door's answers to the secretary,
+/// Issue 563).
+pub fn heartbeat_age_at(path: &Path) -> Option<f64> {
+    let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).ok()?;
+    conn.busy_timeout(Duration::from_secs(2)).ok()?;
+    heartbeat_age(&conn)
+}
+
+/// The `makibad` of the dispatcher row, when it stopped without recording it (Issue 563).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Unrecorded {
+    pub pid: i64,
+    pub started_at: String,
+    pub heartbeat_at: Option<String>,
+}
+
+/// The dispatcher row's `makibad`, when no `dispatcher_stopped` of its pid came at or after its
+/// `started_at` and no `dispatcher_stop_unrecorded` names it yet. Asked only while no `makibad`
+/// holds the lock: the row is then the last one that got as far as writing it.
+pub fn unrecorded_stop(conn: &Connection) -> rusqlite::Result<Option<Unrecorded>> {
+    conn.query_row(
+        "SELECT d.pid, d.started_at, d.heartbeat_at FROM dispatcher d
+         WHERE d.id = 1 AND d.pid IS NOT NULL AND d.started_at IS NOT NULL
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'dispatcher_stopped'
+                 AND json_extract(e.payload_json, '$.pid') = d.pid AND e.occurred_at >= d.started_at)
+           AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'dispatcher_stop_unrecorded'
+                 AND json_extract(e.payload_json, '$.pid') = d.pid
+                 AND json_extract(e.payload_json, '$.started_at') = d.started_at)",
+        [],
+        |r| {
+            Ok(Unrecorded {
+                pid: r.get(0)?,
+                started_at: r.get(1)?,
+                heartbeat_at: r.get(2)?,
+            })
+        },
+    )
+    .optional()
+}
+
 pub fn main(as_json: bool) -> ExitCode {
     let path = crate::daemon::state_dir().join("state.db");
     if as_json {
@@ -658,7 +710,8 @@ fn pull_requests(conn: &Connection) -> rusqlite::Result<Vec<Value>> {
 }
 
 /// One entry of `pull_requests[]`: `repo`, `pr`, `task_id`; `title` (the newest recorded one);
-/// `head_oid` (the merged head, else the run's newest recorded head of this pull request);
+/// `head_oid` (the merged head, else the newest recorded head of this pull request by any run,
+/// Issue 569, else the run's newest watch of it);
 /// `ci` (`running` while a watch of the head is under way, else the newest result of that
 /// repository, number and head after the newest `pr_closed` unless the head was recorded again
 /// since, else null); `state` (`merged`, `closed` or `open`); `merged_via`, `merged_by`; and
@@ -690,15 +743,13 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
         Some(h) => Some(h.to_string()),
         None => conn
             .query_row(
-                "SELECT coalesce(
-                   (SELECT json_extract(payload_json, '$.head_oid') FROM events
-                    WHERE run_id = ?1 AND kind IN ('pr_opened', 'fix_pushed')
-                      AND lower(json_extract(payload_json, '$.repo')) = lower(?2)
-                      AND json_extract(payload_json, '$.pr') = ?3
-                    ORDER BY id DESC LIMIT 1),
-                   (SELECT head_oid FROM pr_watches
-                    WHERE run_id = ?1 AND lower(repo) = lower(?2) AND pr = ?3
-                    ORDER BY id DESC LIMIT 1))",
+                &format!(
+                    "SELECT coalesce({},
+                       (SELECT head_oid FROM pr_watches
+                        WHERE run_id = ?1 AND lower(repo) = lower(?2) AND pr = ?3
+                        ORDER BY id DESC LIMIT 1))",
+                    crate::daemon::belt::pr_head_sql("?2", "?3")
+                ),
                 params![row["id"].as_i64(), repo, pr],
                 |r| r.get(0),
             )
@@ -719,7 +770,7 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
     };
     let ci = match &head {
         None => Value::Null,
-        Some(h) => ci_of(conn, repo, pr, h)?,
+        Some(h) => crate::daemon::belt::pr_ci(conn, repo, pr, h)?.map_or(Value::Null, Value::from),
     };
     let merge_state = match (&head, state) {
         (Some(h), "open") => newest("'pr_read'")?
@@ -746,46 +797,6 @@ fn pull_request(conn: &Connection, row: &Value, repo: &str, pr: i64) -> rusqlite
               "merged_by": of_merge("merged_by"), "merge_state": merge_state,
               "merge_order": merge_order}),
     )
-}
-
-/// The CI of `repo#pr` at `head`: `running` while a watch of it is `watching`; else the status of
-/// its newest `ci_completed` written after the newest `pr_closed` of the pull request (any, when
-/// the head was recorded again after that close); else null.
-fn ci_of(conn: &Connection, repo: &str, pr: i64, head: &str) -> rusqlite::Result<Value> {
-    let running: bool = conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM pr_watches WHERE status = 'watching'
-           AND lower(repo) = lower(?1) AND pr = ?2 AND lower(head_oid) = lower(?3))",
-        params![repo, pr, head],
-        |r| r.get(0),
-    )?;
-    if running {
-        return Ok(json!("running"));
-    }
-    let of = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
-              AND json_extract(payload_json, '$.pr') = ?2";
-    let head_is = "lower(json_extract(payload_json, '$.head_oid')) = lower(?3)";
-    let status: Option<String> = conn
-        .query_row(
-            &format!(
-                "SELECT json_extract(payload_json, '$.status') FROM events
-                 WHERE kind = 'ci_completed' AND {of} AND {head_is}
-                   AND id > (SELECT CASE WHEN EXISTS (
-                                 SELECT 1 FROM events g WHERE g.kind IN ('pr_opened', 'fix_pushed')
-                                   AND lower(json_extract(g.payload_json, '$.repo')) = lower(?1)
-                                   AND json_extract(g.payload_json, '$.pr') = ?2
-                                   AND lower(json_extract(g.payload_json, '$.head_oid')) = lower(?3)
-                                   AND g.id > c.cut)
-                               THEN 0 ELSE c.cut END
-                             FROM (SELECT coalesce(max(id), 0) AS cut FROM events
-                                   WHERE kind = 'pr_closed' AND {of}) c)
-                 ORDER BY id DESC LIMIT 1"
-            ),
-            params![repo, pr, head],
-            |r| r.get(0),
-        )
-        .optional()?
-        .flatten();
-    Ok(status.map_or(Value::Null, Value::from))
 }
 
 /// The newest triage scan (Issue 256), null before the first: what the secretary would propose
@@ -1146,18 +1157,21 @@ fn report(path: &std::path::Path) -> Result<(String, bool), String> {
     };
     let fresh = age < STALE.as_secs_f64();
     let pid = pid.map_or("unknown".to_string(), |p| p.to_string());
-    let mut text = format!(
+    // A stale heartbeat is the first thing the person reads (Issue 563).
+    let mut text = if fresh {
+        String::new()
+    } else {
+        "makibad is not running: the heartbeat is older than 30 s\n".to_string()
+    };
+    text.push_str(&format!(
         "makibad: pid {pid}\nheartbeat: {beat} ({age:.0} s ago)\nsubscribed: {}\n",
         if subscribed == 1 { "yes" } else { "no" }
-    );
+    ));
     text.push_str(&mode_line(
         recorded_mode(&conn, fresh).as_deref(),
         fresh,
         mode_here(),
     ));
-    if !fresh {
-        text.push_str("makibad is not running: the heartbeat is older than 30 s\n");
-    }
     // The secretary (Issue 43): its newest launch, and how the person attaches to it.
     let stage: Option<String> = conn
         .query_row(

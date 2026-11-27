@@ -115,7 +115,10 @@ pub fn main() -> ExitCode {
     };
     // The channel servers reach the door's port; delivery pushes through their held requests.
     let db = dir.join("state.db");
-    let hub = crate::channel::Hub::new(move |token| door::agent_of(&db, token));
+    let beat_db = db.clone();
+    // Issue 563: the secretary's channel server watches makibad by the heartbeat's age.
+    let hub = crate::channel::Hub::new(move |token| door::agent_of(&db, token))
+        .with_beat(move || crate::status_local::heartbeat_age_at(&beat_db));
     let delivery = Delivery::new(Box::new(hub.clone()));
     match serve(&dir, &|| connect_base(&dir), delivery, Some((door, hub))) {
         Ok(()) => ExitCode::SUCCESS,
@@ -283,16 +286,35 @@ fn serve_until(
     // Issue 272: calling the person back; its seams are read now.
     let mut person_call = call::Call::new(dir);
     let base = connect();
-    // Not subscribed yet: the row says so, and the heartbeat already runs.
-    w.conn()
-        .execute(
-            "INSERT INTO dispatcher (id, pid, started_at, heartbeat_at, base, base_version, subscribed)
-             VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, NULL, 0)
-             ON CONFLICT(id) DO UPDATE SET pid = ?1, started_at = excluded.started_at,
-               heartbeat_at = excluded.heartbeat_at, base = ?2, base_version = NULL, subscribed = 0",
-            rusqlite::params![std::process::id(), base.name()],
-        )
-        .map_err(|e| e.to_string())?;
+    // Not subscribed yet: the row says so, and the heartbeat already runs. Issue 563: the row of
+    // a makibad that stopped without recording it is kept as `dispatcher_stop_unrecorded` in the
+    // same transaction that overwrites it, so its last heartbeat is never lost unrecorded.
+    crash::point("dispatcher_row");
+    w.transaction(|w| {
+        if let Some(u) =
+            crate::status_local::unrecorded_stop(w.conn()).map_err(crate::db::Error::from)?
+        {
+            let payload = json!({"pid": u.pid, "started_at": u.started_at,
+                                 "heartbeat_at": u.heartbeat_at});
+            w.append_event(&NewEvent {
+                kind: "dispatcher_stop_unrecorded",
+                actor: Some("makibad"),
+                payload: Some(&payload),
+                ..Default::default()
+            })?;
+        }
+        w.conn()
+            .execute(
+                "INSERT INTO dispatcher (id, pid, started_at, heartbeat_at, base, base_version, subscribed)
+                 VALUES (1, ?1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'), ?2, NULL, 0)
+                 ON CONFLICT(id) DO UPDATE SET pid = ?1, started_at = excluded.started_at,
+                   heartbeat_at = excluded.heartbeat_at, base = ?2, base_version = NULL, subscribed = 0",
+                rusqlite::params![std::process::id(), base.name()],
+            )
+            .map_err(crate::db::Error::from)?;
+        Ok(())
+    })
+    .map_err(|e| e.to_string())?;
 
     let info = base
         .hello()
@@ -387,6 +409,8 @@ fn serve_until(
     let mut resumed = false;
     let mut park = park::Park::new(&org.to_string_lossy(), park::after_from_env());
     while !stop.load(Ordering::SeqCst) {
+        // A test's stop of the tick while the process lives (Issue 563; debug builds only).
+        crash::hold("tick");
         match rx.recv_timeout(TICK) {
             Ok(Msg::Subscribed(Ok(()))) => subscribed = true,
             Ok(Msg::Subscribed(Err(e))) => return Err(e),

@@ -16,6 +16,15 @@
 //! Whether an agent's channel is connected is read from its held request being there; the hub
 //! sees a dead server by the connection closing, within `PEEK_EVERY`.
 //!
+//! The watch of `makibad` (Issue 563, docs/design/makibad-watch.md): `makibad` cannot watch
+//! itself, and the secretary's channel server is the one process outside it that always holds a
+//! request to its door. Every answer to the secretary carries `BEAT_HEADER`, the heartbeat's age
+//! read from `state.db` (`Hub::with_beat`); the door's threads are not the tick, so a stopped tick
+//! still answers with a growing age. A server that has seen the header is the watcher: it gives
+//! the secretary one `watch` notice when an answer's age reaches `status_local::STALE` (the tick
+//! has stopped) or when the door has not answered for that long (`makibad` has stopped), and
+//! another only after an answer with a fresh heartbeat. What it knows is in memory only.
+//!
 //! The ledger stays with `daemon::delivery`: this module carries already-wrapped text and never
 //! reads or marks a message. Which agent a request is for comes from the token only (`Hub::new`
 //! takes the function the door supplies); the token travels in the launch arguments.
@@ -65,13 +74,29 @@ pub(crate) fn read_head(r: &mut impl Read) -> std::io::Result<(Vec<u8>, usize)> 
 }
 
 fn respond(s: &mut TcpStream, status: &str, body: &str) -> std::io::Result<()> {
+    respond_with(s, status, "", body)
+}
+
+/// As `respond`, with `extra`, whole header lines each ending in CRLF, before the blank line.
+fn respond_with(s: &mut TcpStream, status: &str, extra: &str, body: &str) -> std::io::Result<()> {
     let _ = s.set_write_timeout(Some(IO_LIMIT));
     write!(
         s,
-        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        "HTTP/1.1 {status}\r\nContent-Type: text/plain; charset=utf-8\r\nContent-Length: {}\r\n{extra}Connection: close\r\n\r\n{body}",
         body.len()
     )?;
     s.flush()
+}
+
+/// The header that carries the heartbeat's age to the secretary's channel server (Issue 563).
+pub const BEAT_HEADER: &str = "X-Makiba-Heartbeat-Age";
+
+/// How long a held request stays open: `HOLD`, or `MAKIBA_CHANNEL_HOLD_MS` (a test's seam).
+fn hold() -> Duration {
+    std::env::var("MAKIBA_CHANNEL_HOLD_MS")
+        .ok()
+        .and_then(|v| v.trim().parse().ok())
+        .map_or(HOLD, Duration::from_millis)
 }
 
 // ---- the side of makibad ----------------------------------------------------------------------
@@ -89,9 +114,13 @@ struct Slot {
 }
 
 type Auth = Box<dyn Fn(&str) -> Option<String> + Send + Sync>;
+/// The heartbeat's age in seconds, `None` when it cannot be read.
+type Beat = Box<dyn Fn() -> Option<f64> + Send + Sync>;
 
 struct Inner {
     auth: Auth,
+    /// Set by `with_beat`: the answers to the secretary carry its value (Issue 563).
+    beat: std::sync::OnceLock<Beat>,
     slots: Mutex<HashMap<String, Slot>>,
     /// The newest session start seen for each agent.
     newest: Mutex<HashMap<String, u128>>,
@@ -128,12 +157,32 @@ impl Hub {
     pub fn new(auth: impl Fn(&str) -> Option<String> + Send + Sync + 'static) -> Hub {
         Hub(Arc::new(Inner {
             auth: Box::new(auth),
+            beat: std::sync::OnceLock::new(),
             slots: Mutex::new(HashMap::new()),
             newest: Mutex::new(HashMap::new()),
             rejected: AtomicU64::new(0),
             next_gen: AtomicU64::new(1),
             closed: AtomicBool::new(false),
         }))
+    }
+
+    /// With `beat`, the heartbeat's age: every answer to the secretary's requests carries it in
+    /// `BEAT_HEADER`, so its channel server watches `makibad` (Issue 563). Set once, before the
+    /// hub is cloned.
+    pub fn with_beat(self, beat: impl Fn() -> Option<f64> + Send + Sync + 'static) -> Hub {
+        let _ = self.0.beat.set(Box::new(beat));
+        self
+    }
+
+    /// The header lines of an answer to `agent`: the heartbeat's age for the secretary.
+    fn extra(&self, agent: &str) -> String {
+        if agent != crate::spec::AGENT_SECRETARY {
+            return String::new();
+        }
+        match self.0.beat.get().and_then(|f| f()) {
+            Some(age) => format!("{BEAT_HEADER}: {age:.1}\r\n"),
+            None => String::new(),
+        }
     }
 
     /// Is the agent's channel server holding a request now?
@@ -198,6 +247,7 @@ impl Hub {
             // replaced is dropped: its receiver disconnects and that request answers 409.
             let mut slots = self.0.slots.lock().unwrap();
             let mut newest = self.0.newest.lock().unwrap();
+            let before = newest.get(&agent).copied();
             let seen = newest.entry(agent.clone()).or_insert(start);
             if start < *seen {
                 drop((slots, newest));
@@ -205,6 +255,17 @@ impl Hub {
                 return;
             }
             *seen = start;
+            // Issue 563: the first request of a new session of a watching server is answered at
+            // once, so it learns it watches without waiting out a hold.
+            let extra = self.extra(&agent);
+            if !extra.is_empty() && before.is_none_or(|b| start > b) {
+                // The older session's held request goes, as a replacement would make it: its
+                // receiver disconnects and it answers 409, so nothing is pushed to it.
+                slots.remove(&agent);
+                drop((slots, newest));
+                let _ = respond_with(&mut s, "204 No Content", &extra, "");
+                return;
+            }
             slots.insert(
                 agent.clone(),
                 Slot {
@@ -216,17 +277,17 @@ impl Hub {
         }
         let _reg = Registered {
             hub: &self.0,
-            agent,
+            agent: agent.clone(),
             serial,
         };
-        let until = Instant::now() + HOLD;
+        let until = Instant::now() + hold();
         while Instant::now() < until {
             if self.0.closed.load(Ordering::SeqCst) {
                 return;
             }
             match rx.recv_timeout(PEEK_EVERY) {
                 Ok(offer) => {
-                    let r = hand_over(&mut s, &offer.text);
+                    let r = hand_over(&mut s, &self.extra(&agent), &offer.text);
                     let _ = offer.reply.send(r);
                     return;
                 }
@@ -243,7 +304,7 @@ impl Hub {
                 }
             }
         }
-        let _ = respond(&mut s, "204 No Content", "");
+        let _ = respond_with(&mut s, "204 No Content", &self.extra(&agent), "");
     }
 }
 
@@ -262,8 +323,8 @@ fn peer_gone(s: &TcpStream) -> bool {
 }
 
 /// Write the answer and wait for the server's `ACK`: only then is the text taken.
-fn hand_over(s: &mut TcpStream, text: &str) -> Result<(), String> {
-    respond(s, "200 OK", text).map_err(|e| format!("cannot write the answer: {e}"))?;
+fn hand_over(s: &mut TcpStream, extra: &str, text: &str) -> Result<(), String> {
+    respond_with(s, "200 OK", extra, text).map_err(|e| format!("cannot write the answer: {e}"))?;
     let _ = s.set_read_timeout(Some(ACK_WAIT));
     let mut ack = [0u8; 3];
     s.read_exact(&mut ack)
@@ -318,8 +379,10 @@ const PROTOCOLS: [&str; 3] = ["2025-03-26", "2025-06-18", "2024-11-05"];
 
 /// What one pass of asking the door came to.
 enum Ask {
-    Text,
-    Nothing,
+    /// A message, and the heartbeat's age if the answer carried it.
+    Text(Option<f64>),
+    /// The hold ran out, and the heartbeat's age if the answer carried it.
+    Nothing(Option<f64>),
     Refused,
     Superseded,
     Failed(String),
@@ -358,6 +421,17 @@ fn ask(door: &str, token: &str, session: &str, out: &Out) -> Ask {
                     .ok()
             })
             .unwrap_or(0);
+        let age = resp
+            .headers
+            .iter()
+            .find(|h| h.name.eq_ignore_ascii_case(BEAT_HEADER))
+            .and_then(|h| {
+                std::str::from_utf8(h.value)
+                    .ok()?
+                    .trim()
+                    .parse::<f64>()
+                    .ok()
+            });
         match resp.code {
             Some(200) if len > 0 && len <= BODY_MAX => {
                 let mut body = buf.split_off(n);
@@ -374,9 +448,9 @@ fn ask(door: &str, token: &str, session: &str, out: &Out) -> Ask {
                 // Taken only when it is written out: then, and only then, `ACK`.
                 out.notify(&text);
                 s.write_all(b"ACK").map_err(|e| e.to_string())?;
-                Ok(Ask::Text)
+                Ok(Ask::Text(age))
             }
-            Some(204) => Ok(Ask::Nothing),
+            Some(204) => Ok(Ask::Nothing(age)),
             Some(401) => Ok(Ask::Refused),
             Some(409) => Ok(Ask::Superseded),
             c => Err(format!("unexpected answer {c:?}")),
@@ -409,14 +483,74 @@ impl Out {
     }
 }
 
+/// The watch of `makibad` (Issue 563, docs/design/makibad-watch.md), kept in memory by the
+/// channel server only; a new server starts with nothing.
+#[derive(Default)]
+struct Watch {
+    /// An answer carried the heartbeat's age: this is the secretary's server.
+    watcher: bool,
+    /// When the door last answered. A silence is counted from here, so a door that keeps its
+    /// socket open and answers nothing (a stopped process) is counted as well.
+    last_answer: Option<Instant>,
+    /// A notice was given for this stale spell.
+    noticed: bool,
+}
+
+impl Watch {
+    /// An answer of the door, with the age it carried. Returns the notice to give, if any.
+    fn answered(&mut self, age: Option<f64>) -> Option<String> {
+        self.last_answer = Some(Instant::now());
+        let age = age?;
+        self.watcher = true;
+        if age < crate::status_local::STALE.as_secs_f64() {
+            self.noticed = false;
+            return None;
+        }
+        self.notice(format!(
+            "makibad answers but its heartbeat is {age:.0} s old: its tick has stopped and it \
+             cannot say so itself. Tell the person once: run makiba status, then makiba down; if \
+             down says makibad is still running after 20 s, kill -KILL the pid status shows; then \
+             makiba up."
+        ))
+    }
+
+    /// A failed ask. Returns the notice to give, if any.
+    fn failed(&mut self) -> Option<String> {
+        let gone = self.last_answer?.elapsed();
+        if gone < crate::status_local::STALE {
+            return None;
+        }
+        self.notice(format!(
+            "makibad has not answered for {} s: the door does not answer, so makibad has stopped \
+             and cannot say so itself. Tell the person once: run makiba up; it names a stop that \
+             was not recorded. If the person stopped it with makiba down, nothing is wrong.",
+            gone.as_secs()
+        ))
+    }
+
+    fn notice(&mut self, text: String) -> Option<String> {
+        if !self.watcher || self.noticed {
+            return None;
+        }
+        self.noticed = true;
+        Some(format!(
+            "<makiba from=\"makiba channel\" kind=\"watch\">\n{text}\n</makiba>"
+        ))
+    }
+}
+
 fn poll(door: String, token: String, session: String, out: Arc<Out>) {
     let mut wait = Duration::from_millis(200);
     let mut said = false;
+    let mut watch = Watch::default();
     loop {
         match ask(&door, &token, &session, &out) {
-            Ask::Text | Ask::Nothing => {
+            Ask::Text(age) | Ask::Nothing(age) => {
                 wait = Duration::from_millis(200);
                 said = false;
+                if let Some(text) = watch.answered(age) {
+                    out.notify(&text);
+                }
             }
             Ask::Refused => {
                 eprintln!("makiba channel: the door refused the token");
@@ -430,6 +564,9 @@ fn poll(door: String, token: String, session: String, out: Arc<Out>) {
                 if !said {
                     eprintln!("makiba channel: cannot reach the door: {e}");
                     said = true;
+                }
+                if let Some(text) = watch.failed() {
+                    out.notify(&text);
                 }
                 std::thread::sleep(wait);
                 wait = (wait * 2).min(Duration::from_secs(2));
@@ -552,5 +689,111 @@ mod tests {
         // Asking again, as the old server would after a 200, is refused at once.
         assert_eq!(code(&mut status_of(addr, "100-1")), "409");
         assert!(hub.connected("a"));
+    }
+
+    /// `when` seconds ago, as an `Instant`.
+    fn ago(secs: u64) -> Instant {
+        Instant::now()
+            .checked_sub(Duration::from_secs(secs))
+            .expect("the clock is too young for the test")
+    }
+
+    /// Issue 563: one notice per spell, given again after a fresh heartbeat; a silence counts from
+    /// the last answer; a server that never saw the age does not watch.
+    #[test]
+    fn the_watch_notices_once_per_spell_and_again_after_a_fresh_heartbeat() {
+        let mut w = Watch::default();
+        assert_eq!(w.answered(Some(1.0)), None);
+        assert!(w.watcher);
+        let first = w
+            .answered(Some(31.0))
+            .expect("a stale heartbeat is noticed");
+        assert!(first.contains("its tick has stopped"), "{first}");
+        assert_eq!(w.answered(Some(32.0)), None, "a second notice in one spell");
+        assert_eq!(w.answered(Some(0.5)), None);
+        let again = w
+            .answered(Some(31.0))
+            .expect("noticed again after a fresh heartbeat");
+        assert!(again.contains("its tick has stopped"), "{again}");
+        // A fresh heartbeat, then silence: counted from that answer, not from the first failure.
+        assert_eq!(w.answered(Some(0.5)), None);
+        assert_eq!(w.failed(), None, "a failure right after an answer");
+        w.last_answer = Some(ago(31));
+        let gone = w.failed().expect("a silence of 31 s since the last answer");
+        assert!(gone.contains("the door does not answer"), "{gone}");
+        assert_eq!(w.failed(), None, "a second notice in one silence");
+
+        let mut worker = Watch::default();
+        assert_eq!(worker.answered(None), None);
+        worker.last_answer = Some(ago(40));
+        assert_eq!(
+            worker.failed(),
+            None,
+            "a server that never saw the age watched"
+        );
+    }
+
+    fn head_of(s: &mut TcpStream) -> String {
+        s.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+        let (buf, n) = read_head(s).unwrap();
+        String::from_utf8_lossy(&buf[..n]).into_owned()
+    }
+
+    /// Issue 563: a new session of the secretary's server is answered at once with the
+    /// heartbeat's age, so a makibad that dies before any hold ends is still watched; a worker's
+    /// request carries no age and is held.
+    #[test]
+    fn a_new_secretary_session_learns_the_heartbeat_at_once() {
+        let hub = Hub::new(|t| match t {
+            "t" => Some(crate::spec::AGENT_SECRETARY.to_string()),
+            "w" => Some("w-t1".to_string()),
+            _ => None,
+        })
+        .with_beat(|| Some(1.5));
+        let l = TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = l.local_addr().unwrap();
+        let h = hub.clone();
+        std::thread::spawn(move || {
+            for s in l.incoming().flatten() {
+                let h = h.clone();
+                std::thread::spawn(move || h.serve(s));
+            }
+        });
+        let asked = Instant::now();
+        let head = head_of(&mut status_of(addr, "100-1"));
+        assert!(asked.elapsed() < HOLD / 2, "the first request was held");
+        assert!(head.starts_with("HTTP/1.1 204"), "{head}");
+        assert!(head.contains(&format!("{BEAT_HEADER}: 1.5\r\n")), "{head}");
+        // The same session asks again: now it is held, as before.
+        let held = status_of(addr, "100-1");
+        let until = Instant::now() + Duration::from_secs(5);
+        while !hub.connected(crate::spec::AGENT_SECRETARY) && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hub.connected(crate::spec::AGENT_SECRETARY));
+        // A worker's first request is held and carries no age.
+        let mut s = TcpStream::connect(addr).unwrap();
+        write!(
+            s,
+            "GET {PATH} HTTP/1.1\r\nAuthorization: Bearer w\r\nX-Makiba-Session: 100-2\r\n\r\n"
+        )
+        .unwrap();
+        let until = Instant::now() + Duration::from_secs(5);
+        while !hub.connected("w-t1") && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(hub.connected("w-t1"), "the worker's request was not held");
+
+        // A newer session's first request, answered at once, still ends the older session's
+        // held request: it answers 409 and no push reaches it.
+        let mut old = held;
+        let head = head_of(&mut status_of(addr, "300-3"));
+        assert!(head.starts_with("HTTP/1.1 204"), "{head}");
+        assert_eq!(code(&mut old), "409", "the older session's held request");
+        assert!(!hub.connected(crate::spec::AGENT_SECRETARY));
+        assert!(
+            hub.push(crate::spec::AGENT_SECRETARY, "x").is_err(),
+            "a push reached a superseded session"
+        );
     }
 }
