@@ -67,7 +67,11 @@ written; every launched code run has one, `prepare.rs`), where:
 5. the head has no `queue_readiness` yet (**first judgement**), or its newest one is `ready`
    (**watched**), or (Issue 573) `hold` (**held**: it conflicts with a pull request before it in
    the queue's order, docs/design/queue-overlap.md). A head decided `update` or `unknown` is not
-   judged again; its next judgement is of the new head.
+   judged again; its next judgement is of the new head. Exception (Issue 575,
+   docs/design/queue-unmergeable.md section 3.3): a head whose newest record R is reason `unmergeable`, `waiting` false (the end of a wait), is judged
+   again as a first judgement once, after R, an `update` of the task with R's `pr_base` ended
+   `done` with no `branch_updated` of the task since R (it merged nothing), or the same head is
+   recorded again (`pr pushed`).
 
 ### 3.2 The readers (git, on threads)
 

@@ -4592,6 +4592,54 @@ pub(super) fn merge_dequeued_with(
     Ok(())
 }
 
+/// End a queue act (`attempt`) or a stay queued outside makibad (`attempt` `None`) of `repo#pr` at
+/// `head` that makibad took out of the merge queue because GitHub marked its entry `UNMERGEABLE`
+/// (Issue 575, docs/design/queue-unmergeable.md), in the caller's transaction: `merge_dequeued`
+/// with `why` `unmergeable`, and the secretary told which entries ahead (`ahead`) it waits for.
+/// The event's id.
+#[allow(clippy::too_many_arguments)]
+pub(super) fn merge_dequeued_unmergeable(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    attempt: Option<i64>,
+    ahead: &[i64],
+    base: &str,
+) -> crate::db::Result<i64> {
+    let id = w.append_event(&NewEvent {
+        kind: "merge_dequeued",
+        actor: Some("makibad"),
+        payload: Some(
+            &json!({"repo": repo, "pr": pr, "head": head, "attempt": attempt,
+                              "why": "unmergeable", "reason": null, "ahead": ahead}),
+        ),
+        run_task_id: Some(task),
+        ..Default::default()
+    })?;
+    let then = if ahead.is_empty() {
+        format!(
+            "It has no entry ahead of it; once GitHub shows it out of the queue, makibad tells you to update the branch with {base}"
+        )
+    } else {
+        let named: Vec<String> = ahead.iter().map(|n| format!("#{n}")).collect();
+        format!(
+            "It waits for {} to land or leave the queue, then tells you to update the branch with {base}",
+            named.join(", ")
+        )
+    };
+    notice(
+        w,
+        crate::spec::AGENT_SECRETARY,
+        task,
+        &format!(
+            "makibad took {repo}#{pr} at {head} out of the merge queue: GitHub marked its entry UNMERGEABLE (it conflicts with an entry ahead of it). {then}; makibad does not update it itself. Do not queue it meanwhile."
+        ),
+    )?;
+    Ok(id)
+}
+
 /// The `merge` verb's check, before the gate and again in its final transaction: the pull request
 /// is the current one of a run the PR watch follows (`prwatch::followed`), and it has no act
 /// awaiting its landing. The run's task.

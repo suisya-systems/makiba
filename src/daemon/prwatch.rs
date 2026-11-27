@@ -45,6 +45,19 @@
 //! While an act awaits its landing the stay writes nothing. `merge_dequeued` carries GitHub's
 //! `reason` of that removal for both.
 //!
+//! An `UNMERGEABLE` entry (Issue 575, docs/design/queue-unmergeable.md): a read in the queue at the
+//! head of a queue act (or of a stay, only with `MAKIBA_UNMERGEABLE_HAND=dequeue`) whose
+//! `mergeQueueEntry.state` is `UNMERGEABLE` writes `queue_dequeue_requested`; the merge pass
+//! (`merge.rs`) sends the dequeue and writes its outcome, `merge_dequeued` (`why` `unmergeable`)
+//! and the wait (`unmergeable_wait`: a `queue_readiness` `update`, reason `unmergeable`, `waiting`
+//! true, with the entries ahead). While a request is open, a read out of the queue does not end
+//! the act as `left the queue`. The membership read also reads each open wait's entries ahead;
+//! once each is merged, closed or out of the queue, and the pull request itself is read open, out
+//! of the queue, with its own base, `end_wait` writes the closing record and tells the secretary
+//! which update to run; makibad writes no `update` command and never updates the branch after a
+//! wait (narrowed on 2026-11-28). The secretary's update that merged nothing, or the same head
+//! recorded again, lets that head be judged again (`wait_released`).
+//!
 //! The merge state (Issue 387, in place of claude-org-ja's conflict announce): the same state read
 //! carries `mergeable`, `mergeStateStatus` and `isDraft`, and each open read is brought back to
 //! the loop. A passed CI result waits for a read of its head made after it, for at most three
@@ -1023,11 +1036,22 @@ pub struct PrWatch {
     /// The membership reads (Issue 476), by repository lowercased: the newest one's start and
     /// thread. Memory only: a restart starts them again on its first pass.
     members: HashMap<String, Member>,
-    member_tx: Sender<Membership>,
-    member_rx: Receiver<Membership>,
+    member_tx: Sender<MemberRead>,
+    member_rx: Receiver<MemberRead>,
     /// Membership reads not written yet: kept until their transaction commits.
-    member_queued: Vec<Membership>,
+    member_queued: Vec<MemberRead>,
+    /// The next membership read's `seq`.
+    member_seq: u64,
+    /// The entries ahead each open wait's reads answered gone (`GoneSeen`). Memory only: lost
+    /// at a restart, which then costs at most one more membership interval.
+    gone_seen: GoneSeen,
+    /// Whether a stay queued outside makibad whose entry turns `UNMERGEABLE` is taken out of the
+    /// queue too (`MAKIBA_UNMERGEABLE_HAND` is `dequeue`, Issue 575).
+    hand: bool,
 }
+
+/// The switch of Issue 575 for pull requests queued outside makibad.
+pub const HAND_ENV: &str = "MAKIBA_UNMERGEABLE_HAND";
 
 /// One membership read of a repository (Issue 476).
 struct Member {
@@ -1054,6 +1078,21 @@ struct Membership {
     /// Each pull request with the follow (task and generation) it was read for.
     reads: Vec<(Followed, Value)>,
 }
+
+/// A membership read as its thread sends it: the read, and every answer by number, followed or
+/// not, for the entries ahead an open wait reads (Issue 575).
+struct MemberRead {
+    m: Membership,
+    waited: Vec<(i64, Value)>,
+    /// The order the reads were begun in (one counter per PrWatch): an earlier read has a
+    /// smaller one. Marks can be equal across reads; this cannot.
+    seq: u64,
+}
+
+/// By wait (its record's id), each entry ahead answered gone from the queue, with the `seq` of
+/// the earliest read in a row that answered it so (Issue 575): an entry answered `OPEN` out of
+/// the queue counts as gone only when an earlier read answered it gone too. Memory only.
+type GoneSeen = HashMap<i64, HashMap<i64, u64>>;
 
 impl PrWatch {
     /// `$MAKIBA_GH` (default `gh`), `$MAKIBA_PRWATCH_INTERVAL_MS`, `$MAKIBA_PRWATCH_BUDGET_MS`
@@ -1098,6 +1137,9 @@ impl PrWatch {
             member_tx,
             member_rx,
             member_queued: Vec::new(),
+            member_seq: 0,
+            gone_seen: HashMap::new(),
+            hand: std::env::var(HAND_ENV).is_ok_and(|v| v == "dequeue"),
         }
     }
 
@@ -1129,10 +1171,12 @@ impl PrWatch {
             self.member_queued.push(m);
         }
         for m in std::mem::take(&mut self.member_queued) {
-            if let Err(e) = apply_entered(w, &m) {
+            if let Err(e) =
+                apply_entered(w, &m.m).and_then(|()| apply_waits_seen(w, &m, &mut self.gone_seen))
+            {
                 eprintln!(
                     "makibad: pr watch {}: cannot record its merge queue entries: {e}",
-                    m.repo
+                    m.m.repo
                 );
                 self.member_queued.push(m);
             }
@@ -1198,7 +1242,7 @@ impl PrWatch {
         }
         // The merge queue (Issue 434): each open read, in order, before the merge state.
         for r in &fresh {
-            match apply_queue(w, r, &self.dequeue_seen, self.interval) {
+            match apply_queue_with(w, r, &self.dequeue_seen, self.interval, self.hand) {
                 Ok(QueueStep::Nothing) => {}
                 Ok(QueueStep::Note(attempt)) => {
                     self.dequeue_seen
@@ -1351,7 +1395,7 @@ impl PrWatch {
     /// open stay (`Followed::act` false) is in the merge queue. A pull request followed with an
     /// act or a stay is read by its own state poller, which alone decides its leaving.
     fn memberships(&mut self, w: &StateWriter) -> Result<()> {
-        let mut groups: Vec<(String, String, Vec<Followed>)> = Vec::new();
+        let mut groups: Vec<(String, String, Vec<Followed>, Vec<i64>)> = Vec::new();
         for f in followed(w.conn(), None)? {
             if f.closed || f.act {
                 continue;
@@ -1360,7 +1404,28 @@ impl PrWatch {
             match groups.iter_mut().find(|g| g.0 == key) {
                 Some(g) if !g.2.iter().any(|o| o.pr == f.pr) => g.2.push(f),
                 Some(_) => {}
-                None => groups.push((key, f.repo.clone(), vec![f])),
+                None => groups.push((key, f.repo.clone(), vec![f], Vec::new())),
+            }
+        }
+        // The entries ahead of each open wait (Issue 575), followed or not, in the same read.
+        for wait in open_waits(w.conn(), None)? {
+            let key = wait.f.repo.to_lowercase();
+            let at = match groups.iter().position(|g| g.0 == key) {
+                Some(i) => i,
+                None => {
+                    groups.push((key, wait.f.repo.clone(), Vec::new(), Vec::new()));
+                    groups.len() - 1
+                }
+            };
+            let g = &mut groups[at];
+            // The pull request itself too: its wait ends only on a read of its own base.
+            if !g.3.contains(&wait.f.pr) {
+                g.3.push(wait.f.pr);
+            }
+            for n in wait.waits_for {
+                if !g.3.contains(&n) {
+                    g.3.push(n);
+                }
             }
         }
         for m in self.members.values_mut() {
@@ -1377,27 +1442,38 @@ impl PrWatch {
         let mark: i64 = w
             .conn()
             .query_row("SELECT coalesce(max(id), 0) FROM events", [], |r| r.get(0))?;
-        for (key, repo, follows) in groups {
+        for (key, repo, follows, ahead) in groups {
             if self.members.contains_key(&key) {
                 continue;
             }
+            self.member_seq += 1;
+            let seq = self.member_seq;
             let cancel = Arc::new(AtomicBool::new(false));
             let handle = {
                 let (gh, tx, cancel) =
                     (self.gh.clone(), self.member_tx.clone(), Arc::clone(&cancel));
                 std::thread::spawn(move || {
-                    let prs: Vec<i64> = follows.iter().map(|f| f.pr).collect();
+                    let mut prs: Vec<i64> = follows.iter().map(|f| f.pr).collect();
+                    for n in ahead {
+                        if !prs.contains(&n) {
+                            prs.push(n);
+                        }
+                    }
                     let read = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         read_membership(&gh, &repo, &prs, &cancel)
                     }));
                     if let Ok(Some(answers)) = read {
                         let reads = answers
-                            .into_iter()
+                            .iter()
                             .filter_map(|(pr, v)| {
-                                Some((follows.iter().find(|f| f.pr == pr)?.clone(), v))
+                                Some((follows.iter().find(|f| f.pr == *pr)?.clone(), v.clone()))
                             })
                             .collect();
-                        let _ = tx.send(Membership { repo, mark, reads });
+                        let _ = tx.send(MemberRead {
+                            m: Membership { repo, mark, reads },
+                            waited: answers,
+                            seq,
+                        });
                     }
                 })
             };
@@ -1747,13 +1823,16 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
                        AND ((r.range_id IS NULL AND r.status = 'completed')
                             OR r.status = 'abandoned'))) AS plain,
                   EXISTS (SELECT 1 FROM events a WHERE a.kind = 'merge_attempted'
-                          AND {attempted}) AS attempted
+                          AND {attempted}) AS attempted,
+                  EXISTS (SELECT 1 FROM events d WHERE d.kind = 'merge_dequeued'
+                          AND json_extract(d.payload_json, '$.why') = 'unmergeable'
+                          AND {dequeued}) AS dequeued
            FROM runs r
            WHERE (?1 IS NULL OR r.task_id = ?1)
              AND {repo} IS NOT NULL AND {pr} IS NOT NULL
              AND NOT EXISTS (SELECT 1 FROM events e WHERE e.kind = 'pr_merged'
                              AND e.run_id = r.id AND {merged}))
-         WHERE plain OR attempted
+         WHERE plain OR attempted OR dequeued
          ORDER BY run",
         repo = current_pr_sql("r", "repo"),
         pr = current_pr_sql("r", "pr"),
@@ -1769,8 +1848,13 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
             "json_extract(a.payload_json, '$.repo')",
             "json_extract(a.payload_json, '$.pr')"
         ),
+        dequeued = is_current_pr_sql(
+            "r",
+            "json_extract(d.payload_json, '$.repo')",
+            "json_extract(d.payload_json, '$.pr')"
+        ),
     ))?;
-    let rows: Vec<(i64, Followed, bool, bool)> = q
+    let rows: Vec<(i64, Followed, bool, bool, bool)> = q
         .query_map([task], |r| {
             Ok((
                 r.get(0)?,
@@ -1785,15 +1869,20 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
                 },
                 r.get(7)?,
                 r.get(8)?,
+                r.get(9)?,
             ))
         })?
         .collect::<std::result::Result<_, _>>()?;
     let mut out = Vec::new();
-    for (run, mut f, plain, attempted) in rows {
+    for (run, mut f, plain, attempted, dequeued) in rows {
         // Each run records its own landing: another run's `pr_merged` of the same pull request
         // does not end the act for this one.
         f.act = attempted && super::door::act_awaiting_for(c, &f.repo, f.pr, Some(run))?.is_some();
-        if plain || f.act {
+        // A queue act makibad took out of the queue as UNMERGEABLE (Issue 575) stays followed,
+        // whatever the run's status or age, until a day after its head is told ready again, or
+        // until it lands, is closed or another attempt is made: its wait, its update and the merge
+        // the ready notice invites all read the follows.
+        if plain || f.act || ((attempted || dequeued) && recovering(c, &f.repo, f.pr)?) {
             // A pull request followed open with a stay in the queue of its own (Issue 476) is
             // read through GraphQL as an act's is; the stay never makes a pull request followed.
             if !f.act && !f.closed && open_stay(c, &f.repo, f.pr)?.is_some() {
@@ -1803,6 +1892,36 @@ pub(super) fn followed(c: &Connection, task: Option<&str>) -> Result<Vec<Followe
         }
     }
     Ok(out)
+}
+
+/// Whether `repo#pr` has a `merge_dequeued` with `why` `unmergeable` (Issue 575: a queue act, or a
+/// stay queued outside makibad with `MAKIBA_UNMERGEABLE_HAND=dequeue`) that nothing has followed
+/// yet: no `pr_merged`, `pr_closed` or `merge_attempted` of it after it, and no `queue_readiness` of it with verdict `ready` or `unknown` made
+/// more than a day ago (so that the secretary can still ask for the merge its ready notice
+/// invites: the `merge` verb requires the pull request to be followed).
+fn recovering(c: &Connection, repo: &str, pr: i64) -> Result<bool> {
+    let of = |t: &str| {
+        format!(
+            "lower(json_extract({t}.payload_json, '$.repo')) = lower(?1)
+             AND json_extract({t}.payload_json, '$.pr') = ?2"
+        )
+    };
+    Ok(c.query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM events d WHERE d.kind = 'merge_dequeued' AND {d}
+               AND json_extract(d.payload_json, '$.why') = 'unmergeable'
+               AND NOT EXISTS (SELECT 1 FROM events e WHERE e.id > d.id AND {e}
+                     AND (e.kind IN ('pr_merged', 'pr_closed', 'merge_attempted')
+                          OR (e.kind = 'queue_readiness'
+                              AND json_extract(e.payload_json, '$.verdict')
+                                  IN ('ready', 'unknown')
+                              AND julianday('now') - julianday(e.occurred_at) > 1.0))))",
+            d = of("d"),
+            e = of("e"),
+        ),
+        params![repo, pr],
+        |q| q.get(0),
+    )?)
 }
 
 /// A state read worth writing, for the pull request and generation it was read for, and when
@@ -1907,9 +2026,9 @@ fn open_stay(c: &Connection, repo: &str, pr: i64) -> Result<Option<(i64, String)
 }
 
 /// The fields of the membership read of one pull request (Issue 476; merge-act.md section 10
-/// claim 3 verified them).
+/// claim 3 verified them, but for `baseRefName`, added for the base of a wait, Issue 575).
 const MEMBER_FIELDS: &str =
-    "number state headRefOid isInMergeQueue mergeQueueEntry{id state position}";
+    "number state headRefOid baseRefName isInMergeQueue mergeQueueEntry{id state position}";
 
 /// The membership read of `prs` of `repo` (Issue 476): one `gh api graphql` call, the pull
 /// request `prs[i]` under the alias `p<i>` with the variable `n<i>`. `None`: the call failed, its
@@ -2091,6 +2210,7 @@ fn poll_state(
                             queued: v["isInMergeQueue"].as_bool(),
                             timeline: queue_items(&v),
                             removal_reason: removal_reason(&v),
+                            entry: v.get("mergeQueueEntry").filter(|e| e.is_object()).cloned(),
                         });
                     }
                     if matches!(
@@ -2466,6 +2586,9 @@ struct MergeRead {
     /// GitHub's reason of the newest queue item when it is a removal (`removal_reason`, Issue
     /// 476).
     removal_reason: Option<String>,
+    /// `mergeQueueEntry` as read (`id`, `state`, `position`), when the read carries one (Issue
+    /// 575).
+    entry: Option<Value>,
 }
 
 /// What `apply_queue` did with an open read, for the notes of `PrWatch::dequeue_seen`.
@@ -2488,16 +2611,33 @@ enum QueueStep {
 /// merge-act.md section 10 is [unverified]: a pull request leaving the queue to land may be read
 /// so for a moment). A read out of the queue with no such removal never ends it: the act stays
 /// followed, and its landing is read.
+///
+/// Issue 575 (docs/design/queue-unmergeable.md): a read in the queue at the act's head whose entry
+/// is `UNMERGEABLE` asks the merge pass to take it out (`request_dequeue`); while that request is
+/// open, a read out of the queue does not end the act as `left the queue` (the dequeue's outcome
+/// does). A stay queued outside makibad is asked for only when `hand` (`MAKIBA_UNMERGEABLE_HAND`
+/// is `dequeue`).
+#[cfg(test)]
 fn apply_queue(
     w: &StateWriter,
     r: &MergeRead,
     notes: &HashMap<i64, (String, i64, Instant)>,
     interval: Duration,
 ) -> Result<QueueStep> {
+    apply_queue_with(w, r, notes, interval, false)
+}
+
+fn apply_queue_with(
+    w: &StateWriter,
+    r: &MergeRead,
+    notes: &HashMap<i64, (String, i64, Instant)>,
+    interval: Duration,
+    hand: bool,
+) -> Result<QueueStep> {
     w.transaction(|w| {
         let (task, repo, pr) = (r.f.task.as_str(), r.f.repo.as_str(), r.f.pr);
         let Some(a) = super::door::act_awaiting(w.conn(), repo, pr)? else {
-            return stay_queue(w, r, notes, interval);
+            return stay_queue(w, r, notes, interval, hand);
         };
         if !a.queue || act_holds(w.conn(), repo, pr, r.started_ms)? {
             return Ok(QueueStep::Nothing);
@@ -2506,8 +2646,13 @@ fn apply_queue(
             super::door::merge_dequeued(w, task, repo, pr, &a, "head moved")?;
             return Ok(QueueStep::Ended(a.attempt));
         }
+        let key = DequeueKey::Act(a.attempt);
         match r.queued {
-            Some(true) => Ok(QueueStep::Clear(a.attempt)),
+            Some(true) => {
+                request_dequeue(w, r, &a.head, key)?;
+                Ok(QueueStep::Clear(a.attempt))
+            }
+            Some(false) if dequeue_open(w.conn(), key)? => Ok(QueueStep::Nothing),
             Some(false) => {
                 // Evidence of leaving the queue: the newest queue item in the window (the
                 // timeline lists them oldest first) is a removal; one followed by another
@@ -2559,6 +2704,7 @@ fn stay_queue(
     r: &MergeRead,
     notes: &HashMap<i64, (String, i64, Instant)>,
     interval: Duration,
+    hand: bool,
 ) -> Result<QueueStep> {
     let (task, repo, pr) = (r.f.task.as_str(), r.f.repo.as_str(), r.f.pr);
     let Some((stay, head)) = open_stay(w.conn(), repo, pr)? else {
@@ -2575,8 +2721,15 @@ fn stay_queue(
         end("head moved", None)?;
         return Ok(QueueStep::Ended(stay));
     }
+    let key = DequeueKey::Stay(stay);
     match r.queued {
-        Some(true) => Ok(QueueStep::Clear(stay)),
+        Some(true) => {
+            if hand {
+                request_dequeue(w, r, &head, key)?;
+            }
+            Ok(QueueStep::Clear(stay))
+        }
+        Some(false) if dequeue_open(w.conn(), key)? => Ok(QueueStep::Nothing),
         Some(false) => {
             let removed = r.timeline.as_ref().is_some_and(|items| {
                 items
@@ -2598,6 +2751,364 @@ fn stay_queue(
         }
         None => Ok(QueueStep::Nothing),
     }
+}
+
+// ---- an UNMERGEABLE queue entry (Issue 575) ----------------------------------------------------
+
+/// What a dequeue request is for: a queue act (its attempt) or a stay queued outside makibad (its
+/// `merge_queue_entered`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum DequeueKey {
+    Act(i64),
+    Stay(i64),
+}
+
+impl DequeueKey {
+    fn column(self) -> (&'static str, i64) {
+        match self {
+            DequeueKey::Act(a) => ("$.attempt", a),
+            DequeueKey::Stay(s) => ("$.stay", s),
+        }
+    }
+}
+
+/// The outcomes of every `queue_dequeue_requested` of `key`, oldest first: `None` while open.
+fn dequeue_outcomes(c: &Connection, key: DequeueKey) -> Result<Vec<Option<String>>> {
+    let (path, id) = key.column();
+    let mut st = c.prepare(&format!(
+        "SELECT (SELECT json_extract(o.payload_json, '$.outcome') FROM events o
+                  WHERE o.kind = 'queue_dequeue_ended'
+                    AND json_extract(o.payload_json, '$.request') = r.id
+                  ORDER BY o.id LIMIT 1)
+         FROM events r WHERE r.kind = 'queue_dequeue_requested'
+           AND json_extract(r.payload_json, '{path}') = ?1
+         ORDER BY r.id"
+    ))?;
+    let rows = st.query_map([id], |q| q.get::<_, Option<String>>(0))?;
+    Ok(rows.collect::<std::result::Result<_, _>>()?)
+}
+
+/// Whether `key` has a dequeue request no outcome ends yet.
+fn dequeue_open(c: &Connection, key: DequeueKey) -> Result<bool> {
+    Ok(dequeue_outcomes(c, key)?.iter().any(Option::is_none))
+}
+
+/// In the caller's transaction: for a read in the queue at `head` whose entry is `UNMERGEABLE`,
+/// one `queue_dequeue_requested` of `key`, unless it has one open or one that ended other than
+/// `not_sent` (nothing was sent and the entry may turn `UNMERGEABLE` again). No notice.
+fn request_dequeue(w: &StateWriter, r: &MergeRead, head: &str, key: DequeueKey) -> Result<()> {
+    let Some(entry) = r.entry.as_ref() else {
+        return Ok(());
+    };
+    if entry["state"].as_str() != Some("UNMERGEABLE") {
+        return Ok(());
+    }
+    if dequeue_outcomes(w.conn(), key)?
+        .iter()
+        .any(|o| o.as_deref() != Some("not_sent"))
+    {
+        return Ok(());
+    }
+    let (attempt, stay) = match key {
+        DequeueKey::Act(a) => (Some(a), None),
+        DequeueKey::Stay(s) => (None, Some(s)),
+    };
+    w.append_event(&NewEvent {
+        kind: "queue_dequeue_requested",
+        actor: Some("makibad"),
+        payload: Some(&json!({
+            "repo": r.f.repo, "pr": r.f.pr, "head": head, "task_id": r.f.task,
+            "attempt": attempt, "stay": stay, "entry": entry, "boot": super::merge::boot(),
+        })),
+        run_task_id: Some(&r.f.task),
+        ..Default::default()
+    })?;
+    Ok(())
+}
+
+/// Whether `key` is still the pull request's act or stay in the queue.
+pub(super) fn dequeue_key_holds(
+    c: &Connection,
+    repo: &str,
+    pr: i64,
+    key: DequeueKey,
+) -> Result<bool> {
+    Ok(match key {
+        DequeueKey::Act(attempt) => {
+            super::door::act_awaiting(c, repo, pr)?.is_some_and(|a| a.queue && a.attempt == attempt)
+        }
+        DequeueKey::Stay(stay) => open_stay(c, repo, pr)?.is_some_and(|(s, _)| s == stay),
+    })
+}
+
+/// The project's default branch of `task`'s run, and whether the run has a code worktree.
+fn run_base(c: &Connection, task: &str) -> Result<Option<(String, bool)>> {
+    Ok(c.query_row(
+        "SELECT COALESCE(p.default_branch, 'main'),
+                (SELECT worktree FROM run_launch WHERE run_id = r.id AND kind = 'code'
+                 ORDER BY id DESC LIMIT 1) IS NOT NULL
+         FROM runs r LEFT JOIN projects p ON p.id = r.project_id WHERE r.task_id = ?1",
+        [task],
+        |q| Ok((q.get(0)?, q.get(1)?)),
+    )
+    .optional()?)
+}
+
+/// The wait of a head makibad took out of the merge queue (Issue 575), in the caller's
+/// transaction: a `queue_readiness` with verdict `update`, reason `unmergeable`, `waiting` true and
+/// the entries ahead (`waits_for`); `dequeue` is the `merge_dequeued` that took it out. Its verdict
+/// makes the `merge` verb refuse the head and keeps it out of the readiness candidates until the
+/// wait ends (`end_wait`).
+#[allow(clippy::too_many_arguments)]
+pub(super) fn unmergeable_wait(
+    w: &StateWriter,
+    task: &str,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    dequeue: i64,
+    ahead: &[i64],
+    pr_base: Option<&str>,
+) -> Result<i64> {
+    let base = run_base(w.conn(), task)?.map(|(b, _)| b);
+    w.append_event(&NewEvent {
+        kind: "queue_readiness",
+        actor: Some("makibad"),
+        payload: Some(&json!({
+            "repo": repo, "pr": pr, "head_oid": head, "task_id": task, "base": base,
+            "base_tip": null, "ci_base": null, "merge_state": null, "verdict": "update",
+            "reason": "unmergeable", "landings": [], "watched": false, "command": null,
+            "waiting": true, "waits_for": ahead, "dequeue": dequeue, "pr_base": pr_base,
+        })),
+        run_task_id: Some(task),
+        ..Default::default()
+    })
+}
+
+/// An open wait (`unmergeable_wait`): the newest `queue_readiness` of the run's newest recorded
+/// head of a followed pull request read open.
+#[derive(Debug, Clone)]
+struct Wait {
+    id: i64,
+    f: Followed,
+    head: String,
+    waits_for: Vec<i64>,
+}
+
+/// Every open wait (of `task` only, when given).
+fn open_waits(c: &Connection, task: Option<&str>) -> Result<Vec<Wait>> {
+    let mut out = Vec::new();
+    for f in followed(c, task)? {
+        if f.closed {
+            continue;
+        }
+        let Some(head) = newest_head(c, &f.task)? else {
+            continue;
+        };
+        let Some(r) = newest_readiness(c, &f.repo, f.pr, &head)? else {
+            continue;
+        };
+        if r.verdict != "update" || r.reason.as_deref() != Some("unmergeable") || !r.waiting {
+            continue;
+        }
+        let payload: Option<String> = c.query_row(
+            "SELECT payload_json FROM events WHERE id = ?1",
+            [r.id],
+            |q| q.get(0),
+        )?;
+        let v: Value = payload
+            .and_then(|p| serde_json::from_str(&p).ok())
+            .unwrap_or(Value::Null);
+        let waits_for = v["waits_for"]
+            .as_array()
+            .map(|a| a.iter().filter_map(Value::as_i64).collect())
+            .unwrap_or_default();
+        out.push(Wait {
+            id: r.id,
+            f,
+            head,
+            waits_for,
+        });
+    }
+    Ok(out)
+}
+
+/// Whether a pull request as the membership read answered it has left the merge queue: merged,
+/// closed, or open out of the queue.
+fn gone_from_queue(v: &Value) -> Option<&'static str> {
+    match v["state"].as_str()? {
+        "MERGED" => Some("merged"),
+        "CLOSED" => Some("closed"),
+        "OPEN" if v["isInMergeQueue"].as_bool() == Some(false) => Some("left the queue"),
+        _ => None,
+    }
+}
+
+/// The open waits of the read's repository that existed when it was started (`mark`), whose every
+/// entry ahead it answered as gone from the queue, and which it answered for the pull request
+/// itself with its base (`baseRefName`) and out of the queue, end (`end_wait`). A wait with no
+/// entry ahead needs that answer too: no wait ends on the base the dequeue read. An entry not
+/// answered or still queued, or the pull request itself unanswered, without its base, or queued
+/// again, ends nothing. An entry answered `OPEN` out of the queue counts as gone only when an
+/// earlier read of the same wait (`seen`, a smaller `seq`) answered it gone too: one answer of a
+/// pull request that is landing may show it out of the queue before it shows it merged. How each
+/// entry left is this read's answer.
+#[cfg(test)]
+fn apply_waits(w: &StateWriter, read: &MemberRead) -> Result<()> {
+    apply_waits_seen(w, read, &mut HashMap::new())
+}
+
+/// `apply_waits`, with the entries ahead earlier reads answered gone (`seen`), which it updates.
+fn apply_waits_seen(w: &StateWriter, read: &MemberRead, seen: &mut GoneSeen) -> Result<()> {
+    let waits = open_waits(w.conn(), None)?;
+    seen.retain(|id, _| waits.iter().any(|o| o.id == *id));
+    for wait in waits {
+        if !wait.f.repo.eq_ignore_ascii_case(&read.m.repo) || wait.id > read.m.mark {
+            continue;
+        }
+        // Diff review round 3: only a read made for the pull request's current follow (the same
+        // generation: no close, reopen or new head recorded since the read began).
+        if !read.m.reads.iter().any(|(f, _)| *f == wait.f) {
+            continue;
+        }
+        let Some((_, own)) = read.waited.iter().find(|(p, _)| *p == wait.f.pr) else {
+            continue;
+        };
+        let Some(current) = own["baseRefName"].as_str() else {
+            continue;
+        };
+        if own["state"].as_str() != Some("OPEN") || own["isInMergeQueue"].as_bool() != Some(false) {
+            continue;
+        }
+        let earlier = seen.entry(wait.id).or_default();
+        let mut left: Vec<(i64, &str)> = Vec::new();
+        let mut all = true;
+        for n in &wait.waits_for {
+            let Some((_, v)) = read.waited.iter().find(|(p, _)| p == n) else {
+                all = false;
+                continue;
+            };
+            let Some(how) = gone_from_queue(v) else {
+                earlier.remove(n);
+                all = false;
+                continue;
+            };
+            let first = *earlier.entry(*n).or_insert(read.seq);
+            if how == "left the queue" && first >= read.seq {
+                all = false;
+            }
+            left.push((*n, how));
+        }
+        if all {
+            end_wait(w, &wait, &left, current)?;
+        }
+    }
+    Ok(())
+}
+
+/// End `wait` (Issue 575, narrowed on 2026-11-28), in one transaction, when it is still open for
+/// the same follow and head and the pull request has no act awaiting its landing, no open stay
+/// and no `update` running: a second `queue_readiness` (`waiting` false, `left`: each entry ahead
+/// and how it left, `pr_base`: the branch the pull request targets as the read that ended the wait
+/// shows it, `command` null) and one notice telling the secretary to update the branch with that
+/// base. makibad writes no `update` command and never updates or pushes the branch itself.
+/// Whether it wrote.
+fn end_wait(w: &StateWriter, wait: &Wait, left: &[(i64, &str)], pr_base: &str) -> Result<bool> {
+    let task = wait.f.task.as_str();
+    w.transaction(|w| {
+        let Some(now) = open_waits(w.conn(), Some(task))?
+            .into_iter()
+            .find(|o| o.id == wait.id && o.f == wait.f && o.head == wait.head)
+        else {
+            return Ok(false);
+        };
+        let (repo, pr) = (now.f.repo.as_str(), now.f.pr);
+        // Queued again (by makibad's act, or a stay queued outside it), or an update running: the
+        // wait stays open.
+        if super::door::act_awaiting(w.conn(), repo, pr)?.is_some()
+            || open_stay(w.conn(), repo, pr)?.is_some()
+            || update_running(w.conn(), task)?.is_some()
+        {
+            return Ok(false);
+        }
+        let Some((base, has_worktree)) = run_base(w.conn(), task)? else {
+            return Ok(false);
+        };
+        let listed: Vec<Value> = left
+            .iter()
+            .map(|(n, how)| json!({"pr": n, "how": how}))
+            .collect();
+        w.append_event(&NewEvent {
+            kind: "queue_readiness",
+            actor: Some("makibad"),
+            payload: Some(&json!({
+                "repo": repo, "pr": pr, "head_oid": now.head, "task_id": task, "base": base,
+                "base_tip": null, "ci_base": null, "merge_state": null, "verdict": "update",
+                "reason": "unmergeable", "landings": [], "watched": false, "command": null,
+                "waiting": false, "waits_for": [], "left": listed, "dequeue_wait": wait.id,
+                "pr_base": pr_base,
+            })),
+            run_task_id: Some(task),
+            ..Default::default()
+        })?;
+        let why = if left.is_empty() {
+            "it was taken out of the merge queue as UNMERGEABLE, with no entry ahead of it"
+                .to_string()
+        } else {
+            let named: Vec<String> = left.iter().map(|(n, how)| format!("#{n} {how}")).collect();
+            format!(
+                "the entries ahead of it in the merge queue have left it ({})",
+                named.join(", ")
+            )
+        };
+        let at = &now.head[..now.head.len().min(7)];
+        let link = format!("https://github.com/{repo}/pull/{pr}");
+        let what = if has_worktree {
+            format!(
+                "makibad does not update the branch itself: call update with task {task} and base {pr_base}. Once the new head is recorded (pr pushed) and its CI passes, makibad tells you whether it can be queued; if the update merges nothing, makibad judges {at} again."
+            )
+        } else {
+            format!(
+                "Its run has no code worktree, so update cannot run: have the branch take {pr_base} in and record the new head with pr pushed; if it already holds {pr_base}, record {} again with pr pushed and makibad judges it again.",
+                now.head
+            )
+        };
+        super::door::notice(
+            w,
+            AGENT_SECRETARY,
+            task,
+            &format!(
+                "makibad's wait for {repo}#{pr} at {at} has ended: {why}. {what} Do not queue it at {at}. {link}"
+            ),
+        )?;
+        Ok(true)
+    })
+}
+
+/// Whether the end of a wait (`end_wait`'s record `record` of `head`) is released for a judgement
+/// again (Issue 575, queue-ready.md rule 5): after the record, an `update` of `task` with the
+/// record's `pr_base` ended `done` and no `branch_updated` of the task followed the record (the
+/// update merged nothing), or the same head was recorded again (`fix_pushed`, `pr pushed`).
+fn wait_released(c: &Connection, task: &str, record: i64, head: &str) -> Result<bool> {
+    Ok(c.query_row(
+        "SELECT
+           EXISTS (SELECT 1 FROM commands c
+                    WHERE c.verb = 'update' AND c.status = 'done'
+                      AND json_extract(c.args_json, '$.task') = ?1
+                      AND json_extract(c.args_json, '$.base') = json_extract(e.payload_json, '$.pr_base')
+                      AND c.received_at >= e.occurred_at)
+           AND NOT EXISTS (SELECT 1 FROM events b
+                            WHERE b.kind = 'branch_updated' AND b.id > e.id
+                              AND json_extract(b.payload_json, '$.task_id') = ?1)
+           OR EXISTS (SELECT 1 FROM events f
+                       WHERE f.kind = 'fix_pushed' AND f.id > e.id AND f.run_id = e.run_id
+                         AND lower(json_extract(f.payload_json, '$.head_oid')) = lower(?3))
+         FROM events e WHERE e.id = ?2",
+        params![task, record, head],
+        |q| q.get(0),
+    )
+    .optional()?
+    .unwrap_or(false))
 }
 
 /// Record what an open read saw (`pr_read`, Issue 405), in one transaction, while its task still
@@ -2829,15 +3340,17 @@ pub(super) fn newest_head(c: &Connection, task: &str) -> Result<Option<String>> 
     .flatten())
 }
 
-/// A `queue_readiness` as recorded: its event id, verdict, reason and base tip, and whether it
+/// A `queue_readiness` as recorded: its event id, verdict, reason and base tip, whether it
 /// carries `own_checks` (written by the rule of Issue 567; a record without it was judged with
-/// no regard for a head's own checks).
+/// no regard for a head's own checks), and, for reason `unmergeable` (Issue 575), whether it is
+/// the wait for the entries ahead.
 pub(super) struct Recorded {
     pub id: i64,
     pub verdict: String,
     pub reason: Option<String>,
     pub base_tip: Option<String>,
     pub own_checks_read: bool,
+    pub waiting: bool,
 }
 
 /// The newest `queue_readiness` of `repo#pr` at `head`.
@@ -2850,7 +3363,8 @@ pub(super) fn newest_readiness(
     Ok(c.query_row(
         "SELECT id, json_extract(payload_json, '$.verdict'), json_extract(payload_json, '$.reason'),
                 json_extract(payload_json, '$.base_tip'),
-                json_type(payload_json, '$.own_checks') IS NOT NULL
+                json_type(payload_json, '$.own_checks') IS NOT NULL,
+                coalesce(json_extract(payload_json, '$.waiting'), 0)
          FROM events WHERE kind = 'queue_readiness'
            AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
            AND json_extract(payload_json, '$.pr') = ?2
@@ -2864,6 +3378,7 @@ pub(super) fn newest_readiness(
                 reason: q.get(2)?,
                 base_tip: q.get(3)?,
                 own_checks_read: q.get(4)?,
+                waiting: q.get::<_, i64>(5)? != 0,
             })
         },
     )
@@ -3112,6 +3627,16 @@ fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<
             Some(r) if r.verdict == "hold" => {
                 let tip = r.base_tip.filter(|_| r.own_checks_read);
                 (None, None, Some(held_of(c, r.id, tip)?))
+            }
+            // Issue 575: the end of a wait for the entries ahead, released by the secretary's
+            // update that merged nothing, or by the same head recorded again: judged again, as a
+            // first judgement.
+            Some(r)
+                if r.reason.as_deref() == Some("unmergeable")
+                    && !r.waiting
+                    && wait_released(c, &f.task, r.id, &head)? =>
+            {
+                (None, None, None)
             }
             Some(_) => continue,
         };
@@ -4987,6 +5512,7 @@ esac"#,
             queued: None,
             timeline: None,
             removal_reason: None,
+            entry: None,
         }
     }
 
@@ -6263,6 +6789,7 @@ esac"#,
             queued: Some(false),
             timeline: Some(timeline),
             removal_reason: None,
+            entry: None,
             ..merge_read(&f, &head, "CLEAN")
         };
         let again = vec![(true, at), (false, at + 1000), (true, at + 2000)];
@@ -6420,6 +6947,7 @@ esac"#,
             queued: Some(false),
             timeline: Some(vec![(true, now_ms()), (false, now_ms())]),
             removal_reason: None,
+            entry: None,
             ..merge_read(&f, &head, "CLEAN")
         };
         let t0 = Instant::now();
@@ -6576,5 +7104,649 @@ esac"#,
         };
         apply_entered(&w, &fresh).unwrap();
         assert_eq!(entries(&w), 1, "a read of the current follow");
+    }
+
+    // ---- an UNMERGEABLE entry (Issue 575) -------------------------------------------------------
+
+    /// A completed run closed more than a day ago whose queue act makibad took out of the queue as
+    /// UNMERGEABLE stays followed (its wait and its end are read from the follows) until its head is
+    /// told ready again.
+    #[test]
+    fn a_dequeued_act_of_an_old_completed_run_stays_followed_until_ready() {
+        let (_dir, w) = org();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t1",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "a".repeat(40);
+        register(&w, "pr_opened", "t1", "o/p", 7, &head).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'completed',
+                   completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 days')
+                 WHERE task_id = 't1'",
+                [],
+            )
+            .unwrap();
+        let follows = |w: &StateWriter| followed(w.conn(), None).unwrap().len();
+        assert_eq!(follows(&w), 0, "an old completed run is not followed");
+        let attempt = w
+            .append_event(&NewEvent {
+                kind: "merge_attempted",
+                actor: Some("makibad"),
+                payload: Some(&json!({"repo": "o/p", "pr": 7, "head": head, "boot": "b"})),
+                run_task_id: Some("t1"),
+                ..Default::default()
+            })
+            .unwrap();
+        event(
+            &w,
+            "merge_enqueued",
+            "makibad",
+            Some("t1"),
+            json!({"attempt": attempt}),
+        );
+        assert_eq!(follows(&w), 1, "followed while its queue act awaits");
+        let dequeued = super::super::door::merge_dequeued_unmergeable(
+            &w,
+            "t1",
+            "o/p",
+            7,
+            &head,
+            Some(attempt),
+            &[2],
+            "main",
+        )
+        .unwrap();
+        unmergeable_wait(&w, "t1", "o/p", 7, &head, dequeued, &[2], Some("main")).unwrap();
+        assert_eq!(follows(&w), 1, "followed while it waits");
+        assert_eq!(open_waits(w.conn(), None).unwrap().len(), 1);
+        event(
+            &w,
+            "queue_readiness",
+            "makibad",
+            Some("t1"),
+            json!({"repo": "o/p", "pr": 7, "head_oid": head, "verdict": "ready"}),
+        );
+        assert_eq!(
+            follows(&w),
+            1,
+            "told ready: still followed, so that the merge it invites is accepted"
+        );
+        w.conn()
+            .execute(
+                "UPDATE events SET occurred_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 days')
+                 WHERE kind = 'queue_readiness'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            follows(&w),
+            0,
+            "a day after it was told ready: followed as before"
+        );
+    }
+
+    /// A pull request retargeted while it waited: the base the membership read shows now, not the
+    /// one the dequeue read, is the base the notice names.
+    #[test]
+    fn a_pull_request_retargeted_while_it_waited_is_told_to_update_with_its_own_base() {
+        let (_dir, w) = org();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t3",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage)
+                 VALUES ((SELECT id FROM runs WHERE task_id = 't3'), 's', 'code', 'fake', 'b',
+                         '/nowhere', 'verified')",
+                [],
+            )
+            .unwrap();
+        let head = "c".repeat(40);
+        register(&w, "pr_opened", "t3", "o/p", 9, &head).unwrap();
+        unmergeable_wait(&w, "t3", "o/p", 9, &head, 0, &[2], Some("main")).unwrap();
+        let mark: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        let read = MemberRead {
+            m: Membership {
+                repo: "o/p".into(),
+                mark,
+                reads: follows_now(&w),
+            },
+            seq: next_seq(),
+            waited: vec![
+                (
+                    2,
+                    json!({"number": 2, "state": "MERGED", "isInMergeQueue": false}),
+                ),
+                (
+                    9,
+                    json!({"number": 9, "state": "OPEN", "isInMergeQueue": false,
+                           "baseRefName": "release"}),
+                ),
+            ],
+        };
+        apply_waits(&w, &read).unwrap();
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "the wait ended"
+        );
+        assert_eq!(last_readiness(&w)["pr_base"], "release");
+        let told = last_notice(&w);
+        assert!(
+            told.contains("call update with task t3 and base release"),
+            "{told}"
+        );
+    }
+
+    /// A stay queued outside makibad, taken out with the switch on, of a completed run more than a
+    /// day old, stays followed while it waits.
+    #[test]
+    fn a_dequeued_stay_of_an_old_completed_run_stays_followed() {
+        let (_dir, w) = org();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t4",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("in_use"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "d".repeat(40);
+        register(&w, "pr_opened", "t4", "o/p", 10, &head).unwrap();
+        event(
+            &w,
+            "merge_queue_entered",
+            "makibad",
+            Some("t4"),
+            json!({"repo": "o/p", "pr": 10, "head": head, "attempt": null}),
+        );
+        let dequeued = super::super::door::merge_dequeued_unmergeable(
+            &w,
+            "t4",
+            "o/p",
+            10,
+            &head,
+            None,
+            &[2],
+            "main",
+        )
+        .unwrap();
+        unmergeable_wait(&w, "t4", "o/p", 10, &head, dequeued, &[2], Some("main")).unwrap();
+        w.conn()
+            .execute(
+                "UPDATE runs SET status = 'completed',
+                   completed_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-2 days')
+                 WHERE task_id = 't4'",
+                [],
+            )
+            .unwrap();
+        assert_eq!(followed(w.conn(), None).unwrap().len(), 1);
+        assert_eq!(open_waits(w.conn(), None).unwrap().len(), 1);
+    }
+
+    /// A run in review with a code worktree, whose pull request `pr` is recorded at `head`.
+    fn waiting_run(w: &StateWriter, task: &str, pr: i64, head: &str) {
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: task,
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        w.conn()
+            .execute(
+                "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage)
+                 VALUES ((SELECT id FROM runs WHERE task_id = ?1), 's', 'code', 'fake', 'b',
+                         '/nowhere', 'verified')",
+                [task],
+            )
+            .unwrap();
+        register(w, "pr_opened", task, "o/p", pr, head).unwrap();
+    }
+
+    /// A membership read of `o/p` started now, with `answers` by number.
+    fn read_now(w: &StateWriter, answers: Vec<(i64, Value)>) -> MemberRead {
+        let mark: i64 = w
+            .conn()
+            .query_row("SELECT max(id) FROM events", [], |r| r.get(0))
+            .unwrap();
+        MemberRead {
+            m: Membership {
+                repo: "o/p".into(),
+                mark,
+                reads: follows_now(w),
+            },
+            waited: answers,
+            seq: next_seq(),
+        }
+    }
+
+    /// A membership read's `seq`, as the watch gives them: one larger per read.
+    fn next_seq() -> u64 {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The CI flake of the declared test (a read that shows a landing entry ahead out of the queue
+    /// before it shows it merged): one `OPEN` out-of-the-queue answer ends nothing; the next read
+    /// answering it `MERGED` ends the wait with "merged".
+    #[test]
+    fn a_torn_read_then_a_merged_read_ends_the_wait_as_merged() {
+        let (_dir, w) = org();
+        let head = "5".repeat(40);
+        waiting_run(&w, "t12", 18, &head);
+        unmergeable_wait(&w, "t12", "o/p", 18, &head, 0, &[2], Some("main")).unwrap();
+        let own = (
+            18,
+            json!({"number": 18, "state": "OPEN", "isInMergeQueue": false, "baseRefName": "main"}),
+        );
+        let mut seen = HashMap::new();
+        let torn = read_now(
+            &w,
+            vec![
+                (
+                    2,
+                    json!({"number": 2, "state": "OPEN", "isInMergeQueue": false}),
+                ),
+                own.clone(),
+            ],
+        );
+        apply_waits_seen(&w, &torn, &mut seen).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "one out-of-the-queue answer ends nothing"
+        );
+        let merged = read_now(
+            &w,
+            vec![
+                (
+                    2,
+                    json!({"number": 2, "state": "MERGED", "isInMergeQueue": false}),
+                ),
+                own,
+            ],
+        );
+        apply_waits_seen(&w, &merged, &mut seen).unwrap();
+        assert!(open_waits(w.conn(), None).unwrap().is_empty(), "ended");
+        assert_eq!(
+            last_readiness(&w)["left"],
+            json!([{"pr": 2, "how": "merged"}])
+        );
+    }
+
+    /// An entry ahead that really left the queue without landing ends the wait only on a second
+    /// read that answers it gone; the same read applied again ends nothing.
+    #[test]
+    fn one_out_of_the_queue_read_alone_ends_no_wait() {
+        let (_dir, w) = org();
+        let head = "4".repeat(40);
+        waiting_run(&w, "t13", 19, &head);
+        unmergeable_wait(&w, "t13", "o/p", 19, &head, 0, &[2], Some("main")).unwrap();
+        let answers = vec![
+            (
+                2,
+                json!({"number": 2, "state": "OPEN", "isInMergeQueue": false}),
+            ),
+            (
+                19,
+                json!({"number": 19, "state": "OPEN", "isInMergeQueue": false,
+                       "baseRefName": "main"}),
+            ),
+        ];
+        let mut seen = HashMap::new();
+        let first = read_now(&w, answers.clone());
+        apply_waits_seen(&w, &first, &mut seen).unwrap();
+        apply_waits_seen(&w, &first, &mut seen).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "one read, even applied twice, ends nothing"
+        );
+        apply_waits_seen(&w, &read_now(&w, answers), &mut seen).unwrap();
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "a second read ends it"
+        );
+        assert_eq!(
+            last_readiness(&w)["left"],
+            json!([{"pr": 2, "how": "left the queue"}])
+        );
+    }
+
+    /// Every current follow, as a membership read begun now carries them.
+    fn follows_now(w: &StateWriter) -> Vec<(Followed, Value)> {
+        followed(w.conn(), None)
+            .unwrap()
+            .into_iter()
+            .map(|f| (f, Value::Null))
+            .collect()
+    }
+
+    /// Diff review round 3: a membership read begun before the pull request was closed and
+    /// reopened (another follow generation) ends no wait; a read of the current follow does.
+    #[test]
+    fn a_read_of_an_older_follow_generation_ends_no_wait() {
+        let (_dir, w) = org();
+        let head = "6".repeat(40);
+        waiting_run(&w, "t11", 17, &head);
+        unmergeable_wait(&w, "t11", "o/p", 17, &head, 0, &[2], Some("main")).unwrap();
+        let answers = vec![
+            (
+                2,
+                json!({"number": 2, "state": "MERGED", "isInMergeQueue": false}),
+            ),
+            (
+                17,
+                json!({"number": 17, "state": "OPEN", "isInMergeQueue": false,
+                       "baseRefName": "main"}),
+            ),
+        ];
+        let old = read_now(&w, answers.clone());
+        event(
+            &w,
+            "pr_closed",
+            "makibad",
+            Some("t11"),
+            json!({"repo": "o/p", "pr": 17}),
+        );
+        event(
+            &w,
+            "pr_reopened",
+            "makibad",
+            Some("t11"),
+            json!({"repo": "o/p", "pr": 17}),
+        );
+        apply_waits(&w, &old).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "a read of the follow before the close and reopen"
+        );
+        apply_waits(&w, &read_now(&w, answers)).unwrap();
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "a read of the current follow ends it"
+        );
+    }
+
+    /// Round 4's blocker: a wait with no entry ahead ends only from a membership read of the pull
+    /// request itself with its base, never on the base the dequeue read (it may have been
+    /// retargeted, makibad restarted, since).
+    #[test]
+    fn a_wait_with_no_entry_ahead_ends_only_from_a_read_of_its_own_base() {
+        let (_dir, w) = org();
+        let head = "e".repeat(40);
+        waiting_run(&w, "t5", 11, &head);
+        unmergeable_wait(&w, "t5", "o/p", 11, &head, 0, &[], Some("main")).unwrap();
+        apply_waits(&w, &read_now(&w, Vec::new())).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "no answer: open"
+        );
+        apply_waits(
+            &w,
+            &read_now(
+                &w,
+                vec![(
+                    11,
+                    json!({"number": 11, "state": "OPEN", "isInMergeQueue": false,
+                           "baseRefName": "release"}),
+                )],
+            ),
+        )
+        .unwrap();
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "ended by the read of its own base"
+        );
+        assert_eq!(last_readiness(&w)["pr_base"], "release", "its own base");
+    }
+
+    /// Round 4's major: a pull request queued again while it waits (a stay, or the read shows it
+    /// in the queue) keeps its wait open.
+    #[test]
+    fn a_pull_request_queued_again_while_it_waits_keeps_waiting() {
+        let (_dir, w) = org();
+        let head = "f".repeat(40);
+        waiting_run(&w, "t6", 12, &head);
+        unmergeable_wait(&w, "t6", "o/p", 12, &head, 0, &[2], Some("main")).unwrap();
+        let gone = json!({"number": 2, "state": "MERGED", "isInMergeQueue": false});
+        // The read shows it queued again.
+        apply_waits(
+            &w,
+            &read_now(
+                &w,
+                vec![
+                    (2, gone.clone()),
+                    (
+                        12,
+                        json!({"number": 12, "state": "OPEN", "isInMergeQueue": true,
+                               "baseRefName": "main"}),
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(open_waits(w.conn(), None).unwrap().len(), 1);
+        // A stay recorded for it, though this read shows it out of the queue.
+        event(
+            &w,
+            "merge_queue_entered",
+            "makibad",
+            Some("t6"),
+            json!({"repo": "o/p", "pr": 12, "head": head, "attempt": null}),
+        );
+        apply_waits(
+            &w,
+            &read_now(
+                &w,
+                vec![
+                    (2, gone),
+                    (
+                        12,
+                        json!({"number": 12, "state": "OPEN", "isInMergeQueue": false,
+                               "baseRefName": "main"}),
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(open_waits(w.conn(), None).unwrap().len(), 1);
+    }
+
+    /// Round 5's major: a membership read that shows the waiting pull request closed or merged
+    /// (before the state poller recorded it) ends nothing: an ended pull request is not told to be
+    /// updated.
+    fn an_ended_pull_request_ends_no_wait(state: &str, task: &str, pr: i64) {
+        let (_dir, w) = org();
+        let head = "9".repeat(40);
+        waiting_run(&w, task, pr, &head);
+        unmergeable_wait(&w, task, "o/p", pr, &head, 0, &[2], Some("main")).unwrap();
+        apply_waits(
+            &w,
+            &read_now(
+                &w,
+                vec![
+                    (
+                        2,
+                        json!({"number": 2, "state": "MERGED", "isInMergeQueue": false}),
+                    ),
+                    (
+                        pr,
+                        json!({"number": pr, "state": state, "isInMergeQueue": false,
+                               "baseRefName": "main"}),
+                    ),
+                ],
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "{state}: still open"
+        );
+    }
+
+    #[test]
+    fn a_waiting_pull_request_read_closed_ends_no_wait() {
+        an_ended_pull_request_ends_no_wait("CLOSED", "t7", 13);
+    }
+
+    #[test]
+    fn a_waiting_pull_request_read_merged_ends_no_wait() {
+        an_ended_pull_request_ends_no_wait("MERGED", "t8", 14);
+    }
+
+    /// The newest notice's body.
+    fn last_notice(w: &StateWriter) -> String {
+        w.conn()
+            .query_row(
+                "SELECT body FROM messages WHERE kind = 'notice' ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap()
+    }
+
+    /// The payload of the newest `queue_readiness`.
+    fn last_readiness(w: &StateWriter) -> Value {
+        let p: String = w
+            .conn()
+            .query_row(
+                "SELECT payload_json FROM events WHERE kind = 'queue_readiness'
+                 ORDER BY id DESC LIMIT 1",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str(&p).unwrap()
+    }
+
+    /// The narrowing of 2026-11-28: the end of a wait writes the closing record and one notice
+    /// naming the update to run with the pull request's own base, and no `update` command.
+    #[test]
+    fn a_wait_ends_with_a_notice_naming_the_update_and_no_command() {
+        let (_dir, w) = org();
+        let head = "b".repeat(40);
+        waiting_run(&w, "t2", 8, &head);
+        unmergeable_wait(&w, "t2", "o/p", 8, &head, 0, &[2], Some("main")).unwrap();
+        let waits = open_waits(w.conn(), None).unwrap();
+        assert_eq!(waits.len(), 1);
+        assert!(end_wait(&w, &waits[0], &[(2, "merged")], "release").unwrap());
+        let commands = count(
+            &w,
+            "SELECT count(*) FROM commands WHERE verb = 'update'",
+            [],
+        )
+        .unwrap();
+        assert_eq!(commands, 0, "makibad writes no update");
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "the wait ended"
+        );
+        let closing = last_readiness(&w);
+        assert_eq!(closing["waiting"], false, "{closing}");
+        assert_eq!(closing["command"], Value::Null, "{closing}");
+        assert_eq!(closing["pr_base"], "release", "{closing}");
+        assert_eq!(
+            closing["left"],
+            json!([{"pr": 2, "how": "merged"}]),
+            "{closing}"
+        );
+        let told = last_notice(&w);
+        assert!(
+            told.contains("call update with task t2 and base release"),
+            "{told}"
+        );
+        assert!(told.contains("#2 merged"), "{told}");
+        // Not ended twice.
+        assert!(!end_wait(&w, &waits[0], &[(2, "merged")], "release").unwrap());
+    }
+
+    /// A run without a code worktree cannot run `update`: the notice says how to have the head
+    /// judged again instead.
+    #[test]
+    fn a_wait_of_a_run_without_a_code_worktree_ends_with_its_own_notice() {
+        let (_dir, w) = org();
+        w.upsert_run(&crate::db::writer::RunUpsert {
+            task_id: "t9",
+            project_slug: "p",
+            title: Some("T"),
+            status: Some("review"),
+            ..Default::default()
+        })
+        .unwrap();
+        let head = "7".repeat(40);
+        register(&w, "pr_opened", "t9", "o/p", 15, &head).unwrap();
+        unmergeable_wait(&w, "t9", "o/p", 15, &head, 0, &[], Some("main")).unwrap();
+        let waits = open_waits(w.conn(), None).unwrap();
+        assert!(end_wait(&w, &waits[0], &[], "main").unwrap());
+        let told = last_notice(&w);
+        assert!(told.contains("has no code worktree"), "{told}");
+        assert!(
+            told.contains("record 7777777777777777777777777777777777777777 again with pr pushed"),
+            "{told}"
+        );
+        assert!(!told.contains("call update"), "{told}");
+    }
+
+    /// Rule 5's case (queue-ready.md): the closing record of a wait is judged again after the
+    /// secretary's update of the pull request's own base merged nothing, or after the same head is
+    /// recorded again; not before, not after an update of another base, not after one that merged.
+    #[test]
+    fn the_end_of_a_wait_is_judged_again_only_once_released() {
+        let (_dir, w) = org();
+        let head = "8".repeat(40);
+        waiting_run(&w, "t10", 16, &head);
+        unmergeable_wait(&w, "t10", "o/p", 16, &head, 0, &[], Some("main")).unwrap();
+        let waits = open_waits(w.conn(), None).unwrap();
+        assert!(end_wait(&w, &waits[0], &[], "main").unwrap());
+        let record = newest_readiness(w.conn(), "o/p", 16, &head)
+            .unwrap()
+            .unwrap();
+        assert!(!record.waiting);
+        let released = |w: &StateWriter| wait_released(w.conn(), "t10", record.id, &head).unwrap();
+        let update = |w: &StateWriter, base: &str, status: &str| {
+            w.conn()
+                .execute(
+                    "INSERT INTO commands (actor, verb, args_json, status)
+                     VALUES ('secretary', 'update', ?1, ?2)",
+                    params![json!({"task": "t10", "base": base}).to_string(), status],
+                )
+                .unwrap();
+        };
+        assert!(!released(&w), "no update yet");
+        update(&w, "main", "failed");
+        assert!(!released(&w), "a failed update");
+        update(&w, "release", "done");
+        assert!(!released(&w), "an update of another base");
+        update(&w, "main", "done");
+        assert!(released(&w), "an update of its base that merged nothing");
+        event(
+            &w,
+            "branch_updated",
+            "makibad",
+            Some("t10"),
+            json!({"task_id": "t10", "base": "main", "old": head, "new": "9".repeat(40)}),
+        );
+        assert!(!released(&w), "an update that merged something");
+        register(&w, "fix_pushed", "t10", "o/p", 16, &head).unwrap();
+        assert!(released(&w), "the same head recorded again");
     }
 }
