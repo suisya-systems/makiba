@@ -24,3 +24,9 @@ signal-hook = "0.4.6"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+
+# Dev and test builds (the test profile inherits this) keep line tables, so backtraces still name
+# file:line, and drop variable and type debug info: with one binary per test file, full debug info
+# filled the disk (docs/design/incidents.md).
+[profile.dev]
+debug = "line-tables-only"
