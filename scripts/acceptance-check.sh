@@ -22,6 +22,11 @@
 #     added or be deleted; each is named before the last line, and the person accepts it at the
 #     merge (Issue 514). A base merge counts only for its own resolution: what differs from the
 #     clean merge of its parents, or a conflict not resolved as the branch's own version.
+# The two worktrees are made under the repository's git folder (<git common dir>/acceptance-check/),
+# not under the system's temporary folder, and removed at exit (Issue 558). It fails at once when
+# that git folder is in a temporary folder while the checkout is not, or when a folder above the
+# work folder, other than CARGO_HOME, holds a Cargo config. A declared Python test runs with no
+# conftest.py and no pytest config from above its worktree (--confcutdir; -c, --rootdir).
 # Last line: ACCEPTANCE: pass | none | fail. Exit 0 pass or none (nothing declared), 1 fail, 2 usage.
 #   bash scripts/acceptance-check.sh --test-commit SHA
 # prints only the paths the test commit SHA may not change (rule 2), one per line, sorted: exit 0
@@ -264,8 +269,43 @@ done <"$list"
 rm -f "$list"
 
 # 3. declared tests fail at the test commit and pass at head
-work=$(mktemp -d)
-trap 'git worktree remove --force "$work/t" >/dev/null 2>&1; git worktree remove --force "$work/h" >/dev/null 2>&1; rm -rf "$work"' EXIT
+# The work folder is under the repository's git folder, not the system's temporary folder: a
+# declared test then sees in the acceptance job the kind of path it sees in the tests job, also
+# when the code under test treats a temporary folder otherwise (Issue 558). A git folder in a
+# temporary folder while the checkout is not would bring that back, so it fails the check.
+tmp_root() { # tmp_root <resolved dir>: prints the temporary folder that holds it, if any
+  local r
+  for r in /tmp /private/tmp /var/tmp ${TMPDIR:+"$TMPDIR"}; do
+    r=$(cd -P "$r" 2>/dev/null && pwd -P) || continue
+    under "$1" "$r" && { echo "$r"; return 0; }
+  done
+  return 1
+}
+gitdir=$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null) && gitdir=$(cd -P "$gitdir" && pwd -P) &&
+  mkdir -p "$gitdir/acceptance-check" && work=$(mktemp -d "$gitdir/acceptance-check/run.XXXXXX") ||
+  { echo "acceptance-check: cannot make a work folder under the repository's git folder" >&2; echo "ACCEPTANCE: fail"; exit 1; }
+trap 'git worktree remove --force "$work/t" >/dev/null 2>&1; git worktree remove --force "$work/h" >/dev/null 2>&1; rm -rf "$work"; rmdir "$gitdir/acceptance-check" 2>/dev/null' EXIT
+if root=$(tmp_root "$work"); then
+  if top=$(git rev-parse --show-toplevel 2>/dev/null) && top=$(cd -P "$top" && pwd -P) && ! tmp_root "$top" >/dev/null; then
+    echo "acceptance-check: the git folder $gitdir is under a temporary folder ($root) while the checkout $top is not; declared tests would see a path the tests job does not"
+    echo "ACCEPTANCE: fail"; exit 1
+  fi
+fi
+# Cargo reads .cargo/config.toml (or .cargo/config) in every folder above the one it builds in. A
+# folder above the work folder is outside both worktrees (in CI, the checkout, which is the head),
+# so its config would shape the test commit's build too: the check fails instead. CARGO_HOME's
+# config is read by every build anyway and is left out.
+cargo_home=$(cd -P "${CARGO_HOME:-$HOME/.cargo}" 2>/dev/null && pwd -P) || cargo_home=
+d=$work
+while [ "$d" != / ]; do
+  d=$(dirname "$d")
+  [ -n "$cargo_home" ] && [ "$d/.cargo" = "$cargo_home" ] && continue
+  for f in "$d/.cargo/config" "$d/.cargo/config.toml"; do
+    [ -e "$f" ] || continue
+    echo "acceptance-check: $f lies above the work folder $work; Cargo would read it in the builds of both the test commit and head, so a config outside them could shape the test commit's build"
+    echo "ACCEPTANCE: fail"; exit 1
+  done
+done
 git worktree add -q --detach "$work/t" "$first" && git worktree add -q --detach "$work/h" "$head" \
   || { echo "acceptance-check: git worktree add failed" >&2; echo "ACCEPTANCE: fail"; exit 1; }
 # Each test is "py <path>" or "rs <path> <target name>".
@@ -290,17 +330,65 @@ run_rs() { # run_rs <tree> <name> <where>: output in $work/out, Cargo's exit sta
   (cd "$1" && export CARGO_TERM_COLOR=never CARGO_TARGET_DIR="$1/target" CARGO_BUILD_BUILD_DIR="$1/target" &&
     cargo fetch --locked && cargo test --locked --test "$2") >"$work/out" 2>&1
 }
+# pytest looks above the worktree too: for a config file (whose folder then becomes the rootdir,
+# and conftest.py files up to it are loaded) when the worktree has none. Above the worktree is the
+# checkout, in CI the head, which would then shape the test commit's run (Issue 558). So no
+# conftest.py above the worktree is loaded (--confcutdir), and unless the config file pytest's
+# discovery picks lies inside the worktree, the run gets an empty one (-c, --rootdir) instead.
+# Which file that is, is asked of pytest's own discovery function (locate_config), which reads
+# files and starts nothing: no plugin, no pythonpath, no conftest. Its rules (empty tables, quoted
+# TOML keys, the version's file names) are not copied here. It runs from the work folder, so no
+# module of a worktree can shadow what it imports; when it cannot be asked, the check fails.
+: >"$work/empty-pytest.ini" # a name pytest's own search never takes
+py_found() { # py_found <tree> <test path>: prints the config file pytest's discovery picks, or nothing
+  (cd "$work" && python3 - "$1" "$1/$2" 2>"$work/py-err" <<'PY'
+import inspect
+import sys
+from pathlib import Path
+
+from _pytest.config.findpaths import locate_config
+
+tree, test = Path(sys.argv[1]), [Path(sys.argv[2])]
+n = len(inspect.signature(locate_config).parameters)
+if n == 2:
+    found = locate_config(tree, test)
+elif n == 1:
+    found = locate_config(test)
+else:
+    raise SystemExit(f"locate_config takes {n} parameters")
+print(found[1] or "")
+PY
+  )
+}
+own_config() { # own_config <tree> <config file or empty>: the file lies inside <tree>
+  local f=$2
+  [ -n "$f" ] && f=$(cd -P "$(dirname "$f")" 2>/dev/null && pwd -P)/${f##*/} && under "$f" "$1"
+}
+run_py() { # run_py <tree> <test path> <config file or empty>: output in $work/out, pytest's exit status returned
+  if own_config "$1" "$3"; then
+    (cd "$1" && python3 -m pytest -q -p no:cacheprovider --confcutdir="$1" "$2") >"$work/out" 2>&1
+  else
+    (cd "$1" && python3 -m pytest -q -p no:cacheprovider --confcutdir="$1" -c "$work/empty-pytest.ini" --rootdir="$1" "$2") >"$work/out" 2>&1
+  fi
+}
+cannot_ask() { no "cannot ask pytest which config file $1 uses at $2: $(tail -1 "$work/py-err")"; }
 ran() { sed -n 's/^running \([0-9][0-9]*\) tests\{0,1\}$/\1/p' "$work/out" | head -1; }
 while read -r kind t n; do
   [ -n "$kind" ] || continue
   if [ "$kind" = py ]; then
-    (cd "$work/t" && python3 -m pytest -q -p no:cacheprovider "$t") >"$work/out" 2>&1
-    case $? in
-      0) no "$t passes at the test commit $first; it must fail before the fix" ;;
-      5) no "$t collects no test at the test commit $first; it must fail before the fix" ;;
-      *) echo "acceptance-check: $t fails at the test commit (expected)" ;;
-    esac
-    if (cd "$work/h" && python3 -m pytest -q -p no:cacheprovider "$t") >"$work/out" 2>&1; then
+    if ! cfg_t=$(py_found "$work/t" "$t"); then
+      cannot_ask "$t" "the test commit $first"
+    else
+      run_py "$work/t" "$t" "$cfg_t"
+      case $? in
+        0) no "$t passes at the test commit $first; it must fail before the fix" ;;
+        5) no "$t collects no test at the test commit $first; it must fail before the fix" ;;
+        *) echo "acceptance-check: $t fails at the test commit (expected)" ;;
+      esac
+    fi
+    if ! cfg_h=$(py_found "$work/h" "$t"); then
+      cannot_ask "$t" "head $head"
+    elif run_py "$work/h" "$t" "$cfg_h"; then
       echo "acceptance-check: $t passes at head"
     else
       no "$t fails at head $head:"; sed 's/^/  /' "$work/out" | tail -20
