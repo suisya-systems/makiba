@@ -1435,6 +1435,51 @@ pub(crate) fn pr_head_sql(repo: &str, pr: &str) -> String {
     )
 }
 
+/// The CI of `repo#pr` at `head` (Issue 405; one read for `pull_requests[].ci` and a review
+/// item's stage, Issue 569): `running` while a watch of it is `watching`; else the status of its
+/// newest `ci_completed` written after the newest `pr_closed` of the pull request (any, when the
+/// head was recorded again after that close); else None.
+pub(crate) fn pr_ci(
+    conn: &Connection,
+    repo: &str,
+    pr: i64,
+    head: &str,
+) -> rusqlite::Result<Option<String>> {
+    let running: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM pr_watches WHERE status = 'watching'
+           AND lower(repo) = lower(?1) AND pr = ?2 AND lower(head_oid) = lower(?3))",
+        params![repo, pr, head],
+        |r| r.get(0),
+    )?;
+    if running {
+        return Ok(Some("running".into()));
+    }
+    let of = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
+              AND json_extract(payload_json, '$.pr') = ?2";
+    let head_is = "lower(json_extract(payload_json, '$.head_oid')) = lower(?3)";
+    Ok(conn
+        .query_row(
+            &format!(
+                "SELECT json_extract(payload_json, '$.status') FROM events
+                 WHERE kind = 'ci_completed' AND {of} AND {head_is}
+                   AND id > (SELECT CASE WHEN EXISTS (
+                                 SELECT 1 FROM events g WHERE g.kind IN ('pr_opened', 'fix_pushed')
+                                   AND lower(json_extract(g.payload_json, '$.repo')) = lower(?1)
+                                   AND json_extract(g.payload_json, '$.pr') = ?2
+                                   AND lower(json_extract(g.payload_json, '$.head_oid')) = lower(?3)
+                                   AND g.id > c.cut)
+                               THEN 0 ELSE c.cut END
+                             FROM (SELECT coalesce(max(id), 0) AS cut FROM events
+                                   WHERE kind = 'pr_closed' AND {of}) c)
+                 ORDER BY id DESC LIMIT 1"
+            ),
+            params![repo, pr, head],
+            |r| r.get(0),
+        )
+        .optional()?
+        .flatten())
+}
+
 /// Whether the pull request `repo`, `pr` (SQL expressions) is the current pull request of the run
 /// `alias`: the same repository (any case, as GitHub reads it) and number.
 pub(super) fn is_current_pr_sql(alias: &str, repo: &str, pr: &str) -> String {
@@ -3282,32 +3327,40 @@ fn run_item(c: &Connection, issue: i64, task: &str) -> rusqlite::Result<Option<V
                 // run that shares the pull request, or registered a head another run's row
                 // watches), of the pull request's newest registered head first: a pull request
                 // registered again keeps its older row, behind another's newer one, and so does
-                // a head it returns to. At that head a row still `watching` comes first, as
-                // `pull_requests[].ci` reads `running` while any is, then the one finished last,
-                // whose `ci_completed` the same transaction wrote and `ci` reads (rows of one
-                // head whose repository differs in case only are two rows).
-                let watch: Option<(String, Option<String>)> = c
+                // a head it returns to. Its result at the pull request's newest registered head
+                // is the one `pull_requests[].ci` reads (`pr_ci`), so that two watch rows of one
+                // head (a repository registered in another case) cannot make the two disagree;
+                // the row's own conclusion only where that read has none.
+                let watch: Option<(String, Option<String>, String, i64, String)> = c
                     .query_row(
                         &format!(
-                            "SELECT w.status, w.conclusion FROM pr_watches w
+                            "SELECT w.status, w.conclusion, w.repo, w.pr,
+                                    coalesce({head}, w.head_oid)
+                             FROM pr_watches w
                              JOIN runs r ON r.id = ?1
                              WHERE {}
-                             ORDER BY coalesce(lower(w.head_oid) = lower({}), 0) DESC,
-                                      w.status = 'watching' DESC,
-                                      w.finished_at DESC,
+                             ORDER BY coalesce(lower(w.head_oid) = lower({head}), 0) DESC,
                                       w.id DESC
                              LIMIT 1",
                             is_current_pr_sql("r", "w.repo", "w.pr"),
-                            pr_head_sql("w.repo", "w.pr")
+                            head = pr_head_sql("w.repo", "w.pr")
                         ),
                         [run],
-                        |r| Ok((r.get(0)?, r.get(1)?)),
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
                     )
                     .optional()?;
                 it["stage"] = json!(match watch {
                     None => "no_pr",
-                    Some((s, Some(c))) if s == "completed" && c == "passed" => "to_land",
-                    Some(_) => "ci",
+                    Some((s, conclusion, repo, pr, head)) => {
+                        match pr_ci(c, &repo, pr, &head)?.as_deref() {
+                            Some("passed") => "to_land",
+                            Some(_) => "ci",
+                            None if s == "completed" && conclusion.as_deref() == Some("passed") => {
+                                "to_land"
+                            }
+                            None => "ci",
+                        }
+                    }
                 });
             }
             "completed" => {
@@ -4998,7 +5051,8 @@ pub(in crate::daemon) mod tests {
 
     /// Two runs register one head of one pull request with the repository in another case, so
     /// there are two watch rows of it: while either still watches, both items are at `ci`, as
-    /// `pull_requests[].ci` reads `running` (Issue 569, diff review round 1).
+    /// `pull_requests[].ci` reads `running`, and once both finished the stage follows the result
+    /// `ci` reads, the newest `ci_completed` (Issue 569, diff review rounds 1 to 3).
     #[test]
     fn a_watch_still_running_at_the_head_keeps_the_stage_at_ci() {
         let (_dir, w) = org();
@@ -5046,25 +5100,37 @@ pub(in crate::daemon) mod tests {
                 .map(|i| i["stage"].clone())
                 .collect()
         };
-        let finish = |repo: &str, conclusion: &str, at: &str| {
+        // A row finishes as the PR watch finishes it: its conclusion and `finished_at`, and the
+        // `ci_completed` that `pull_requests[].ci` reads, in one go. Every finish here has the
+        // same `finished_at` (diff review round 3: two finishes in one millisecond), so only
+        // the order of the results can decide.
+        let finish = |repo: &str, conclusion: &str| {
             w.conn()
                 .execute(
                     "UPDATE pr_watches SET status = 'completed', conclusion = ?2,
-                       finished_at = ?3 WHERE repo = ?1",
-                    params![repo, conclusion, at],
+                       finished_at = '2026-11-24T09:00:00.000Z' WHERE repo = ?1",
+                    params![repo, conclusion],
                 )
                 .unwrap();
+            w.append_event(&NewEvent {
+                kind: "ci_completed",
+                actor: Some("makibad"),
+                payload: Some(&json!({"repo": repo, "pr": 7, "head_oid": h,
+                                      "status": conclusion})),
+                ..Default::default()
+            })
+            .unwrap();
         };
         // The newer row concludes passed while the older one still watches.
-        finish("O/P", "passed", "2026-11-24T09:00:00.000Z");
+        finish("O/P", "passed");
         assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
-        // Then the older row fails: the result finished last is the one shown.
-        finish("o/p", "failed", "2026-11-24T09:05:00.000Z");
+        // Then the older row fails: the result written last is the one shown.
+        finish("o/p", "failed");
         assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
-        finish("o/p", "passed", "2026-11-24T09:10:00.000Z");
+        finish("o/p", "passed");
         assert_eq!(stages(), vec![json!("to_land"), json!("to_land")]);
-        // The newer row finishes failed last.
-        finish("O/P", "failed", "2026-11-24T09:15:00.000Z");
+        // The newer row fails last.
+        finish("O/P", "failed");
         assert_eq!(stages(), vec![json!("ci"), json!("ci")]);
     }
 }
