@@ -1,8 +1,10 @@
 //! Issue 578: the answer of a prompt reserves its entry before it presses the key, with no write
 //! transaction open (src/daemon/door.rs, `answer_prompt`). What the reservation guarantees:
 //!
-//! - a key whose outcome is not known keeps the entry answered, and the command answers that
-//!   the outcome is not known;
+//! - a key whose outcome is not known (the request written, no answer read) keeps the entry
+//!   answered, and the command answers that the outcome is not known;
+//! - a key whose request never reached the base (it could not be connected to) reopens the
+//!   entry, so a later answer presses it;
 //! - a request interrupted after the reservation (here a panic inside the key press, as a crash
 //!   would leave it) never presses again on a retry of the same idem;
 //! - a key the base refused reopens the entry even when the first try to reopen it meets the
@@ -40,8 +42,10 @@ const SCREEN: [&str; 5] = [
 enum Keys {
     /// The base says nothing was pressed.
     Refused,
-    /// The base gives no answer: the key may have gone in.
+    /// The request was written and no answer came back: the key may have gone in.
     Unknown,
+    /// The base could not be reached: nothing was written. The press after it succeeds.
+    Unreached,
     /// The request ends inside the press, as a crash would end it.
     Panics,
 }
@@ -121,7 +125,11 @@ impl Base for Prompted {
         }
         match self.keys {
             Keys::Refused => Err(BaseError::Finished(detail("finished"))),
-            Keys::Unknown => Err(BaseError::Unavailable(detail("unavailable"))),
+            Keys::Unknown => Err(BaseError::Unavailable(detail("read"))),
+            Keys::Unreached if self.pressed.load(Ordering::SeqCst) == 1 => {
+                Err(BaseError::Unavailable(detail("connect")))
+            }
+            Keys::Unreached => Ok(()),
             Keys::Panics => panic!("the request ends inside the key press"),
         }
     }
@@ -297,4 +305,28 @@ fn a_refused_key_reopens_the_entry_past_a_held_lock() {
     assert_eq!(entry(&db, id), "open");
     assert_eq!(answered_events(&db), 0);
     assert_eq!(command(&db), "failed");
+}
+
+#[test]
+fn a_key_that_never_reached_the_base_reopens_the_entry() {
+    let (_dir, db, id, key) = org();
+    let base = Arc::new(Prompted::new(Keys::Unreached));
+    let as_base: Arc<dyn Base> = base.clone();
+    let door = Door::new(
+        StateWriter::open(&db).unwrap(),
+        as_base,
+        "claude_code".into(),
+    );
+    let e = answer(&door, &key, id, "a1").expect_err("the base could not be reached");
+    assert_eq!(e.kind, ErrorKind::Unavailable, "{e:?}");
+    assert!(e.message.contains("no key was pressed"), "{e:?}");
+    assert_eq!(entry(&db, id), "open");
+    assert_eq!(answered_events(&db), 0);
+    assert_eq!(command(&db), "failed");
+    // Once the base is back, a new answer presses the key.
+    let v = answer(&door, &key, id, "a2").expect("the second answer is pressed");
+    assert_eq!(v, json!({"id": id, "status": "answered", "key": "enter"}));
+    assert_eq!(base.pressed.load(Ordering::SeqCst), 2);
+    assert_eq!(entry(&db, id), "answered");
+    assert_eq!(answered_events(&db), 1);
 }

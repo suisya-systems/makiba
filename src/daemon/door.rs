@@ -1226,6 +1226,20 @@ struct Pressing {
     key: &'static str,
 }
 
+/// Whether a key press that failed with `e` may still have reached the terminal: the request was
+/// written, or may have been, and no reply was read (`write`, `read`, `closed`, or a reply that
+/// could not be read). A refusal the base answered, and a failure before anything was written
+/// (`connect`, `socket`, `organization`), pressed nothing (Issue 578).
+fn key_may_have_gone(e: &crate::base::BaseError) -> bool {
+    use crate::base::BaseError;
+    match e {
+        BaseError::Unavailable(d) | BaseError::Other(d) => {
+            matches!(d.kind.as_str(), "write" | "read" | "closed" | "reply")
+        }
+        _ => false,
+    }
+}
+
 /// How many times the reopening of an entry whose key the base refused is tried (Issue 578).
 const UNDO_TRIES: usize = 3;
 
@@ -1438,16 +1452,11 @@ fn answer_prompt(
         let _ = w.rollback();
         return Err(internal(e));
     }
-    use crate::base::BaseError;
     let r: Response = match base.keys(&p.terminal, &[p.key]) {
         Ok(()) => Ok(json!({"id": p.id, "status": "answered", "key": p.key})),
-        // The base refused: nothing was pressed, so the entry is open again for another answer.
-        Err(
-            e @ (BaseError::StatusMismatch(_)
-            | BaseError::Blocked(_)
-            | BaseError::Finished(_)
-            | BaseError::NotFound(_)),
-        ) => {
+        // Nothing was pressed (the base refused, or the request never reached it), so the entry
+        // is open again for another answer.
+        Err(e) if !key_may_have_gone(&e) => {
             let r = Err(refuse(
                 ErrorKind::Unavailable,
                 format!("the base: {e}; no key was pressed"),
