@@ -62,8 +62,9 @@ impl Dispatch {
     /// One pass: returns the task ids taken, oldest first.
     pub fn pass(&self, w: &StateWriter) -> Result<Vec<String>> {
         let mut taken = Vec::new();
-        // One transaction per run, so the count and the event are never apart.
-        while let Some(task) = w.transaction(|w| self.take_one(w))? {
+        // One transaction per run, so the count and the event are never apart. Read first (Issue
+        // 578): a pass with nothing to take takes no write lock.
+        while let Some(task) = w.transaction_read_first(|w| self.take_one(w))? {
             super::crash::point("run_taken");
             taken.push(task);
         }
