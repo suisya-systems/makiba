@@ -2829,12 +2829,15 @@ pub(super) fn newest_head(c: &Connection, task: &str) -> Result<Option<String>> 
     .flatten())
 }
 
-/// A `queue_readiness` as recorded: its event id, verdict, reason and base tip.
+/// A `queue_readiness` as recorded: its event id, verdict, reason and base tip, and whether it
+/// carries `own_checks` (written by the rule of Issue 567; a record without it was judged with
+/// no regard for a head's own checks).
 pub(super) struct Recorded {
     pub id: i64,
     pub verdict: String,
     pub reason: Option<String>,
     pub base_tip: Option<String>,
+    pub own_checks_read: bool,
 }
 
 /// The newest `queue_readiness` of `repo#pr` at `head`.
@@ -2846,7 +2849,8 @@ pub(super) fn newest_readiness(
 ) -> Result<Option<Recorded>> {
     Ok(c.query_row(
         "SELECT id, json_extract(payload_json, '$.verdict'), json_extract(payload_json, '$.reason'),
-                json_extract(payload_json, '$.base_tip')
+                json_extract(payload_json, '$.base_tip'),
+                json_type(payload_json, '$.own_checks') IS NOT NULL
          FROM events WHERE kind = 'queue_readiness'
            AND lower(json_extract(payload_json, '$.repo')) = lower(?1)
            AND json_extract(payload_json, '$.pr') = ?2
@@ -2859,6 +2863,7 @@ pub(super) fn newest_readiness(
                 verdict: q.get(1)?,
                 reason: q.get(2)?,
                 base_tip: q.get(3)?,
+                own_checks_read: q.get(4)?,
             })
         },
     )
@@ -2943,7 +2948,9 @@ fn ready_candidates(c: &Connection, repos: &Path, task: Option<&str>) -> Result<
         }
         let ready = match newest_readiness(c, &f.repo, f.pr, &head)? {
             None => None,
-            Some(r) if r.verdict == "ready" => Some(r.base_tip),
+            // A `ready` of the rule before Issue 567 covers no base tip: its watching reader reads
+            // the landings since the base the head holds whole, by the rule of today.
+            Some(r) if r.verdict == "ready" => Some(r.base_tip.filter(|_| r.own_checks_read)),
             Some(_) => continue,
         };
         out.push(ReadyCand {
@@ -3002,15 +3009,19 @@ struct ReadDone {
 }
 
 /// What the loop decides for a head.
+/// `own_checks`: the head's own check paths as its reading found them (Issue 567); empty when the
+/// decision was made without a reading (a conflict decided at once).
 enum Decision {
     Ready {
         base_tip: String,
         ci_base: String,
+        own_checks: Vec<String>,
     },
     Update {
         reason: &'static str,
         base_tip: Option<String>,
         ci_base: Option<String>,
+        own_checks: Vec<String>,
         landings: Vec<super::ready::Landing>,
     },
     Unknown {
@@ -3133,6 +3144,7 @@ impl PrWatch {
                     reason: "conflict",
                     base_tip: tip,
                     ci_base: None,
+                    own_checks: Vec::new(),
                     landings: Vec::new(),
                 };
                 decide(w, &self.repos, &c.key(), &class, &d)?;
@@ -3205,14 +3217,25 @@ impl PrWatch {
             Ok(Reading::Read {
                 base_tip,
                 ci_base,
+                own_checks,
                 landings,
             }) => {
                 self.read_failing.remove(&key);
                 if !landings.is_empty() {
+                    // A path every head counts names the reason; otherwise only landed tests
+                    // count, for a head that changes a check (Issue 567).
+                    let checks = landings
+                        .iter()
+                        .any(|l| l.paths.iter().any(|p| super::ready::checked(p)));
                     Decision::Update {
-                        reason: "checks_changed",
+                        reason: if checks {
+                            "checks_changed"
+                        } else {
+                            "tests_landed"
+                        },
                         base_tip: Some(base_tip.clone()),
                         ci_base: Some(ci_base.clone()),
+                        own_checks: own_checks.clone(),
                         landings: landings.clone(),
                     }
                 } else if d.watch {
@@ -3222,6 +3245,7 @@ impl PrWatch {
                     Decision::Ready {
                         base_tip: base_tip.clone(),
                         ci_base: ci_base.clone(),
+                        own_checks: own_checks.clone(),
                     }
                 }
             }
@@ -3258,17 +3282,25 @@ fn on_merge_state(d: Decision, class: &str, covered: Option<String>) -> Decision
     if class != "conflict" {
         return d;
     }
-    let (base_tip, ci_base) = match d {
-        Decision::Ready { base_tip, ci_base } => (Some(base_tip), Some(ci_base)),
+    let (base_tip, ci_base, own_checks) = match d {
+        Decision::Ready {
+            base_tip,
+            ci_base,
+            own_checks,
+        } => (Some(base_tip), Some(ci_base), own_checks),
         Decision::Update {
-            base_tip, ci_base, ..
-        } => (base_tip, ci_base),
-        Decision::Unknown { .. } => (covered, None),
+            base_tip,
+            ci_base,
+            own_checks,
+            ..
+        } => (base_tip, ci_base, own_checks),
+        Decision::Unknown { .. } => (covered, None, Vec::new()),
     };
     Decision::Update {
         reason: "conflict",
         base_tip,
         ci_base,
+        own_checks,
         landings: Vec::new(),
     }
 }
@@ -3287,27 +3319,49 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
             return Ok(false);
         };
         let (repo, pr, base) = (c.f.repo.as_str(), c.f.pr, c.base.as_str());
-        let (verdict, reason, base_tip, ci_base, landings) = match d {
-            Decision::Ready { base_tip, ci_base } => (
+        let (verdict, reason, base_tip, ci_base, own_checks, landings) = match d {
+            Decision::Ready {
+                base_tip,
+                ci_base,
+                own_checks,
+            } => (
                 "ready",
                 Value::Null,
                 Some(base_tip.clone()),
                 Some(ci_base.clone()),
+                own_checks.clone(),
                 Vec::new(),
             ),
             Decision::Update {
                 reason,
                 base_tip,
                 ci_base,
+                own_checks,
                 landings,
             } => (
                 "update",
                 json!(reason),
                 base_tip.clone(),
                 ci_base.clone(),
+                own_checks.clone(),
                 landings.clone(),
             ),
-            Decision::Unknown { reason } => ("unknown", json!(reason), None, None, Vec::new()),
+            Decision::Unknown { reason } => (
+                "unknown",
+                json!(reason),
+                None,
+                None,
+                Vec::new(),
+                Vec::new(),
+            ),
+        };
+        // At most three paths named, then "...".
+        let few = |paths: &[String]| {
+            let mut named: Vec<&str> = paths.iter().take(3).map(String::as_str).collect();
+            if paths.len() > 3 {
+                named.push("...");
+            }
+            named.join(", ")
         };
         let listed: Vec<Value> = landings
             .iter()
@@ -3317,6 +3371,7 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
             "repo": repo, "pr": pr, "head_oid": c.head, "task_id": task, "base": base,
             "base_tip": base_tip, "ci_base": ci_base, "merge_state": class, "verdict": verdict,
             "reason": reason, "landings": listed, "watched": watched, "command": Value::Null,
+            "own_checks": own_checks,
         });
         let event = w.append_event(&NewEvent {
             kind: "queue_readiness",
@@ -3329,10 +3384,20 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
         let at = short(&c.head);
         let link = format!("https://github.com/{repo}/pull/{pr}");
         let body = match d {
-            Decision::Ready { ci_base, .. } => format!(
-                "{repo}#{pr} at {at} can be queued: its CI passed, the head holds {base} at {}, and no landing since changed what the checks check (docs/design/queue-ready.md). {link}",
-                short(ci_base)
-            ),
+            Decision::Ready { ci_base, .. } => {
+                let tests = if own_checks.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        ", and, as it changes a check ({}), it holds every landing since that added or changed a test",
+                        few(&own_checks)
+                    )
+                };
+                format!(
+                    "{repo}#{pr} at {at} can be queued: its CI passed, the head holds {base} at {}, and no landing since changed what the checks check{tests} (docs/design/queue-ready.md). {link}",
+                    short(ci_base)
+                )
+            }
             Decision::Update {
                 reason, landings, ..
             } => {
@@ -3341,20 +3406,21 @@ fn decide(w: &StateWriter, repos: &Path, key: &ReadKey, class: &str, d: &Decisio
                 } else {
                     let named: Vec<String> = landings
                         .iter()
-                        .map(|l| {
-                            let mut paths: Vec<&str> =
-                                l.paths.iter().take(3).map(String::as_str).collect();
-                            if l.paths.len() > 3 {
-                                paths.push("...");
-                            }
-                            format!("{} ({})", short(&l.sha), paths.join(", "))
-                        })
+                        .map(|l| format!("{} ({})", short(&l.sha), few(&l.paths)))
                         .collect();
-                    format!(
-                        "landings since {base} at {}, which the head holds, changed what the checks check: {}",
-                        ci_base.as_deref().map(short).unwrap_or_default(),
-                        named.join(", ")
-                    )
+                    let since = ci_base.as_deref().map(short).unwrap_or_default();
+                    if *reason == "tests_landed" {
+                        format!(
+                            "it changes a check ({}), and landings since {base} at {since}, which the head holds, added or changed tests: {}",
+                            few(&own_checks),
+                            named.join(", ")
+                        )
+                    } else {
+                        format!(
+                            "landings since {base} at {since}, which the head holds, changed what the checks check: {}",
+                            named.join(", ")
+                        )
+                    }
                 };
                 let lead = if watched {
                     format!("{repo}#{pr} at {at} is no longer ready for the queue: ")
@@ -4486,6 +4552,7 @@ esac"#,
             result: Ok(super::super::ready::Reading::Read {
                 base_tip: "b".repeat(40),
                 ci_base: "c".repeat(40),
+                own_checks: Vec::new(),
                 landings: Vec::new(),
             }),
         };
@@ -4518,6 +4585,7 @@ esac"#,
             Decision::Ready {
                 base_tip: t.clone(),
                 ci_base: t.clone(),
+                own_checks: Vec::new(),
             },
             Decision::Unknown {
                 reason: "fetch failed".into(),
@@ -4526,6 +4594,7 @@ esac"#,
                 reason: "checks_changed",
                 base_tip: None,
                 ci_base: None,
+                own_checks: Vec::new(),
                 landings: Vec::new(),
             },
         ] {
@@ -4572,6 +4641,7 @@ esac"#,
         let ready = Decision::Ready {
             base_tip: "b".repeat(40),
             ci_base: "c".repeat(40),
+            own_checks: Vec::new(),
         };
         let mut other = key.clone();
         other.base = "release".into();

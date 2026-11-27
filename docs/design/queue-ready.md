@@ -5,6 +5,9 @@ Status: approved by the person on 2026-11-25 with Q1, Q2 and Q3 answered as this
 answered in this text; section 11). Code is cited at 3bb84aa. No GitHub host was reachable while
 this note was written; a claim about GitHub is marked [unverified].
 
+Extended by Issue 567 (section 12): a pull request that itself changes a check is also not ready
+while a test landed since its base; approved by the person on 2026-11-27 and built with it.
+
 ## 1. The rule
 
 The person's rule (Issue 475, narrowed on 2026-11-25), which this note states once; the code holds
@@ -20,6 +23,10 @@ repeating the list.
   apart reliably without a YAML parser, and the line reader first built for it kept letting YAML
   edges through review, so on 2026-11-25 the person chose that every `.github/` change counts
   (section 4.2). A scheduling-only change then costs one update more than needed, never a miss.
+- The other direction (Issue 567, section 12): when the head's **own changes** since the base it
+  holds touch a check (`landing::CHECKS`: `tools/`, `.github/`, `tests/common/`,
+  `scripts/acceptance-check.sh`), a landing since that adds or changes any file under `tests/`
+  counts too (reason `tests_landed`). A deleted test does not count.
 - Not ready because of a conflict or such a landing: makibad brings the branch up to date itself
   (the existing `update` job: a merge, never a rebase) and watches the new head's CI.
 - Any other move of the base is no reason to update: the queue tests the combination.
@@ -99,7 +106,7 @@ the reader stopped by the pass):
 | Result | Verdict | Written |
 | --- | --- | --- |
 | merge class `conflict` (no git reading needed) | `update`, reason `conflict` | the event, the `update` command, one notice |
-| a landing counts | `update`, reason `checks_changed` | the event, the `update` command, one notice |
+| a landing counts | `update`, reason `checks_changed` (a path under `CHECKED_PATHS`), else `tests_landed` (only tests, for a head that changes a check; section 12) | the event, the `update` command, one notice |
 | nothing counts, first judgement | `ready` | the event, one notice |
 | nothing counts, watching | none | nothing; `covered` is set to `B` in memory |
 | `stale` | none | nothing (a newer head is coming) |
@@ -114,8 +121,9 @@ whatever the landings. The conflict row applies to a first judgement and to a wa
 
 The event `queue_readiness` (actor `makibad`, on the task's run): `repo`, `pr`, `head_oid`,
 `task_id`, `base` (`<b>`), `base_tip` (`B`), `ci_base` (`C`), `merge_state` (the class),
-`verdict` (`ready`, `update` or `unknown`), `reason` (`conflict`, `checks_changed`, or git's message
-for `unknown`), `landings` (`[{"sha", "paths"}]`, the ones that count), `watched` (whether a
+`verdict` (`ready`, `update` or `unknown`), `reason` (`conflict`, `checks_changed`, `tests_landed`,
+or git's message for `unknown`), `own_checks` (the head's own check paths, section 12; empty when
+none or when decided without a reading), `landings` (`[{"sha", "paths"}]`, the ones that count), `watched` (whether a
 `ready` verdict of this head preceded it), and `command` (the `update` command's id).
 
 The `update` command is inserted as the door's `update` verb records one: `commands` with actor
@@ -158,6 +166,10 @@ judgement of a new head.
   checks check: <sha 7> (<up to 3 paths>), ...>. It is not to be queued at this head; makibad
   records and watches the new head. <link>" When the head was told ready before, the text begins
   "<repo>#<pr> at <7> is no longer ready for the queue:".
+- For a head that changes a check (section 12), the ready notice adds ", and, as it changes a check
+  (<up to 3 paths>), it holds every landing since that added or changed a test", and the update
+  notice for `tests_landed` reads "it changes a check (<up to 3 paths>), and landings since <b> at
+  <C 7>, which the head holds, added or changed tests: <sha 7> (<up to 3 paths>), ...".
 - unknown: "makibad cannot judge whether <repo>#<pr> at <7> is ready for the queue: <git message>.
   Judge it by hand by the rule of docs/design/queue-ready.md section 1. <link>"
 
@@ -178,7 +190,9 @@ change is in the test commit and the gate does not read it as an edited test.
 
 One constant, `CHECKED_PATHS`, `["tests/common/", "tools/", ".github/"]`; a landing's path counts
 when it lies under one of them. Nothing else in code or docs lists the paths: the skill and spec.md
-name the module and this note.
+name the module and this note. The other direction (section 12) uses no list of its own: a head's
+own checks are judged by `landing::is_check_path` (the list `landing::CHECKS`, which the merge
+order of Issue 331 uses too), and a landed test is a path under `ready::TESTS` (`tests/`).
 
 ### 4.2 `.github/`: every change counts
 
@@ -360,3 +374,49 @@ merge base.
   the test commit (3.6).
 - Major, the skill still lets the secretary proceed from a "mergeable now" CI notice: the skill's
   CI notice, merge-state, Merging and stop line 8 wait for the readiness notice (section 8).
+
+## 12. Issue 567: a pull request that changes a check, and tests landed since its base
+
+Approved by the person on 2026-11-27 (Q1: any test counts; Q2: the merge gate's sources are not
+check paths; Q3: the gap of section 1's direction for `scripts/acceptance-check.sh` is a follow-up
+of its own). Design review round 1, reader codex: passed, 1 blocker, 1 major, 1 minor, each answered
+below. Code is cited at 9666228.
+
+**The case.** PR 534 (Issue 372) changed `scripts/acceptance-check.sh` on base bc250d6. Since that
+base, b9268e5 (#513, PR 552) landed `tests/gate_helper_change.rs`, and no path of that landing lies
+under `CHECKED_PATHS`, so section 1 read PR 534 as ready; in the merge queue that test failed on the
+combination. The test reaches the checker without naming it: `src/daemon/gate.rs` compiles it in
+(`include_str!("../../scripts/acceptance-check.sh")`), and the test file names neither the script
+nor the constant. So a rule narrowed to tests that name the changed check would miss its own case;
+telling which tests run a check needs a reading of the build graph that makibad does not have.
+
+**The rule.** A head's own checks are the paths of `git diff-tree --no-renames <C> <head>` that
+`landing::is_check_path` accepts (a check renamed away counts as its deletion). With any, a landing
+since `C` also counts when it adds or changes a file under `tests/` (any language, fixtures
+included); a deletion does not count. The reason is `checks_changed` when any counted path lies
+under `CHECKED_PATHS`, else `tests_landed`. The merge gate's sources are not check paths: no case
+asks for it, the list is for every project, and a gate change that breaks a newly landed test is
+the ordinary combination the queue tests. Section 1's direction is unchanged: `CHECKED_PATHS`
+still does not hold `scripts/acceptance-check.sh` (the Issue's text said it did; the code never
+had it), and that gap is the follow-up of Q3.
+
+**The owner.** The readiness of sections 2 and 3: the reader computes the own checks in the reading
+it already makes (one more bounded git call), `ready.rs` holds the rule, `prwatch.rs` decides and
+writes. Nothing new watches or polls. Issues 573 (ordering pull requests that touch the same files)
+and 575 (an UNMERGEABLE queue entry) had no design on origin/main when this was written; 573 is
+another "this landing counts for this head" rule and belongs in `ready.rs`'s judgement of
+landings, and 575 is the merge-queue watch's (docs/design/merge-queue-watch.md), whose end hands
+the head back to readiness as a candidate.
+
+**A record of the rule before.** (The design review's blocker.) A `ready` record restores its
+`base_tip` as the tip a watching reader covers, and a reading of an unchanged tip reads nothing;
+so a check-changing head judged ready by section 1 alone would stay ready. A `ready` record
+without `own_checks` covers no tip: its watching reader reads every landing since `C` once, by
+this rule. No other state is kept; section 5's rules hold.
+
+**The declared test.** `tests/queue_ready_check_change.rs`: a check-changing head on a base older
+than a landed test is updated (`tests_landed`) and its new head is told ready; a head that changes
+no check is ready on the same landing; a ready check-changing head is revoked when a test lands;
+a `ready` record of the rule before is judged again with the base unmoved. Unit tests in
+`ready.rs`: a deleted test does not count, a root commit's tests are added, the own checks of a
+check renamed away.
