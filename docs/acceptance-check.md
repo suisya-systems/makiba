@@ -21,6 +21,55 @@ The base may be merged into the branch after the test commit; a merge that bring
 
 No trailer: the job passes and prints `ACCEPTANCE: none`. On a pull request the last line of the log is always `ACCEPTANCE: pass`, `none` or `fail`. Tests: [`tests/test_acceptance_check.py`](../tests/test_acceptance_check.py); test infrastructure outside `tests/`: [`tests/test_acceptance_root_infra.py`](../tests/test_acceptance_root_infra.py).
 
+## A failure by construction, approved by the owner
+
+Some pull requests fail `acceptance` by construction: a declared test that had to change after its test commit (#530), a declared Cargo target that ignores a test (#520, #535), a change of this checker (#534). They used to land only by the lift. The owner chose instead a signed approval for exactly that head and failure set ([`docs/design/acceptance-approval.md`](design/acceptance-approval.md), option 1, Issue 574). Its build is in five steps (Issues 589 to 593). This checker's part (Issue 589) is below. makibad's ask and record are Issues 590 to 592. The workflow step that hands the approvals to the checker, and the signers file, are the owner's Issue 593. Until that step is in, nothing passes `--approvals`, and the route is inert.
+
+**Canonical lines.** On a fail, before the last line, the checker prints each failure once more in a form that holds no duration, no test output and no sha (the note's 4.1):
+
+- `acceptance-check: approvable changed <path>`: rule 4, for a declared path, for a path the test commit changed, or for `scripts/acceptance-check.sh`;
+- `acceptance-check: approvable ignored <path> <n>`: rule 3, a declared Cargo target that ignores `n` tests at head (`<path>` as declared);
+- `acceptance-check: not approvable`, once, when any other failure was found. This also covers a path with a byte outside printable ASCII without space (`0x21` to `0x7e`): such a name could split a record or pass for another, so it keeps the lift.
+
+The records (`changed <path>`, `ignored <path> <n>`), sorted bytewise and each followed by a newline, are the **failure set**. Its SHA-256 is the **failure digest**. Without `--approvals` nothing else changes: the same failure lines, the same last line, the same exit status.
+
+**Allowed kinds** (the note's section 5). Approvable:
+
+- a declared path or a path the test commit changed, changed after the test commit, whether it is a test target, a declared non-target file or a helper the test commit changed;
+- this checker changed after the test commit;
+- a declared Cargo target that ignores a test at head.
+
+Never approvable, whatever else the path is: anything under `.github/` and test infrastructure by file name (`INFRA_NAMES`, `INFRA_PREFIXES`). Also not approvable, so still by the lift:
+
+- another file under `tests/` that is neither a target nor a helper, changed after the test commit;
+- a declared test that fails at head, passes or runs no test at the test commit, does not compile at head, or runs no test at head;
+- rule 1, a second declaring commit, a merge test commit, a merge that brings in a non-base commit;
+- a work folder, worktree, listing or Cargo config failure.
+
+Widening the list is a change of the base's checker, so it is itself such a pull request.
+
+**`--approvals DIR`.** `bash scripts/acceptance-check.sh --approvals DIR <base sha> <head sha>` judges as above (`DIR` must be a directory: else usage, exit 2). Only when the check would fail does it read the approvals, as the note's 4.3 sets out:
+
+1. When any failure is not approvable, or there is no record, it prints `acceptance-check: approvals not read: ...` and fails as before.
+2. The repository is `$GITHUB_REPOSITORY`, and the pull request is `<n>` of `$GITHUB_REF` = `refs/pull/<n>/merge`, which Actions sets on `pull_request`. If either is missing, it reads nothing and fails.
+3. The signers come from the **base**: `git show <base>:.github/acceptance-approvers`, in `ssh-keygen` allowed-signers form (`makiba-owner namespaces="makiba-acceptance-approval" <public key>`). Neither the head nor the checkout is read. If the file is absent or empty, it reads nothing and fails.
+4. Each regular file directly in `DIR`, in name order, is a comment body: the approval text, a line `---`, then the armored `SSH SIGNATURE` block. Two checks decide it, and it is accepted only when both pass:
+   - the text is exactly `makiba-acceptance-approval v1`, `repo <repository>`, `pr <n>`, `head <the head judged>`, `failures <this run's failure digest>`, `pending <digits>`, and then this run's failure set, one record per line, each line ending in a newline;
+   - `ssh-keygen -Y verify -f <signers> -I makiba-owner -n makiba-acceptance-approval` accepts its signature over that text.
+
+   The failure set and its digest are computed in this run, never read from a log. A file that is not accepted is named, with the reason, in `acceptance-check: approval <name> not accepted: ...`.
+5. On the first accepted file it prints `acceptance-check: approved by the owner (pending <id>): <records joined by "; ">`, then `ACCEPTANCE: pass`, exit 0. With none accepted it ends with `ACCEPTANCE: fail` as before.
+
+So an approval signed by another key, for another head, pull request or repository, one that leaves out a failure or names one that is not there, one with a wrong digest, and any approval while a failure is not approvable, all fail. Test: [`tests/test_acceptance_approval.py`](../tests/test_acceptance_approval.py).
+
+Limits:
+
+- Inert until Issue 593 passes the flag.
+- The merge queue's commit is not judged, so no approval is read there (the note's section 6).
+- A body with CRLF line ends is not the signed text, so it fails.
+- The repository and the pull request number come from the runner's environment.
+- The pull request's code runs in the same job before the verification, as it can already change today's verdict (the note's section 9). Against hostile code, the bound is makiba's gate and the person's reading.
+
 ## A fix that must change a test helper
 
 A fix that is a change to a test helper (Issue 506's `tests/common/local.rs`), or a clean base merge into a declared test (Issue 475's `tests/pr_merge_state.rs`), used to fail rule 4 and landed only by the lift. The person decided ([`docs/design/helper-fix.md`](design/helper-fix.md), option D): CI lets these through and names them, and the person's key at the merge accepts them.
@@ -110,7 +159,7 @@ Branch protection on `main`: require the checks `acceptance`, `tests` and `lint`
 - A test that needs a new dev-dependency cannot add it in the test commit (rule 2), so it fails to compile there for that reason and counts as failing; the reviewer sees it in the log.
 - `rust-toolchain.toml` is not protected by rule 4; a change to it after the test commit is a review matter.
 - The checker is taken from the base revision, but the workflow file is read from the pull request, so a PR that edits the `acceptance` job itself is not stopped by the job. Review of `.github/` changes stays with the person.
-- A pull request that changes the checker or CI after its test commit fails rule 4 of its own `acceptance` job; the owner lifts the `acceptance` requirement of branch protection for it, and a person merges it. The pull requests of Issue 514 and Issue 576 are such: each changes the checker after its test commit and lands by the lift.
+- A pull request that changes the checker or CI after its test commit fails rule 4 of its own `acceptance` job; the owner lifts the `acceptance` requirement of branch protection for it, and a person merges it. The pull requests of Issue 514 and Issue 576 are such: each changes the checker after its test commit and lands by the lift. Once the workflow passes `--approvals` (Issue 593), a failure of an allowed kind lands instead on the owner's signed approval of that head (above). Issue 589's own pull request is the last checker change this route needs to land by the lift. A change under `.github/` keeps the lift.
 - `acceptance` passing no longer proves that no test helper changed after the test commit: the helper line in its log says which did, and makiba's merge gate asks the person's key for them. A web-UI merge, or claude-org-ja's landing gate (which reads only the check), sees them only in the log.
 - A test helper that is test infrastructure (a name of `INFRA_NAMES` or `INFRA_PREFIXES`, wherever it is under `tests/`) keeps the lift; so does a helper the test commit changed.
 - A base merge made with other merge settings than merge-tree's defaults (a merge driver in `.gitattributes`, renormalization) can differ from merge-tree's tree and then counts as the branch's own.
