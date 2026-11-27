@@ -2935,6 +2935,11 @@ fn apply_waits(w: &StateWriter, read: &MemberRead) -> Result<()> {
         if !wait.f.repo.eq_ignore_ascii_case(&read.m.repo) || wait.id > read.m.mark {
             continue;
         }
+        // Diff review round 3: only a read made for the pull request's current follow (the same
+        // generation: no close, reopen or new head recorded since the read began).
+        if !read.m.reads.iter().any(|(f, _)| *f == wait.f) {
+            continue;
+        }
         let Some((_, own)) = read.waited.iter().find(|(p, _)| *p == wait.f.pr) else {
             continue;
         };
@@ -6501,7 +6506,7 @@ esac"#,
             m: Membership {
                 repo: "o/p".into(),
                 mark,
-                reads: Vec::new(),
+                reads: follows_now(&w),
             },
             waited: vec![
                 (
@@ -6605,10 +6610,66 @@ esac"#,
             m: Membership {
                 repo: "o/p".into(),
                 mark,
-                reads: Vec::new(),
+                reads: follows_now(w),
             },
             waited: answers,
         }
+    }
+
+    /// Every current follow, as a membership read begun now carries them.
+    fn follows_now(w: &StateWriter) -> Vec<(Followed, Value)> {
+        followed(w.conn(), None)
+            .unwrap()
+            .into_iter()
+            .map(|f| (f, Value::Null))
+            .collect()
+    }
+
+    /// Diff review round 3: a membership read begun before the pull request was closed and
+    /// reopened (another follow generation) ends no wait; a read of the current follow does.
+    #[test]
+    fn a_read_of_an_older_follow_generation_ends_no_wait() {
+        let (_dir, w) = org();
+        let head = "6".repeat(40);
+        waiting_run(&w, "t11", 17, &head);
+        unmergeable_wait(&w, "t11", "o/p", 17, &head, 0, &[2], Some("main")).unwrap();
+        let answers = vec![
+            (
+                2,
+                json!({"number": 2, "state": "MERGED", "isInMergeQueue": false}),
+            ),
+            (
+                17,
+                json!({"number": 17, "state": "OPEN", "isInMergeQueue": false,
+                       "baseRefName": "main"}),
+            ),
+        ];
+        let old = read_now(&w, answers.clone());
+        event(
+            &w,
+            "pr_closed",
+            "makibad",
+            Some("t11"),
+            json!({"repo": "o/p", "pr": 17}),
+        );
+        event(
+            &w,
+            "pr_reopened",
+            "makibad",
+            Some("t11"),
+            json!({"repo": "o/p", "pr": 17}),
+        );
+        apply_waits(&w, &old).unwrap();
+        assert_eq!(
+            open_waits(w.conn(), None).unwrap().len(),
+            1,
+            "a read of the follow before the close and reopen"
+        );
+        apply_waits(&w, &read_now(&w, answers)).unwrap();
+        assert!(
+            open_waits(w.conn(), None).unwrap().is_empty(),
+            "a read of the current follow ends it"
+        );
     }
 
     /// Round 4's blocker: a wait with no entry ahead ends only from a membership read of the pull

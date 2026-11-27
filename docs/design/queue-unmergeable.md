@@ -198,7 +198,8 @@ answer by number, kept whether or not that number is followed; `apply_entered` k
 `reads` only, and the wait's end reads `waited` only.
 
 A wait **ends** only from a membership read started after the wait record (`mark` at or above
-its id) that answers for every number of `waits_for` as gone (`state` `MERGED` or `CLOSED`, or
+its id), made for the pull request's current follow (the same generation: no close, reopen or new
+head recorded since the read began; diff review round 3), that answers for every number of `waits_for` as gone (`state` `MERGED` or `CLOSED`, or
 `OPEN` with `isInMergeQueue` false) and for the pull request **itself** `OPEN`, out of the queue,
 with its own `baseRefName` (the read names the pull request itself; a wait with `waits_for` empty
 needs that answer too, never the base the dequeue read). A number answered null, the pull request
