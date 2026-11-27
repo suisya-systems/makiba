@@ -1060,8 +1060,32 @@ fn all_ahead(entries: &[(i64, i64)], pr: i64) -> Vec<i64> {
     v.into_iter().map(|(_, n)| n).collect()
 }
 
+/// Why `read` is no dequeue to send for `r` (`entry`: the entry id it must still have, when
+/// known), or `None`.
+fn not_to_send(read: &DqRead, r: &Request, entry: Option<&str>) -> Option<String> {
+    if read.state != "OPEN" {
+        return Some(format!("the pull request is {}", read.state.to_lowercase()));
+    }
+    if !read.head.eq_ignore_ascii_case(&r.head) {
+        return Some(format!("the pull request's head is {}", read.head));
+    }
+    if !read.queued {
+        return Some("the pull request is not in the merge queue".into());
+    }
+    if read.entry_id.is_some() && entry.is_some() && read.entry_id.as_deref() != entry {
+        return Some("the queue entry was replaced".into());
+    }
+    if read.entry_state.as_deref() != Some("UNMERGEABLE") {
+        return Some(format!(
+            "the queue entry is {}",
+            read.entry_state.as_deref().unwrap_or("not readable")
+        ));
+    }
+    None
+}
+
 /// A request of this start, run once: read, and send only when GitHub still shows the same entry
-/// `UNMERGEABLE` at the request's head.
+/// `UNMERGEABLE` at the request's head, read again after the queue's pages, just before sending.
 fn dequeue(program: &str, r: &Request) -> DqOutcome {
     let unread = |why: String| DqOutcome::NoRead {
         sent: false,
@@ -1072,29 +1096,14 @@ fn dequeue(program: &str, r: &Request) -> DqOutcome {
         Ok(read) => read,
         Err(e) => return unread(e),
     };
-    let not_sent = |why: String| DqOutcome::Ended {
+    let not_sent = |read: &DqRead, why: String| DqOutcome::Ended {
         outcome: "not_sent",
         ahead: Vec::new(),
         state: read.raw.clone(),
         why,
     };
-    if read.state != "OPEN" {
-        return not_sent(format!("the pull request is {}", read.state.to_lowercase()));
-    }
-    if !read.head.eq_ignore_ascii_case(&r.head) {
-        return not_sent(format!("the pull request's head is {}", read.head));
-    }
-    if !read.queued {
-        return not_sent("the pull request is not in the merge queue".into());
-    }
-    if read.entry_id.is_some() && r.entry_id.is_some() && read.entry_id != r.entry_id {
-        return not_sent("the queue entry was replaced".into());
-    }
-    if read.entry_state.as_deref() != Some("UNMERGEABLE") {
-        return not_sent(format!(
-            "the queue entry is {}",
-            read.entry_state.as_deref().unwrap_or("not readable")
-        ));
+    if let Some(why) = not_to_send(&read, r, r.entry_id.as_deref()) {
+        return not_sent(&read, why);
     }
     let entries = match queue_entries(program, r, &read.base) {
         Ok(e) => e,
@@ -1123,6 +1132,24 @@ fn dequeue(program: &str, r: &Request) -> DqOutcome {
         }
         None => all_ahead(&entries, r.pr),
     };
+    // Diff review round 2: the queue pages take time, and the pull request may have been updated
+    // and queued again meanwhile. Read it again just before sending: the same node, base and
+    // entry (its id as the first read showed it), still `UNMERGEABLE` at the request's head.
+    let again = match dq_read(program, r) {
+        Ok(again) => again,
+        Err(e) => return unread(e),
+    };
+    let entry = read.entry_id.as_deref().or(r.entry_id.as_deref());
+    if let Some(why) = not_to_send(&again, r, entry) {
+        return not_sent(&again, format!("{why} (read again before sending)"));
+    }
+    if again.node != read.node || again.base != read.base || again.entry_id.is_none() {
+        return not_sent(
+            &again,
+            "the pull request read again before sending is not the one read before".into(),
+        );
+    }
+    let read = again;
     let answer = call(
         program,
         &[
@@ -1385,7 +1412,7 @@ mod tests {
     use crate::daemon::prwatch::DequeueKey;
 
     /// A stand-in gh in a folder of its own: the pull request read answers the file `read` (or
-    /// `read_after` once the mutation was called), the queue read answers `page1` and, with a
+    /// `read_paged` once the queue was read, `read_after` once the mutation was called), the queue read answers `page1` and, with a
     /// cursor, `page2`, and the mutation answers `mutation`; every mutation call is logged in
     /// `sent`. The folder and the program's path.
     fn stand_in() -> (tempfile::TempDir, String) {
@@ -1399,8 +1426,8 @@ cursor=
 for a in "$@"; do case "$a" in cursor=*) cursor=${{a#cursor=}} ;; esac; done
 case "$*" in
   *dequeuePullRequest*) echo x >> "$d/sent"; cat "$d/mutation" ;;
-  *mergeQueue\(*) if [ -n "$cursor" ]; then cat "$d/page2"; else cat "$d/page1"; fi ;;
-  *baseRefName*) if [ -e "$d/sent" ] && [ -e "$d/read_after" ]; then cat "$d/read_after"; else cat "$d/read"; fi ;;
+  *mergeQueue\(*) touch "$d/paged"; if [ -n "$cursor" ]; then cat "$d/page2"; else cat "$d/page1"; fi ;;
+  *baseRefName*) if [ -e "$d/sent" ] && [ -e "$d/read_after" ]; then cat "$d/read_after"; elif [ -e "$d/paged" ] && [ -e "$d/read_paged" ]; then cat "$d/read_paged"; else cat "$d/read"; fi ;;
   *) echo "unexpected: $*" >&2; exit 2 ;;
 esac
 "#
@@ -1557,6 +1584,48 @@ esac
         put(&dir, "read", &fine);
         assert_eq!(ended(&dequeue(&gh, &r)).0, "not_sent");
         assert_eq!(sent(&dir), 0);
+    }
+
+    /// Diff review round 2: the pull request updated and queued again while the queue's pages
+    /// are read (another entry, another head, no longer `UNMERGEABLE`) is read again just before
+    /// sending, and nothing is sent.
+    #[test]
+    fn an_entry_replaced_while_the_queue_is_read_is_not_dequeued() {
+        let r = request(super::boot());
+        let replaced = |f: &dyn Fn(&mut serde_json::Value)| {
+            let mut v = pr("OPEN", true, 3);
+            f(&mut v["data"]["repository"]["pullRequest"]);
+            v
+        };
+        let cases: Vec<(&str, serde_json::Value)> = vec![
+            (
+                "another entry",
+                replaced(&|p| p["mergeQueueEntry"]["id"] = serde_json::json!("MQE_2")),
+            ),
+            (
+                "another head",
+                replaced(&|p| p["headRefOid"] = serde_json::json!("2".repeat(40))),
+            ),
+            (
+                "queued again, not yet UNMERGEABLE",
+                replaced(&|p| p["mergeQueueEntry"]["state"] = serde_json::json!("AWAITING_CHECKS")),
+            ),
+            ("out of the queue", pr("OPEN", false, 0)),
+        ];
+        for (what, paged) in cases {
+            let (dir, gh) = stand_in();
+            put(&dir, "page1", &page(&[(1, 2), (2, 1)], None));
+            put(&dir, "read", &pr("OPEN", true, 2));
+            put(&dir, "read_paged", &paged);
+            put(
+                &dir,
+                "mutation",
+                &serde_json::json!({"data": {"dequeuePullRequest": {"mergeQueueEntry": {"id": "MQE_1"}}}}),
+            );
+            let o = dequeue(&gh, &r);
+            assert_eq!(ended(&o).0, "not_sent", "{what}: {o:?}");
+            assert_eq!(sent(&dir), 0, "{what}: nothing sent");
+        }
     }
 
     /// Diff review round 1: an entry of the queue without a readable position or pull request

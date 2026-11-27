@@ -120,7 +120,10 @@ this start (`boot`) not yet started is **run**:
    (the entry was replaced), or an entry state other than `UNMERGEABLE`: outcome `not_sent` (with
    what was read). Nothing was sent, and this is the only outcome that lets the watch write a new
    request for the act or stay.
-3. Otherwise `ahead` = the numbers of the entries with a position smaller than its own; then
+3. Otherwise `ahead` = the numbers of the entries with a position smaller than its own (from the
+   queue's own snapshot). The pull request is then **read again** (diff review round 2: it may
+   have been updated and queued again while the pages were read): anything step 2 names, or
+   another node, base or entry id than the first read's, is `not_sent`. Then
    `DEQUEUE_MUTATION` `mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{id}}}`
    with the pull request's node id [unverified: the input `id` is the pull request's].
 4. Data for the mutation: outcome `dequeued`. GraphQL errors of a `DEFINITIVE_GRAPHQL` type with no
@@ -343,6 +346,10 @@ The GitHub answers (field names, the mutation's input, `UNMERGEABLE`) are the st
 - makibad waits for every entry ahead, not only the one that conflicts (section 1, point 3).
 - An entry that turns `UNMERGEABLE` and back between two reads is not seen; one read is enough to
   request, and the merge pass reads again before sending.
+- `dequeuePullRequest` takes the pull request's id, not the entry's: between the last read and the
+  mutation (one call apart) a new entry of the same pull request could still be taken out. The
+  read just before sending narrows that window to one call; GitHub offers no entry-bound dequeue
+  [unverified].
 - A pull request makibad does not follow is not handled.
 - The dequeue and the queue read are [unverified] against GitHub until the first real case.
 - makibad does not queue again (Q1); the secretary asks with `merge` on the "can be queued" notice.
