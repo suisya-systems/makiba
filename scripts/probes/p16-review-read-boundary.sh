@@ -1,11 +1,16 @@
 #!/usr/bin/env bash
 # P16 (Issue 262): the second reader cannot read a file outside its round's folder.
 # makibad starts each reader inside bubblewrap with a mount plan of its own (src/daemon/review.rs).
-# This probe runs, on a host where bubblewrap can make a namespace, the two ignored tests of
+# This probe runs, on a host where bubblewrap can make a namespace, the three ignored tests of
 # tests/review_read_boundary.rs, each in a cargo process of its own:
 #  stand-in-readers   stand-in readers inside the real bwrap try a decoy in a scratch home, a decoy in the
 #                     state folder and the decoy person key, read by the test outside first (control);
 #                     PASS = every decoy unreadable inside, the diff file readable, for codex and the fallback
+#  system-home        (Issue 568) stand-in readers installed under a home that lies in a system folder, which
+#                     the boundary hides with a tmpfs: PASS = each reader starts (passed, under its own name),
+#                     every decoy unreadable inside, the diff file readable. Needs MAKIBA_PROBE_SYSTEM_HOME, an
+#                     empty folder under /usr the person owns (sudo mkdir /usr/local/makiba-p16 &&
+#                     sudo chown "$USER" /usr/local/makiba-p16); without it the case is NEEDS-HUMAN
 #  real-readers       the real codex, then the real claude as the fallback, each in the real bwrap, asked by
 #                     the design note to read a decoy in $HOME and one in the state folder; PASS = the answer
 #                     names the expected reader, is passed, and carries neither decoy's content
@@ -42,5 +47,15 @@ run_case() { # run_case <case> <test name>
 }
 
 run_case stand-in-readers a_planted_secret_is_unreadable_inside_the_real_boundary
+sys_home=${MAKIBA_PROBE_SYSTEM_HOME:-}
+case $sys_home in
+  /usr/*)
+    if [ -d "$sys_home" ] && [ -w "$sys_home" ]; then
+      run_case system-home a_reader_installed_under_a_home_in_a_system_folder_starts
+    else
+      record system-home NEEDS-HUMAN "MAKIBA_PROBE_SYSTEM_HOME=$sys_home is not a writable folder"
+    fi ;;
+  *) record system-home NEEDS-HUMAN "set MAKIBA_PROBE_SYSTEM_HOME to an empty folder under /usr you own (sudo mkdir /usr/local/makiba-p16 && sudo chown \"\$USER\" /usr/local/makiba-p16)" ;;
+esac
 run_case real-readers a_real_reader_cannot_read_a_planted_secret
 finish

@@ -5,10 +5,12 @@
 //! OS-level boundary, bubblewrap by default, named to the door with `Door::with_review_boundary`.
 //! The first three tests use a stand-in boundary that records its arguments and then runs what
 //! follows `--`, and read the recorded mounts as bubblewrap does: what the reader could see. The
-//! last two are `#[ignore]`: they need a host where bubblewrap can make a namespace and are run by
-//! the probe P16 (`scripts/probes/p16-review-read-boundary.sh`), the fourth with stand-in readers
-//! that try to read planted decoys, the fifth with the real programs and the real home. Run the
-//! fifth alone (`--exact`): it must not share a process with the others, which move `HOME`.
+//! last three are `#[ignore]`: they need a host where bubblewrap can make a namespace and are run
+//! by the probe P16 (`scripts/probes/p16-review-read-boundary.sh`), the fourth with stand-in
+//! readers that try to read planted decoys, the fifth with stand-in readers installed under a
+//! home that lies in a system folder (Issue 568), the sixth with the real programs and the real
+//! home. Run the fifth and the sixth each alone (`--exact`): each moves `HOME` or keeps it, and
+//! must not share a process with the others.
 
 mod common;
 
@@ -578,6 +580,106 @@ fn a_planted_secret_is_unreadable_inside_the_real_boundary() {
         }
         let other = if fallback {
             progs.join("nowhere/codex")
+        } else {
+            other
+        };
+        let door = o.door(&other, &same, Path::new("bwrap"));
+        let v = o.review(&door, json!({"kind": "diff"}));
+        let reader = if fallback { "fresh-session" } else { "codex" };
+        assert_eq!(v["reader"], reader, "{v}");
+        assert_eq!(v["verdict"], "passed", "{v}");
+        let text = v["text"].as_str().unwrap_or_default();
+        for d in &decoys {
+            assert!(
+                text.contains(&format!("{}=1", d.display())),
+                "{} was readable inside the boundary: {v}",
+                d.display()
+            );
+        }
+        assert!(
+            text.contains("MAKIBA_REVIEW.diff=0"),
+            "the diff was unreadable: {v}"
+        );
+    }
+}
+
+/// Removes the folder it names, with what is under it, when dropped.
+struct Planted(PathBuf);
+
+impl Drop for Planted {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Issue 568: with the real bubblewrap, a reader installed under a home that lies in a system
+/// folder (hidden by the boundary with a tmpfs) is given back after it and starts, for codex and
+/// for the fallback, and still cannot read a decoy in that home, in the state folder or the
+/// person key. It needs `MAKIBA_PROBE_SYSTEM_HOME`, an empty folder under `/usr` the person owns
+/// (`sudo mkdir /usr/local/makiba-p16 && sudo chown "$USER" /usr/local/makiba-p16`). Run alone
+/// (`--exact`) by the probe P16: it moves `HOME` into that folder.
+#[test]
+#[ignore = "needs bubblewrap with user namespaces and MAKIBA_PROBE_SYSTEM_HOME under /usr; run alone by scripts/probes/p16-review-read-boundary.sh"]
+fn a_reader_installed_under_a_home_in_a_system_folder_starts() {
+    let place = std::fs::canonicalize(
+        std::env::var_os("MAKIBA_PROBE_SYSTEM_HOME").expect("MAKIBA_PROBE_SYSTEM_HOME"),
+    )
+    .expect("MAKIBA_PROBE_SYSTEM_HOME is not a folder");
+    assert!(
+        place.starts_with("/usr"),
+        "MAKIBA_PROBE_SYSTEM_HOME is not under /usr: {}",
+        place.display()
+    );
+    let home = place.join(format!("home-{}", std::process::id()));
+    let _planted = Planted(home.clone());
+    std::fs::create_dir_all(&home).unwrap();
+    let secret = home.join("secret.txt");
+    std::fs::write(&secret, "decoy-home-secret\n").unwrap();
+    // The fixture leaves HOME alone in this mode; this test moves it, before any thread starts.
+    let _ = root(false);
+    // SAFETY: no thread has started yet; this test runs alone in its process.
+    unsafe {
+        std::env::set_var("HOME", &home);
+        for v in [
+            "CODEX_HOME",
+            "CLAUDE_CONFIG_DIR",
+            "XDG_CONFIG_HOME",
+            "XDG_DATA_HOME",
+            "XDG_STATE_HOME",
+            "XDG_CACHE_HOME",
+        ] {
+            std::env::remove_var(v);
+        }
+    }
+    for (task, fallback) in [("rb6other", false), ("rb6same", true)] {
+        let mut o = org(task, false);
+        let decoy_state = o.state.join("decoy.txt");
+        std::fs::write(&decoy_state, "decoy-state-secret\n").unwrap();
+        let decoys = [
+            secret.clone(),
+            decoy_state.clone(),
+            o.root.join("config/makiba/person.key"),
+        ];
+        for d in &decoys {
+            assert!(
+                std::fs::read(d).is_ok(),
+                "control: {} unreadable",
+                d.display()
+            );
+        }
+        let paths: Vec<&Path> = decoys.iter().map(PathBuf::as_path).collect();
+        // The readers' own install folders, one per case, beneath the hidden home.
+        let progs = home.join(format!(".local/{task}/bin"));
+        let other = progs.join("codex");
+        let same = progs.join("claude");
+        if fallback {
+            trying_reader(&same, 0, true, &paths);
+        } else {
+            trying_reader(&other, 0, false, &paths);
+            trying_reader(&same, 0, true, &paths);
+        }
+        let other = if fallback {
+            o.root.join("nowhere/codex")
         } else {
             other
         };
