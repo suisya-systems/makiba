@@ -3589,6 +3589,14 @@ fn decide_with(
             None => c.peers.is_empty() && c.held.is_none(),
             Some(p) => p == c.peers.as_slice(),
         };
+        // A held head whose earlier pull request has landed is updated (`Lifted`, written by the
+        // pass from the ledger), never told ready or held again by a reading.
+        if matches!(d, Decision::Ready { .. } | Decision::Hold { .. })
+            && let Some(h) = &c.held
+            && landed_peer(w.conn(), &c.f.repo, h)?.is_some()
+        {
+            return Ok(false);
+        }
         match d {
             Decision::Ready { .. } if !same_peers => return Ok(false),
             Decision::Hold { .. } if read.is_none() || !same_peers => return Ok(false),
@@ -5018,8 +5026,9 @@ esac"#,
     }
 
     /// Issue 573: a held head is never made `unknown`, neither by a failing reading past the
-    /// budget nor by a decision written for it, so its update when a pull request it names lands
-    /// is never lost.
+    /// budget nor by a decision written for it, and once a pull request it names has landed a
+    /// late reading tells it neither ready nor held again, so its update on that landing is never
+    /// lost.
     #[test]
     fn a_held_head_is_never_unknown() {
         let dir = tempfile::tempdir().unwrap();
@@ -5095,6 +5104,29 @@ esac"#,
                 .collect()
         };
         assert_eq!(verdicts, vec!["hold".to_string()]);
+
+        // A reading that comes back after the pull request the hold names landed writes nothing:
+        // the head is updated by the pass instead.
+        w.append_event(&NewEvent {
+            kind: "pr_merged",
+            actor: Some("makibad"),
+            payload: Some(&json!({"repo": "o/r", "pr": 4, "head_oid": "c".repeat(40)})),
+            ..Default::default()
+        })
+        .unwrap();
+        let ready = Decision::Ready {
+            base_tip: "b".repeat(40),
+            ci_base: "c".repeat(40),
+        };
+        assert!(!decide_with(&w, &repos, &key, Some(&[]), "ready", &ready).unwrap());
+        let held = ready_candidates(w.conn(), &repos, Some("t")).unwrap()[0]
+            .held
+            .clone()
+            .unwrap();
+        assert_eq!(
+            landed_peer(w.conn(), "o/r", &held).unwrap().map(|l| l.0),
+            Some(4)
+        );
     }
 
     /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two
