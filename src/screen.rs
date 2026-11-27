@@ -10,6 +10,10 @@
 //! repository and a task id that pass their checks and the screen's own fixed sentences; never
 //! from a title, a question, a reason or any other text of a record. Where a repository is
 //! registered by several projects, the rules of screen.md section 2, "After Issue 415", hold.
+//!
+//! The two acts that need a typed confirmation, "Approve exactly this" and "Abandon and close…"
+//! (docs/design/screen-acts.md section 5, Issue 570), have no line in the model: their control
+//! carries the id to type, and `confirmed` gives the line only when the typed text equals it.
 
 use crate::daemon::prwatch::parse_time;
 use serde_json::{Map, Value, json};
@@ -469,6 +473,47 @@ fn control(c: &Ctx, key: &str, line: Value) -> Value {
     json!({"key": key, "words": c.w.get(key), "line": line, "confirm": null})
 }
 
+/// A control whose line waits for the person to type `id` (screen-acts.md section 5): no line,
+/// and in `confirm` what `confirmed` builds it from and what the person is asked to type.
+fn typed_control(c: &Ctx, key: &str, mut confirm: Value) -> Value {
+    let id = confirm["id"].as_str().unwrap_or_default().to_string();
+    confirm["type_words"] = json!(c.w.fill("act.type_id", &[("id", id)]));
+    let mut ctl = control(c, key, Value::Null);
+    ctl["confirm"] = confirm;
+    ctl
+}
+
+/// The line of a control behind a typed confirmation (Issue 570), given only when `typed` equals
+/// the id the control shows, exactly: `makiba range approve <id> --read <read> --mode <mode>`
+/// (without `--yes`: the command prints the draft and asks) or `makiba close <task> --abandon`.
+/// It checks the syntax of what it builds from and nothing more: it cannot know that the control
+/// came from the model, so the caller passes the control it showed. Otherwise null.
+pub fn confirmed(control: &Value, typed: &str) -> Value {
+    let k = &control["confirm"];
+    let Some(id) = k["id"].as_str() else {
+        return Value::Null;
+    };
+    if typed != id {
+        return Value::Null;
+    }
+    match str_of(&k["act"]) {
+        Some("approve") => {
+            let digits = !id.is_empty() && id.bytes().all(|b| b.is_ascii_digit());
+            let range = if digits { id.parse::<i64>().ok() } else { None };
+            match (range, k["read_id"].as_i64(), str_of(&k["mode"])) {
+                (Some(id), Some(read), Some(m @ ("human" | "acceptance"))) => {
+                    json!(format!(
+                        "makiba range approve {id} --read {read} --mode {m}"
+                    ))
+                }
+                _ => Value::Null,
+            }
+        }
+        Some("abandon") if task_ok(id) => json!(format!("makiba close {id} --abandon")),
+        _ => Value::Null,
+    }
+}
+
 fn failures(c: &Ctx) -> Value {
     let st = c.st;
     let secretary_down = arr(&st["anomalies"])
@@ -584,14 +629,15 @@ fn failures(c: &Ctx) -> Value {
                     controls.push(control(c, "act.history", Value::Null));
                 }
                 if kind == "launch_failed" {
-                    let line = task
-                        .as_deref()
-                        .filter(|t| task_ok(t))
-                        .map_or(Value::Null, |t| {
-                            json!(format!("makiba close {t} --abandon"))
-                        });
-                    let mut ab = control(c, "act.abandon", line);
-                    ab["confirm"] = json!(c.w.get("act.abandon_confirm"));
+                    let ab = match task.as_deref().filter(|t| task_ok(t)) {
+                        Some(t) => typed_control(
+                            c,
+                            "act.abandon",
+                            json!({"act": "abandon", "id": t,
+                                   "words": c.w.get("act.abandon_confirm")}),
+                        ),
+                        None => control(c, "act.abandon", Value::Null),
+                    };
                     controls.push(ab);
                 }
             }
@@ -842,13 +888,20 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
                 _ => Value::Null,
             }
         };
-        let approve = match (status, id, r["read_id"].as_i64()) {
-            ("proposed", Some(id), Some(read)) => {
-                let mut l = format!("makiba range approve {id} --read {read}");
-                if let Some(m @ ("human" | "acceptance")) = str_of(&r["approves_under"]) {
-                    l.push_str(&format!(" --mode {m}"));
-                }
-                json!(l)
+        // Issue 570: behind the typed range id, and only with the read and the mode shown.
+        let approve = match (
+            status,
+            id,
+            r["read_id"].as_i64(),
+            str_of(&r["approves_under"]),
+        ) {
+            ("proposed", Some(id), Some(read), Some(m @ ("human" | "acceptance"))) => {
+                typed_control(
+                    c,
+                    "range.approve",
+                    json!({"act": "approve", "id": id.to_string(), "read_id": read,
+                           "mode": m, "words": null}),
+                )
             }
             _ => Value::Null,
         };
@@ -902,8 +955,8 @@ fn ranges(c: &Ctx) -> (Value, Value, Value) {
                 "hold": line(status == "active", "pause"),
                 "resume": line(status == "paused", "resume"),
                 "end": line(status == "active" || status == "paused", "end"),
-                "approve": approve,
             },
+            "approve": approve,
         }));
     }
     let sel = (0..out.len())

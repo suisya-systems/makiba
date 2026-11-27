@@ -111,7 +111,7 @@ Tests that show another local program cannot act as the person, or set the mark:
 
 Already done, a prerequisite: `makiba range approve --read` (Issue 408).
 
-1. **P1a. The gated lines to type** (S, under every outcome, with Issue 169's model). The model of screen.md section 7, step 1 gives the lines of approve and abandon only after the typed id matches, the line of approve with `--read` and `--mode` and without `--yes`, and no line with `--via`. Its assertions are those of section 6 for the read-only outcomes. It also brings screen.md sections 4 and 10 up to date on `--read`.
+1. **P1a. The gated lines to type** (S, under every outcome, with Issue 169's model). The model of screen.md section 7, step 1 gives the lines of approve and abandon only after the typed id matches, the line of approve with `--read` and `--mode` and without `--yes`, and no line with `--via`. Its assertions are those of section 6 for the read-only outcomes. It also brings screen.md sections 4 and 10 up to date on `--read`. Built by Issue 570: `screen::confirmed` in `src/screen.rs`, declared test `tests/screen_model.rs` (t16; screen.md section 11).
 2. **P1b. The mark `--via screen`** (S). `src/cli.rs`, `src/daemon/door.rs`, spec sections 3, 10 and 12, lines.md L-N8, and the door tests of section 6. Only under outcome A: under the other outcomes nothing would set it.
 3. **P1c. The screen acts, in the app's addition** (M, after P17 shows outcome A and after Issue 169's model and frame exist). The vectors and confirmations of section 5 in the model and its test, and the addition starting `makiba` (section 2). It needs P1b for the mark.
 
