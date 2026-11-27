@@ -2962,7 +2962,8 @@ fn held_of(c: &Connection, id: i64, base_tip: Option<String>) -> Result<Held> {
 /// The peers of `x` among the followed pull requests `all` (queue-overlap.md section 3.2): of the
 /// same repository, not read closed, at their newest recorded head, and in the merge queue, or
 /// told ready (their head's newest `queue_readiness`) before `x` was and not being updated (no
-/// `update` of their task `accepted`). None while `x` is itself in the queue.
+/// `update` of their task `accepted`), one per pull request (the run that registered it last).
+/// None while `x` is itself in the queue.
 fn peers_of(
     c: &Connection,
     all: &[Followed],
@@ -2973,8 +2974,19 @@ fn peers_of(
     if x.act {
         return Ok(out);
     }
-    for o in all {
+    for (i, o) in all.iter().enumerate() {
         if o.task == x.task || o.pr == x.pr || o.closed || !o.repo.eq_ignore_ascii_case(&x.repo) {
+            continue;
+        }
+        // A pull request two runs follow is one peer: the run that registered it last (a later
+        // run on ties), so one peer ref is never fetched twice.
+        let superseded = all.iter().enumerate().any(|(j, p)| {
+            j != i
+                && p.pr == o.pr
+                && p.repo.eq_ignore_ascii_case(&o.repo)
+                && (p.gen_reg, j) > (o.gen_reg, i)
+        });
+        if superseded {
             continue;
         }
         let Some(head) = newest_head(c, &o.task)? else {
@@ -5187,6 +5199,51 @@ esac"#,
             )
             .unwrap();
         assert!(peers(&w).is_empty());
+    }
+
+    /// Issue 573: two runs following one pull request make one peer, the run that registered it
+    /// last, so the reading never fetches two branches into one peer ref.
+    #[test]
+    fn a_pull_request_two_runs_follow_is_one_peer() {
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        let repos = dir.path().join("repos");
+        std::fs::create_dir_all(repos.join("p/.git")).unwrap();
+        for (task, pr, head) in [
+            ("u", 4, "c".repeat(40)),
+            ("v", 4, "d".repeat(40)),
+            ("t", 5, "a".repeat(40)),
+        ] {
+            w.upsert_run(&crate::db::writer::RunUpsert {
+                task_id: task,
+                project_slug: "p",
+                status: Some("review"),
+                ..Default::default()
+            })
+            .unwrap();
+            register(&w, "pr_opened", task, "o/r", pr, &head).unwrap();
+            for kind in ["ci_completed", "queue_readiness"] {
+                if kind == "queue_readiness" && pr == 5 {
+                    continue;
+                }
+                w.append_event(&NewEvent {
+                    kind,
+                    actor: Some("makibad"),
+                    payload: Some(&json!({"repo": "o/r", "pr": pr, "head_oid": head,
+                                          "status": "passed", "verdict": "ready",
+                                          "base_tip": "b".repeat(40)})),
+                    run_task_id: Some(task),
+                    ..Default::default()
+                })
+                .unwrap();
+            }
+        }
+        let peers: Vec<(i64, String)> = ready_candidates(w.conn(), &repos, Some("t")).unwrap()[0]
+            .peers
+            .iter()
+            .map(|p| (p.pr, p.task.clone()))
+            .collect();
+        assert_eq!(peers, vec![(4, "v".to_string())]);
     }
 
     /// Issue 475: a reading that succeeds after a failure starts the failure budget again, so two

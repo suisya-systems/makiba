@@ -85,6 +85,10 @@ verdict (`hold` included: a held pull request the person queues by hand holds th
 the queue, a pull request held (`hold`), updating (an `update` of its task `accepted`, also after
 a `ready`), or judged `update` or `unknown` is nobody's peer.
 
+A pull request that two runs follow is one peer: the run that registered it last (the newest
+`pr_opened` or `fix_pushed`), so a reading never fetches two branches into one peer ref (diff
+review of the rebuilt branch).
+
 A held head is never made `unknown` (no later reading would judge it again, and its update on the
 landing would be lost): a failing reading of a held head is read again without the budget, and a
 reading that comes back after a pull request its hold names has landed writes neither `ready` nor
