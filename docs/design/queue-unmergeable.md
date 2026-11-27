@@ -112,8 +112,10 @@ this start (`boot`) not yet started is **run**:
    endCursor} nodes{position pullRequest{number}}}}`, page after page while `hasNextPage`, at most
    10 pages) [unverified: `Repository.mergeQueue`, `MergeQueueEntry.pullRequest`; the connection
    is paginated as GitHub's reference shows]. A page that fails is a read that fails (below);
-   more than 10 pages is `failed` ("the queue is longer than makibad reads"), nothing sent: an
-   incomplete list is never taken as every entry ahead.
+   more than 10 pages, or an entry without a readable `position` or `pullRequest.number` (GitHub's
+   fields are nullable; diff review round 1), is `failed`, nothing sent (for an earlier start's
+   request read out of the queue: `unknown`): an incomplete list is never taken as every entry
+   ahead.
 2. Not `OPEN`, another head, out of the queue, an entry `id` other than the request's `entry.id`
    (the entry was replaced), or an entry state other than `UNMERGEABLE`: outcome `not_sent` (with
    what was read). Nothing was sent, and this is the only outcome that lets the watch write a new
@@ -215,8 +217,8 @@ has no open stay, and that no `update` of the task is `accepted`:
   queue)", or "it was taken out of the merge queue as UNMERGEABLE, with no entry ahead of it". A
   run without a code worktree (the door refuses its `update`) is told instead "... Its run has no
   code worktree, so update cannot run: have the branch take <pr_base> in and record the new head
-  with pr pushed; if it already holds <pr_base>, record <7> again with pr pushed and makibad judges
-  it again. Do not queue it at <7>. <link>".
+  with pr pushed; if it already holds <pr_base>, record <head> (all 40 characters) again with pr
+  pushed and makibad judges it again. Do not queue it at <7>. <link>".
 
 No `commands` row is written, and makibad never updates or pushes the branch after a wait. The base
 named is the pull request's own, so a pull request into another branch needs no case of its own.

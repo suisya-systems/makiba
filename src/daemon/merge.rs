@@ -984,7 +984,9 @@ fn dq_read(program: &str, r: &Request) -> std::result::Result<DqRead, String> {
 /// Why a queue read gave no whole list.
 enum QueueErr {
     Read(String),
-    Long,
+    /// A queue makibad cannot take as every entry ahead: longer than it reads, or an entry
+    /// without a readable position or pull request (GitHub's fields are nullable). Why.
+    Incomplete(String),
 }
 
 /// Every entry of the queue of `base`: (position, number), page after page.
@@ -1028,11 +1030,14 @@ fn queue_entries(
             return Err(QueueErr::Read(format!("the queue read answered {v}")));
         };
         for n in nodes {
-            if let (Some(p), Some(number)) =
+            let (Some(p), Some(number)) =
                 (n["position"].as_i64(), n["pullRequest"]["number"].as_i64())
-            {
-                out.push((p, number));
-            }
+            else {
+                return Err(QueueErr::Incomplete(format!(
+                    "an entry of the merge queue has no readable position or pull request ({n})"
+                )));
+            };
+            out.push((p, number));
         }
         if entries["pageInfo"]["hasNextPage"].as_bool() != Some(true) {
             return Ok(out);
@@ -1042,7 +1047,9 @@ fn queue_entries(
             return Err(QueueErr::Read("the queue read gave no cursor".into()));
         }
     }
-    Err(QueueErr::Long)
+    Err(QueueErr::Incomplete(format!(
+        "the merge queue is longer than makibad reads ({QUEUE_PAGES} pages)"
+    )))
 }
 
 /// Every pull request in the queue other than `pr`, by position (a dequeue read after the fact, when
@@ -1092,15 +1099,12 @@ fn dequeue(program: &str, r: &Request) -> DqOutcome {
     let entries = match queue_entries(program, r, &read.base) {
         Ok(e) => e,
         Err(QueueErr::Read(e)) => return unread(e),
-        Err(QueueErr::Long) => {
+        Err(QueueErr::Incomplete(why)) => {
             return DqOutcome::Ended {
                 outcome: "failed",
                 ahead: Vec::new(),
                 state: read.raw.clone(),
-                why: format!(
-                    "the merge queue is longer than makibad reads ({} pages); nothing was sent",
-                    QUEUE_PAGES
-                ),
+                why: format!("{why}; nothing was sent"),
             };
         }
     };
@@ -1252,12 +1256,12 @@ fn dequeue_read_only(program: &str, r: &Request, known: Option<Vec<i64>>) -> DqO
                     why: e,
                 };
             }
-            Err(QueueErr::Long) => {
+            Err(QueueErr::Incomplete(why)) => {
                 return DqOutcome::Ended {
                     outcome: "unknown",
                     ahead: Vec::new(),
                     state: read.raw,
-                    why: "out of the queue, but the queue is too long to read what is ahead".into(),
+                    why: format!("out of the queue, but {why}, so what is ahead is not known"),
                 };
             }
         },
@@ -1553,5 +1557,36 @@ esac
         put(&dir, "read", &fine);
         assert_eq!(ended(&dequeue(&gh, &r)).0, "not_sent");
         assert_eq!(sent(&dir), 0);
+    }
+
+    /// Diff review round 1: an entry of the queue without a readable position or pull request
+    /// (GitHub's fields are nullable) is never skipped: before sending it is `failed` and nothing
+    /// is sent; an earlier start's request read out of the queue is `unknown`, never `dequeued`
+    /// with an entry ahead missing.
+    #[test]
+    fn a_queue_entry_without_a_position_or_pull_request_sends_nothing() {
+        let blank = |node: serde_json::Value| {
+            serde_json::json!({"data": {"repository": {"mergeQueue": {"entries": {
+                "pageInfo": {"hasNextPage": false, "endCursor": null},
+                "nodes": [{"position": 1, "pullRequest": {"number": 2}}, node,
+                          {"position": 3, "pullRequest": {"number": 1}}]}}}}})
+        };
+        let r = request(super::boot());
+        for node in [
+            serde_json::json!({"position": 2, "pullRequest": null}),
+            serde_json::json!({"position": null, "pullRequest": {"number": 4}}),
+            serde_json::Value::Null,
+        ] {
+            let (dir, gh) = stand_in();
+            put(&dir, "page1", &blank(node.clone()));
+            put(&dir, "read", &pr("OPEN", true, 3));
+            let o = dequeue(&gh, &r);
+            assert_eq!(ended(&o).0, "failed", "{node}: {o:?}");
+            assert_eq!(sent(&dir), 0, "{node}: nothing sent");
+            put(&dir, "read", &pr("OPEN", false, 0));
+            let o = dequeue_read_only(&gh, &request("an earlier start"), None);
+            assert_eq!(ended(&o).0, "unknown", "{node}: {o:?}");
+            assert_eq!(sent(&dir), 0);
+        }
     }
 }

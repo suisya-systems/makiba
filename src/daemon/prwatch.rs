@@ -3022,7 +3022,8 @@ fn end_wait(w: &StateWriter, wait: &Wait, left: &[(i64, &str)], pr_base: &str) -
             )
         } else {
             format!(
-                "Its run has no code worktree, so update cannot run: have the branch take {pr_base} in and record the new head with pr pushed; if it already holds {pr_base}, record {at} again with pr pushed and makibad judges it again."
+                "Its run has no code worktree, so update cannot run: have the branch take {pr_base} in and record the new head with pr pushed; if it already holds {pr_base}, record {} again with pr pushed and makibad judges it again.",
+                now.head
             )
         };
         super::door::notice(
@@ -6826,7 +6827,7 @@ esac"#,
         let told = last_notice(&w);
         assert!(told.contains("has no code worktree"), "{told}");
         assert!(
-            told.contains("record 7777777 again with pr pushed"),
+            told.contains("record 7777777777777777777777777777777777777777 again with pr pushed"),
             "{told}"
         );
         assert!(!told.contains("call update"), "{told}");
