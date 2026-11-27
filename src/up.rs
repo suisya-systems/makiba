@@ -334,15 +334,15 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     with_ledger(&dir, |w| {
         person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
     })?;
-    // Issue 590: outside the ledger's lock, so ssh-keygen never lengthens a hold of it. Another
-    // organization may share the key's place: its agents run in this base's terminals. A stopped
-    // base runs none; with the stand-in (`MAKIBA_BASE=stub`) nothing was probed and none is read.
-    let others = match &probe {
+    // Issue 590: outside the ledger's lock, so ssh-keygen never lengthens a hold of it. Every agent
+    // runs in a terminal of a base on this machine, of this organization or of another that may
+    // share the key's place. With the stand-in (`MAKIBA_BASE=stub`) nothing was probed and no
+    // base is read.
+    let on_base = match &probe {
         None => Ok(Vec::new()),
-        Some(_) if stopped => Ok(Vec::new()),
-        Some(_) => other_organizations(&*the_base, &organization(&dir)),
+        Some(_) => base_agents_that_may_read(&dir),
     };
-    approval_key(&dir, others);
+    approval_key(&dir, on_base);
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
@@ -431,9 +431,9 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
 
 /// The approval key (Issue 590, docs/design/acceptance-approval.md section 3): kept private when
 /// it exists, made when it is absent and nothing that could read it runs, its line printed. `up`
-/// goes on whatever happens here: without the key no approval can be signed. `others`: the other
-/// organizations whose agents run on the base (`other_organizations`).
-fn approval_key(dir: &Path, others: Result<Vec<String>, String>) {
+/// goes on whatever happens here: without the key no approval can be signed. `on_base`: the
+/// agents running on a base of this machine that may read it (`base_agents_that_may_read`).
+fn approval_key(dir: &Path, on_base: Result<Vec<String>, String>) {
     let key = crate::cli::approval_key_path();
     let staging = crate::cli::approval_staging_path();
     let way = "run makiba down --secretary, then makiba up";
@@ -467,16 +467,16 @@ fn approval_key(dir: &Path, others: Result<Vec<String>, String>) {
             // not deny it: the key is made only by an `up` that starts makibad itself.
             let not_made = if !matches!(daemon_running(dir), Ok(false)) {
                 Some("makibad is running".to_string())
-            } else if let Err(e) = &others {
+            } else if let Err(e) = &on_base {
                 Some(e.clone())
-            } else if let Ok(orgs) = &others
-                && !orgs.is_empty()
+            } else if let Ok(agents) = &on_base
+                && !agents.is_empty()
             {
-                // Their launches may come from a makiba before the key, and are not in this
-                // organization's ledger.
+                // Their launches may come from a makiba before the key, or from another
+                // organization, whose ledger this `up` does not read.
                 Some(format!(
-                    "agents of another organization run on the base: {}",
-                    orgs.join(" ")
+                    "agents on the base may read it: {}",
+                    agents.join(", ")
                 ))
             } else {
                 match &lacking {
@@ -513,28 +513,72 @@ fn organization(dir: &Path) -> String {
         .into_owned()
 }
 
-/// The `makiba.org` tags of the base's makiba agents (a terminal with a `makiba.role` tag) that
-/// are not `org`'s, each once, sorted; an agent with no `makiba.org` tag counts as `(none)`.
-fn other_organizations(base: &dyn base::Base, org: &str) -> Result<Vec<String>, String> {
-    let terminals = base
-        .list()
-        .map_err(|e| format!("cannot list the base's terminals: {e}"))?;
-    let mut out: Vec<String> = Vec::new();
-    for t in terminals {
-        if !t.tags.contains_key(crate::spec::TAG_ROLE) {
-            continue;
-        }
-        let theirs = t
-            .tags
-            .get(crate::spec::TAG_ORG)
-            .cloned()
-            .unwrap_or_else(|| "(none)".into());
-        if theirs != org && !out.contains(&theirs) {
-            out.push(theirs);
+/// The makiba agents running in the base's terminals, of every session on this machine, that may
+/// read the approval key: a terminal is what runs, whatever the ledger says of its key (`down`
+/// revokes a key before it ends the terminal). A session nothing listens at runs none; any other
+/// failure to list one is an error, so the key is not made.
+fn base_agents_that_may_read(dir: &Path) -> Result<Vec<String>, String> {
+    let mut per_session = Vec::new();
+    for session in base::sessions()? {
+        match base::connect_session(&session, Duration::from_secs(5)).list() {
+            Ok(ts) => per_session.push((session, ts)),
+            Err(BaseError::Unavailable(d)) if d.kind == "connect" => {}
+            Err(e) => {
+                return Err(format!(
+                    "cannot list the terminals of session {session}: {e}"
+                ));
+            }
         }
     }
-    out.sort();
-    Ok(out)
+    let conn = read_only(dir);
+    let key = crate::cli::approval_key_path();
+    let settings = dir.join("settings");
+    let denies = |spawn: &str| {
+        conn.as_ref().is_some_and(|c| {
+            person_key::launch_denies_approval(c, &settings, spawn, &key).unwrap_or(false)
+        })
+    };
+    Ok(agents_that_may_read(
+        &per_session,
+        &organization(dir),
+        &denies,
+    ))
+}
+
+/// Of the terminals of each session, the makiba agents (a live program in a terminal with a
+/// `makiba.role` tag) that may read the approval key: every one of another organization (another
+/// `makiba.org` tag, or none), and one of `org` whose launch (`makiba.spawn`) `denies` says does
+/// not deny it. Each as `<session>: <name>`, with the organization when it is another.
+fn agents_that_may_read(
+    per_session: &[(String, Vec<base::Terminal>)],
+    org: &str,
+    denies: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (session, terminals) in per_session {
+        for t in terminals {
+            if !t.alive || !t.tags.contains_key(crate::spec::TAG_ROLE) {
+                continue;
+            }
+            match t.tags.get(crate::spec::TAG_ORG) {
+                Some(theirs) if theirs == org => {
+                    let ok = t
+                        .tags
+                        .get(crate::spec::TAG_SPAWN)
+                        .is_some_and(|s| denies(s));
+                    if !ok {
+                        out.push(format!("{session}: {}", t.name));
+                    }
+                }
+                theirs => out.push(format!(
+                    "{session}: {} of organization {}",
+                    t.name,
+                    theirs.map_or("(none)", String::as_str)
+                )),
+            }
+        }
+    }
+    out
 }
 
 fn read_only(dir: &Path) -> Option<rusqlite::Connection> {
@@ -677,58 +721,67 @@ mod tests {
         dir
     }
 
-    /// Issue 590: the agents of another organization on the same base are named, so the approval
-    /// key is not made beside them; this organization's agents and a terminal that is no makiba
-    /// agent are not.
+    /// Issue 590: every agent of another organization, in any session, and every agent of this
+    /// one whose launch does not deny the approval key, is named, whatever the ledger says of its
+    /// key; this organization's agents that deny it, a shell a stopped core left in a kept
+    /// terminal, and a terminal that is no makiba agent are not.
     #[test]
-    fn the_agents_of_another_organization_on_the_base_are_named() {
-        use crate::base::{Base, LaunchSpec};
-        use std::collections::BTreeMap;
-        let stub = crate::base::stub::Stub::new();
-        let launch = |name: &str, tags: &[(&str, &str)]| {
-            stub.launch(&LaunchSpec {
-                argv: vec!["true".into()],
-                cwd: std::env::temp_dir(),
-                name: name.into(),
-                tags: tags
-                    .iter()
-                    .map(|(k, v)| (k.to_string(), v.to_string()))
-                    .collect::<BTreeMap<_, _>>(),
-                env: BTreeMap::new(),
-                unset: vec![],
-            })
-            .unwrap();
+    fn the_agents_on_a_base_that_may_read_the_approval_key_are_named() {
+        use crate::base::{Terminal, TerminalRef};
+        let t = |name: &str, alive: bool, tags: &[(&str, &str)]| Terminal {
+            id: TerminalRef(name.into()),
+            name: name.into(),
+            tags: tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            status: None,
+            turn: None,
+            alive,
+            exit_code: None,
         };
-        launch(
-            "secretary",
-            &[
-                (crate::spec::TAG_ROLE, "secretary"),
-                (crate::spec::TAG_ORG, "/org/a"),
-            ],
-        );
-        launch("a shell", &[]);
+        use crate::spec::{TAG_ORG as ORG, TAG_ROLE as ROLE, TAG_SPAWN as SPAWN};
+        let ours = vec![
+            t(
+                "secretary",
+                true,
+                &[(ROLE, "secretary"), (ORG, "/org/a"), (SPAWN, "s-new")],
+            ),
+            t(
+                "w-old",
+                true,
+                &[(ROLE, "worker"), (ORG, "/org/a"), (SPAWN, "s-old")],
+            ),
+            t("w-nospawn", true, &[(ROLE, "worker"), (ORG, "/org/a")]),
+            t(
+                "w-shell",
+                false,
+                &[(ROLE, "worker"), (ORG, "/org/a"), (SPAWN, "s-old")],
+            ),
+            t("a shell", true, &[]),
+        ];
+        let theirs = vec![
+            t(
+                "secretary",
+                true,
+                &[(ROLE, "secretary"), (ORG, "/org/b"), (SPAWN, "s-new")],
+            ),
+            t("curator", true, &[(ROLE, "curator")]),
+        ];
+        let denies = |spawn: &str| spawn == "s-new";
+        let per_session = vec![("makiba".to_string(), ours), ("other".to_string(), theirs)];
         assert_eq!(
-            other_organizations(&stub, "/org/a").unwrap(),
-            Vec::<String>::new()
-        );
-        launch(
-            "w-t1",
-            &[
-                (crate::spec::TAG_ROLE, "worker"),
-                (crate::spec::TAG_ORG, "/org/b"),
-            ],
-        );
-        launch("curator", &[(crate::spec::TAG_ROLE, "curator")]);
-        launch(
-            "secretary-b",
-            &[
-                (crate::spec::TAG_ROLE, "secretary"),
-                (crate::spec::TAG_ORG, "/org/b"),
-            ],
+            agents_that_may_read(&per_session, "/org/a", &denies),
+            vec![
+                "makiba: w-old".to_string(),
+                "makiba: w-nospawn".to_string(),
+                "other: secretary of organization /org/b".to_string(),
+                "other: curator of organization (none)".to_string(),
+            ]
         );
         assert_eq!(
-            other_organizations(&stub, "/org/a").unwrap(),
-            vec!["(none)".to_string(), "/org/b".to_string()]
+            agents_that_may_read(&per_session[..1], "/org/a", &|_: &str| true),
+            vec!["makiba: w-nospawn".to_string()]
         );
     }
 

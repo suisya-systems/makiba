@@ -241,50 +241,64 @@ pub fn agents_without_approval_deny(
     settings_dir: &Path,
     key: &Path,
 ) -> rusqlite::Result<Vec<String>> {
-    let key = std::path::absolute(key)
-        .unwrap_or_else(|_| key.to_path_buf())
-        .display()
-        .to_string();
     let mut q = conn.prepare(
-        "SELECT a.agent_id, a.spawn_id, l.role, r.task_id
-         FROM agents a
-         LEFT JOIN run_launch l ON l.spawn_id = a.spawn_id
-         LEFT JOIN runs r ON r.id = l.run_id
-         WHERE a.role <> 'person' AND a.revoked_at IS NULL ORDER BY a.id",
+        "SELECT agent_id, spawn_id FROM agents
+         WHERE role <> 'person' AND revoked_at IS NULL ORDER BY id",
     )?;
     let rows = q
         .query_map([], |r| {
-            Ok((
-                r.get::<_, String>(0)?,
-                r.get::<_, Option<String>>(1)?,
-                r.get::<_, Option<String>>(2)?,
-                r.get::<_, Option<String>>(3)?,
-            ))
+            Ok((r.get::<_, String>(0)?, r.get::<_, Option<String>>(1)?))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
     let mut out: Vec<String> = Vec::new();
-    for (agent, spawn, role, task) in rows {
-        let denies = match (spawn, role) {
-            (Some(spawn), Some(role)) => {
-                let file =
-                    super::launch::settings_file(settings_dir, task.as_deref(), &role, &spawn);
-                std::fs::read_to_string(file)
-                    .ok()
-                    .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
-                    .and_then(|v| {
-                        v["sandbox"]["filesystem"]["denyRead"]
-                            .as_array()
-                            .map(|a| a.iter().any(|e| e.as_str() == Some(key.as_str())))
-                    })
-                    .unwrap_or(false)
-            }
-            _ => false,
+    for (agent, spawn) in rows {
+        let denies = match spawn {
+            Some(spawn) => launch_denies_approval(conn, settings_dir, &spawn, key)?,
+            None => false,
         };
         if !denies && !out.contains(&agent) {
             out.push(agent);
         }
     }
     Ok(out)
+}
+
+/// Whether the launch `spawn` of this organization has a settings file in `settings_dir` that
+/// denies reading the approval key `key`. A launch the ledger does not hold, or a file that
+/// cannot be read, does not.
+pub fn launch_denies_approval(
+    conn: &Connection,
+    settings_dir: &Path,
+    spawn: &str,
+    key: &Path,
+) -> rusqlite::Result<bool> {
+    let key = std::path::absolute(key)
+        .unwrap_or_else(|_| key.to_path_buf())
+        .display()
+        .to_string();
+    let launch: Option<(String, Option<String>)> = match conn.query_row(
+        "SELECT l.role, r.task_id FROM run_launch l LEFT JOIN runs r ON r.id = l.run_id
+         WHERE l.spawn_id = ?1",
+        [spawn],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    ) {
+        Ok(row) => Some(row),
+        Err(rusqlite::Error::QueryReturnedNoRows) => None,
+        Err(e) => return Err(e),
+    };
+    let Some((role, task)) = launch else {
+        return Ok(false);
+    };
+    let file = super::launch::settings_file(settings_dir, task.as_deref(), &role, spawn);
+    Ok(std::fs::read_to_string(file)
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok())
+        .and_then(|v| {
+            v["sandbox"]["filesystem"]["denyRead"]
+                .as_array()
+                .map(|a| a.iter().any(|e| e.as_str() == Some(key.as_str())))
+        })
+        .unwrap_or(false))
 }
 
 #[cfg(test)]
