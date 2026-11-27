@@ -211,7 +211,12 @@ fail closed.
    the newest completed run of every check at head (as `Ci::check_runs` reads them) succeeded except
    the repository's acceptance check, and that one failed. It reads that job's log (`repos/<repo>/
    actions/jobs/<id>/logs` through the API; that the check run's id is the job's id is [unverified])
-   and takes the checker's lines at column 0: the `approvable` records and `not approvable`. Any `not
+   and takes the checker's lines. A downloaded job log starts every line with the runner's
+   timestamp and one space (`2026-11-27T10:00:00.1234567Z acceptance-check: ...`): makibad strips
+   exactly one leading token of that form (an RFC 3339 UTC time ending in `Z`) and its one space,
+   keeps the rest of the line as it is, and reads only lines that then start with `acceptance-check:
+   ` at column 0, so an indented line of test output stays indented and is not read. From them it
+   takes the `approvable` records and `not approvable`. Any `not
    approvable`, no record, or a log it cannot read: refused, as today. Then the gate is evaluated as
    for a passed head, every rule unchanged (the manifest, condition (a), `check_first`, the review,
    edited tests, the helper lists, the language and order checks), except two: condition (b) is not
@@ -251,7 +256,10 @@ privilege; the secretary already reruns CI (`ci_rerun`), and makibad gains no Gi
 Allowed, each only on the owner's approval of that head:
 
 - **changed**: a declared path, or a path the test commit changed, changed after the test commit
-  (kind a, #530);
+  (kind a, #530), whether it is a test target (a declared `tests/<name>.rs` or `test_*.py`), a
+  declared test file that is not a target, or a helper the test commit changed. Precedence: a path
+  under `.github/` or that is test infrastructure (`is_infra`) is never approvable, whatever else it
+  is; otherwise a declared path or a path the test commit changed is kind (a);
 - **changed** `scripts/acceptance-check.sh` after the test commit (kind c, #534);
 - **ignored**: a declared Cargo target that ignores a test at head (kind b, #520, #535).
 
@@ -259,8 +267,9 @@ Not allowed, so still by the lift:
 
 - any change under `.github/` (the workflow is what runs the verification, and the gate's condition
   (b) requires `.github/workflows/` equal to the base);
-- test infrastructure under `tests/` and other non-helper files under `tests/` changed after the test
-  commit;
+- test infrastructure under `tests/` (`is_infra`) changed after the test commit, declared or not;
+- a file under `tests/` that is neither a test target nor a helper, and that is neither declared nor
+  changed by the test commit, changed after the test commit;
 - a declared test that fails at head (kind d, #519, until Issue 558), passes or runs no test at the
   test commit, does not compile at head, runs no test at head;
 - rule 1 (the test commit changes an undeclared path), a second declaring commit, a merge test
@@ -306,15 +315,18 @@ recorded, the rerun fails again, and the lift remains.
    (temporary repositories and an `ssh-keygen` key made in the test's temporary folder, as
    `tests/test_acceptance_check.py`): one case per allowed kind (its line, with no duration in it)
    and per non-allowed kind (`not approvable`), each verdict unchanged without `--approvals`; a valid
-   approval passes; a signature by another key, another head, another pull request, a missing or an
+   approval passes; an edited declared Rust target, an edited declared `test_*.py` and an edited
+   helper the test commit changed are each `approvable changed`, while an edited `tests/conftest.py`
+   (declared or not) and an edited `.github/` file are `not approvable`; a signature by another key, another head, another pull request, a missing or an
    extra failure, no signers file at base, a signers file only at head, and a `not approvable`
    failure each fail. It changes the checker after its test commit: it lands by the lift, the last
    one this route needs (one pull request, so one lift, not two).
 2. **The gate judges a head whose acceptance failed by construction.** `src/daemon/gate.rs`: the
    job's log read (a stand-in serves it), the warning, condition (a)'s refusals held back only for
    the set's paths, every other failure refused as today, condition (b) not judged on that path.
-   Declared test `tests/gate_acceptance_approval.rs`: a log with only approvable records gives an
-   allowance with the acceptance warning naming the set; `not approvable`, no record or an unreadable
+   Declared test `tests/gate_acceptance_approval.rs`, its logs in the downloaded form (each line after
+   a runner timestamp): a log with only approvable records gives an allowance with the acceptance
+   warning naming the set; a timestamped indented line is not read; `not approvable`, no record or an unreadable
    log is refused; a fabricated indented line is not read; a declared path outside the set is still
    refused by (a); a head whose acceptance failed is not allowed by the fallback of (b). Changes
    `docs/design/spec.md` (the `acceptance_gate` payload).
