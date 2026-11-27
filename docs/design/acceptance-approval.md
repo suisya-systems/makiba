@@ -406,6 +406,14 @@ acceptance checker and `.github/`), so each stops after its design for the owner
   their builds and build Issue 1 above must be ordered so no two change `scripts/acceptance-check.sh` at once.
 - The owner's terminal must reach `approval.key` when they approve; a person on another machine
   cannot approve this way.
+- `makiba up` makes `approval.key` only when no agent that could read it is seen (build Issue 3,
+  Issue 590): this organization's `makibad` is stopped, every live agent of its ledger denies the
+  key, and no agent that may read it runs in a terminal of any base session on the machine. Another
+  organization's `makibad` is seen only through the terminals it already runs: one that is idle
+  then, or starts later, from a makiba before Issue 590, can launch an agent whose settings do not
+  deny the key. Accepted by the owner (pending 134) instead of a machine-wide lock in every
+  `makibad`'s launch path; the bound is the deny rules of the binary each organization runs, as for
+  a person key two organizations share.
 - **The pull request's code runs in the same job as the verification.** The checker builds and runs
   the head's tests before it compares failure sets and verifies the signature, on one runner. Code
   that runs there (a test, a build script) can change what later steps of the job execute or read:
