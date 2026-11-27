@@ -1226,6 +1226,9 @@ struct Pressing {
     key: &'static str,
 }
 
+/// How many times the reopening of an entry whose key the base refused is tried (Issue 578).
+const UNDO_TRIES: usize = 3;
+
 fn prompt_stale(id: i64, why: String) -> DoorError {
     refuse(
         ErrorKind::Stale,
@@ -1450,7 +1453,9 @@ fn answer_prompt(
                 format!("the base: {e}; no key was pressed"),
                 "",
             ));
-            let undone = w.transaction(|w| {
+            // Tried again while the lock is held elsewhere (each try waits the busy timeout): an
+            // entry left answered with no key pressed would never be recorded again.
+            let undo = |w: &StateWriter| -> crate::db::Result<()> {
                 w.conn().execute(
                     "UPDATE pending SET status = ?1, answer = NULL, answered_by = NULL,
                        answered_at = NULL WHERE id = ?2 AND status = 'answered'",
@@ -1460,9 +1465,23 @@ fn answer_prompt(
                     .execute("DELETE FROM events WHERE id = ?1", [event])?;
                 finish_command(w, command, &r)?;
                 Ok(())
-            });
+            };
+            let mut undone = w.transaction(undo);
+            for _ in 1..UNDO_TRIES {
+                if undone.is_ok() {
+                    break;
+                }
+                undone = w.transaction(undo);
+            }
             if let Err(e) = undone {
                 eprintln!("makibad: cannot reopen pending entry {}: {e}", p.id);
+                return Err(internal(format!(
+                    "pending entry {}: no key was pressed (the base: {}), but the entry could not be \
+                     reopened ({e}); it stays answered, and the prompt is still on the worker's \
+                     screen",
+                    p.id,
+                    r.as_ref().err().map_or("", |e| e.message.as_str())
+                )));
             }
             return r;
         }
