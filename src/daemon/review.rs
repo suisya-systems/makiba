@@ -1064,12 +1064,21 @@ fn place_login(round_home: &Path, rel: &str) -> Result<PathBuf, String> {
     Ok(dst)
 }
 
+/// Where the entry `p` itself lies: its folder's real path and its own name, a last link not
+/// followed. A link in a system folder that leads into a hidden home lies in the system folder.
+fn entry(p: &Path) -> PathBuf {
+    match (p.parent(), p.file_name()) {
+        (Some(d), Some(n)) => real(d).join(n),
+        _ => real(p),
+    }
+}
+
 /// Does a folder of `given` show `p`: one holds it, and every place of `hidden` that holds `p`
-/// (by its path or its real path) also holds that folder, which was then given back inside the
-/// hidden place after its tmpfs (Issue 568). A system bind does not show what lies under a home
-/// hidden in it.
+/// (by its path or where the entry really lies) also holds that folder, which was then given
+/// back inside the hidden place after its tmpfs (Issue 568). A system bind does not show what
+/// lies under a home hidden in it.
 fn shown_by(p: &Path, given: &[PathBuf], hidden: &[PathBuf]) -> bool {
-    let pr = real(p);
+    let pr = entry(p);
     given.iter().any(|g| {
         p.starts_with(g)
             && hidden
@@ -1119,7 +1128,7 @@ pub fn program_mounts(
         a.extend(["--tmpfs".into(), s(h)]);
     }
     let under_hidden = |p: &Path| {
-        let r = real(p);
+        let r = entry(p);
         hidden.iter().any(|h| p.starts_with(h) || r.starts_with(h))
     };
     let in_system = |p: &Path| {
@@ -1481,6 +1490,34 @@ fn withheld(mut a: Answer) -> Answer {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A launcher in the system folder that is a link into a hidden home (the review of Issue
+    /// 568): the link is shown by the system bind as it is (made again, bubblewrap would refuse
+    /// the link already there), and the program it leads to is given back after the home's tmpfs.
+    #[test]
+    fn a_system_launcher_into_a_hidden_home_stays_as_the_system_shows_it() {
+        let t = std::fs::canonicalize(tempfile::tempdir().unwrap().keep()).unwrap();
+        let usr = t.join("usr");
+        let home = usr.join("local/home/someone");
+        let program = home.join(".local/bin/codex");
+        std::fs::create_dir_all(program.parent().unwrap()).unwrap();
+        std::fs::write(&program, "").unwrap();
+        let launcher = usr.join("local/bin/codex");
+        std::fs::create_dir_all(launcher.parent().unwrap()).unwrap();
+        std::os::unix::fs::symlink("../home/someone/.local/bin/codex", &launcher).unwrap();
+        let args = program_mounts(&[usr.as_path()], &launcher, Some(&home), &[]).unwrap();
+        let s = |p: &Path| p.display().to_string();
+        let at = |w: &[String]| args.windows(w.len()).position(|x| x == w);
+        assert!(
+            !args.iter().skip(1).any(|a| *a == s(&launcher)),
+            "the launcher is mounted again: {args:?}"
+        );
+        let local = home.join(".local");
+        let tmpfs = at(&["--tmpfs".into(), s(&home)]).expect("no tmpfs on the home");
+        let bind = at(&["--ro-bind".into(), s(&local), s(&local)])
+            .unwrap_or_else(|| panic!("the program's folder is not given back: {args:?}"));
+        assert!(tmpfs < bind, "{args:?}");
+    }
 
     /// A reader's configuration reached through a link (the review of Issue 262): a program
     /// folder holding its real place is not given, and where a given folder holds it, it is
