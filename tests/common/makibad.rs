@@ -13,6 +13,10 @@
 //!   that the command itself sets the variable (an inherited value may be the person's own) and
 //!   panics with `MISSING` otherwise, so an `env_clear` or `env_remove` is caught.
 //!
+//! - The binary does not inherit `MAKIBA_MERGE_APPROVAL_MODE` from the test's process, which on a
+//!   machine that runs `makibad` holds the person's mode (Issue 637): `Makibad` removes it, and a
+//!   test that wants a mode sets it on the command (`env`, `envs`, `with`), which wins.
+//!
 //! The check lives here, in the tests; `makibad` resolves the folder as before.
 
 use makiba::base::Base;
@@ -32,6 +36,8 @@ folder of its own: start makibad through tests/common/makibad.rs (daemon, up, ru
 run_until; use_knowledge for a folder of the test's own)";
 
 const MAKIBA: &str = env!("CARGO_BIN_EXE_makiba");
+/// The merge approval mode's variable, which the binary does not inherit (Issue 637).
+const MODE_ENV: &str = makiba::daemon::gate::MODE_ENV;
 
 /// This process's knowledge folder, made and set once.
 static PROCESS: OnceLock<PathBuf> = OnceLock::new();
@@ -162,7 +168,9 @@ pub struct Makibad(Command);
 impl Makibad {
     fn new(root: &Path, verb: &str) -> Makibad {
         let mut c = Command::new(MAKIBA);
-        c.arg(verb).env(KNOWLEDGE_ENV, knowledge(root));
+        c.arg(verb)
+            .env(KNOWLEDGE_ENV, knowledge(root))
+            .env_remove(MODE_ENV);
         Makibad(c)
     }
 
