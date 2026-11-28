@@ -38,7 +38,7 @@ Give the task one worker with an exact scope. Write it in English:
 
 1. What to change, and why, in a few sentences.
 2. What not to touch. A change to an existing test, a file under `.github/`, a script, the merge gate, the acceptance checker, or the language check (`tools/language-allowlist.txt`, or `tools/check_language.py`, its scope) needs the person: the brief says the worker stops and asks before making one (Issue 339).
-3. How to check it: the repository's own tests and lint, and any test the task adds.
+3. How to check it: the repository's own tests and lint, and any test the task adds. For a Rust repository, the brief says the worker runs the suite with `cargo nextest run --locked --no-fail-fast` when `cargo nextest --version` works, and with `cargo test --locked --no-fail-fast` otherwise; nextest runs no doctests, so `cargo test --locked --doc` runs them beside it (Issue 642).
 4. How to report: `report` `done` with what changed, the commit, how it was checked and what was not done; `blocked` with one question when it cannot go on.
 5. The commit form the repository uses. Workers never push: you do (the pull-request skill).
 6. When the task is an Issue: give `issue`, and do not paste the Issue. `makibad` reads its title, body and comments at dispatch and puts them after your brief, as a snapshot; the worker cannot read GitHub. Add only what the Issue does not say (which comment overrides the body, what changed since it was written). When the answer's `issue_text` is `unreadable: ...`, send the worker the Issue's text word for word.
