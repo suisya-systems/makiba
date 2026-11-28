@@ -5722,11 +5722,9 @@ impl Door {
         }
         // Issue 592: an ask is answered by the person's signature of the approval text the entry
         // showed, which is the one the reading names; another text is a new reading.
+        // An entry that showed no approval or another one is refreshed first, so that the next
+        // `makiba merge approve` sees the text to sign; only then is a missing signature refused.
         let approval = merge_entry_approval(&j, pr, &head, id);
-        if j.ask && signature.is_none() {
-            let _ = w.rollback();
-            return fail(&w, Err(no_signature(id)));
-        }
         let other_text = j.ask && approval.as_deref() != c["approval"].as_str();
         if other_text || j.warnings.iter().any(|x| !shown_warnings.contains(x)) {
             // A warning the person was not shown: the entry takes the new reading, and the person
@@ -5770,6 +5768,10 @@ impl Door {
                     },
                 )),
             );
+        }
+        if j.ask && signature.is_none() {
+            let _ = w.rollback();
+            return fail(&w, Err(no_signature(id)));
         }
         let consumed = w.conn().execute(
             "UPDATE pending SET status = 'answered', answer = 'approved', answered_by = 'person',
