@@ -385,7 +385,8 @@ fn serve_until(
     if let Err(e) = prepare.sweep(&w) {
         eprintln!("makibad: the temporary folders of launches that are over: {e}");
     }
-    let launch = launch::Launch::new(dir, door_addr);
+    let launch =
+        launch::Launch::new(dir, door_addr).with_priority(launch::WorkerPriority::from_env());
     let mut curator = curator::Curator::from_env(dir);
     // `makiba up` asks for the secretary (Issue 43), read once, at start; renewals and relaunches
     // (Issue 46) run whatever it says.

@@ -33,6 +33,11 @@
 //! Every terminal carries the hash of its key in the `makiba.key` tag (Issue 131), so an adoption
 //! keeps that key and revokes every other key of the launch. A terminal without the tag (started
 //! before it existed) revokes none.
+//!
+//! A worker's launch carries the organization's priority for worker programs (Issue 626,
+//! `WorkerPriority`): `nice -n <n>` in front of its argv and `CARGO_BUILD_JOBS` in its `env`, so
+//! that parallel builds leave `makibad` its share of the machine. Its `worker_spawned` records the
+//! values as `priority`. No other role gets it.
 
 use crate::agents::{self, Agent, AgentLaunch, DoorAccess, Role};
 use crate::base::Terminal;
@@ -80,10 +85,98 @@ pub const RESUME_PROMPT: &str = "The organization was restarted. Go on with the 
 /// let go while it waited for the person, and what woke it is delivered as a message.
 pub const UNPARK_PROMPT: &str = "Your terminal was let go while you waited for the person, and you are back in this conversation. Read your messages: what brought you back is there. Then go on with the task.";
 
+/// Issue 626: the organization's priority for worker programs, read once when `makibad` starts.
+/// Each value is absent when its variable is unset, empty or not valid.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct WorkerPriority {
+    /// The nice level (1 to 19) and the absolute path of `nice`.
+    pub nice: Option<(u8, PathBuf)>,
+    /// `CARGO_BUILD_JOBS` in the launch's environment.
+    pub build_jobs: Option<u32>,
+}
+
+/// The nice level of worker programs, 1 to 19.
+pub const NICE_ENV: &str = "MAKIBA_WORKER_NICE";
+/// `CARGO_BUILD_JOBS` for worker programs, 1 or more.
+pub const BUILD_JOBS_ENV: &str = "MAKIBA_WORKER_BUILD_JOBS";
+
+impl WorkerPriority {
+    /// From this process's environment. A value that is not valid, or a `nice` that `PATH` does
+    /// not find, is not applied and is logged.
+    pub fn from_env() -> WorkerPriority {
+        let var = |name: &str| std::env::var(name).unwrap_or_default();
+        let nice = match parse_nice(&var(NICE_ENV)) {
+            Ok(Some(n)) => match agents::on_path("nice") {
+                Some(path) => Some((n, path)),
+                None => {
+                    eprintln!("makibad: {NICE_ENV}={n}, but PATH finds no nice; not applied");
+                    None
+                }
+            },
+            Ok(None) => None,
+            Err(v) => {
+                eprintln!("makibad: {NICE_ENV}={v:?} is not a nice level 1-19; not applied");
+                None
+            }
+        };
+        let build_jobs = match parse_jobs(&var(BUILD_JOBS_ENV)) {
+            Ok(j) => j,
+            Err(v) => {
+                eprintln!("makibad: {BUILD_JOBS_ENV}={v:?} is not a number of jobs; not applied");
+                None
+            }
+        };
+        WorkerPriority { nice, build_jobs }
+    }
+
+    /// What goes in front of a worker's argv.
+    fn prefix(&self) -> Vec<String> {
+        match &self.nice {
+            Some((n, path)) => vec![path.display().to_string(), "-n".into(), n.to_string()],
+            None => Vec::new(),
+        }
+    }
+
+    /// The `priority` of a worker's `worker_spawned`: `None` when nothing is applied.
+    fn payload(&self) -> Option<serde_json::Value> {
+        (self.nice.is_some() || self.build_jobs.is_some()).then(|| {
+            json!({
+                "nice": self.nice.as_ref().map(|(n, _)| n),
+                "build_jobs": self.build_jobs,
+            })
+        })
+    }
+}
+
+/// `Ok(None)` for an empty value, `Err` with the value for one that is not 1 to 19.
+fn parse_nice(v: &str) -> std::result::Result<Option<u8>, String> {
+    let t = v.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    match t.parse::<u8>() {
+        Ok(n) if (1..=19).contains(&n) => Ok(Some(n)),
+        _ => Err(v.to_string()),
+    }
+}
+
+/// `Ok(None)` for an empty value, `Err` with the value for one that is not a number above 0.
+fn parse_jobs(v: &str) -> std::result::Result<Option<u32>, String> {
+    let t = v.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    match t.parse::<u32>() {
+        Ok(n) if n > 0 => Ok(Some(n)),
+        _ => Err(v.to_string()),
+    }
+}
+
 pub struct Launch {
     org: String,
     settings: PathBuf,
     door: String,
+    priority: WorkerPriority,
     /// Launches this process started whose record is not written yet, by spawn id.
     pending: Mutex<BTreeMap<String, Pending>>,
 }
@@ -141,8 +234,15 @@ impl Launch {
             org: org.to_string_lossy().into_owned(),
             settings: state.join("settings"),
             door,
+            priority: WorkerPriority::default(),
             pending: Mutex::new(BTreeMap::new()),
         }
+    }
+
+    /// The priority every worker launch of this process carries (Issue 626).
+    pub fn with_priority(mut self, priority: WorkerPriority) -> Launch {
+        self.priority = priority;
+        self
     }
 
     /// One pass: launches every launch at `settings_ready`. Returns the task ids launched.
@@ -214,7 +314,10 @@ impl Launch {
             match outcome {
                 Outcome::Up => {
                     self.lock().insert(row.spawn.clone(), Pending::Up);
-                    if record(w, &row)? {
+                    let priority = (row.role == "worker")
+                        .then(|| self.priority.payload())
+                        .flatten();
+                    if record_with(w, &row, priority)? {
                         super::crash::point("launched");
                         self.lock().remove(&row.spawn);
                         launched.push(row.name());
@@ -261,7 +364,7 @@ impl Launch {
         let rules = agents::rules_path(role);
         // A first launch names its conversation (Issue 41); a resume names the stored one.
         let session = row.resume.is_none().then(|| agents::session_id(&row.spawn));
-        let argv = agent.argv_with_session(
+        let mut argv = agent.argv_with_session(
             &AgentLaunch {
                 role,
                 brief: Some(match prompt_of(row) {
@@ -327,6 +430,14 @@ impl Launch {
             let abs = |p: PathBuf| std::path::absolute(&p).unwrap_or(p).display().to_string();
             if let Some(door) = crate::cli::door_path().filter(|_| !crate::cli::door_off()) {
                 env.insert("MAKIBA_DOOR".to_string(), abs(door));
+            }
+        }
+        // A worker's program runs below makibad's priority (Issue 626): `nice` in front of the
+        // argv (the base puts its own `env -u` in front of both), and a bound on cargo's jobs.
+        if role == Role::Worker {
+            argv.splice(0..0, self.priority.prefix());
+            if let Some(j) = self.priority.build_jobs {
+                env.insert("CARGO_BUILD_JOBS".to_string(), j.to_string());
             }
         }
         // The launch's own temporary folder (Issue 243), when its preparation made one: a launch
@@ -486,9 +597,16 @@ pub fn add_relaunch(
     Ok(spawn)
 }
 
-/// `worker_spawned` and stage `launched`, together, only over `settings_ready` (Issue 163):
-/// `false`, and nothing written, when the launch was moved meanwhile.
+/// `record_with` and no priority.
+#[cfg(test)]
 fn record(w: &StateWriter, row: &Row) -> Result<bool> {
+    record_with(w, row, None)
+}
+
+/// `worker_spawned` and stage `launched`, together, only over `settings_ready` (Issue 163):
+/// `false`, and nothing written, when the launch was moved meanwhile. `priority`, when given, is
+/// the payload's `priority` (Issue 626).
+fn record_with(w: &StateWriter, row: &Row, priority: Option<serde_json::Value>) -> Result<bool> {
     super::crash::hold("launched");
     w.transaction(|w| {
         let n = w.conn().execute(
@@ -498,14 +616,18 @@ fn record(w: &StateWriter, row: &Row) -> Result<bool> {
         if n == 0 {
             return Ok(false);
         }
+        let mut payload = json!({
+            "task_id": row.task,
+            "spawn_id": row.spawn,
+            "prompt": prompt_of(row),
+        });
+        if let Some(p) = &priority {
+            payload["priority"] = p.clone();
+        }
         w.append_event(&NewEvent {
             kind: "worker_spawned",
             actor: Some("makibad"),
-            payload: Some(&json!({
-                "task_id": row.task,
-                "spawn_id": row.spawn,
-                "prompt": prompt_of(row),
-            })),
+            payload: Some(&payload),
             run_task_id: row.task.as_deref(),
             ..Default::default()
         })?;
@@ -819,5 +941,46 @@ mod tests {
         assert_eq!(stage, "failed");
         assert!(why.contains("nope"), "{why}");
         assert!(revoked(&w).is_empty());
+    }
+
+    /// Issue 626: the setting's values, and what is not one.
+    #[test]
+    fn the_worker_priority_reads_its_values_and_refuses_the_rest() {
+        assert_eq!(parse_nice(""), Ok(None));
+        assert_eq!(parse_nice(" 10 "), Ok(Some(10)));
+        assert_eq!(parse_nice("19"), Ok(Some(19)));
+        for bad in ["0", "20", "-5", "ten", "300"] {
+            assert_eq!(parse_nice(bad), Err(bad.to_string()), "{bad}");
+        }
+        assert_eq!(parse_jobs(""), Ok(None));
+        assert_eq!(parse_jobs("2"), Ok(Some(2)));
+        for bad in ["0", "-1", "two"] {
+            assert_eq!(parse_jobs(bad), Err(bad.to_string()), "{bad}");
+        }
+        assert_eq!(WorkerPriority::default().payload(), None);
+    }
+
+    /// Issue 626: a worker's launch carries nice and the jobs; the secretary's does not.
+    #[test]
+    fn only_a_worker_launch_carries_the_priority() {
+        let (dir, _w, row) = org();
+        let l = Launch::new(dir.path(), "127.0.0.1:1".into()).with_priority(WorkerPriority {
+            nice: Some((10, PathBuf::from("/usr/bin/nice"))),
+            build_jobs: Some(2),
+        });
+        let agent = agents::by_name("fake").unwrap();
+        let worker = l.spec(&row, Role::Worker, &*agent, "k".into());
+        assert_eq!(worker.argv[..3], ["/usr/bin/nice", "-n", "10"]);
+        assert_eq!(
+            worker.env.get("CARGO_BUILD_JOBS").map(String::as_str),
+            Some("2")
+        );
+        let secretary = l.spec(&row, Role::Secretary, &*agent, "k".into());
+        assert!(!secretary.argv.iter().any(|a| a == "/usr/bin/nice"));
+        assert!(!secretary.env.contains_key("CARGO_BUILD_JOBS"));
+        assert_eq!(
+            l.priority.payload(),
+            Some(json!({"nice": 10, "build_jobs": 2}))
+        );
     }
 }
