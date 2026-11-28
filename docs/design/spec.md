@@ -738,6 +738,7 @@ New:
 | --- | --- | --- |
 | `dispatcher_started` / `dispatcher_stopped` | `makibad` starts, stops cleanly | `pid`, `base`, `base_version`, `merge_approval_mode` (`makibad`'s, Issue 383), `base_session` (the base session `makibad` connects to, Issue 411) |
 | `dispatcher_stop_unrecorded` | `makibad` starts and the dispatcher row is of a `makibad` that stopped without recording it: no `dispatcher_stopped` of its pid at or after its `started_at`. Written in the transaction that overwrites the row, so its last heartbeat is kept (Issue 563) | `pid`, `started_at`, `heartbeat_at` (of that row) |
+| `tick_slow` | A tick of `makibad`'s loop took 5 s (`SLOW_TICK`) or longer; `makibad.log` gets one line naming its slowest pass (Issue 624) | `total_ms`, `slowest` (`pass`, `ms`), `passes` (each `pass`, `ms`: the passes of 1 s or longer, in the order they ran) |
 | `base_resynced` | A `Resync` was handled | `reason`, `terminals`, `restart` |
 | `terminal_status` | A terminal's status record changes | `task_id`, `role`, `spawn_id`, `state`, `kind`, `msg` |
 | `terminal_turn` | The base reports a turn end | `task_id`, `role`, `spawn_id`, `turn` |
