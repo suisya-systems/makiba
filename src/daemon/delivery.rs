@@ -573,6 +573,9 @@ pub fn send_typed(
     match base.send(&t.id, &wrap(id, sender, kind, body), only_if_idle) {
         Ok(()) => {
             w.confirm_push(event, recipient).map_err(|e| failed(&e))?;
+            // Typed and taken: a run in review is sent back to work (Issue 654). A refusal below
+            // deletes the message and moves nothing.
+            super::door::sent_back(w, recipient).map_err(|e| failed(&e))?;
             Ok(id)
         }
         // The base refused: nothing was typed, so nothing stays stored.

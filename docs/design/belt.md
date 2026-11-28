@@ -103,6 +103,8 @@ A slot is free when both of these are below their limit:
 
 A run that comes back (answered, unparked, sent back to rework) counts again at once, even above the limit; nothing new goes in until the count is below it.
 
+A run reworking its pull request counts in both counts (Issue 654). A run in `review` counts while its fix is due (`belt::FIX_DUE`): from a done report until its first push that succeeded (`branch_pushed`), and from the push of its test commit alone (`push` with `head`) until its next done report. A message to its worker (a `send`, an `answer`, typed or not) moves a run in `review` to `in_use`, as `report start` does, so it counts until its next `done`; a `blocked` report leaves it `in_use`. A run in `review` after the done report of its fix (waiting for its push, CI or its landing) counts in neither.
+
 ### 3.3 Reading the candidates
 
 The triage pass cannot serve the clock as it is (review): it scans only after a close, at most every 30 minutes, keeps the top 3 before any range is applied, and keeps no Issue text. So the range has its own read: on `propose` (for the draft, so that the approval shows what it would admit), on approval, on `resume`, after each close of a range task, and every 10 minutes while the range is active (a first proposal), `makibad` reads the project's open Issues whole (body, comments, labels, milestone) and the open pull requests with the Issues they close, outside any transaction. It applies the range to every Issue before any cut, looks up the state of each dependency not in the read, and writes `range_candidates` and a `range_read` event in one transaction. A read that fails keeps the previous one and is said in the log; only a complete read can end a range `used_up`.
@@ -115,9 +117,9 @@ The triage pass cannot serve the clock as it is (review): it scans only after a 
 | --- | --- | --- |
 | The person approves a range | Writes the secretary a notice of the approval in its transaction (Issue 612: the range, the range it replaced and ended, `at_once`, the mode, and that a read follows). Reads, then dispatches next candidates until no slot is free (each `belt_dispatched`). A dispatch writes no notice: the secretary hears of each task from its worker's `report start`, and of a failed launch from its notice. | Tells the person what went in: its input is that notice and the workers' reports. |
 | A slot is free (any cause below) | In the transaction of the event that freed it: dispatches the next candidate from the newest read. With none: ends it `used_up` when 2.4 allows. | Nothing. |
-| A worker reports `done` | Run to `review` (as today); it stops counting. Slot free. | Push, pull request, `pr` (skill `pull-request`). |
+| A worker reports `done` | Run to `review` (as today). It stops counting unless its fix is due (3.2: nothing pushed yet, or its test commit pushed alone since its last done); slot free when it stops. | Push, pull request, `pr` (skill `pull-request`). |
 | CI failed | Nothing new. | Sends the worker back. |
-| The worker starts the rework | `report start` from a worker at `review` moves its run to `in_use` (new, review): it counts again. | Nothing. |
+| The worker is sent back or starts the rework | A message to the worker of a run at `review`, or its `report start`, moves the run to `in_use` (Issue 654): it counts again. | Nothing. |
 | A new head is recorded (`pr pushed`) | At the `budget_fixes`-th fix after the first head: a stop of the task, line budget (section 5). A clean merge of the base is no fix. | - |
 | CI passed | Nothing new. | Merges under the mode and the stop lines, or puts the stop to the person. |
 | The gate refuses | A stop of the task, line gate (section 5). | Tells the person, with the link. |

@@ -110,6 +110,28 @@ pub const WAITING: &str = concat!(
                           WHERE lu.run_id = r.id AND lu.kind = 'run_unparked'), 0))))"
 );
 
+/// A run `r` in `review` whose fix is due (Issue 654): it counts in both counts. Its newest
+/// recorded head (a push that succeeded, `branch_pushed`, or a head recorded with `pr`,
+/// `pr_opened` / `fix_pushed`) is none while it has a done report, or is its test commit pushed
+/// alone (a `push` with that `head`, Issue 307) and newer than its newest done report. So a run
+/// counts from a done report until its first head, and from the push of its test commit alone
+/// until its next done report; after the fix's done it waits for its push and CI, and does not
+/// count. The done report is read from its message, which `report` writes before the belt fills.
+pub const FIX_DUE: &str = "(r.status = 'review' AND (
+    (NOT EXISTS (SELECT 1 FROM events fp WHERE fp.run_id = r.id
+                 AND fp.kind IN ('branch_pushed', 'pr_opened', 'fix_pushed'))
+     AND EXISTS (SELECT 1 FROM messages fm WHERE fm.run_id = r.id AND fm.kind = 'report_done'))
+    OR EXISTS (SELECT 1 FROM events fp WHERE fp.id = (
+                   SELECT max(fq.id) FROM events fq WHERE fq.run_id = r.id
+                   AND fq.kind IN ('branch_pushed', 'pr_opened', 'fix_pushed'))
+               AND fp.id > coalesce((SELECT max(fm.event_id) FROM messages fm
+                                     WHERE fm.run_id = r.id AND fm.kind = 'report_done'), 0)
+               AND EXISTS (SELECT 1 FROM commands fc WHERE fc.verb = 'push'
+                           AND json_extract(fc.args_json, '$.task') = r.task_id
+                           AND json_extract(fc.args_json, '$.head')
+                               = coalesce(json_extract(fp.payload_json, '$.head'),
+                                          json_extract(fp.payload_json, '$.head_oid'))))))";
+
 /// `chain`: the range `?1` and every range it replaced (each `ended` `replaced`). Their runs stay
 /// theirs (where a run came from), and count for the range that replaced them.
 const CHAIN: &str = "WITH RECURSIVE chain(id) AS (
@@ -1427,9 +1449,10 @@ fn range_count(w: &StateWriter, id: i64) -> Result<i64> {
 }
 
 /// A run `r` of a range that counts against its `at_once` (`range_count`, and `belt[].counts` of
-/// the read surface): queued, at work or suspended, and not waiting (`WAITING`).
+/// the read surface): queued, at work or suspended, or in review with its fix due (`FIX_DUE`),
+/// and not waiting (`WAITING`).
 fn counts_sql() -> String {
-    format!("(r.status IN ('queued', 'in_use', 'suspended') AND NOT {WAITING})")
+    format!("((r.status IN ('queued', 'in_use', 'suspended') OR {FIX_DUE}) AND NOT {WAITING})")
 }
 
 /// The runs of the range and its chain not closed.

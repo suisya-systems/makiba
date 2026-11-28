@@ -1903,6 +1903,7 @@ fn message_row(
         if let Some(task) = super::park::parked_worker(w, recipient)? {
             super::park::unpark(w, &task, "message", json!({"from": sender, "kind": kind}))?;
         }
+        sent_back(w, recipient)?;
         let event = w.append_event(&NewEvent {
             kind: "message_sent",
             actor: Some(sender),
@@ -2037,7 +2038,8 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
             .map_err(internal)?;
         }
     }
-    // A worker that starts again from review (rework) is at work again, and counts again.
+    // A worker that starts again from review (rework) is at work again, and counts again; so is
+    // one sent a message while in review (`sent_back`, Issue 654).
     if state == "start" {
         w.conn()
             .execute(
@@ -2047,6 +2049,20 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
             .map_err(internal)?;
     }
     Ok(json!({"id": id}))
+}
+
+/// A message to the worker `recipient` of a run in `review` sends it back to work (Issue 654):
+/// every message starts a turn of the worker that ends in a report, so the run is `in_use`, as
+/// after a rework `start`, and counts again until its next `done`. Called where a message to a
+/// worker is stored (`store_message`) or once a typed one is confirmed (`delivery::send_typed`).
+pub(super) fn sent_back(w: &StateWriter, recipient: &str) -> crate::db::Result<()> {
+    if let Some(task) = recipient.strip_prefix(crate::spec::WORKER_AGENT_PREFIX) {
+        w.conn().execute(
+            "UPDATE runs SET status = 'in_use' WHERE task_id = ?1 AND status = 'review'",
+            [task],
+        )?;
+    }
+    Ok(())
 }
 
 /// `close` (spec section 12), the gate of Issue 36: refused without a `report_done` unless
