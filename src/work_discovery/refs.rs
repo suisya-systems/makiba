@@ -280,12 +280,12 @@ pub fn unparsed_dependency_line(text: &str) -> Option<String> {
 
 // The one form a dependency is written in (Issue 356), read on a line with its emphasis and code
 // marks taken out: an optional quote, heading, list marker and task box, one keyword, an optional
-// colon, a run of `#N` or `owner/repo#N` joined by `,`, `and` or `&`, an optional final `.`, and
-// nothing else.
+// colon, a run of `#N` or `owner/repo#N` joined by `,`, `and`, `&` or whitespace alone (the form
+// the issue skill writes, `Depends on #N #M`; Issue 646), an optional final `.`, and nothing else.
 re!(
     STRICT_FORM,
     format!(
-        r"(?i)^\s*(?:>\s*)*(?:#{{1,6}}\s+|[-+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?(?:blocked\s+by|depends\s+on|requires)\s*:?\s*(?P<run>{r}(?:\s*,\s*(?:and\s+)?{r}|\s+and\s+{r}|\s*&\s*{r})*)\s*\.?\s*$",
+        r"(?i)^\s*(?:>\s*)*(?:#{{1,6}}\s+|[-+]\s+|\d+[.)]\s+)?(?:\[[ xX]\]\s*)?(?:blocked\s+by|depends\s+on|requires)\s*:?\s*(?P<run>{r}(?:\s*,\s*(?:and\s+)?{r}|\s+and\s+{r}|\s*&\s*{r}|\s+{r})*)\s*\.?\s*$",
         r = format!(r"(?:{OWNER_REPO})?#\d+")
     )
 );
