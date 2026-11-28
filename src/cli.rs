@@ -125,6 +125,56 @@ pub fn approval_signer_line(path: &Path) -> Result<String, String> {
     ))
 }
 
+/// The armored signature of `text` by the approval key at `key` (Issue 592): `ssh-keygen -Y sign`
+/// in the namespace `makiba-acceptance-approval`, the text on standard input. It runs in the
+/// person's own process; only the signature leaves it.
+pub fn sign_approval(key: &Path, text: &str) -> Result<String, String> {
+    use std::io::Write as _;
+    let mut child = std::process::Command::new("ssh-keygen")
+        .args(["-Y", "sign", "-n", APPROVAL_NAMESPACE, "-f"])
+        .arg(key)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
+    let written = child.stdin.take().map(|mut i| i.write_all(text.as_bytes()));
+    let out = child
+        .wait_with_output()
+        .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
+    if !out.status.success() || !matches!(written, Some(Ok(()))) {
+        return Err(format!(
+            "ssh-keygen cannot sign with {}: {}",
+            key.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    String::from_utf8(out.stdout).map_err(|_| "ssh-keygen printed no text signature".into())
+}
+
+/// The person's signature of the acceptance approval the merge entry `id` asks for, when it asks
+/// one (Issue 592): the text must be one `printed` shows, and the approval key signs it.
+fn merge_signature(id: i64, printed: &str) -> Result<Option<String>, String> {
+    let Some(text) = crate::status_local::merge_approval_here(id)? else {
+        return Ok(None);
+    };
+    if !printed.contains(&text) {
+        return Err(format!(
+            "pending merge entry {id} asks to sign an approval its printed text does not show; nothing approved"
+        ));
+    }
+    let key = approval_key_path();
+    if !key.exists() {
+        return Err(format!(
+            "no approval key at {}: makiba up makes it; nothing approved",
+            key.display()
+        ));
+    }
+    sign_approval(&key, &text)
+        .map(Some)
+        .map_err(|e| format!("{e}; nothing approved"))
+}
+
 /// `makiba approval-key`: the approval key's line for `.github/acceptance-approvers`, read from
 /// the key; it makes, changes and removes nothing.
 pub fn approval_key_main() -> ExitCode {
@@ -980,14 +1030,14 @@ fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> 
 /// read from `state.db`, and `makibad`'s mode beside it, and ask on the terminal unless `yes`. The
 /// SHA-256 of the text printed goes with the approval, so an entry changed since is refused
 /// (`stale`) instead of approved unseen.
-fn merge_preview(id: i64, yes: bool) -> Result<String, String> {
+fn merge_preview(id: i64, yes: bool) -> Result<(String, String), String> {
     let (text, shown) = crate::status_local::merge_entry_here(id)?;
     print!("{text}");
     let status = crate::status_local::read_here()?;
     let mode = status["merge_approval_mode"].as_str().unwrap_or("unknown");
     println!("Merge approval mode: {mode} (makibad's)");
     if yes {
-        return Ok(shown);
+        return Ok((text, shown));
     }
     print!("Approve the merge of entry {id}? [y/N] ");
     let _ = std::io::stdout().flush();
@@ -996,7 +1046,7 @@ fn merge_preview(id: i64, yes: bool) -> Result<String, String> {
         .read_line(&mut answer)
         .map_err(|e| format!("cannot read the answer: {e}"))?;
     if answer.trim().eq_ignore_ascii_case("y") {
-        Ok(shown)
+        Ok((text, shown))
     } else {
         Err("not approved".into())
     }
@@ -1030,8 +1080,15 @@ pub fn main(c: Command) -> ExitCode {
         }
     };
     if let Some((id, yes)) = merge_preview_of {
-        match merge_preview(id, yes) {
-            Ok(shown) => request["shown"] = shown.into(),
+        match merge_preview(id, yes).and_then(|(text, shown)| {
+            merge_signature(id, &text).map(|signature| (shown, signature))
+        }) {
+            Ok((shown, signature)) => {
+                request["shown"] = shown.into();
+                if let Some(s) = signature {
+                    request["signature"] = s.into();
+                }
+            }
             Err(e) => {
                 eprintln!("makiba: {e}");
                 return exit(ErrorKind::Conflict.exit_code());

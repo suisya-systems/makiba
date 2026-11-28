@@ -1112,6 +1112,13 @@ pub struct Verdict {
     /// (`evaluate_failed`), each record `changed <path>` or `ignored <path> <n>`, sorted bytewise;
     /// empty on every other path.
     pub acceptance_failures: Vec<String>,
+    /// Issue 592: the `acceptance_approved` event and its pending entry a head is judged on
+    /// (`evaluate_approved`): the landing on the person's signed approval of
+    /// `acceptance_failures`; `None` on every other path.
+    pub approved_in: Option<(i64, i64)>,
+    /// `owner/name` as GitHub spells it in the pull request's url (`github_repo_of`), which the
+    /// approval text names; `None` when the url does not name the pull request.
+    pub github_repo: Option<String>,
 }
 
 /// A path the gate names for the person's key, with the object ids it was judged from, in the
@@ -1888,11 +1895,34 @@ pub fn evaluate_failed(
         set = Some(records);
     }
     let set = set.unwrap_or_default();
-    let touched = changed_by(repo, &msha)?;
-    let mtree = tree(repo, &msha)?;
+    let held = approvable_held(repo, &msha, base, head, &manifest, &set)?;
+    v.merged_tests = check_protected_held(repo, &msha, base, head, &manifest, &held)?;
+    v.result = "passed".into();
+    v.reason = format!(
+        "the repository's acceptance check {check:?} ({REPO_CHECK} at base) failed at head {h12} by construction ({} approvable record(s)); condition (b) is not judged on this path",
+        set.len()
+    );
+    v.acceptance_failures = set;
+    Ok(())
+}
+
+/// Each record of `set` checked by section 5 of docs/design/acceptance-approval.md as git shows
+/// it (the test commit `msha` and its declared paths `manifest`), and the checker's own change
+/// named by a record: the paths of the `changed` records, whose condition (a) refusals are held
+/// back. Shared by `evaluate_failed` and `evaluate_approved`.
+fn approvable_held(
+    repo: &Path,
+    msha: &str,
+    base: &str,
+    head: &str,
+    manifest: &[String],
+    set: &[String],
+) -> Result<BTreeSet<String>, Reject> {
+    let touched = changed_by(repo, msha)?;
+    let mtree = tree(repo, msha)?;
     let declared = |p: &str| manifest.iter().any(|m| under(p, m));
     let mut held = BTreeSet::new();
-    for record in &set {
+    for record in set {
         let words: Vec<&str> = record.split(' ').collect();
         let ok = match words.as_slice() {
             ["changed", p] => {
@@ -1915,19 +1945,107 @@ pub fn evaluate_failed(
             held.insert(p.to_string());
         }
     }
-    if !held.contains(CHECKER_PATH) && own_change(repo, &msha, base, head, CHECKER_PATH)? {
+    if !held.contains(CHECKER_PATH) && own_change(repo, msha, base, head, CHECKER_PATH)? {
         return reject(format!(
             "{CHECKER_PATH} changed after the test commit, but the acceptance job's log names no record of it"
         ));
     }
+    Ok(held)
+}
+
+/// The gate for a head with a passed CI on which the person signed an acceptance approval (Issue
+/// 592, docs/design/acceptance-approval.md 4.4 (3)): the approval `approved` (its
+/// `acceptance_approved` event and pending entry) of the failure set `set`, the newest of the head.
+/// It allows only by condition (b)'s first route (the base names the check, and every run of it
+/// at head succeeded; the fallback of (b) is not tried), with nothing under `.github/` differing
+/// from the base, every record of the set valid again by section 5, and condition (a)'s refusals
+/// held back for exactly the set's `changed` paths. The door then lets the request land on that
+/// one approval, or asks the person again.
+#[allow(clippy::too_many_arguments)]
+pub fn evaluate_approved(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    slug: &str,
+    pin: Option<&Pin>,
+    ci: &mut Ci,
+    set: &[String],
+    approved: (i64, i64),
+    v: &mut Verdict,
+) -> Result<(), Reject> {
+    let Some((msha, manifest)) = manifest_of(repo, base, head, pin, v)? else {
+        return reject(format!(
+            "the head the person approved has no test commit ({TRAILER}) any more: the owner's lift"
+        ));
+    };
+    check_first(repo, &msha, base, head)?;
+    let Some(check) = repo_check(repo, base)? else {
+        return reject(format!(
+            "the base names no acceptance check ({REPO_CHECK}), so the approved head cannot land on it"
+        ));
+    };
+    let h12 = &head[..head.len().min(12)];
+    let github = |sha: &str| -> Result<Tree, Reject> {
+        Ok(tree(repo, sha)?
+            .into_iter()
+            .filter(|(p, _)| under(p, ".github"))
+            .collect())
+    };
+    if github(base)? != github(head)? {
+        return reject(format!(
+            "a path under .github/ differs between the base and head {h12}: a head landing on an acceptance approval is judged only with .github/ as the base holds it: the owner's lift"
+        ));
+    }
+    let held = approvable_held(repo, &msha, base, head, &manifest, set)?;
     v.merged_tests = check_protected_held(repo, &msha, base, head, &manifest, &held)?;
+    let at_head: Vec<String> = ci
+        .check_runs(slug, head)?
+        .into_iter()
+        .filter(|(k, _)| k.1 == check)
+        .map(|(_, c)| c)
+        .collect();
+    if at_head.is_empty() || at_head.iter().any(|c| c != "success") {
+        return reject(format!(
+            "the repository's acceptance check {check:?} did not succeed at head {h12} ({at_head:?}): a head landing on an acceptance approval needs that check itself to pass (rerun it once the approval comment is posted)"
+        ));
+    }
     v.result = "passed".into();
     v.reason = format!(
-        "the repository's acceptance check {check:?} ({REPO_CHECK} at base) failed at head {h12} by construction ({} approvable record(s)); condition (b) is not judged on this path",
-        set.len()
+        "the repository's acceptance check {check:?} ({REPO_CHECK} at base) succeeded at head {h12} on the person's acceptance approval in pending {}",
+        approved.1
     );
-    v.acceptance_failures = set;
+    v.acceptance_failures = set.to_vec();
+    v.approved_in = Some(approved);
     Ok(())
+}
+
+/// The SHA-256 of a failure set as the approval names it (4.2): its records joined by `\n` with a
+/// final `\n`.
+pub fn failures_digest(set: &[String]) -> String {
+    let joined: String = set.iter().map(|r| format!("{r}\n")).collect();
+    Sha256::digest(joined.as_bytes())
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
+}
+
+/// The approval text the person signs (docs/design/acceptance-approval.md 4.2), byte for byte as
+/// the acceptance checker rebuilds it: `repo` is GitHub's own spelling of `owner/name`.
+pub fn approval_text(repo: &str, pr: i64, head: &str, set: &[String], pending: i64) -> String {
+    let records: String = set.iter().map(|r| format!("{r}\n")).collect();
+    format!(
+        "makiba-acceptance-approval v1\nrepo {repo}\npr {pr}\nhead {head}\nfailures {}\npending {pending}\n{records}",
+        failures_digest(set)
+    )
+}
+
+/// `owner/name` as GitHub spells it in a pull request's url
+/// (`https://github.com/<owner>/<name>/pull/<n>`), when it names `repo` (in any case) and `pr`.
+pub fn github_repo_of(url: &str, repo: &str, pr: i64) -> Option<String> {
+    let rest = url.strip_prefix("https://github.com/")?;
+    let (named, n) = rest.rsplit_once("/pull/")?;
+    (n == pr.to_string() && named.split('/').count() == 2 && named.eq_ignore_ascii_case(repo))
+        .then(|| named.to_string())
 }
 
 // ---- the PR ------------------------------------------------------------------------------------
