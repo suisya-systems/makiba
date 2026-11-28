@@ -24,6 +24,8 @@ struct Inner {
     subscribers: Vec<Sender<BaseEvent>>,
     /// `send` types the text, then fails as a timeout would (`fail_sends_after_typing`).
     fail_after_typing: bool,
+    /// `send` types nothing and refuses as a terminal blocked on a prompt (`refuse_sends`).
+    refuse: bool,
 }
 
 impl Inner {
@@ -127,6 +129,12 @@ impl Stub {
     /// timed out after the text was taken: the outcome is not known to the caller.
     pub fn fail_sends_after_typing(&self) {
         self.lock().fail_after_typing = true;
+    }
+
+    /// Whether `send` refuses, typing nothing, as a terminal that blocked on a prompt between the
+    /// caller's read of its state and the send: a refusal that comes after the caller's checks.
+    pub fn refuse_sends(&self, on: bool) {
+        self.lock().refuse = on;
     }
 
     /// Script a change of state, as the program in the terminal would report it.
@@ -265,6 +273,7 @@ impl Base for Stub {
 
     fn send(&self, t: &TerminalRef, text: &str, only_if_idle: bool) -> Result<(), BaseError> {
         let mut inner = self.lock();
+        let refuse = inner.refuse;
         let e = inner.entry(t)?;
         if !e.terminal.alive {
             return Err(error(
@@ -275,7 +284,7 @@ impl Base for Stub {
         }
         let state = e.terminal.status.as_ref().map(|s| s.state);
         // As hc: a blocked terminal takes no text, whatever the caller asked.
-        if state == Some(State::Blocked) {
+        if state == Some(State::Blocked) || refuse {
             return Err(error(
                 BaseError::Blocked,
                 "blocked",

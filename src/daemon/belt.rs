@@ -114,7 +114,8 @@ pub const WAITING: &str = concat!(
 /// (its newest launch `code`): a document run pushes nothing. Either it has a done report and no
 /// head recorded at all (no `branch_pushed`, no `pr_opened` / `fix_pushed`), or its newest
 /// `branch_pushed` (a push that succeeded) is of its test commit alone (`test_commit`, read by
-/// push.rs; or a `push` with that `head`, Issue 307) and newer than its newest done report. So a
+/// push.rs; for an event written before that field, a `push` with that `head` that was done, Issue
+/// 307) and newer than its newest done report. So a
 /// run counts from a done report until its first head, and from the push of its test commit
 /// alone until its next done report; after the fix's done it waits for its push and CI, and does
 /// not count, whatever head `pr` records later. The done report is read from its message, which
@@ -132,7 +133,9 @@ pub const FIX_DUE: &str = "(r.status = 'review'
                AND fp.id > coalesce((SELECT max(fm.event_id) FROM messages fm
                                      WHERE fm.run_id = r.id AND fm.kind = 'report_done'), 0)
                AND (json_extract(fp.payload_json, '$.test_commit') = 1
-                    OR EXISTS (SELECT 1 FROM commands fc WHERE fc.verb = 'push'
+                    OR json_type(fp.payload_json, '$.test_commit') IS NULL
+                    AND EXISTS (SELECT 1 FROM commands fc WHERE fc.verb = 'push'
+                               AND fc.status = 'done'
                                AND json_extract(fc.args_json, '$.task') = r.task_id
                                AND json_extract(fc.args_json, '$.head')
                                    = json_extract(fp.payload_json, '$.head'))))))";
@@ -4338,9 +4341,21 @@ pub(in crate::daemon) mod tests {
         )
         .unwrap();
         assert!(!due("c"), "a pr record is no push");
-        // The fix pushed: the whole branch, no test commit.
+        // The fix pushed: the whole branch, no test commit. A `push` that named the fix as its
+        // `head` failed first (push.rs refuses a head that is not the test commit): it does not
+        // make the fix a test commit.
+        w.conn()
+            .execute(
+                "INSERT INTO commands (actor, verb, args_json, status)
+                 VALUES ('secretary', 'push', json_object('task', 'c', 'head', ?1), 'failed')",
+                [&f],
+            )
+            .unwrap();
         pushed("c", &f, false);
-        assert!(!due("c"));
+        assert!(
+            !due("c"),
+            "the fix pushed after a failed push with its head"
+        );
 
         // A document run done: nothing to push, never due.
         run_of(&w, id, "d");

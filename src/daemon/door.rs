@@ -2054,11 +2054,26 @@ fn report(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
 /// A message to the worker `recipient` of a run in `review` sends it back to work (Issue 654):
 /// every message starts a turn of the worker that ends in a report, so the run is `in_use`, as
 /// after a rework `start`, and counts again until its next `done`. Called where a message to a
-/// worker is stored (`store_message`) or once a typed one is confirmed (`delivery::send_typed`).
-pub(super) fn sent_back(w: &StateWriter, recipient: &str) -> crate::db::Result<()> {
+/// worker is stored: `store_message`, and the transaction of `delivery::send_typed` that records
+/// a typed one before it is typed (undone with `not_sent_back` when the base refuses it). Whether
+/// the run moved.
+pub(super) fn sent_back(w: &StateWriter, recipient: &str) -> crate::db::Result<bool> {
+    let Some(task) = recipient.strip_prefix(crate::spec::WORKER_AGENT_PREFIX) else {
+        return Ok(false);
+    };
+    let n = w.conn().execute(
+        "UPDATE runs SET status = 'in_use' WHERE task_id = ?1 AND status = 'review'",
+        [task],
+    )?;
+    Ok(n == 1)
+}
+
+/// The undoing of a `sent_back` that moved the run, for a typed message the base refused (nothing
+/// was typed): the run is in review again, unless it has moved on since.
+pub(super) fn not_sent_back(w: &StateWriter, recipient: &str) -> crate::db::Result<()> {
     if let Some(task) = recipient.strip_prefix(crate::spec::WORKER_AGENT_PREFIX) {
         w.conn().execute(
-            "UPDATE runs SET status = 'in_use' WHERE task_id = ?1 AND status = 'review'",
+            "UPDATE runs SET status = 'review' WHERE task_id = ?1 AND status = 'in_use'",
             [task],
         )?;
     }

@@ -564,18 +564,18 @@ pub fn send_typed(
                  VALUES (?1, ?2, 'pending', 1, strftime('%Y-%m-%dT%H:%M:%fZ','now'), strftime('%Y-%m-%dT%H:%M:%fZ','now'))",
                 params![event, recipient],
             )?;
-            Ok(Some((id, event)))
+            // A run in review is sent back to work with the record (Issue 654), so a crash after
+            // the text is typed cannot leave its rework uncounted; a refusal below undoes it.
+            let moved = super::door::sent_back(w, recipient)?;
+            Ok(Some((id, event, moved)))
         })
         .map_err(|e| failed(&e))?;
-    let Some((id, event)) = recorded else {
+    let Some((id, event, moved)) = recorded else {
         return Err(TypedError::Parked);
     };
     match base.send(&t.id, &wrap(id, sender, kind, body), only_if_idle) {
         Ok(()) => {
             w.confirm_push(event, recipient).map_err(|e| failed(&e))?;
-            // Typed and taken: a run in review is sent back to work (Issue 654). A refusal below
-            // deletes the message and moves nothing; an unknown outcome moves it.
-            super::door::sent_back(w, recipient).map_err(|e| failed(&e))?;
             Ok(id)
         }
         // The base refused: nothing was typed, so nothing stays stored.
@@ -585,20 +585,23 @@ pub fn send_typed(
             | BaseError::Finished(_)
             | BaseError::NotFound(_)),
         ) => {
-            w.conn()
-                .execute("DELETE FROM events WHERE id = ?1", [event])
-                .map_err(|e| failed(&e))?;
+            w.transaction(|w| {
+                w.conn()
+                    .execute("DELETE FROM events WHERE id = ?1", [event])?;
+                if moved {
+                    super::door::not_sent_back(w, recipient)?;
+                }
+                Ok(())
+            })
+            .map_err(|e| failed(&e))?;
             Err(TypedError::Conflict(e.to_string()))
         }
         // A timeout or the like: it may have been typed. Kept `pending`, never sent again. A run
-        // in review is sent back to work all the same (Issue 654): a worker that took the text is
-        // at work, and one that did not is counted until its next report, never too few.
-        Err(e) => {
-            super::door::sent_back(w, recipient).map_err(|e| failed(&e))?;
-            Err(TypedError::Failed(format!(
-                "message {id}: the outcome of the send is not known: {e}"
-            )))
-        }
+        // in review stays sent back to work (Issue 654): a worker that took the text is at work,
+        // and one that did not is counted until its next report, never too few.
+        Err(e) => Err(TypedError::Failed(format!(
+            "message {id}: the outcome of the send is not known: {e}"
+        ))),
     }
 }
 
@@ -798,10 +801,25 @@ mod tests {
         // Taken.
         send_typed(&w, &base, "secretary", "w-a", "message", "Write the fix.").unwrap();
         assert_eq!(status("a"), "in_use");
-        // Refused: the terminal is blocked on a prompt.
-        base.set_state(&terminals[1], State::Blocked);
-        assert!(send_typed(&w, &base, "secretary", "w-b", "message", "x").is_err());
+        // Refused after the record (the run moved with it): the terminal blocked on a prompt
+        // before the text went in, so the base types nothing. The move is undone with the message.
+        base.refuse_sends(true);
+        let r = send_typed(&w, &base, "secretary", "w-b", "message", "x");
+        assert!(
+            matches!(&r, Err(TypedError::Conflict(m)) if m.contains("blocked on a prompt")),
+            "{r:?}"
+        );
+        base.refuse_sends(false);
         assert_eq!(status("b"), "review");
+        let kept: i64 = w
+            .conn()
+            .query_row(
+                "SELECT count(*) FROM messages WHERE recipient = 'w-b'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(kept, 0, "nothing stays stored");
         // Not known: typed, then the answer timed out.
         base.fail_sends_after_typing();
         let r = send_typed(&w, &base, "secretary", "w-c", "message", "Write the fix.");
