@@ -21,6 +21,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// The lowest git that has `git merge-tree --write-tree`, which `update` merges with.
 pub const GIT_LOWEST: (u64, u64) = (2, 38);
@@ -363,6 +365,198 @@ pub fn remove_under(top: &Path, path: &Path) -> Result<(), String> {
     std::fs::remove_dir_all(&real).map_err(|e| format!("{}: {e}", real.display()))
 }
 
+/// The name of the holding folder in each folder a close removes from (Issue 644). It cannot be a
+/// project slug (letters, digits and `-`), a task id (never starting with `.`) or a launch id.
+pub const HOLDING: &str = ".makiba-removing";
+
+/// `<top>/.makiba-removing`, where `take_out` puts what it takes out of `top`.
+pub fn holding(top: &Path) -> PathBuf {
+    top.join(HOLDING)
+}
+
+/// Take `path`, which must be strictly under `top` (both resolved), out of its place (Issue 644):
+/// renamed into `top`'s holding folder, which `empty_holding` empties off the tick; nothing when it
+/// is gone. On another file system than the holding folder it is removed here, as before, and
+/// that is said.
+pub fn take_out(top: &Path, path: &Path) -> Result<(), String> {
+    match path.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", path.display())),
+        Ok(_) => {}
+    }
+    let real = std::fs::canonicalize(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let top_real = std::fs::canonicalize(top).map_err(|e| format!("{}: {e}", top.display()))?;
+    if !real.starts_with(&top_real) || real == top_real {
+        return Err(format!(
+            "{} is not under {}: it is not removed",
+            path.display(),
+            top.display()
+        ));
+    }
+    move_out(&top_real, &real)
+}
+
+/// Take `entry`, a child of the folder `parent`, out of its place as itself (a link is moved as a
+/// link, never followed; Issue 644): `parent` resolved must be strictly under `top` resolved.
+pub fn take_out_entry(top: &Path, parent: &Path, entry: &Path) -> Result<(), String> {
+    let parent_real =
+        std::fs::canonicalize(parent).map_err(|e| format!("{}: {e}", parent.display()))?;
+    let top_real = std::fs::canonicalize(top).map_err(|e| format!("{}: {e}", top.display()))?;
+    if !parent_real.starts_with(&top_real) || parent_real == top_real {
+        return Err(format!(
+            "{} is not under {}: it is not removed",
+            parent.display(),
+            top.display()
+        ));
+    }
+    let Some(name) = entry.file_name() else {
+        return Err(format!("{} names no entry", entry.display()));
+    };
+    let entry = parent_real.join(name);
+    match entry.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(format!("{}: {e}", entry.display())),
+        Ok(_) => move_out(&top_real, &entry),
+    }
+}
+
+/// Rename `entry` (under `top`, both resolved) into `top`'s holding folder, made when absent; on
+/// another file system, remove it in place.
+fn move_out(top: &Path, entry: &Path) -> Result<(), String> {
+    use std::os::unix::fs::DirBuilderExt;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let hold = holding(top);
+    match std::fs::DirBuilder::new().mode(0o700).create(&hold) {
+        Err(e) if e.kind() != std::io::ErrorKind::AlreadyExists => {
+            return Err(format!("{}: {e}", hold.display()));
+        }
+        _ => {}
+    }
+    let m = hold
+        .symlink_metadata()
+        .map_err(|e| format!("{}: {e}", hold.display()))?;
+    if !m.file_type().is_dir() {
+        return Err(format!("{} is not a folder", hold.display()));
+    }
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or_default();
+    let to = hold.join(format!(
+        "{nanos}-{}-{}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::SeqCst)
+    ));
+    match std::fs::rename(entry, &to) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::CrossesDevices => {
+            eprintln!(
+                "makibad: {} is on another file system than {}: removed on the tick",
+                entry.display(),
+                hold.display()
+            );
+            remove_entry(entry)
+        }
+        Err(e) => Err(format!("{} -> {}: {e}", entry.display(), to.display())),
+    }
+}
+
+/// Remove `entry` itself: a folder with all it holds (links in it are not followed), anything else
+/// as a file. Gone already counts as removed. A test's hold (`removal`) waits here once.
+fn remove_entry(entry: &Path) -> Result<(), String> {
+    super::crash::hold("removal");
+    let gone = match entry.symlink_metadata() {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(format!("{}: {e}", entry.display())),
+        Ok(m) if m.file_type().is_dir() => std::fs::remove_dir_all(entry),
+        Ok(_) => std::fs::remove_file(entry),
+    };
+    match gone {
+        Err(e) if e.kind() != std::io::ErrorKind::NotFound => {
+            Err(format!("{}: {e}", entry.display()))
+        }
+        _ => Ok(()),
+    }
+}
+
+/// Sets the emptier's stop flag when dropped: on `makibad`'s return, an error or an unwind.
+pub struct Emptier(Arc<AtomicBool>);
+
+impl Drop for Emptier {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Start the emptier (Issue 644): a thread that, until the returned guard is dropped, empties each
+/// of `folders` (holding folders) every second, off the tick. A holding folder that is not a real
+/// folder (a link) is said and never listed. Each entry removed is said with its time; a failure
+/// is said once per entry and error and tried again on the next round. The thread is not joined:
+/// a removal under way is not cut short, and the next start goes on with what is left. `state`
+/// arms a test's hold (`crash::arm`).
+pub fn empty_holding(state: &Path, folders: Vec<PathBuf>) -> Emptier {
+    let stop = Arc::new(AtomicBool::new(false));
+    let (flag, state) = (stop.clone(), state.to_path_buf());
+    let spawned = std::thread::Builder::new()
+        .name("emptier".into())
+        .spawn(move || {
+            super::crash::arm(&state);
+            let mut said: std::collections::HashSet<(PathBuf, String)> = Default::default();
+            while !flag.load(Ordering::SeqCst) {
+                for hold in &folders {
+                    match hold.symlink_metadata() {
+                        Err(_) => continue,
+                        Ok(m) if !m.file_type().is_dir() => {
+                            let why = "not a folder".to_string();
+                            if said.insert((hold.clone(), why)) {
+                                eprintln!(
+                                    "makibad: {} is not a folder: it is not emptied",
+                                    hold.display()
+                                );
+                            }
+                            continue;
+                        }
+                        Ok(_) => {}
+                    }
+                    let Ok(entries) = std::fs::read_dir(hold) else {
+                        continue;
+                    };
+                    for e in entries.flatten() {
+                        if flag.load(Ordering::SeqCst) {
+                            return;
+                        }
+                        let (entry, at) = (e.path(), std::time::Instant::now());
+                        match remove_entry(&entry) {
+                            Ok(()) => eprintln!(
+                                "makibad: removed {} off the tick in {:.1} s",
+                                entry.display(),
+                                at.elapsed().as_secs_f64()
+                            ),
+                            Err(why) => {
+                                if said.insert((entry.clone(), why.clone())) {
+                                    eprintln!(
+                                        "makibad: cannot remove {why} off the tick; tried again"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                for _ in 0..10 {
+                    if flag.load(Ordering::SeqCst) {
+                        return;
+                    }
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            }
+        });
+    if let Err(e) = spawned {
+        eprintln!("makibad: cannot start the emptier of the holding folders: {e}");
+    }
+    Emptier(stop)
+}
+
 /// The run's git folder for `task` in the state folder of `settings` (`<state>/settings`).
 pub fn dir(settings: &Path, task: &str) -> PathBuf {
     root(settings).join(task)
@@ -449,5 +643,59 @@ mod tests {
         assert!(checked_out_submodules(&gitdir, wt).unwrap().is_empty());
         std::fs::write(wt.join("sub/work.txt"), "unsaved\n").unwrap();
         assert_eq!(checked_out_submodules(&gitdir, wt).unwrap(), ["sub"]);
+    }
+
+    /// Issue 644: a folder strictly under its top goes into the top's holding folder; one gone is
+    /// nothing; one not under the top, or a holding folder that is a link, is refused.
+    #[test]
+    fn take_out_moves_into_the_holding_folder_only_under_its_top() {
+        let t = tempfile::tempdir().unwrap();
+        let top = t.path().join("top");
+        std::fs::create_dir_all(top.join("a/b")).unwrap();
+        std::fs::write(top.join("a/b/f"), "x").unwrap();
+        take_out(&top, &top.join("a")).unwrap();
+        assert!(!top.join("a").exists());
+        let held: Vec<_> = std::fs::read_dir(holding(&top))
+            .unwrap()
+            .flatten()
+            .collect();
+        assert_eq!(held.len(), 1);
+        assert!(held[0].path().join("b/f").is_file());
+        take_out(&top, &top.join("a")).unwrap();
+        assert!(take_out(&top, &top).is_err());
+        let other = t.path().join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        assert!(take_out(&top, &other).is_err());
+        assert!(other.exists());
+
+        let linked = t.path().join("linked");
+        std::fs::create_dir_all(linked.join("c")).unwrap();
+        std::os::unix::fs::symlink(&other, holding(&linked)).unwrap();
+        assert!(take_out(&linked, &linked.join("c")).is_err());
+        assert!(linked.join("c").is_dir());
+    }
+
+    /// Issue 644: a document's entry is moved as itself: a link to `out/` moves as a link and
+    /// `out/` stays; a dangling link moves too.
+    #[test]
+    fn take_out_entry_moves_a_link_as_a_link() {
+        let t = tempfile::tempdir().unwrap();
+        let docs = t.path().join("docs");
+        let doc = docs.join("d");
+        std::fs::create_dir_all(doc.join("out")).unwrap();
+        std::fs::write(doc.join("out/report.md"), "kept").unwrap();
+        std::os::unix::fs::symlink(doc.join("out"), doc.join("to-out")).unwrap();
+        std::os::unix::fs::symlink(t.path().join("nowhere"), doc.join("dangling")).unwrap();
+        take_out_entry(&docs, &doc, &doc.join("to-out")).unwrap();
+        take_out_entry(&docs, &doc, &doc.join("dangling")).unwrap();
+        assert!(doc.join("out/report.md").is_file());
+        assert!(doc.join("to-out").symlink_metadata().is_err());
+        assert!(doc.join("dangling").symlink_metadata().is_err());
+        for e in std::fs::read_dir(holding(&docs)).unwrap().flatten() {
+            assert!(e.file_type().unwrap().is_symlink());
+            remove_entry(&e.path()).unwrap();
+        }
+        assert!(doc.join("out/report.md").is_file());
+        assert!(take_out_entry(&docs, &docs, &docs.join("d")).is_err());
     }
 }

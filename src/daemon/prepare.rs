@@ -253,7 +253,7 @@ impl Prepare {
             .collect::<std::result::Result<_, _>>()?;
         let root = tmp_root(&self.places.settings);
         for id in ids {
-            if let Err(e) = run_repo::remove_under(&root, &tmp_dir(&self.places.settings, id)) {
+            if let Err(e) = run_repo::take_out(&root, &tmp_dir(&self.places.settings, id)) {
                 eprintln!("makibad: the temporary folder of launch {id}: {e}");
             }
         }
