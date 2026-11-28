@@ -14,6 +14,8 @@
 //! folder, and `gh` is a stand-in script (`MAKIBA_GH`) that answers from files named by the
 //! repository. No `makibad` loop runs while a test writes `state.db`. The merge approval mode is
 //! makibad's environment, so the cases of each mode run in a child process of this test binary.
+//! Every other case runs under `human`, which `init` pins in this process, so a mode the test
+//! inherits (the person's, on a machine that runs makibad) does not reach it (Issue 637).
 //! The tests that start the door's Unix socket need a host that lets them create one.
 
 mod common;
@@ -81,6 +83,11 @@ fn init() -> PathBuf {
             std::env::set_var("MAKIBA_REPOS_DIR", home.path().join("repos"));
             // Issue 512: a failed read of GitHub is tried again; the wait between tries is short.
             std::env::set_var("MAKIBA_GATE_READ_WAIT_MS", "10");
+            // Issue 637: a case outside `in_mode` runs under human, whatever this process
+            // inherited; an `in_mode` child keeps the mode its parent gave it.
+            if std::env::var_os("GATE_TEST_CHILD").is_none() {
+                std::env::set_var(gate::MODE_ENV, "human");
+            }
         }
     });
     HOME.get().unwrap().path().to_path_buf()
@@ -438,6 +445,37 @@ impl Case {
             ],
         );
     }
+}
+
+/// Issue 637: a case outside `in_mode` passes in a process whose own environment holds the decoy
+/// `MAKIBA_MERGE_APPROVAL_MODE=acceptance`, as on a machine that runs makibad.
+#[test]
+fn a_decoy_mode_does_not_reach_a_parent_case() {
+    if std::env::var_os("DECOY_CHILD").is_some() {
+        return;
+    }
+    let out = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "test_first_passes",
+            "--exact",
+            "--test-threads=1",
+            "--nocapture",
+        ])
+        .env("DECOY_CHILD", "1")
+        .env_remove("GATE_TEST_CHILD")
+        .env(gate::MODE_ENV, "acceptance")
+        .output()
+        .unwrap();
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "test_first_passes with the decoy mode failed:\n{text}"
+    );
+    assert!(
+        text.contains("1 passed"),
+        "test_first_passes did not run in the child:\n{text}"
+    );
 }
 
 // ---- tools/test_acceptance_gate.py: GateTest -----------------------------------------------------
