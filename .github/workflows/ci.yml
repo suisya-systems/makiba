@@ -244,9 +244,15 @@ jobs:
     # At a test-commit head (T, the scope job) it fails at once, with no checkout and no build, so a
     # head that ran only its declared tests never reads as passed; the declared tests are judged here
     # when the fix is pushed (docs/design/test-commit-scoped-ci.md, 3.2 and I2).
+    # The owner's signed approval (docs/design/acceptance-approval.md 4.3, Issue 593): the job reads
+    # the pull request's comments, so it needs pull-requests: read; contents: read is the checkout's.
+    # A job-level block sets every scope it does not list to none. tests/test_ci_acceptance_approval.py.
     needs: scope
     if: ${{ !cancelled() && (github.event_name == 'pull_request' || github.event_name == 'merge_group') }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: read
     steps:
       - name: Merge queue - the declared test was judged at the pull request's head
         if: github.event_name == 'merge_group'
@@ -259,6 +265,50 @@ jobs:
           echo "the head is the test commit alone: the declared tests are judged by this job when the fix is pushed"
           echo "ACCEPTANCE: fail"
           exit 1
+      - name: Read the owner's approval comments
+        if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
+        # Before the checkout, so no code of the pull request has run; only this step holds the token.
+        # Each comment whose first line is exactly `makiba-acceptance-approval v1` is written to
+        # $RUNNER_TEMP/approvals/<comment id>, CRLF made LF, with a final newline. Who posted it is not
+        # read: the checker verifies the signature against the base's .github/acceptance-approvers.
+        # A read that fails leaves the folder empty and the step succeeds: the checker then judges as
+        # without approvals.
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR: ${{ github.event.pull_request.number }}
+        run: |
+          dir="$RUNNER_TEMP/approvals"
+          mkdir -p "$dir"
+          if gh api --paginate "repos/$GITHUB_REPOSITORY/issues/$PR/comments?per_page=100" > "$RUNNER_TEMP/comments.json" \
+            && python3 -I - "$RUNNER_TEMP/comments.json" "$dir" <<'EOF'
+          import json, sys
+          from pathlib import Path
+          text, out = Path(sys.argv[1]).read_text(encoding="utf-8"), Path(sys.argv[2])
+          dec, pos, found = json.JSONDecoder(), 0, {}
+          while text[pos:].strip():
+              while text[pos].isspace():
+                  pos += 1
+              page, pos = dec.raw_decode(text, pos)
+              if not isinstance(page, list):
+                  sys.exit("a page of comments is not a list")
+              for c in page:
+                  if not isinstance(c, dict):
+                      continue
+                  cid, body = c.get("id"), c.get("body")
+                  if type(cid) is not int or cid < 0 or not isinstance(body, str):
+                      continue
+                  body = body.replace("\r\n", "\n")
+                  if body.split("\n", 1)[0] == "makiba-acceptance-approval v1":
+                      found[cid] = body if body.endswith("\n") else body + "\n"
+          for cid, body in found.items():
+              (out / str(cid)).write_bytes(body.encode("utf-8"))
+          EOF
+          then :
+          else
+            rm -f "$dir"/*
+            echo "acceptance: approval comments not read; judged without approvals"
+          fi
+          echo "approval comments: $(find "$dir" -mindepth 1 -maxdepth 1 -type f | wc -l)"
       - uses: actions/checkout@v4
         if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         with:
@@ -282,4 +332,8 @@ jobs:
           base=${{ github.event.pull_request.base.sha }}
           git show "$base:scripts/acceptance-check.sh" > "$RUNNER_TEMP/acceptance-check.sh" 2>/dev/null \
             || cp scripts/acceptance-check.sh "$RUNNER_TEMP/acceptance-check.sh"
-          bash "$RUNNER_TEMP/acceptance-check.sh" "$base" "${{ github.event.pull_request.head.sha }}"
+          # The approvals read above go only to a checker that knows --approvals: one that does not
+          # would answer usage (exit 2) and fail every pull request (the note's section 8).
+          approvals=()
+          if grep -q -e '--approvals' "$RUNNER_TEMP/acceptance-check.sh"; then approvals=(--approvals "$RUNNER_TEMP/approvals"); fi
+          bash "$RUNNER_TEMP/acceptance-check.sh" "${approvals[@]}" "$base" "${{ github.event.pull_request.head.sha }}"
