@@ -566,7 +566,7 @@ pub fn send_typed(
             )?;
             // A run in review is sent back to work with the record (Issue 654), so a crash after
             // the text is typed cannot leave its rework uncounted; a refusal below undoes it.
-            let moved = super::door::sent_back(w, recipient)?;
+            let moved = kind == "message" && super::door::sent_back(w, recipient)?;
             Ok(Some((id, event, moved)))
         })
         .map_err(|e| failed(&e))?;

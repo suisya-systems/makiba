@@ -1903,7 +1903,11 @@ fn message_row(
         if let Some(task) = super::park::parked_worker(w, recipient)? {
             super::park::unpark(w, &task, "message", json!({"from": sender, "kind": kind}))?;
         }
-        sent_back(w, recipient)?;
+        // A message (a send or an answer) sends a run in review back to work (Issue 654); a
+        // notice of makibad does not.
+        if kind == "message" {
+            sent_back(w, recipient)?;
+        }
         let event = w.append_event(&NewEvent {
             kind: "message_sent",
             actor: Some(sender),
