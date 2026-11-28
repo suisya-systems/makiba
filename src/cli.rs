@@ -917,20 +917,28 @@ pub fn exit(code: i32) -> ExitCode {
     ExitCode::from(u8::try_from(code).unwrap_or(1))
 }
 
+/// A preview's refusal: the kind it exits with and what it says.
+type Refusal = (ErrorKind, String);
+
 /// Before `range approve`: print the draft and `makibad`'s newest complete read of it, read from
 /// `state.db` as `status` reads it, with its id, and ask on the terminal unless `yes`. The read's
 /// id goes with the approval (or the read named with `--read`, Issue 408), so a read made since is
 /// refused (`stale`) instead of approved unseen. So does the merge approval mode printed, the one
 /// the approval fixes (the range's `approves_under`, Issue 326): a mode `makibad` no longer has is
-/// refused (`stale`); with none known, nothing is sent. Returns the read and the mode.
-fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> {
-    let status = crate::status_local::read_here()?;
+/// refused (`stale`); with none known, nothing is sent. Returns the read and the mode, or why the
+/// mode is not known (Issue 638). A `state.db` that cannot be opened or read is `unavailable`; the
+/// draft's own state (no such range, no complete read, the person's no) is `conflict`.
+fn approve_preview(id: i64, yes: bool) -> Result<(i64, Result<String, &'static str>), Refusal> {
+    let status = crate::status_local::read_here().map_err(|e| (ErrorKind::Unavailable, e))?;
+    let conflict = |e: String| (ErrorKind::Conflict, e);
     let range = status["ranges"]
         .as_array()
         .and_then(|a| a.iter().find(|r| r["id"] == json!(id)))
-        .ok_or_else(|| format!("no range {id} in state.db"))?;
+        .ok_or_else(|| conflict(format!("no range {id} in state.db")))?;
     let read = range["read_id"].as_i64().ok_or_else(|| {
-        format!("range {id} has no complete read yet; wait for makibad to read it")
+        conflict(format!(
+            "range {id} has no complete read yet; wait for makibad to read it"
+        ))
     })?;
     let text = |k: &str| range[k].as_str().unwrap_or("-").to_string();
     println!("Range {id} of {} ({})", text("project"), text("status"));
@@ -974,8 +982,17 @@ fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> 
     );
     // Issue 383: makibad's mode, the one the gate reads; this shell's only beside it. Issue 326:
     // the mode approving this draft fixes, as status shows it for the range.
-    let fixes = range["approves_under"].as_str().map(str::to_string);
-    let mode = fixes.as_deref().unwrap_or("unknown");
+    let mode = range["approves_under"].as_str().unwrap_or("unknown");
+    // Issue 638: makibad records its mode only once subscribed, after its heartbeat and its door.
+    let fixes = range["approves_under"].as_str().map(str::to_string).ok_or(
+        if status["makibad"]["running"] != json!(true) {
+            "makibad is not running"
+        } else if status["makibad"]["subscribed"] != json!(true) {
+            "makibad is starting and has not recorded it yet"
+        } else {
+            "makibad has not recorded it"
+        },
+    );
     let here = status["merge_approval_mode_here"].as_str().unwrap_or("-");
     if mode == here {
         println!("Merge approval mode: {mode} (makibad's)");
@@ -1018,11 +1035,11 @@ fn approve_preview(id: i64, yes: bool) -> Result<(i64, Option<String>), String> 
     let mut answer = String::new();
     std::io::stdin()
         .read_line(&mut answer)
-        .map_err(|e| format!("cannot read the answer: {e}"))?;
+        .map_err(|e| conflict(format!("cannot read the answer: {e}")))?;
     if answer.trim().eq_ignore_ascii_case("y") {
         Ok((read, fixes))
     } else {
-        Err("not approved".into())
+        Err(conflict("not approved".into()))
     }
 }
 
@@ -1097,7 +1114,7 @@ pub fn main(c: Command) -> ExitCode {
     }
     if let Some((id, yes)) = preview {
         match id
-            .map_err(String::from)
+            .map_err(|e| (ErrorKind::Conflict, String::from(e)))
             .and_then(|id| approve_preview(id, yes))
         {
             Ok((read, mode)) => {
@@ -1107,18 +1124,21 @@ pub fn main(c: Command) -> ExitCode {
                 }
                 // A mode named with `--mode` goes as named; else the mode printed (Issue 326).
                 if request["approval_mode"].is_null() {
-                    let Some(mode) = mode else {
-                        eprintln!(
-                            "makiba: makibad's merge approval mode is not known (it is not running or has not recorded it); nothing approved"
-                        );
-                        return exit(ErrorKind::Conflict.exit_code());
+                    let mode = match mode {
+                        Ok(mode) => mode,
+                        Err(why) => {
+                            eprintln!(
+                                "makiba: makibad's merge approval mode is not known ({why}); nothing approved; run this again once makiba status shows makibad's merge approval mode"
+                            );
+                            return exit(ErrorKind::Conflict.exit_code());
+                        }
                     };
                     request["approval_mode"] = mode.into();
                 }
             }
-            Err(e) => {
+            Err((kind, e)) => {
                 eprintln!("makiba: {e}");
-                return exit(ErrorKind::Conflict.exit_code());
+                return exit(kind.exit_code());
             }
         }
     }
