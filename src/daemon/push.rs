@@ -209,8 +209,8 @@ fn before_ci(dir: &Path, j: &Job, base: &str, sent: &str) -> std::result::Result
 
 /// What a thread did.
 enum Done {
-    /// `push`: the head pushed.
-    Pushed(String),
+    /// `push`: the head pushed, and whether it is the branch's test commit alone (Issue 654).
+    Pushed { head: String, test_commit: bool },
     /// `update`: origin's head of the branch before and after; `base_merge` (a readiness update,
     /// Issue 475): `new` is a clean merge of the base onto the judged head.
     Updated {
@@ -320,7 +320,17 @@ fn work(places: &Places, j: &Job) -> Outcome {
                 }
             };
             before_ci(&repo, j, &base, &sent)?;
-            push_head(&repo, &sent, &j.branch).map(|()| Done::Pushed(sent))
+            // Issue 654: whether what is sent is the branch's test commit alone (with `head` or
+            // not): the run's fix is then due, and it keeps counting (`belt::FIX_DUE`). A read
+            // that fails says no; it never stops the push.
+            let test_commit = gate::find_manifest(&repo, &base, &sent)
+                .ok()
+                .flatten()
+                .is_some_and(|(t, _)| t == sent);
+            push_head(&repo, &sent, &j.branch).map(|()| Done::Pushed {
+                head: sent,
+                test_commit,
+            })
         }
         Some(base) => update(&repo, j, base, &head).map(|d| judged_merge(&repo, j, base, d)),
     }
@@ -959,11 +969,12 @@ fn finish(w: &StateWriter, j: &Job, outcome: &Outcome) -> Result<()> {
         }
         let base = j.base.as_deref().unwrap_or_default();
         let body = match outcome {
-            Ok(Done::Pushed(head)) => {
+            Ok(Done::Pushed { head, test_commit }) => {
                 w.append_event(&NewEvent {
                     kind: "branch_pushed",
                     actor: Some("makibad"),
-                    payload: Some(&json!({"task_id": j.task, "branch": j.branch, "head": head})),
+                    payload: Some(&json!({"task_id": j.task, "branch": j.branch, "head": head,
+                                          "test_commit": test_commit})),
                     run_task_id: Some(&j.task),
                     ..Default::default()
                 })?;

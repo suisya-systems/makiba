@@ -532,13 +532,13 @@ fn the_belt_lists_each_open_range_task_with_its_place_its_count_and_its_stop() {
     assert_eq!(r["pending_id"], Value::Null, "{r}");
     assert!(org.pending(stop).is_none(), "entry {stop} still pending");
 
-    // 5. Done: in review, counting no more.
+    // 5. Done with nothing pushed: in review, and still counting (its fix may be due, Issue 654).
     org.report(&first, "done", "Done; ran the tests.");
     let belt = org.belt();
     let r = row(&belt, &first);
     assert_eq!(r["place"], json!("review"), "{r}");
     assert_eq!(r["stage"], json!("no_pr"), "{r}");
-    assert_eq!(r["counts"], json!(false), "{r}");
+    assert_eq!(r["counts"], json!(true), "{r}");
 
     // 6. Closed: off the belt; the second is still on it.
     org.call(&org.secretary, "close", json!({"task_id": first}));
