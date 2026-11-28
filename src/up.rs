@@ -523,7 +523,9 @@ fn organization(dir: &Path) -> String {
 
 /// The makiba agents running in the base's terminals, of every session on this machine, that may
 /// read the approval key: a terminal is what runs, whatever the ledger says of its key (`down`
-/// revokes a key before it ends the terminal). A session nothing listens at runs none; any other
+/// revokes a key before it ends the terminal). Each session is read with `list_session`, which
+/// gives every organization's terminals on a connection without one (Issue 661: `list` refuses
+/// there, and gives only one organization's). A session nothing listens at runs none; any other
 /// failure to list one is an error, so the key is not made.
 fn base_agents_that_may_read(dir: &Path) -> Result<Vec<String>, String> {
     let mut per_session = Vec::new();
@@ -536,7 +538,7 @@ fn base_agents_that_may_read(dir: &Path) -> Result<Vec<String>, String> {
             }
             return Err(format!("cannot connect to session {session}: {e}"));
         }
-        match base::connect_session(&session, Duration::from_secs(5)).list() {
+        match base::connect_session(&session, Duration::from_secs(5)).list_session() {
             Ok(ts) => per_session.push((session, ts)),
             Err(e) => {
                 return Err(format!(
