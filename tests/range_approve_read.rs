@@ -9,7 +9,14 @@
 //!    `makiba::cli::request`, and sent to a door on the stand-in base with the person key.
 //! 2. The real `makiba daemon` with the person's socket, and the real `makiba` binary as the
 //!    person. `MAKIBA_GH` is a stand-in that fails, so the read the approval triggers is a failed
-//!    read that reaches no network and changes nothing asserted here.
+//!    read that reaches no network and changes nothing asserted here. The test starts once
+//!    `makibad` has recorded its merge approval mode, the one the preview reads (Issue 638): its
+//!    heartbeat and its door come before that record.
+//! 3. Issue 638: the same, with `makibad` held after its heartbeat and its door and before it
+//!    records its mode (the hold point `tick`, debug builds). The approval says the mode is not
+//!    known because `makibad` is starting, approves nothing (exit 5), and once `makibad` has
+//!    recorded its mode the same line approves.
+//! 4. Issue 638: a `state.db` the preview cannot open is `unavailable` (exit 6), not `conflict`.
 
 mod common;
 
@@ -186,8 +193,10 @@ impl Daemon {
         }
     }
 
-    /// Seeds the range before `makibad` starts, so its first look finds the reads.
-    fn start() -> (Daemon, Seeded) {
+    /// Seeds the range before `makibad` starts, so its first look finds the reads. Unheld, it
+    /// returns once `makibad` has recorded its merge approval mode; `hold`, once `makibad` is held
+    /// at its first tick, after its heartbeat and its door and before it records the mode.
+    fn start(hold: bool) -> (Daemon, Seeded) {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_path_buf();
         for d in ["home", "state", "config", "data", "run", "xdg-state"] {
@@ -203,6 +212,9 @@ impl Daemon {
         let w = StateWriter::open(&root.join("state/state.db")).unwrap();
         let s = seed(&w);
         drop(w);
+        if hold {
+            std::fs::write(root.join("state/makibad.hold-at"), "tick").unwrap();
+        }
         let mut d = Daemon {
             _tmp: tmp,
             root,
@@ -224,6 +236,7 @@ impl Daemon {
             if UnixStream::connect(&door).is_ok()
                 && TcpStream::connect(("127.0.0.1", d.port)).is_ok()
                 && d.heartbeat()
+                && (!hold || d.held().exists())
             {
                 open = true;
                 break;
@@ -231,7 +244,42 @@ impl Daemon {
             std::thread::sleep(Duration::from_millis(50));
         }
         assert!(open, "the door did not open");
+        if !hold {
+            d.wait_mode();
+        }
         (d, s)
+    }
+
+    /// The file `makibad` writes where it is held, and waits on until it is removed.
+    fn held(&self) -> PathBuf {
+        self.root.join("state/makibad.held")
+    }
+
+    /// Let a held `makibad` go on.
+    fn release(&self) {
+        std::fs::remove_file(self.held()).unwrap();
+    }
+
+    /// The person's status read of the ledger, as the preview reads it.
+    fn status(&self) -> Value {
+        makiba::status_local::read(&self.db_path()).unwrap()
+    }
+
+    /// Wait, bounded, until `makibad`'s merge approval mode is recorded, as the person's status
+    /// reads it: what `range approve` fixes (Issue 638).
+    fn wait_mode(&self) {
+        let until = Instant::now() + Duration::from_secs(20);
+        while Instant::now() < until {
+            let mode = self.status()["merge_approval_mode"].clone();
+            if mode == json!("human") || mode == json!("acceptance") {
+                return;
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        panic!(
+            "makibad did not record its merge approval mode: {}",
+            self.status()
+        );
     }
 
     fn db_path(&self) -> PathBuf {
@@ -288,7 +336,7 @@ fn text(o: &Output) -> String {
 ///    `stale` (exit 7) and approves nothing; the newest approves the range on that read.
 #[test]
 fn makiba_range_approve_with_read_over_the_persons_socket() {
-    let (d, s) = Daemon::start();
+    let (d, s) = Daemon::start(false);
     let db = d.db_path();
     let id = s.id.to_string();
 
@@ -325,4 +373,93 @@ fn makiba_range_approve_with_read_over_the_persons_socket() {
     assert_eq!(out.status.code(), Some(0), "{}", text(&out));
     assert_eq!(range_row(&db, s.id), ("active".to_string(), Some(s.newer)));
     assert_eq!(approvals(&db, s.id), vec![json!(s.newer)]);
+}
+
+/// 3. Issue 638: `makibad` held after its heartbeat and its door, before it records its merge
+///    approval mode. The approval says the mode is not known because `makibad` is starting, and
+///    approves nothing; once `makibad` has recorded its mode, the same line approves.
+#[test]
+fn range_approve_while_makibad_starts_says_so_and_approves_once_it_has_started() {
+    let (d, s) = Daemon::start(true);
+    let db = d.db_path();
+    let status = d.status();
+    assert_eq!(status["merge_approval_mode"], Value::Null, "{status}");
+    assert_eq!(status["makibad"]["subscribed"], json!(false), "{status}");
+    let id = s.id.to_string();
+    let newer = s.newer.to_string();
+    let line = ["range", "approve", &id, "--read", &newer, "--yes"];
+
+    let starting = d.cli(&line);
+    assert_eq!(starting.status.code(), Some(5), "{}", text(&starting));
+    assert!(
+        String::from_utf8_lossy(&starting.stdout).contains("Merge approval mode: unknown"),
+        "{}",
+        text(&starting)
+    );
+    let err = String::from_utf8_lossy(&starting.stderr);
+    assert!(
+        err.contains("makibad is starting and has not recorded it yet"),
+        "the answer does not say makibad is starting: {}",
+        text(&starting)
+    );
+    assert!(
+        err.contains("run this again once makiba status shows"),
+        "the answer does not say to run it again: {}",
+        text(&starting)
+    );
+    assert_eq!(range_row(&db, s.id), ("proposed".to_string(), None));
+    assert!(approvals(&db, s.id).is_empty(), "approved with no mode");
+
+    d.release();
+    d.wait_mode();
+    let started = d.cli(&line);
+    assert_eq!(started.status.code(), Some(0), "{}", text(&started));
+    let stdout = String::from_utf8_lossy(&started.stdout);
+    assert!(
+        stdout.contains(&format!("Read {} at ", s.newer)),
+        "{}",
+        text(&started)
+    );
+    assert!(
+        !stdout.contains("Merge approval mode: unknown"),
+        "{}",
+        text(&started)
+    );
+    assert_eq!(range_row(&db, s.id), ("active".to_string(), Some(s.newer)));
+    assert_eq!(approvals(&db, s.id), vec![json!(s.newer)]);
+}
+
+/// 4. Issue 638: a `state.db` the preview cannot open is `unavailable` (exit 6), with SQLite's
+///    message, not `conflict`.
+#[test]
+fn range_approve_on_a_state_db_it_cannot_open_is_unavailable() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let state = root.join("state");
+    std::fs::create_dir_all(&state).unwrap();
+    let missing = Command::new(MAKIBA)
+        .env("HOME", root.join("home"))
+        .env("MAKIBA_STATE_DIR", &state)
+        .env("XDG_STATE_HOME", root.join("xdg-state"))
+        .env("XDG_CONFIG_HOME", root.join("config"))
+        .env("XDG_DATA_HOME", root.join("data"))
+        .env("XDG_RUNTIME_DIR", root.join("run"))
+        .env_remove("MAKIBA_DOOR")
+        .env_remove("MAKIBA_PERSON_KEY")
+        .args(["range", "approve", "1", "--yes"])
+        .stdin(Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(missing.status.code(), Some(6), "{}", text(&missing));
+    let err = String::from_utf8_lossy(&missing.stderr);
+    assert!(err.contains("cannot open"), "{}", text(&missing));
+    assert!(
+        err.contains(&state.join("state.db").display().to_string()),
+        "{}",
+        text(&missing)
+    );
+    assert!(
+        !state.join("state.db").exists(),
+        "the preview made a state.db"
+    );
 }
