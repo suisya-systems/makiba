@@ -441,7 +441,7 @@ impl Door {
                         &text,
                         |w, id| match &q {
                             None => Ok(json!({"id": id})),
-                            Some(q) => q.answered(w, &actor, id),
+                            Some(q) => q.answered_alone(w, &actor, role, id),
                         },
                     ) {
                         return r;
@@ -456,7 +456,7 @@ impl Door {
         // door's lock stays held: no other request of the door comes between.
         let peeked = (v == Verb::Peek).then(|| peek(&w, &*self.base, &args));
         if v == Verb::Answer && matches!(question(&w, &args), Ok(None)) {
-            return answer_prompt(&w, &*self.base, &actor, &args, idem);
+            return answer_prompt(&w, &*self.base, &actor, role, &args, idem);
         }
         // The verb's writes and its record are one transaction (a verb's own transaction joins it).
         // IMMEDIATE takes the write lock first: a deferred one that reads, then writes after
@@ -715,7 +715,7 @@ fn run(
         // Read before the transaction (Issue 578): `handle` calls `peek`.
         Verb::Peek => Err(internal("peek is read by the door's handle")),
         Verb::Pending => pending(w, args),
-        Verb::Answer => answer(w, actor, args),
+        Verb::Answer => answer(w, actor, role, args),
         Verb::Renew => renew(w, args),
         Verb::Handover => handover(w, args),
         Verb::Send => {
@@ -1093,8 +1093,10 @@ struct Question {
 }
 
 impl Question {
-    /// Mark the entry answered, after its message `message` was stored (or typed).
-    fn answered(&self, w: &StateWriter, actor: &str, message: i64) -> Response {
+    /// Mark the entry answered, after its message `message` was stored (or typed). The person's
+    /// answer to a worker is told to the secretary (Issue 612); an answer to a stop makibad wrote
+    /// is the secretary's message already.
+    fn answered(&self, w: &StateWriter, actor: &str, role: Role, message: i64) -> Response {
         let changed = w
             .conn()
             .execute(
@@ -1110,11 +1112,39 @@ impl Question {
                 self.id
             )));
         }
+        if role == Role::Person && self.to != crate::spec::AGENT_SECRETARY {
+            let task = self.task.as_deref().unwrap_or("-");
+            person_act(
+                w,
+                self.task.as_deref(),
+                &format!(
+                    "The person answered pending entry {} of task {task}: {}. The answer was sent to the worker.\n{}",
+                    self.id, self.answer, self.body
+                ),
+            )
+            .map_err(internal)?;
+        }
         // A `no` to a failed dependency's question releases a design-only wait (Issue 284).
         super::ahead::answered(w, self.id, &self.answer).map_err(internal)?;
         // A stop answered to the secretary may have been a parked run's last (Issue 283).
         super::park::settle(w).map_err(internal)?;
         Ok(json!({"id": self.id, "status": "answered", "message": message}))
+    }
+
+    /// `answered` in a transaction of its own, for a typed answer, whose text was typed with no
+    /// transaction open: the entry and the person's notice stand together or not at all.
+    fn answered_alone(&self, w: &StateWriter, actor: &str, role: Role, message: i64) -> Response {
+        begin_as(w, "door answer typed").map_err(internal)?;
+        let r = self.answered(w, actor, role, message);
+        if r.is_err() {
+            let _ = w.rollback();
+            return r;
+        }
+        if let Err(e) = w.commit() {
+            let _ = w.rollback();
+            return Err(internal(e));
+        }
+        r
     }
 }
 
@@ -1204,7 +1234,7 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
 /// `answer` (spec sections 7 and 12) of a question: its answer is queued to the worker and the
 /// entry is answered, in the caller's transaction. The answer of a prompt is `answer_prompt`,
 /// called by `handle` before any transaction (Issue 578).
-fn answer(w: &StateWriter, actor: &str, args: &Value) -> Response {
+fn answer(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     let Some(q) = question(w, args)? else {
         return Err(internal(
             "the answer of a prompt is handled by the door's handle",
@@ -1217,7 +1247,7 @@ fn answer(w: &StateWriter, actor: &str, args: &Value) -> Response {
         super::park::unpark(w, task, "answer", json!(q.id)).map_err(internal)?;
     }
     let id = store_message(w, actor, &q.to, "message", q.task.as_deref(), &q.body)?;
-    q.answered(w, actor, id)
+    q.answered(w, actor, role, id)
 }
 
 /// What the answer of a prompt read before its reservation: the entry, its episode and the key.
@@ -1384,6 +1414,7 @@ fn answer_prompt(
     w: &StateWriter,
     base: &dyn Base,
     actor: &str,
+    role: Role,
     args: &Value,
     idem: Option<&str>,
 ) -> Response {
@@ -1505,7 +1536,23 @@ fn answer_prompt(
             p.id
         ))),
     };
-    if let Err(e) = finish_command(w, command, &r) {
+    // The person's answer is told to the secretary once its key was pressed (Issue 612), in one
+    // transaction with the command's finish: a press that did not happen is told nothing.
+    let finished = w.transaction(|w| {
+        if role == Role::Person && r.is_ok() {
+            person_act(
+                w,
+                Some(&p.task),
+                &format!(
+                    "The person answered the permission prompt of pending entry {} of task {}: {} (key {} pressed).",
+                    p.id, p.task, p.answer, p.key
+                ),
+            )?;
+        }
+        finish_command(w, command, &r)?;
+        Ok(())
+    });
+    if let Err(e) = finished {
         eprintln!("makibad: cannot finish command {command}: {e}");
     }
     r
@@ -1825,6 +1872,21 @@ pub(super) fn notice_untasked(
     body: &str,
 ) -> crate::db::Result<i64> {
     message_row(w, "makibad", recipient, "notice", None, body)
+}
+
+/// A notice to the secretary of an act the person did through their key (Issue 612, belt.md 3.4):
+/// the person deals with the secretary only, so the secretary hears of it in the act's own
+/// transaction. Tied to `task` when the act has one. The callers write it only for the role
+/// `person`; the secretary's own acts are not told back to it.
+pub(super) fn person_act(
+    w: &StateWriter,
+    task: Option<&str>,
+    body: &str,
+) -> crate::db::Result<i64> {
+    match task {
+        Some(task) => notice(w, crate::spec::AGENT_SECRETARY, task, body),
+        None => notice_untasked(w, crate::spec::AGENT_SECRETARY, body),
+    }
 }
 
 fn message_row(
@@ -3015,8 +3077,29 @@ fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
 }
 
 /// `config` (spec section 12, Issue 48). A set is a `config_set` event in the command's own
-/// transaction; `max_concurrent_workers` and `merge_approval_mode` are not stored yet.
+/// transaction; `max_concurrent_workers` and `merge_approval_mode` are not stored yet. `config` is
+/// the person's verb alone, so each set is told to the secretary in the same transaction (Issue
+/// 612); a project's artifact language has its own notice, which says what to do with it.
 fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let r = config_value(w, actor, args)?;
+    let key = r["key"].as_str().unwrap_or_default();
+    let own_notice = super::language::kind_of(key).is_some_and(|(_, per_project)| per_project);
+    if args.get("action").and_then(Value::as_str) == Some("set") && !own_notice {
+        let project = r["project"].as_str().filter(|p| !p.is_empty());
+        let of = project
+            .map(|p| format!(" of project {p}"))
+            .unwrap_or_default();
+        let value = r["value"].as_str().unwrap_or_default();
+        let mut body = format!("The person set {key}{of} to {value:?}.");
+        if let Some(applies) = r["applies"].as_str() {
+            body.push_str(&format!(" It applies {applies}."));
+        }
+        person_act(w, None, &body).map_err(internal)?;
+    }
+    Ok(r)
+}
+
+fn config_value(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let key = str_arg(args, "key")?;
     if !CONFIG_KEYS.contains(&key) {
         return Err(usage(format!(
@@ -5075,7 +5158,7 @@ impl Door {
         match action {
             "approve" => return self.merge_approve(w, actor, args, idem),
             "refuse" | "withdraw" => return merge_end(&w, actor, role, action, args, idem),
-            "order" => return merge_order_set(&w, actor, args, idem),
+            "order" => return merge_order_set(&w, actor, role, args, idem),
             _ => {}
         }
         let parsed = (|| -> Result<_, DoorError> {
@@ -5479,7 +5562,13 @@ impl Door {
 /// same order again is the first one. Refused (`conflict`) while the pull request has a merge act
 /// of makibad awaiting its landing: that act runs without a new judgement, so the order could not
 /// hold it.
-fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str>) -> Response {
+fn merge_order_set(
+    w: &StateWriter,
+    actor: &str,
+    role: Role,
+    args: &Value,
+    idem: Option<&str>,
+) -> Response {
     let fail = |r: Response| {
         let _ = record(w, actor, "merge", args, idem, &r);
         r
@@ -5606,6 +5695,23 @@ fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str
                     .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
                 let landed =
                     super::gate::order_landed(w.conn(), &repo, after, number, project.as_deref())?;
+                // Issue 612: a new order of the person is told to the secretary; the same order
+                // again writes nothing, and the secretary's own order is not told back.
+                if role == Role::Person {
+                    let what = if after == "pr" {
+                        "pull request"
+                    } else {
+                        "Issue"
+                    };
+                    person_act(
+                        w,
+                        task.as_deref(),
+                        &format!(
+                            "The person ordered that {repo}#{pr} merges only after {what} #{number} has landed: {reason}"
+                        ),
+                    )
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                }
                 (id, landed)
             }
         };
@@ -6897,7 +7003,8 @@ mod merge_order_tests {
         }
         let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_issue": 1,
                           "reason": "the person's condition"});
-        let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+        let e = merge_order_set(&w, "secretary", crate::spec::Role::Secretary, &args, None)
+            .unwrap_err();
         assert_eq!(e.kind, ErrorKind::Conflict, "{e:?}");
         let n: i64 = w
             .conn()
@@ -6911,7 +7018,8 @@ mod merge_order_tests {
         // An order after a pull request needs no project.
         let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_pr": 1,
                           "reason": "the person's condition"});
-        let v = merge_order_set(&w, "secretary", &args, None).unwrap();
+        let v =
+            merge_order_set(&w, "secretary", crate::spec::Role::Secretary, &args, None).unwrap();
         assert_eq!(v["status"], json!("recorded"), "{v}");
     }
 
@@ -6924,7 +7032,8 @@ mod merge_order_tests {
         for repo in ["o/r ", " o/r", "o/r/x", "o r/r", "o/", "/r", "o/r\n"] {
             let args = json!({"action": "order", "repo": repo, "pr": 2, "after_pr": 1,
                               "reason": "the person's condition"});
-            let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+            let e = merge_order_set(&w, "secretary", crate::spec::Role::Secretary, &args, None)
+                .unwrap_err();
             assert_eq!(e.kind, ErrorKind::Usage, "{repo:?}: {e:?}");
         }
         let n: i64 = w

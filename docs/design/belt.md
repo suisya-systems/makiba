@@ -113,7 +113,7 @@ The triage pass cannot serve the clock as it is (review): it scans only after a 
 
 | Event | `makibad` does | The secretary does |
 | --- | --- | --- |
-| The person approves a range | Reads, then dispatches next candidates until no slot is free (each `belt_dispatched`). | Tells the person what went in. |
+| The person approves a range | Writes the secretary a notice of the approval in its transaction (Issue 612: the range, the range it replaced and ended, `at_once`, the mode, and that a read follows). Reads, then dispatches next candidates until no slot is free (each `belt_dispatched`). A dispatch writes no notice: the secretary hears of each task from its worker's `report start`, and of a failed launch from its notice. | Tells the person what went in: its input is that notice and the workers' reports. |
 | A slot is free (any cause below) | In the transaction of the event that freed it: dispatches the next candidate from the newest read. With none: ends it `used_up` when 2.4 allows. | Nothing. |
 | A worker reports `done` | Run to `review` (as today); it stops counting. Slot free. | Push, pull request, `pr` (skill `pull-request`). |
 | CI failed | Nothing new. | Sends the worker back. |
@@ -127,7 +127,7 @@ The triage pass cannot serve the clock as it is (review): it scans only after a 
 | The person answers | The run counts again from the answer. | Carries the answer (`answer`). |
 | A launch of the range fails | Counts failures in a row; at two, pauses the range and tells the secretary. | Tells the person. |
 | Budget taken or hours past | No new dispatch; the range ends when its last task closes. | Tells the person; open tasks go on. |
-| The person or the secretary pauses | No new dispatch. | Says so; open tasks go on. |
+| The person or the secretary pauses | No new dispatch. The person's pause, resume, end or skip writes the secretary a notice (Issue 612); the secretary's own does not. | Says so; open tasks go on. |
 | The secretary is renewed | Nothing: the range is in the records. The resume brief's fixed line tells the secretary to read `status` first, which shows every range with a live run. | Reads it. |
 | `makibad` restarts | Derives everything from the records on its next pass; a task id is dispatched once, so nothing goes in twice. | Nothing. |
 
