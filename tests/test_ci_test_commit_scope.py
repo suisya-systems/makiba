@@ -226,7 +226,11 @@ def run_scope(cwd, event, tmp, base="", head=""):
     checkout = [s for s in steps if is_checkout(s)]
     if event == "pull_request":
         assert len(checkout) == 1, steps
-        assert checkout[0]["with"] == {"ref": "${{ github.event.pull_request.head.sha }}", "fetch-depth": 0}
+        assert checkout[0]["with"] == {
+            "ref": "${{ github.event.pull_request.head.sha }}",
+            "fetch-depth": 0,
+            "persist-credentials": False,
+        }
     else:
         assert checkout == [], steps
     steps = [s for s in steps if not is_checkout(s)]
@@ -390,8 +394,10 @@ def _no_cancelled_on_acceptance(text):
 def _no_cancelled_on_tests(text):
     return _replace_once(
         text,
-        "    needs: scope\n    if: ${{ !cancelled() }}\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      # The Rust",
-        "    needs: scope\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v4\n      # The Rust",
+        "    needs: scope\n    if: ${{ !cancelled() }}\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      # The Rust",
+        "    needs: scope\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - uses: actions/checkout@v4\n        with:\n          persist-credentials: false\n      # The Rust",
     )
 
 

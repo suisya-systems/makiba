@@ -10,6 +10,9 @@ on:
 concurrency:
   group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || format('{0}-{1}', github.ref, github.sha) }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+# Every checkout sets persist-credentials: false, so the job's token is not left in .git/config
+# for the pull request's code; no later step needs git credentials (Issue 678,
+# tests/test_ci_checkout_credentials.py).
 jobs:
   scope:
     # Whether the head is its test commit alone (docs/design/test-commit-scoped-ci.md, 3.1; Issue 481).
@@ -30,6 +33,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Is the head its test commit alone
         id: scope
         env:
@@ -69,6 +73,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # The Rust build cache, one per job (#471).
       - uses: actions/cache@v4
         with:
@@ -143,6 +149,8 @@ jobs:
           echo "test commit: the declared tests run in tests; the real base runs at the fix"
       - uses: actions/checkout@v4
         if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
+        with:
+          persist-credentials: false
       # The Rust build cache, one per job (#471).
       - uses: actions/cache@v4
         if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
@@ -209,6 +217,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - run: cargo fmt --check
       - run: cargo clippy --locked --all-targets -- -D warnings
       - uses: actions/setup-python@v5
@@ -314,6 +324,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           fetch-depth: 0
+          persist-credentials: false
       - name: Install the toolchain of rust-toolchain.toml
         if: github.event_name == 'pull_request' && needs.scope.outputs.test_commit != 'true'
         run: rustup toolchain install
