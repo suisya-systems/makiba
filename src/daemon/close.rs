@@ -12,7 +12,10 @@
 //!    repository, then removing the work tree and the run's git folder `<state>/git/<task>`
 //!    (Issue 241), each only under its own folder; document by removing everything but `out/`
 //!    and each launch's own temporary folder `<state>/tmp/<launch id>` (Issue 243) is removed
-//!    (kill point `close_removed`);
+//!    (kill point `close_removed`). Removing is a take-out (Issue 644, `run_repo::take_out`): a
+//!    rename into the holding folder `.makiba-removing` of the same folder, which the emptier
+//!    empties off the tick, so a close of tens of GB does not stop the heartbeat; a folder on
+//!    another file system is removed on the tick, as before, and that is said;
 //! 3. the per-task settings file is deleted and the command becomes `done`.
 //!
 //! The record of a half-done close is its `accepted` row. Every step reads what it has to do from
@@ -242,7 +245,7 @@ impl Close {
         // Each launch's own temporary folder (Issue 243).
         let tmp_root = super::prepare::tmp_root(&self.places.settings);
         for (.., id) in &launches {
-            run_repo::remove_under(
+            run_repo::take_out(
                 &tmp_root,
                 &super::prepare::tmp_dir(&self.places.settings, *id),
             )?;
@@ -315,7 +318,7 @@ impl Close {
                     }
                     keep(&gitdir, path, &repo, j)?;
                 }
-                return run_repo::remove_under(&git_root, &gitdir);
+                return run_repo::take_out(&git_root, &gitdir);
             }
             Err(e) => return Err(format!("{}: {e}", path.display())),
             Ok(_) => {}
@@ -336,12 +339,7 @@ impl Close {
                 if e.file_name() == "out" {
                     continue;
                 }
-                let gone = if e.file_type().map_err(|e| e.to_string())?.is_dir() {
-                    std::fs::remove_dir_all(e.path())
-                } else {
-                    std::fs::remove_file(e.path())
-                };
-                gone.map_err(|err| format!("{}: {err}", e.path().display()))?;
+                run_repo::take_out_entry(top, &real, &e.path())?;
             }
             return Ok(());
         }
@@ -354,8 +352,8 @@ impl Close {
         if gitdir.join("HEAD").is_file() {
             keep(&gitdir, &real, &repo, j)?;
         }
-        run_repo::remove_under(top, &real)?;
-        run_repo::remove_under(&git_root, &gitdir)?;
+        run_repo::take_out(top, &real)?;
+        run_repo::take_out(&git_root, &gitdir)?;
         // A worktree of the clone from before Issue 241 leaves an entry there.
         git(&repo, &["worktree", "prune"]);
         Ok(())
