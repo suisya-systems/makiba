@@ -1759,6 +1759,18 @@ fn declares_cargo_target(t: &Tree, p: &str) -> bool {
     (file(p) && is_cargo_target(p)) || (file(&main) && is_cargo_target(&main))
 }
 
+/// The first of the pull request's checks (`Ci::check_run_ids`), other than `check`, whose latest
+/// completed run did not pass by prwatch's buckets (success, skipped and neutral pass), named
+/// with its conclusion.
+fn other_failed(runs: &BTreeMap<CheckKey, (String, i64)>, check: &str) -> Option<String> {
+    runs.iter()
+        .find(|(k, (c, _))| {
+            let entry = json!({"status": "completed", "conclusion": c});
+            k.1 != check && !matches!(super::prwatch::bucket(&entry), "pass" | "skipping")
+        })
+        .map(|(k, (c, _))| format!("{:?} ({c})", k.1))
+}
+
 /// The warning the answer carries for a head whose acceptance failed by construction.
 pub fn acceptance_warning(set: &[String]) -> String {
     format!("acceptance fails by construction: {}", set.join("; "))
@@ -1835,8 +1847,16 @@ pub fn evaluate_failed(
             }
         }
     }
-    let runs: Vec<(String, i64)> = ci
-        .check_run_ids(slug, head)?
+    // The head surface reads GitHub's latest run per name, where a push run can hide a pull
+    // request's: the pull request's own runs (filter=all, as condition (b) reads them) are judged
+    // too. A run of them still going is a workflow run not finished, refused above.
+    let selected = ci.check_run_ids(slug, head)?;
+    if let Some(other) = other_failed(&selected, &check) {
+        return reject(format!(
+            "another check than the acceptance check failed at head {h12} in this pull request's workflow runs: {other}"
+        ));
+    }
+    let runs: Vec<(String, i64)> = selected
         .into_iter()
         .filter(|(k, _)| k.1 == check)
         .map(|(_, r)| r)
@@ -2385,6 +2405,34 @@ mod tests {
             "src",
         ] {
             assert!(!declares_cargo_target(&t, p), "{p}");
+        }
+    }
+
+    /// Issue 591, diff review round 2: a pull request's own check that failed is found among its
+    /// runs even when the latest run of that name at head (a push run) succeeded.
+    #[test]
+    fn another_failed_check_of_the_pull_request_is_found() {
+        let key = |name: &str| (15368, name.to_string(), 1);
+        let runs = |list: &[(&str, &str)]| -> BTreeMap<CheckKey, (String, i64)> {
+            list.iter()
+                .enumerate()
+                .map(|(i, (n, c))| (key(n), (c.to_string(), i as i64)))
+                .collect()
+        };
+        let ok = runs(&[
+            ("acceptance", "failure"),
+            ("tests", "success"),
+            ("lint", "skipped"),
+            ("docs", "neutral"),
+        ]);
+        assert_eq!(other_failed(&ok, "acceptance"), None);
+        for c in ["failure", "cancelled", "timed_out", "action_required", ""] {
+            let bad = runs(&[("acceptance", "failure"), ("tests", c)]);
+            assert_eq!(
+                other_failed(&bad, "acceptance"),
+                Some(format!("\"tests\" ({c})")),
+                "{c}"
+            );
         }
     }
 }
