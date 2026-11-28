@@ -388,6 +388,20 @@ fn serve_until(
     if let Err(e) = prepare.sweep(&w) {
         eprintln!("makibad: the temporary folders of launches that are over: {e}");
     }
+    // Issue 644: what a close or the sweep took out is removed off the tick, also what a stop or
+    // a crash left; the guard stops the emptier on any return or unwind.
+    let _emptier = {
+        let places = Places::from_env(dir);
+        run_repo::empty_holding(
+            dir,
+            vec![
+                run_repo::holding(&places.workers),
+                run_repo::holding(&places.docs),
+                run_repo::holding(&run_repo::root(&places.settings)),
+                run_repo::holding(&prepare::tmp_root(&places.settings)),
+            ],
+        )
+    };
     let launch =
         launch::Launch::new(dir, door_addr).with_priority(launch::WorkerPriority::from_env());
     let mut curator = curator::Curator::from_env(dir);
