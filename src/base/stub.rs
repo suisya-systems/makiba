@@ -104,8 +104,8 @@ impl Stub {
         self
     }
 
-    /// Each `launch` appends a line to `file`: its spec's name and argv as JSON (Issue 352). The
-    /// argv carries the door's token: a test's file only.
+    /// Each `launch` appends a line to `file`: its spec's name, argv and env as JSON (Issue 352;
+    /// env, Issue 626). The argv carries the door's token: a test's file only.
     pub fn with_launch_record(mut self, file: &Path) -> Stub {
         self.launch_record = Some(file.to_path_buf());
         self
@@ -166,7 +166,7 @@ impl Base for Stub {
 
     fn launch(&self, spec: &LaunchSpec) -> Result<TerminalRef, BaseError> {
         if let Some(file) = &self.launch_record {
-            let line = serde_json::json!({"name": spec.name, "argv": spec.argv});
+            let line = serde_json::json!({"name": spec.name, "argv": spec.argv, "env": spec.env});
             let written = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
