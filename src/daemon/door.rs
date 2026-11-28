@@ -441,7 +441,7 @@ impl Door {
                         &text,
                         |w, id| match &q {
                             None => Ok(json!({"id": id})),
-                            Some(q) => q.answered(w, &actor, id),
+                            Some(q) => q.answered_alone(w, &actor, role, id),
                         },
                     ) {
                         return r;
@@ -456,7 +456,7 @@ impl Door {
         // door's lock stays held: no other request of the door comes between.
         let peeked = (v == Verb::Peek).then(|| peek(&w, &*self.base, &args));
         if v == Verb::Answer && matches!(question(&w, &args), Ok(None)) {
-            return answer_prompt(&w, &*self.base, &actor, &args, idem);
+            return answer_prompt(&w, &*self.base, &actor, role, &args, idem);
         }
         // The verb's writes and its record are one transaction (a verb's own transaction joins it).
         // IMMEDIATE takes the write lock first: a deferred one that reads, then writes after
@@ -715,7 +715,7 @@ fn run(
         // Read before the transaction (Issue 578): `handle` calls `peek`.
         Verb::Peek => Err(internal("peek is read by the door's handle")),
         Verb::Pending => pending(w, args),
-        Verb::Answer => answer(w, actor, args),
+        Verb::Answer => answer(w, actor, role, args),
         Verb::Renew => renew(w, args),
         Verb::Handover => handover(w, args),
         Verb::Send => {
@@ -1093,8 +1093,10 @@ struct Question {
 }
 
 impl Question {
-    /// Mark the entry answered, after its message `message` was stored (or typed).
-    fn answered(&self, w: &StateWriter, actor: &str, message: i64) -> Response {
+    /// Mark the entry answered, after its message `message` was stored (or typed). The person's
+    /// answer to a worker is told to the secretary (Issue 612); an answer to a stop makibad wrote
+    /// is the secretary's message already.
+    fn answered(&self, w: &StateWriter, actor: &str, role: Role, message: i64) -> Response {
         let changed = w
             .conn()
             .execute(
@@ -1110,11 +1112,39 @@ impl Question {
                 self.id
             )));
         }
+        if role == Role::Person && self.to != crate::spec::AGENT_SECRETARY {
+            let task = self.task.as_deref().unwrap_or("-");
+            person_act(
+                w,
+                self.task.as_deref(),
+                &format!(
+                    "The person answered pending entry {} of task {task}: {}. The answer was sent to the worker.\n{}",
+                    self.id, self.answer, self.body
+                ),
+            )
+            .map_err(internal)?;
+        }
         // A `no` to a failed dependency's question releases a design-only wait (Issue 284).
         super::ahead::answered(w, self.id, &self.answer).map_err(internal)?;
         // A stop answered to the secretary may have been a parked run's last (Issue 283).
         super::park::settle(w).map_err(internal)?;
         Ok(json!({"id": self.id, "status": "answered", "message": message}))
+    }
+
+    /// `answered` in a transaction of its own, for a typed answer, whose text was typed with no
+    /// transaction open: the entry and the person's notice stand together or not at all.
+    fn answered_alone(&self, w: &StateWriter, actor: &str, role: Role, message: i64) -> Response {
+        begin_as(w, "door answer typed").map_err(internal)?;
+        let r = self.answered(w, actor, role, message);
+        if r.is_err() {
+            let _ = w.rollback();
+            return r;
+        }
+        if let Err(e) = w.commit() {
+            let _ = w.rollback();
+            return Err(internal(e));
+        }
+        r
     }
 }
 
@@ -1204,7 +1234,7 @@ fn question(w: &StateWriter, args: &Value) -> Result<Option<Question>, DoorError
 /// `answer` (spec sections 7 and 12) of a question: its answer is queued to the worker and the
 /// entry is answered, in the caller's transaction. The answer of a prompt is `answer_prompt`,
 /// called by `handle` before any transaction (Issue 578).
-fn answer(w: &StateWriter, actor: &str, args: &Value) -> Response {
+fn answer(w: &StateWriter, actor: &str, role: Role, args: &Value) -> Response {
     let Some(q) = question(w, args)? else {
         return Err(internal(
             "the answer of a prompt is handled by the door's handle",
@@ -1217,7 +1247,7 @@ fn answer(w: &StateWriter, actor: &str, args: &Value) -> Response {
         super::park::unpark(w, task, "answer", json!(q.id)).map_err(internal)?;
     }
     let id = store_message(w, actor, &q.to, "message", q.task.as_deref(), &q.body)?;
-    q.answered(w, actor, id)
+    q.answered(w, actor, role, id)
 }
 
 /// What the answer of a prompt read before its reservation: the entry, its episode and the key.
@@ -1384,6 +1414,7 @@ fn answer_prompt(
     w: &StateWriter,
     base: &dyn Base,
     actor: &str,
+    role: Role,
     args: &Value,
     idem: Option<&str>,
 ) -> Response {
@@ -1505,7 +1536,23 @@ fn answer_prompt(
             p.id
         ))),
     };
-    if let Err(e) = finish_command(w, command, &r) {
+    // The person's answer is told to the secretary once its key was pressed (Issue 612), in one
+    // transaction with the command's finish: a press that did not happen is told nothing.
+    let finished = w.transaction(|w| {
+        if role == Role::Person && r.is_ok() {
+            person_act(
+                w,
+                Some(&p.task),
+                &format!(
+                    "The person answered the permission prompt of pending entry {} of task {}: {} (key {} pressed).",
+                    p.id, p.task, p.answer, p.key
+                ),
+            )?;
+        }
+        finish_command(w, command, &r)?;
+        Ok(())
+    });
+    if let Err(e) = finished {
         eprintln!("makibad: cannot finish command {command}: {e}");
     }
     r
@@ -1825,6 +1872,21 @@ pub(super) fn notice_untasked(
     body: &str,
 ) -> crate::db::Result<i64> {
     message_row(w, "makibad", recipient, "notice", None, body)
+}
+
+/// A notice to the secretary of an act the person did through their key (Issue 612, belt.md 3.4):
+/// the person deals with the secretary only, so the secretary hears of it in the act's own
+/// transaction. Tied to `task` when the act has one. The callers write it only for the role
+/// `person`; the secretary's own acts are not told back to it.
+pub(super) fn person_act(
+    w: &StateWriter,
+    task: Option<&str>,
+    body: &str,
+) -> crate::db::Result<i64> {
+    match task {
+        Some(task) => notice(w, crate::spec::AGENT_SECRETARY, task, body),
+        None => notice_untasked(w, crate::spec::AGENT_SECRETARY, body),
+    }
 }
 
 fn message_row(
@@ -3015,8 +3077,29 @@ fn show(w: &StateWriter, actor: &str, args: &Value) -> Response {
 }
 
 /// `config` (spec section 12, Issue 48). A set is a `config_set` event in the command's own
-/// transaction; `max_concurrent_workers` and `merge_approval_mode` are not stored yet.
+/// transaction; `max_concurrent_workers` and `merge_approval_mode` are not stored yet. `config` is
+/// the person's verb alone, so each set is told to the secretary in the same transaction (Issue
+/// 612); a project's artifact language has its own notice, which says what to do with it.
 fn config(w: &StateWriter, actor: &str, args: &Value) -> Response {
+    let r = config_value(w, actor, args)?;
+    let key = r["key"].as_str().unwrap_or_default();
+    let own_notice = super::language::kind_of(key).is_some_and(|(_, per_project)| per_project);
+    if args.get("action").and_then(Value::as_str) == Some("set") && !own_notice {
+        let project = r["project"].as_str().filter(|p| !p.is_empty());
+        let of = project
+            .map(|p| format!(" of project {p}"))
+            .unwrap_or_default();
+        let value = r["value"].as_str().unwrap_or_default();
+        let mut body = format!("The person set {key}{of} to {value:?}.");
+        if let Some(applies) = r["applies"].as_str() {
+            body.push_str(&format!(" It applies {applies}."));
+        }
+        person_act(w, None, &body).map_err(internal)?;
+    }
+    Ok(r)
+}
+
+fn config_value(w: &StateWriter, actor: &str, args: &Value) -> Response {
     let key = str_arg(args, "key")?;
     if !CONFIG_KEYS.contains(&key) {
         return Err(usage(format!(
@@ -3214,6 +3297,11 @@ struct GateRows {
     /// The merge orders the person set on the PR (Issue 338); the copy read again inside the
     /// verdict's transaction is the one judged.
     orders: Vec<super::gate::After>,
+    /// Issue 592: the PR's `acceptance_approved` events, oldest first, and the ids and heads of
+    /// its `merge_attempted` events; read again when the verdict is recorded, a difference there
+    /// is "ask again".
+    approvals: Vec<(i64, Value)>,
+    attempts: Vec<(i64, String)>,
 }
 
 /// One other open pull request of the repository (Issue 331, merge-order.md 3.3): its task,
@@ -3336,6 +3424,11 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         .collect();
     // Issue 338: the merge orders the person set on this pull request, from the ledger only.
     let orders = super::gate::person_orders(c, repo, pr)?;
+    let approvals = payloads("acceptance_approved")?;
+    let attempts = payloads("merge_attempted")?
+        .into_iter()
+        .map(|(id, v)| (id, text(&v, "head")))
+        .collect();
     Ok(GateRows {
         latest_ci: ci
             .last()
@@ -3347,6 +3440,8 @@ fn gate_rows(w: &StateWriter, repo: &str, pr: i64) -> rusqlite::Result<GateRows>
         review,
         others,
         orders,
+        approvals,
+        attempts,
     })
 }
 
@@ -3707,7 +3802,7 @@ fn merge_order_line(repo: &str, pr: i64, m: &super::gate::MergeOrder) -> String 
 fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
     use super::gate;
     let program = super::gh::program();
-    let (_url, base_branch, view_head) = match gate::pr_view_read(&program, repo, pr) {
+    let (url, base_branch, view_head) = match gate::pr_view_read(&program, repo, pr) {
         Ok(v) => v,
         Err(gate::Fault::Refused(why)) => return Found::Before(why),
         Err(gate::Fault::Unavailable(why)) => return Found::Unavailable(why),
@@ -3719,21 +3814,26 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
             &head[..12]
         ));
     }
-    if rows
+    let latest_ci = rows
         .latest_ci
         .as_ref()
-        .map(|(s, h)| (s.as_str(), h.as_str()))
-        != Some(("passed", head))
-    {
-        let latest = rows
-            .latest_ci
-            .as_ref()
-            .map_or("none".to_string(), |(s, h)| {
-                format!("{s} at {}", &h[..h.len().min(12)])
-            });
+        .map(|(s, h)| (s.as_str(), h.as_str()));
+    let latest = rows
+        .latest_ci
+        .as_ref()
+        .map_or("none".to_string(), |(s, h)| {
+            format!("{s} at {}", &h[..h.len().min(12)])
+        });
+    let no_pass = format!(
+        "no passed ci_completed for {repo}#{pr} at {} (latest: {latest})",
+        &head[..12]
+    );
+    // Issue 592: a head whose CI failed there is judged on, as one whose acceptance check may
+    // have failed by construction (`gate::evaluate_failed`); its refusal starts with today's.
+    let failed_here = latest_ci == Some(("failed", head));
+    if latest_ci != Some(("passed", head)) && !failed_here {
         return Found::Before(format!(
-            "no passed ci_completed for {repo}#{pr} at {} (latest: {latest}); record the head with the pr tool and wait for the CI notice. A repository without CI has no passed run: the person merges it in the GitHub web UI",
-            &head[..12]
+            "{no_pass}; record the head with the pr tool and wait for the CI notice. A repository without CI has no passed run: the person merges it in the GitHub web UI"
         ));
     }
     let repos = super::prepare::Places::from_env(Path::new("")).repos;
@@ -3758,20 +3858,57 @@ fn gate_outside(rows: &GateRows, repo: &str, pr: i64, head: &str) -> Found {
     let mut v = gate::Verdict {
         base: base.clone(),
         head: head.to_string(),
+        github_repo: gate::github_repo_of(&url, repo, pr),
         ..Default::default()
     };
     let mut ci = gate::Ci::new(&program);
     let failed = |sha: &str| Ok(rows.failed.contains(sha));
-    if let Err(e) = gate::evaluate(
-        &clone,
-        &base,
-        head,
-        repo,
-        rows.pin.as_ref(),
-        &mut ci,
-        &failed,
-        &mut v,
-    ) {
+    // Issue 592: the newest acceptance approval of this head, of any method, is the one judged.
+    let approval = rows
+        .approvals
+        .iter()
+        .rfind(|(_, a)| a["head"].as_str() == Some(head));
+    let judged = if failed_here {
+        gate::evaluate_failed(&clone, &base, head, repo, rows.pin.as_ref(), &mut ci, &mut v)
+            .and_then(|()| match &v.github_repo {
+                Some(_) => Ok(()),
+                None => Err(gate::Reject(format!(
+                    "the pull request's url {url:?} does not name {repo}#{pr} on GitHub, so no approval text can name it"
+                ))),
+            })
+            .map_err(|e| gate::Reject(format!("{no_pass}; not failed by construction: {}", e.0)))
+    } else if let Some((id, a)) = approval {
+        let set: Vec<String> = a["set"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|r| r.as_str().map(String::from))
+            .collect();
+        let pending = a["pending_id"].as_i64().unwrap_or_default();
+        gate::evaluate_approved(
+            &clone,
+            &base,
+            head,
+            repo,
+            rows.pin.as_ref(),
+            &mut ci,
+            &set,
+            (*id, pending),
+            &mut v,
+        )
+    } else {
+        gate::evaluate(
+            &clone,
+            &base,
+            head,
+            repo,
+            rows.pin.as_ref(),
+            &mut ci,
+            &failed,
+            &mut v,
+        )
+    };
+    if let Err(e) = judged {
         // A read of GitHub that still failed is the cause of the error: not a refusal (Issue 512).
         // The verdict goes on, so that the test commit found is recorded (the pin) and the rules
         // on the content still apply; `judge` answers `unavailable` only if none refuses.
@@ -3964,6 +4101,9 @@ impl Door {
                 } else if now.others != rows.others {
                     v.result = "rejected".into();
                     v.reason = "the open pull requests of the repository changed while the gate ran; ask again".into();
+                } else if now.approvals != rows.approvals || now.attempts != rows.attempts {
+                    v.result = "rejected".into();
+                    v.reason = "the PR's acceptance approvals or merge attempts changed while the gate ran; ask again".into();
                 }
                 // A CI read that failed (Issue 512) is held as allowed while the rules on the
                 // content run; if none refuses, it becomes `unavailable` below.
@@ -4049,6 +4189,34 @@ impl Door {
                 reason = format!("{reason}; WARNING {line}: the person decides this landing");
             } else {
                 reason = format!("{reason}; {line}");
+            }
+        }
+        // Issue 592: a head whose acceptance failed by construction needs the person's signed
+        // approval of its failure set (the ask), and a head landing on one names it; either is a
+        // warning under both modes, so the person's key decides unless the approval authorizes.
+        let failures: Vec<String> = event
+            .as_ref()
+            .map(|v| v.acceptance_failures.clone())
+            .unwrap_or_default();
+        let approved_in = event.as_ref().and_then(|v| v.approved_in);
+        let mut approved_line = None;
+        if !failures.is_empty() {
+            let line = match approved_in {
+                None => super::gate::acceptance_warning(&failures),
+                Some((_, pending)) => format!(
+                    "acceptance failed by construction, approved in pending {pending}: {}",
+                    failures.join("; ")
+                ),
+            };
+            if allow {
+                warn = true;
+                warnings.push(line.clone());
+                reason = format!("{reason}; WARNING {line}: the person decides this landing");
+            } else {
+                reason = format!("{reason}; {line}");
+            }
+            if approved_in.is_some() {
+                approved_line = Some(line);
             }
         }
         let stats: Vec<String> = event
@@ -4226,6 +4394,12 @@ impl Door {
         if !edited.is_empty() {
             payload["edited_tests"] = json!(edited);
         }
+        if !failures.is_empty() {
+            payload["acceptance_failures"] = json!(failures);
+        }
+        if let Some((event, pending)) = approved_in {
+            payload["approved_in"] = json!({"event": event, "pending_id": pending});
+        }
         if !language.is_empty() {
             payload["language_check"] = json!({
                 "paths": language.iter().map(|e| e.path.as_str()).collect::<Vec<_>>(),
@@ -4370,6 +4544,11 @@ impl Door {
             mode,
             review,
             event: event_id,
+            ask: allow && !failures.is_empty() && approved_in.is_none(),
+            failures,
+            approved_in,
+            approved_line,
+            github_repo: event.as_ref().and_then(|v| v.github_repo.clone()),
         })
     }
 }
@@ -4431,6 +4610,15 @@ struct Judged {
     mode: &'static str,
     review: Option<Value>,
     event: i64,
+    /// Issue 592: the verdict asks the person to sign an acceptance approval of `failures`.
+    ask: bool,
+    /// The failure set of a head whose acceptance failed by construction (`gate::Verdict`).
+    failures: Vec<String>,
+    /// The `acceptance_approved` event and pending entry the head is judged on, and its warning.
+    approved_in: Option<(i64, i64)>,
+    approved_line: Option<String>,
+    /// GitHub's spelling of the repository, which the approval text names.
+    github_repo: Option<String>,
 }
 
 // ---- merge (Issue 431, docs/design/merge-act.md) ------------------------------------------------
@@ -4762,6 +4950,7 @@ fn merge_entry_text(
     reason: &str,
     warnings: &[String],
     stats: &[String],
+    approval: Option<&str>,
     requested_by: &str,
 ) -> String {
     let mut text = format!(
@@ -4773,11 +4962,23 @@ fn merge_entry_text(
     for line in stats {
         text.push_str(&format!("Diff: {line}\n"));
     }
+    if let Some(a) = approval {
+        text.push_str("Approval to sign:\n");
+        text.push_str(a);
+    }
     text.push_str(&format!("Requested by: {requested_by}\n"));
     text
 }
 
-/// The context of a pending merge entry for the gate's reading `j` (merge-act.md section 5.1).
+/// The approval text (docs/design/acceptance-approval.md 4.2) the entry `id` asks the person to
+/// sign for the gate's reading `j`, when `j` is an ask.
+fn merge_entry_approval(j: &Judged, pr: i64, head: &str, id: i64) -> Option<String> {
+    let repo = j.github_repo.as_deref().filter(|_| j.ask)?;
+    Some(super::gate::approval_text(repo, pr, head, &j.failures, id))
+}
+
+/// The context of a pending merge entry for the gate's reading `j` (merge-act.md section 5.1):
+/// with the entry's own `id` (Issue 592), the approval text of an ask, shown in its text.
 #[allow(clippy::too_many_arguments)]
 fn merge_entry_context(
     w: &StateWriter,
@@ -4788,6 +4989,7 @@ fn merge_entry_context(
     head: &str,
     method: &str,
     requested_by: &str,
+    id: Option<i64>,
 ) -> rusqlite::Result<Value> {
     let title: String = w
         .conn()
@@ -4796,6 +4998,7 @@ fn merge_entry_context(
         })
         .optional()?
         .unwrap_or_default();
+    let approval = id.and_then(|id| merge_entry_approval(j, pr, head, id));
     let text = merge_entry_text(
         repo,
         pr,
@@ -4806,13 +5009,18 @@ fn merge_entry_context(
         &j.reason,
         &j.warnings,
         &j.stats,
+        approval.as_deref(),
         requested_by,
     );
-    Ok(json!({
+    let mut context = json!({
         "repo": repo, "pr": pr, "head": head, "method": method, "mode": j.mode,
         "gate_event": j.event, "reason": j.reason, "warnings": j.warnings,
         "requested_by": requested_by, "text_sum": sha256_hex(&text), "text": text,
-    }))
+    });
+    if let Some(a) = approval {
+        context["approval"] = json!(a);
+    }
+    Ok(context)
 }
 
 /// An open merge entry, as the door reads it.
@@ -5008,6 +5216,148 @@ fn merge_attempt(
     Ok(answer)
 }
 
+/// Whether `s` has the form of an armored SSH signature (Issue 592): a `BEGIN SSH SIGNATURE`
+/// line, base64 lines, an `END SSH SIGNATURE` line, at most 4096 bytes. Whose key made it is
+/// checked by the acceptance job, from the base's `.github/acceptance-approvers`.
+fn signature_form(s: &str) -> bool {
+    let lines: Vec<&str> = s.strip_suffix('\n').unwrap_or(s).split('\n').collect();
+    let base64 = |l: &&str| {
+        !l.is_empty()
+            && l.bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/' || b == b'=')
+    };
+    s.len() <= 4096
+        && lines.len() >= 3
+        && lines[0] == "-----BEGIN SSH SIGNATURE-----"
+        && lines[lines.len() - 1] == "-----END SSH SIGNATURE-----"
+        && lines[1..lines.len() - 1].iter().all(base64)
+}
+
+/// The refusal of an approval of an ask without the person's signature (Issue 592).
+fn no_signature(id: i64) -> DoorError {
+    usage(format!(
+        "pending merge entry {id} asks the person to sign its acceptance approval: makiba merge approve {id} signs it with the approval key and sends the signature; nothing was approved"
+    ))
+}
+
+/// The person's signed acceptance approval of entry `id` (Issue 592, docs/design/acceptance-
+/// approval.md 4.4 (2)), in the open transaction that consumed the entry: `acceptance_approved`
+/// with the comment the secretary posts (the approval text, `---`, the signature), and one notice
+/// telling the secretary to post it and rerun the failed acceptance job. No attempt: the next
+/// request at this head and method lands on it once the rerun passes. The answer.
+#[allow(clippy::too_many_arguments)]
+fn acceptance_approved(
+    w: &StateWriter,
+    actor: &str,
+    j: &Judged,
+    (repo, pr, head, method): (&str, i64, &str, &str),
+    task: &str,
+    id: i64,
+    shown_warnings: &[String],
+    text: &str,
+    signature: &str,
+) -> crate::db::Result<Value> {
+    let comment = format!(
+        "{text}---\n{}\n",
+        signature.strip_suffix('\n').unwrap_or(signature)
+    );
+    let ask_line = super::gate::acceptance_warning(&j.failures);
+    let warnings: Vec<&String> = shown_warnings.iter().filter(|x| **x != ask_line).collect();
+    let event = w.append_event(&NewEvent {
+        kind: "acceptance_approved",
+        actor: Some(actor),
+        payload: Some(&json!({
+            "repo": repo, "github_repo": j.github_repo, "pr": pr, "head": head,
+            "method": method, "failures": super::gate::failures_digest(&j.failures),
+            "set": j.failures, "warnings": warnings, "pending_id": id, "comment": comment,
+            "gate_event": j.event, "task_id": task,
+        })),
+        run_task_id: Some(task),
+        ..Default::default()
+    })?;
+    notice(
+        w,
+        crate::spec::AGENT_SECRETARY,
+        task,
+        &format!(
+            "The person approved pending merge entry {id} ({repo}#{pr} at {}, by {method}): acceptance fails by construction ({}). Post this comment on the pull request exactly as given (write it to a file and post it with --body-file), rerun the failed acceptance job (its failed jobs), record the rerun with mcp__makiba__pr state rerun, and when the CI notice says passed at this head ask merge again with method {method}. The comment:\n{comment}",
+            &head[..head.len().min(12)],
+            j.failures.join("; ")
+        ),
+    )?;
+    Ok(
+        json!({"status": "approved", "event": event, "pending_id": id, "repo": repo, "pr": pr,
+              "head": head, "method": method, "comment": comment, "mode": j.mode}),
+    )
+}
+
+/// Issue 592 (docs/design/acceptance-approval.md 4.4 (3)): the pending entry of the person's
+/// acceptance approval that authorizes a request by `method` at `head`, read in the request's
+/// transaction. Only the very approval the gate judged (`j.approved_in`, the newest of the head
+/// of any method) authorizes, and only when it was given for `method`, no attempt at the head came
+/// after it (any later `merge_attempted` there spends it), and every warning of the verdict other
+/// than the approved-in one was among the warnings the person was shown with it.
+fn approved_landing(
+    w: &StateWriter,
+    j: &Judged,
+    repo: &str,
+    pr: i64,
+    head: &str,
+    method: &str,
+) -> rusqlite::Result<Option<i64>> {
+    let (Some((event, pending)), Some(line)) = (j.approved_in, j.approved_line.as_deref()) else {
+        return Ok(None);
+    };
+    let of_head = "lower(json_extract(payload_json, '$.repo')) = lower(?1)
+                   AND json_extract(payload_json, '$.pr') = ?2
+                   AND json_extract(payload_json, '$.head') = ?3";
+    let newest: Option<(i64, Option<String>)> = w
+        .conn()
+        .query_row(
+            &format!(
+                "SELECT id, payload_json FROM events WHERE kind = 'acceptance_approved' AND {of_head}
+                 ORDER BY id DESC LIMIT 1"
+            ),
+            params![repo, pr, head],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    let Some((id, Some(payload))) = newest else {
+        return Ok(None);
+    };
+    let a: Value = serde_json::from_str(&payload).unwrap_or_default();
+    if id != event
+        || a["method"].as_str() != Some(method)
+        || a["pending_id"].as_i64() != Some(pending)
+    {
+        return Ok(None);
+    }
+    let spent: bool = w.conn().query_row(
+        &format!(
+            "SELECT EXISTS (SELECT 1 FROM events WHERE kind = 'merge_attempted' AND id > ?4
+               AND {of_head})"
+        ),
+        params![repo, pr, head, event],
+        |r| r.get(0),
+    )?;
+    if spent {
+        return Ok(None);
+    }
+    let shown: Vec<&str> = a["warnings"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(Value::as_str)
+        .collect();
+    if j.warnings
+        .iter()
+        .any(|x| x != line && !shown.contains(&x.as_str()))
+    {
+        return Ok(None);
+    }
+    Ok(Some(pending))
+}
+
 /// The answer's `status` and the command's status of a `merge` the gate did not allow: a read of
 /// GitHub that still failed is `unavailable`, recorded `failed` (Issue 512); any other verdict is
 /// `refused`, recorded `rejected`.
@@ -5075,7 +5425,7 @@ impl Door {
         match action {
             "approve" => return self.merge_approve(w, actor, args, idem),
             "refuse" | "withdraw" => return merge_end(&w, actor, role, action, args, idem),
-            "order" => return merge_order_set(&w, actor, args, idem),
+            "order" => return merge_order_set(&w, actor, role, args, idem),
             _ => {}
         }
         let parsed = (|| -> Result<_, DoorError> {
@@ -5140,7 +5490,16 @@ impl Door {
             }
             return merge_finish(&w, actor, args, idem, recorded, Ok(answer));
         }
-        if j.warn || (j.mode != "acceptance" && role != Role::Person) {
+        // Issue 592: a head landing on the person's acceptance approval lands by that one answer,
+        // under both modes and whoever asks, when the approval authorizes this request.
+        let authorized = match approved_landing(&w, &j, &repo, pr, &head, &method) {
+            Ok(a) => a,
+            Err(e) => {
+                let _ = w.rollback();
+                return Err(internal(e));
+            }
+        };
+        if authorized.is_none() && (j.warn || (j.mode != "acceptance" && role != Role::Person)) {
             // Issue 432: the person's key decides. The same request again is the same entry; one
             // at another head or with another method replaces it.
             let written = (|| -> crate::db::Result<i64> {
@@ -5149,6 +5508,28 @@ impl Door {
                     if c["head"].as_str() == Some(head.as_str())
                         && c["method"].as_str() == Some(method.as_str())
                     {
+                        // Issue 592: an entry whose approval text is not the reading's (none
+                        // before and one now, or another set) takes the new reading in place.
+                        let by = c["requested_by"].as_str().unwrap_or(actor).to_string();
+                        let fresh = merge_entry_context(
+                            &w,
+                            &j,
+                            &repo,
+                            pr,
+                            &task,
+                            &head,
+                            &method,
+                            &by,
+                            Some(e.id),
+                        )?;
+                        if fresh["approval"] != c["approval"] {
+                            w.conn().execute(
+                                "UPDATE pending SET context_json = ?1
+                                 WHERE id = ?2 AND kind = 'merge' AND status = 'open'
+                                   AND json_extract(context_json, '$.text_sum') = ?3",
+                                params![fresh.to_string(), e.id, c["text_sum"].as_str()],
+                            )?;
+                        }
                         return Ok(e.id);
                     }
                     withdraw_merge_entry(
@@ -5157,7 +5538,8 @@ impl Door {
                         "the secretary asked again at another head or with another method",
                     )?;
                 }
-                let context = merge_entry_context(&w, &j, &repo, pr, &task, &head, &method, actor)?;
+                let context =
+                    merge_entry_context(&w, &j, &repo, pr, &task, &head, &method, actor, None)?;
                 w.conn().execute(
                     "INSERT INTO pending (run_id, kind, question, context_json)
                      VALUES ((SELECT id FROM runs WHERE task_id = ?1), 'merge', ?2, ?3)",
@@ -5170,7 +5552,17 @@ impl Door {
                         context.to_string()
                     ],
                 )?;
-                Ok(w.conn().last_insert_rowid())
+                let id = w.conn().last_insert_rowid();
+                // The approval text names the entry's own id, known only now.
+                let full =
+                    merge_entry_context(&w, &j, &repo, pr, &task, &head, &method, actor, Some(id))?;
+                if full != context {
+                    w.conn().execute(
+                        "UPDATE pending SET context_json = ?1 WHERE id = ?2",
+                        params![full.to_string(), id],
+                    )?;
+                }
+                Ok(id)
             })();
             let id = match written {
                 Ok(id) => id,
@@ -5186,7 +5578,11 @@ impl Door {
                                 "warnings": j.warnings});
             return merge_finish(&w, actor, args, idem, "done", Ok(answer));
         }
-        let approved_by = (role == Role::Person).then_some("person");
+        let approved_by = if authorized.is_some() {
+            Some("person")
+        } else {
+            (role == Role::Person).then_some("person")
+        };
         // A pending merge of this pull request is superseded by the act that runs now: left open,
         // it could be approved after this attempt ended, for a request nobody makes any more.
         let attempted = withdraw_merge_entries(
@@ -5209,7 +5605,7 @@ impl Door {
                 (&repo, pr, &head, &method),
                 &task,
                 approved_by,
-                None,
+                authorized,
             )
         });
         let answer = match attempted {
@@ -5249,10 +5645,29 @@ impl Door {
             let _ = record(w, actor, "merge", args, idem, &r);
             r
         };
-        let parsed = (|| -> Result<(i64, String), DoorError> {
-            Ok((id_arg(args)?, str_arg(args, "shown")?.to_string()))
+        let parsed = (|| -> Result<(i64, String, Option<String>), DoorError> {
+            // Issue 592: the person's signature of the entry's approval text, made in their own
+            // process with the approval key; makibad checks its form only.
+            let signature = match args.get("signature") {
+                None | Some(Value::Null) => None,
+                Some(s) => Some(
+                    s.as_str()
+                        .filter(|s| signature_form(s))
+                        .ok_or_else(|| {
+                            usage(
+                                "signature is an armored SSH signature (-----BEGIN SSH SIGNATURE----- ... -----END SSH SIGNATURE-----, at most 4096 bytes)",
+                            )
+                        })?
+                        .to_string(),
+                ),
+            };
+            Ok((
+                id_arg(args)?,
+                str_arg(args, "shown")?.to_string(),
+                signature,
+            ))
         })();
-        let (id, shown) = match parsed {
+        let (id, shown, signature) = match parsed {
             Ok(p) => p,
             Err(e) => return fail(&w, Err(e)),
         };
@@ -5276,6 +5691,9 @@ impl Door {
         }
         if entry.context["text_sum"].as_str() != Some(shown.as_str()) {
             return fail(&w, Err(merge_stale(id, "is not the text that was printed")));
+        }
+        if entry.context["approval"].is_string() && signature.is_none() {
+            return fail(&w, Err(no_signature(id)));
         }
         let c = &entry.context;
         let (Some(repo), Some(pr), Some(head), Some(method)) = (
@@ -5385,20 +5803,35 @@ impl Door {
             }
             return merge_finish(&w, actor, args, idem, recorded, Ok(answer));
         }
-        if j.warnings.iter().any(|x| !shown_warnings.contains(x)) {
+        // Issue 592: an ask is answered by the person's signature of the approval text the entry
+        // showed, which is the one the reading names; another text is a new reading.
+        // An entry that showed no approval or another one is refreshed first, so that the next
+        // `makiba merge approve` sees the text to sign; only then is a missing signature refused.
+        let approval = merge_entry_approval(&j, pr, &head, id);
+        let other_text = j.ask && approval.as_deref() != c["approval"].as_str();
+        if other_text || j.warnings.iter().any(|x| !shown_warnings.contains(x)) {
             // A warning the person was not shown: the entry takes the new reading, and the person
             // approves what they are shown next, nothing else.
-            let replaced =
-                merge_entry_context(&w, &j, &repo, pr, &task, &head, &method, &requested_by)
-                    .map_err(crate::db::Error::from)
-                    .and_then(|context| {
-                        Ok(w.conn().execute(
-                            "UPDATE pending SET context_json = ?1
+            let replaced = merge_entry_context(
+                &w,
+                &j,
+                &repo,
+                pr,
+                &task,
+                &head,
+                &method,
+                &requested_by,
+                Some(id),
+            )
+            .map_err(crate::db::Error::from)
+            .and_then(|context| {
+                Ok(w.conn().execute(
+                    "UPDATE pending SET context_json = ?1
                      WHERE id = ?2 AND kind = 'merge' AND status = 'open'
                        AND json_extract(context_json, '$.text_sum') = ?3",
-                            params![context.to_string(), id, shown],
-                        )?)
-                    });
+                    params![context.to_string(), id, shown],
+                )?)
+            });
             if let Err(e) = replaced {
                 let _ = w.rollback();
                 return Err(internal(e));
@@ -5411,9 +5844,17 @@ impl Door {
                 "rejected",
                 Err(merge_stale(
                     id,
-                    "now has a warning the printed text did not show",
+                    if other_text {
+                        "now asks to sign another approval text than the printed one"
+                    } else {
+                        "now has a warning the printed text did not show"
+                    },
                 )),
             );
+        }
+        if j.ask && signature.is_none() {
+            let _ = w.rollback();
+            return fail(&w, Err(no_signature(id)));
         }
         let consumed = w.conn().execute(
             "UPDATE pending SET status = 'answered', answer = 'approved', answered_by = 'person',
@@ -5439,6 +5880,28 @@ impl Door {
                 let _ = w.rollback();
                 return Err(internal(e));
             }
+        }
+        if let (true, Some(text), Some(sig)) = (j.ask, approval, signature) {
+            let approved = acceptance_approved(
+                &w,
+                actor,
+                &j,
+                (&repo, pr, &head, &method),
+                &task,
+                id,
+                &shown_warnings,
+                &text,
+                &sig,
+            );
+            return match approved {
+                Ok(answer) => merge_finish(&w, actor, args, idem, "done", Ok(answer)),
+                Err(e) => {
+                    let _ = w.rollback();
+                    Err(internal(format!(
+                        "the approval could not be recorded; nothing was done: {e}"
+                    )))
+                }
+            };
         }
         let attempted = merge_attempt(
             &w,
@@ -5479,7 +5942,13 @@ impl Door {
 /// same order again is the first one. Refused (`conflict`) while the pull request has a merge act
 /// of makibad awaiting its landing: that act runs without a new judgement, so the order could not
 /// hold it.
-fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str>) -> Response {
+fn merge_order_set(
+    w: &StateWriter,
+    actor: &str,
+    role: Role,
+    args: &Value,
+    idem: Option<&str>,
+) -> Response {
     let fail = |r: Response| {
         let _ = record(w, actor, "merge", args, idem, &r);
         r
@@ -5606,6 +6075,23 @@ fn merge_order_set(w: &StateWriter, actor: &str, args: &Value, idem: Option<&str
                     .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
                 let landed =
                     super::gate::order_landed(w.conn(), &repo, after, number, project.as_deref())?;
+                // Issue 612: a new order of the person is told to the secretary; the same order
+                // again writes nothing, and the secretary's own order is not told back.
+                if role == Role::Person {
+                    let what = if after == "pr" {
+                        "pull request"
+                    } else {
+                        "Issue"
+                    };
+                    person_act(
+                        w,
+                        task.as_deref(),
+                        &format!(
+                            "The person ordered that {repo}#{pr} merges only after {what} #{number} has landed: {reason}"
+                        ),
+                    )
+                    .map_err(|e| rusqlite::Error::InvalidParameterName(e.to_string()))?;
+                }
                 (id, landed)
             }
         };
@@ -6709,7 +7195,7 @@ fn tool(v: Verb) -> Value {
             &[],
         ),
         Verb::Merge => (
-            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing. action order records a merge order the person decided: repo, pr (the pull request that waits), exactly one of after_pr or after_issue (what must land first, in the same repository) and reason (the person's decision); the gate then refuses that pull request under either mode until the other has landed. The same order again is the first one; no action lifts it.",
+            "Ask makibad to merge a pull request: action request with repo (owner/name), pr, head (the full 40-character head of the CI notice) and method (squash, merge or rebase; default squash). makibad runs the acceptance gate at that head; refused: the verdict, nothing runs. Allowed under merge_approval_mode acceptance with no warning: accepted with the attempt's number, and makibad itself lands the pull request bound to that head (or adds it to the merge queue where the branch requires one); a notice says merged, enqueued, refused by GitHub or not known. Nothing is retried: ask again once the cause is dealt with. Under merge_approval_mode human, or when the gate warns, the answer is pending with a pending_id: tell the person the pull request, the warnings and that they approve it in their shell with makiba merge approve <id>; only their key lets it land, a word in the conversation does not, and answer cannot. A new head, a replacement pull request or a landing withdraws the entry. A head whose only failed check is acceptance, failed by construction, gives a pending entry too, whose approval the person signs; makibad then tells you to post the signed comment exactly and rerun the failed acceptance job, and the next request at that head and method, once CI passed there, lands on that approval. action withdraw with id (and an optional reason) withdraws a pending merge. Refused (conflict) for a pull request makibad does not follow, or one with an act awaiting its landing. action order records a merge order the person decided: repo, pr (the pull request that waits), exactly one of after_pr or after_issue (what must land first, in the same repository) and reason (the person's decision); the gate then refuses that pull request under either mode until the other has landed. The same order again is the first one; no action lifts it.",
             Map::from_iter([
                 (
                     "action".into(),
@@ -6897,7 +7383,8 @@ mod merge_order_tests {
         }
         let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_issue": 1,
                           "reason": "the person's condition"});
-        let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+        let e = merge_order_set(&w, "secretary", crate::spec::Role::Secretary, &args, None)
+            .unwrap_err();
         assert_eq!(e.kind, ErrorKind::Conflict, "{e:?}");
         let n: i64 = w
             .conn()
@@ -6911,7 +7398,8 @@ mod merge_order_tests {
         // An order after a pull request needs no project.
         let args = json!({"action": "order", "repo": "o/r", "pr": 2, "after_pr": 1,
                           "reason": "the person's condition"});
-        let v = merge_order_set(&w, "secretary", &args, None).unwrap();
+        let v =
+            merge_order_set(&w, "secretary", crate::spec::Role::Secretary, &args, None).unwrap();
         assert_eq!(v["status"], json!("recorded"), "{v}");
     }
 
@@ -6924,7 +7412,8 @@ mod merge_order_tests {
         for repo in ["o/r ", " o/r", "o/r/x", "o r/r", "o/", "/r", "o/r\n"] {
             let args = json!({"action": "order", "repo": repo, "pr": 2, "after_pr": 1,
                               "reason": "the person's condition"});
-            let e = merge_order_set(&w, "secretary", &args, None).unwrap_err();
+            let e = merge_order_set(&w, "secretary", crate::spec::Role::Secretary, &args, None)
+                .unwrap_err();
             assert_eq!(e.kind, ErrorKind::Usage, "{repo:?}: {e:?}");
         }
         let n: i64 = w

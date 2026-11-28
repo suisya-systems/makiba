@@ -45,6 +45,7 @@ pub const EVENT_KINDS_NEW: &[&str] = &[
     "dispatcher_started",
     "dispatcher_stopped",
     "dispatcher_stop_unrecorded",
+    "tick_slow",
     "base_resynced",
     "terminal_status",
     "terminal_turn",

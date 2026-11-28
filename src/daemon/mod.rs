@@ -1,6 +1,8 @@
 //! `makibad`, run as `makiba daemon` (spec sections 5.7 and 14): one instance per state folder,
 //! a heartbeat, a clean stop. It says it is subscribed only once the base's event stream has
-//! yielded its first `Resync`, and only then writes `dispatcher_started`.
+//! yielded its first `Resync`, and only then writes `dispatcher_started`. Its loop times itself:
+//! every pass and the heartbeat, and a tick longer than `tick::SLOW_TICK` is said in one line and
+//! recorded as `tick_slow` (Issue 624).
 
 pub mod ahead;
 pub mod anomalies;
@@ -36,6 +38,7 @@ mod resume;
 pub mod review;
 pub mod run_repo;
 pub mod secretary;
+mod tick;
 mod triage;
 pub use project::hosts_of;
 pub use push::sync_request;
@@ -385,7 +388,8 @@ fn serve_until(
     if let Err(e) = prepare.sweep(&w) {
         eprintln!("makibad: the temporary folders of launches that are over: {e}");
     }
-    let launch = launch::Launch::new(dir, door_addr);
+    let launch =
+        launch::Launch::new(dir, door_addr).with_priority(launch::WorkerPriority::from_env());
     let mut curator = curator::Curator::from_env(dir);
     // `makiba up` asks for the secretary (Issue 43), read once, at start; renewals and relaunches
     // (Issue 46) run whatever it says.
@@ -411,136 +415,192 @@ fn serve_until(
     while !stop.load(Ordering::SeqCst) {
         // A test's stop of the tick while the process lives (Issue 563; debug builds only).
         crash::hold("tick");
-        match rx.recv_timeout(TICK) {
+        let got = rx.recv_timeout(TICK);
+        // The wait of an ended subscription is idle time, as the receive's is: not counted.
+        if matches!(got, Err(RecvTimeoutError::Disconnected)) && subscribed {
+            std::thread::sleep(TICK);
+        }
+        // Issue 624: every pass and the heartbeat are timed; a slow tick is said at its end.
+        let mut clock = tick::Clock::start();
+        match got {
             Ok(Msg::Subscribed(Ok(()))) => subscribed = true,
             Ok(Msg::Subscribed(Err(e))) => return Err(e),
             // Queued with its arrival time; written below, and again on later ticks if refused.
-            Ok(Msg::Event(e, seen)) => monitor.push(&w, e, seen),
+            Ok(Msg::Event(e, seen)) => clock.time("event", || monitor.push(&w, e, seen)),
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) if !subscribed => {
                 return Err("the subscription thread ended before it subscribed".into());
             }
-            Err(RecvTimeoutError::Disconnected) => std::thread::sleep(TICK),
+            Err(RecvTimeoutError::Disconnected) => {}
         }
         // When this tick's work began: verification counts a tick held longer than its stall.
         let tick = Instant::now();
         if subscribed && !started_recorded {
-            match w.transaction(|w| {
-                w.conn()
-                    .execute(
-                        "UPDATE dispatcher SET subscribed = 1, base_version = ?1 WHERE id = 1",
-                        [&info.version],
-                    )
-                    .map_err(crate::db::Error::from)?;
-                event(w, "dispatcher_started", &info.name, &info.version)
-            }) {
-                Ok(()) => started_recorded = true,
-                Err(e) => eprintln!("makibad: cannot record the subscription: {e}"),
-            }
+            clock.time("subscription", || {
+                match w.transaction(|w| {
+                    w.conn()
+                        .execute(
+                            "UPDATE dispatcher SET subscribed = 1, base_version = ?1 WHERE id = 1",
+                            [&info.version],
+                        )
+                        .map_err(crate::db::Error::from)?;
+                    event(w, "dispatcher_started", &info.name, &info.version)
+                }) {
+                    Ok(()) => started_recorded = true,
+                    Err(e) => eprintln!("makibad: cannot record the subscription: {e}"),
+                }
+            });
         }
         // Needs only state.db: not held back by the reconcile.
-        if let Err(e) = exe_watch.pass(&w) {
-            eprintln!("makibad: the executable's watch: {e}");
-        }
+        clock.time("exe_watch", || {
+            if let Err(e) = exe_watch.pass(&w) {
+                eprintln!("makibad: the executable's watch: {e}");
+            }
+        });
         // Needs only state.db as well: the person is called without waiting for the base's records.
-        if let Err(e) = person_call.pass(&w) {
-            eprintln!("makibad: the call to the person: {e}");
-        }
+        clock.time("person_call", || {
+            if let Err(e) = person_call.pass(&w) {
+                eprintln!("makibad: the call to the person: {e}");
+            }
+        });
         // Not before the subscription is recorded: the first Resync's records come after it.
         if started_recorded {
-            monitor.drain(&w);
+            clock.time("monitor", || monitor.drain(&w));
         }
         // The rules and the delivery read what is committed: not before the first Resync is
         // reconciled. Order: recover, monitor, then anomalies and delivery.
         if monitor.reconciled() {
             // First: a close accepted while a pass of the last tick was mid-step is finished only
             // after that pass is (they share this thread), and before any pass starts more work.
-            if let Err(e) = close.pass(&w, &*events_base) {
-                eprintln!("makibad: close: {e}");
-            }
-            if let Err(e) = push.pass(&w) {
-                eprintln!("makibad: push: {e}");
-            }
+            clock.time("close", || {
+                if let Err(e) = close.pass(&w, &*events_base) {
+                    eprintln!("makibad: close: {e}");
+                }
+            });
+            clock.time("push", || {
+                if let Err(e) = push.pass(&w) {
+                    eprintln!("makibad: push: {e}");
+                }
+            });
             // Issue 431: the merge act, the only writer of its attempts' outcomes.
-            if let Err(e) = merge.pass(&w) {
-                eprintln!("makibad: merge: {e}");
-            }
-            if let Err(e) = anomalies.pass(&w) {
-                eprintln!("makibad: anomaly pass failed: {e}");
-            }
+            clock.time("merge", || {
+                if let Err(e) = merge.pass(&w) {
+                    eprintln!("makibad: merge: {e}");
+                }
+            });
+            clock.time("anomalies", || {
+                if let Err(e) = anomalies.pass(&w) {
+                    eprintln!("makibad: anomaly pass failed: {e}");
+                }
+            });
             // Before the dispatch pass: a task the belt puts in is taken on the same tick.
-            if let Err(e) = belt.pass(&w) {
-                eprintln!("makibad: belt: {e}");
-            }
-            if let Err(e) = landing.pass(&w) {
-                eprintln!("makibad: landing: {e}");
-            }
-            if let Err(e) = dispatch.pass(&w) {
-                eprintln!("makibad: dispatch: {e}");
-            }
-            if let Err(e) = prepare.pass(&w) {
-                eprintln!("makibad: prepare: {e}");
-            }
-            if let Err(e) = prepare.design_markers(&w) {
-                eprintln!("makibad: design markers: {e}");
-            }
+            clock.time("belt", || {
+                if let Err(e) = belt.pass(&w) {
+                    eprintln!("makibad: belt: {e}");
+                }
+            });
+            clock.time("landing", || {
+                if let Err(e) = landing.pass(&w) {
+                    eprintln!("makibad: landing: {e}");
+                }
+            });
+            clock.time("dispatch", || {
+                if let Err(e) = dispatch.pass(&w) {
+                    eprintln!("makibad: dispatch: {e}");
+                }
+            });
+            clock.time("prepare", || {
+                if let Err(e) = prepare.pass(&w) {
+                    eprintln!("makibad: prepare: {e}");
+                }
+            });
+            clock.time("design_markers", || {
+                if let Err(e) = prepare.design_markers(&w) {
+                    eprintln!("makibad: design markers: {e}");
+                }
+            });
             // No launch step runs until the start pass has looked for every launch's terminal.
             if !resumed {
-                match resume::pass(&w, &*events_base) {
+                clock.time("resume", || match resume::pass(&w, &*events_base) {
                     Ok(done) => resumed = done,
                     Err(e) => eprintln!("makibad: resume: {e}"),
-                }
+                });
             }
             if resumed {
-                if let Err(e) = launch.pass(&w, &*events_base) {
-                    eprintln!("makibad: launch: {e}");
-                }
-                if let Err(e) = curator.pass(&w, &*events_base) {
-                    eprintln!("makibad: curator: {e}");
-                }
-                if let Err(e) = secretary.pass(&w, &*events_base) {
-                    eprintln!("makibad: secretary: {e}");
-                }
+                clock.time("launch", || {
+                    if let Err(e) = launch.pass(&w, &*events_base) {
+                        eprintln!("makibad: launch: {e}");
+                    }
+                });
+                clock.time("curator", || {
+                    if let Err(e) = curator.pass(&w, &*events_base) {
+                        eprintln!("makibad: curator: {e}");
+                    }
+                });
+                clock.time("secretary", || {
+                    if let Err(e) = secretary.pass(&w, &*events_base) {
+                        eprintln!("makibad: secretary: {e}");
+                    }
+                });
                 // The dialogs before verification (Issue 333): after a stall of this loop a known
                 // dialog on the screen is answered before its launch's time is looked at, and a
                 // launch they move on is looked at on the same tick.
-                if let Err(e) = dialogs.pass(&w, &*events_base) {
-                    eprintln!("makibad: dialogs: {e}");
-                }
-                if let Err(e) = verify.pass(&w, &*events_base, dialogs.keyed(), tick) {
-                    eprintln!("makibad: verify: {e}");
-                }
-                if let Err(e) = prompts.pass(&w, &*events_base) {
-                    eprintln!("makibad: prompts: {e}");
-                }
+                clock.time("dialogs", || {
+                    if let Err(e) = dialogs.pass(&w, &*events_base) {
+                        eprintln!("makibad: dialogs: {e}");
+                    }
+                });
+                clock.time("verify", || {
+                    if let Err(e) = verify.pass(&w, &*events_base, dialogs.keyed(), tick) {
+                        eprintln!("makibad: verify: {e}");
+                    }
+                });
+                clock.time("prompts", || {
+                    if let Err(e) = prompts.pass(&w, &*events_base) {
+                        eprintln!("makibad: prompts: {e}");
+                    }
+                });
                 // After the prompts: a prompt recorded on this tick keeps its terminal.
-                if let Err(e) = park.pass(&w, &*events_base) {
-                    eprintln!("makibad: park: {e}");
+                clock.time("park", || {
+                    if let Err(e) = park.pass(&w, &*events_base) {
+                        eprintln!("makibad: park: {e}");
+                    }
+                });
+            }
+            clock.time("prwatch", || {
+                if let Err(e) = prwatch.pass(&w) {
+                    eprintln!("makibad: pr watch: {e}");
                 }
-            }
-            if let Err(e) = prwatch.pass(&w) {
-                eprintln!("makibad: pr watch: {e}");
-            }
-            if let Err(e) = projects.pass(&w) {
-                eprintln!("makibad: project: {e}");
-            }
-            if let Err(e) = triage.pass(&w) {
-                eprintln!("makibad: triage: {e}");
-            }
-            if let Err(e) = delivery.pass(&w) {
-                eprintln!("makibad: delivery: {e}");
-            }
-            if let Err(e) = delivery.wake_pass(&w, &*events_base) {
-                eprintln!("makibad: wake: {e}");
-            }
+            });
+            clock.time("projects", || {
+                if let Err(e) = projects.pass(&w) {
+                    eprintln!("makibad: project: {e}");
+                }
+            });
+            clock.time("triage", || {
+                if let Err(e) = triage.pass(&w) {
+                    eprintln!("makibad: triage: {e}");
+                }
+            });
+            clock.time("delivery", || {
+                if let Err(e) = delivery.pass(&w) {
+                    eprintln!("makibad: delivery: {e}");
+                }
+            });
+            clock.time("wake", || {
+                if let Err(e) = delivery.wake_pass(&w, &*events_base) {
+                    eprintln!("makibad: wake: {e}");
+                }
+            });
         }
         // A refused heartbeat is said and tried again on the next tick: a lock must not end the watch.
         if Instant::now() >= next_beat {
-            match beat(&w) {
+            clock.time("heartbeat", || match beat(&w) {
                 Ok(()) => next_beat = Instant::now() + HEARTBEAT,
                 Err(e) => eprintln!("makibad: cannot write the heartbeat: {e}"),
-            }
+            });
         }
+        clock.finish(&w);
     }
 
     // A stop: end the pollers (their `gh` children too), say so, release the lock, leave no pid behind.

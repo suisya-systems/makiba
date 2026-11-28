@@ -199,7 +199,7 @@ pub(super) fn range(w: &StateWriter, actor: &str, role: Role, args: &Value) -> R
             "the person runs makiba range in their own shell",
         ));
     }
-    match action {
+    let r = match action {
         "propose" => propose(w, actor, args),
         "approve" => approve(w, actor, args),
         "resume" => move_status(w, actor, args, "paused", "active", "range_resumed"),
@@ -221,7 +221,57 @@ pub(super) fn range(w: &StateWriter, actor: &str, role: Role, args: &Value) -> R
         other => Err(usage(format!(
             "action is propose, approve, pause, resume, end or skip, not {other:?}"
         ))),
+    }?;
+    if role == Role::Person && action != "propose" {
+        person_told(w, action, args, &r).map_err(db)?;
     }
+    Ok(r)
+}
+
+/// The notice of the person's range act to the secretary (Issue 612, belt.md 3.4), in the verb's
+/// transaction after the act stood: the person deals with the secretary only.
+fn person_told(w: &StateWriter, action: &str, args: &Value, r: &Value) -> Result<()> {
+    let id = r["id"].as_i64().unwrap_or_default();
+    let (slug, at_once, replaces): (String, i64, Option<i64>) = w.conn().query_row(
+        "SELECT p.slug, g.at_once, g.replaces FROM ranges g JOIN projects p ON p.id = g.project_id
+         WHERE g.id = ?1",
+        [id],
+        |q| Ok((q.get(0)?, q.get(1)?, q.get(2)?)),
+    )?;
+    let reason = args
+        .get("reason")
+        .and_then(Value::as_str)
+        .filter(|t| !t.trim().is_empty())
+        .map(|t| format!(": {t}"))
+        .unwrap_or_default();
+    let body = match action {
+        "approve" => {
+            let replaced = match replaces {
+                Some(old) => format!("; it replaced range {old}, which ended (replaced)"),
+                None => String::new(),
+            };
+            format!(
+                "The person approved range {id} of project {slug} (at_once {at_once}, merge approval mode {}){replaced}. makibad reads its candidates next and then dispatches; each task's worker reports to you. Tell the person what went in.",
+                r["approval_mode"].as_str().unwrap_or("-")
+            )
+        }
+        "resume" => format!(
+            "The person resumed range {id} of project {slug}{reason}. makibad reads its candidates again and then dispatches."
+        ),
+        "pause" => format!(
+            "The person paused range {id} of project {slug}{reason}. Nothing new goes in; work already running goes on."
+        ),
+        "end" => format!(
+            "The person ended range {id} of project {slug}{reason}. Nothing new goes in; work already running goes on."
+        ),
+        "skip" => format!(
+            "The person skipped #{} in range {id} of project {slug}{reason}.",
+            r["issue"]
+        ),
+        _ => return Ok(()),
+    };
+    super::door::person_act(w, None, &body)?;
+    Ok(())
 }
 
 fn propose(w: &StateWriter, actor: &str, args: &Value) -> Response {

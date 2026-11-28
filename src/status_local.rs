@@ -106,6 +106,22 @@ pub fn read_here() -> Result<Value, String> {
 /// The text of the open pending merge entry `id` in the `state.db` at `path`, read-only (Issue
 /// 432): what `makiba merge approve` prints, and whose SHA-256 its approval carries.
 pub fn merge_entry_text(path: &Path, id: i64) -> Result<String, String> {
+    merge_entry_context(path, id)?["text"]
+        .as_str()
+        .map(String::from)
+        .ok_or_else(|| format!("pending merge entry {id} holds no text"))
+}
+
+/// The acceptance approval text the open pending merge entry `id` asks the person to sign (Issue
+/// 592, docs/design/acceptance-approval.md 4.2), read-only; `None` for an entry that asks none.
+pub fn merge_entry_approval(path: &Path, id: i64) -> Result<Option<String>, String> {
+    Ok(merge_entry_context(path, id)?["approval"]
+        .as_str()
+        .map(String::from))
+}
+
+/// The context of the open pending merge entry `id` in the `state.db` at `path`, read-only.
+fn merge_entry_context(path: &Path, id: i64) -> Result<Value, String> {
     let conn = open(path)?;
     let row: Option<(String, String, String)> = conn
         .query_row(
@@ -124,12 +140,8 @@ pub fn merge_entry_text(path: &Path, id: i64) -> Result<String, String> {
     if status != "open" {
         return Err(format!("pending merge entry {id} is {status}, not open"));
     }
-    let context: Value = serde_json::from_str(&context)
-        .map_err(|e| format!("pending merge entry {id} holds no readable context: {e}"))?;
-    context["text"]
-        .as_str()
-        .map(String::from)
-        .ok_or_else(|| format!("pending merge entry {id} holds no text"))
+    serde_json::from_str(&context)
+        .map_err(|e| format!("pending merge entry {id} holds no readable context: {e}"))
 }
 
 /// `merge_entry_text` of this organization's `state.db`, and the SHA-256 of that text, which
@@ -138,6 +150,11 @@ pub fn merge_entry_here(id: i64) -> Result<(String, String), String> {
     let text = merge_entry_text(&crate::daemon::state_dir().join("state.db"), id)?;
     let sum = crate::daemon::door::sha256_hex(&text);
     Ok((text, sum))
+}
+
+/// `merge_entry_approval` of this organization's `state.db` (Issue 592).
+pub fn merge_approval_here(id: i64) -> Result<Option<String>, String> {
+    merge_entry_approval(&crate::daemon::state_dir().join("state.db"), id)
 }
 
 /// Who reads the status, which decides where `merge_approval_mode` comes from (Issue 383).
