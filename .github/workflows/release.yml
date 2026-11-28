@@ -20,6 +20,8 @@ jobs:
       version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - id: version
         name: The tag and Cargo.toml must agree (a rehearsal has no tag and takes Cargo.toml's version)
         run: |
@@ -50,6 +52,8 @@ jobs:
       VERSION: ${{ needs.check-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       # rustup installs the toolchain of rust-toolchain.toml on the first cargo call.
       - run: cargo build --release --locked --bin makiba
       - name: The binary runs here and prints the version
@@ -71,6 +75,8 @@ jobs:
       VERSION: ${{ needs.check-version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           pattern: archive-*
@@ -95,14 +101,18 @@ jobs:
       contents: write
     env:
       VERSION: ${{ needs.check-version.outputs.version }}
-      GH_TOKEN: ${{ github.token }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
       - uses: actions/download-artifact@v4
         with:
           name: release-files
           path: dist
       - name: Check the manifest once more, then publish the archives, manifest.json and install.sh
+        # The only step that needs the token: the checkouts keep none in .git/config (Issue 680).
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           sh scripts/release-manifest.sh check "$VERSION" dist
           gh release create "v$VERSION" dist/*.tar.gz dist/manifest.json scripts/install.sh \
