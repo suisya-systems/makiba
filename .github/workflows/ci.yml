@@ -106,9 +106,20 @@ jobs:
           fi
           echo "cargo exited $cargo_status, pytest exited $pytest_status"
           [ "$cargo_status" -eq 0 ] && [ "$pytest_status" -eq 0 ]
-      # rustup installs the toolchain of rust-toolchain.toml on the first cargo call.
-      - run: cargo test --locked
+      - name: Install the pinned cargo-nextest
+        # Version and SHA-256 are pinned in the script; nothing is installed unless the digest matches.
         if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
+        run: bash scripts/install-nextest.sh "$HOME/.cargo"
+      - name: Suite
+        # rustup installs the toolchain of rust-toolchain.toml on the first cargo call. nextest runs
+        # each test in a process of its own across all binaries, with the default profile of
+        # .config/nextest.toml (#642); cargo test runs the binaries one after another.
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
+        run: cargo nextest run --locked --no-fail-fast
+      - name: Doctests
+        # nextest runs no doctests, so `cargo test --doc` runs them.
+        if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'
+        run: cargo test --locked --doc
       # The development tools' tests, and tests/db/ until M0-5 removes it.
       - run: python3 -m pytest -q tests
         if: github.event_name != 'pull_request' || needs.scope.outputs.test_commit != 'true'

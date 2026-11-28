@@ -190,7 +190,7 @@ def problems(text):
 
     # The full jobs are still there under not T.
     full_tests = [s.get("run") for s in steps_for(jobs["tests"], Ctx("pull_request", "false"))]
-    for cmd in ("cargo test --locked", "python3 -m pytest -q tests"):
+    for cmd in ("cargo nextest run --locked --no-fail-fast", "python3 -m pytest -q tests"):
         if cmd not in full_tests:
             out.append(f"tests under not T does not run {cmd!r}")
     full_rb = " ".join(s.get("run", "") for s in steps_for(jobs["real-base"], Ctx("merge_group", "false")))

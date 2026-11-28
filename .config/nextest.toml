@@ -1,16 +1,30 @@
-# cargo-nextest profiles (#485, docs/design/real-base-speed.md option B1). Only the real-base job of
-# .github/workflows/ci.yml runs nextest; the tests job keeps `cargo test`.
+# cargo-nextest profiles (#485, docs/design/real-base-speed.md option B1; #642). The tests job of
+# .github/workflows/ci.yml and a worker's local run use the default profile; the real-base job uses
+# `ci`. Every profile inherits the default profile's settings and overrides.
 
-# The real-base job's suite: every test in a process of its own, eight at once across all binaries.
-[profile.ci]
-test-threads = 8
+# The tests job's suite and a worker's local run: every test in a process of its own, one per core
+# across all binaries (cargo test runs the test executables one after another).
+[profile.default]
 # A flaky test stays red: it is named and fixed in an Issue of its own, never retried.
 retries = 0
-fail-fast = false
 # A test running 60 s is named as slow; at 5 periods (300 s) it is ended and fails, so a hang
-# is named instead of holding the job. The longest test takes about 45 s (build_skills_path).
+# is named instead of holding the run. The longest test takes about 45 s (build_skills_path).
 slow-timeout = { period = "60s", terminate-after = 5 }
 # Shown at the end of the run: what failed and what ran slow.
+final-status-level = "slow"
+
+# build_skills_path compiles makiba twice on every core; it takes four slots (all of them when there
+# are fewer) so that the timing-sensitive tests beside it are not starved of CPU.
+[[profile.default.overrides]]
+filter = "binary(build_skills_path)"
+threads-required = 4
+
+# The real-base job's suite: eight at once across all binaries.
+[profile.ci]
+test-threads = 8
+retries = 0
+fail-fast = false
+slow-timeout = { period = "60s", terminate-after = 5 }
 final-status-level = "slow"
 
 # Per-test durations of every run; the job reads real_base_wire's events test from it and keeps
@@ -18,8 +32,6 @@ final-status-level = "slow"
 [profile.ci.junit]
 path = "junit.xml"
 
-# build_skills_path compiles makiba twice on every core; it takes four of the eight slots so that
-# the timing-sensitive tests beside it are not starved of CPU.
 [[profile.ci.overrides]]
 filter = "binary(build_skills_path)"
 threads-required = 4
