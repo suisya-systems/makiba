@@ -54,6 +54,13 @@
 //! Pin: the first verdict that saw a manifest records a digest of the declared files and of the
 //! other paths the test commit changed (its test helpers); a later
 //! verdict for the same PR whose digest differs, or that finds no manifest, is rejected.
+//!
+//! A head whose acceptance failed by construction (Issue 591, docs/design/acceptance-approval.md
+//! 4.4 (1)): `evaluate_failed` reads the failed acceptance job's log (the checker's canonical
+//! records at column 0, after the runner's timestamp), checks every record against git by the
+//! note's section 5, requires that check to be the one thing that failed at head and `.github/`
+//! to be the base's, holds condition (a)'s refusals back for exactly the `changed` paths and
+//! judges no condition (b). The door's route to it is build step 4's.
 
 use super::gh::{self, GhError};
 use serde_json::{Value, json};
@@ -482,6 +489,19 @@ fn check_protected(
     head: &str,
     manifest: &[String],
 ) -> Result<Vec<Change>, Reject> {
+    check_protected_held(repo, msha, base, head, manifest, &BTreeSet::new())
+}
+
+/// Condition (a) with its refusals for the paths of `held` held back (Issue 591: the `changed`
+/// records of a head whose acceptance failed by construction); every other path as before.
+fn check_protected_held(
+    repo: &Path,
+    msha: &str,
+    base: &str,
+    head: &str,
+    manifest: &[String],
+    held: &BTreeSet<String>,
+) -> Result<Vec<Change>, Reject> {
     let short = &msha[..12];
     if git(repo, &["rev-list", "--parents", "-n1", msha])?
         .split_whitespace()
@@ -558,6 +578,7 @@ fn check_protected(
             })
             .collect()
     };
+    let changed: Vec<&str> = changed.into_iter().filter(|p| !held.contains(*p)).collect();
     if !changed.is_empty() {
         return reject(format!(
             "protected paths changed after the test commit {short}: {changed:?} (rebase so the test commit sits on the new base if the change came from base)"
@@ -856,6 +877,9 @@ pub fn gh_lines(program: &str, path: &str, jq: &str) -> Result<Vec<Value>, Rejec
     gh_lines_read(program, path, jq).map_err(Reject::from)
 }
 
+/// A check run's (app, check name, workflow).
+pub type CheckKey = (i64, String, i64);
+
 /// (check suite, workflow, base SHAs) of the latest `pull_request` run per workflow at `sha`.
 #[derive(Default)]
 pub struct Ci {
@@ -941,16 +965,30 @@ impl Ci {
         repo: &str,
         sha: &str,
     ) -> Result<BTreeMap<(i64, String, i64), String>, Reject> {
+        Ok(self
+            .check_run_ids(repo, sha)?
+            .into_iter()
+            .map(|(k, (c, _))| (k, c))
+            .collect())
+    }
+
+    /// `check_runs` with the id of each latest run (Issue 591: the id is the Actions job's, as
+    /// prwatch reads a failed job's log by it, Issue 327).
+    pub fn check_run_ids(
+        &mut self,
+        repo: &str,
+        sha: &str,
+    ) -> Result<BTreeMap<CheckKey, (String, i64)>, Reject> {
         let workflow: BTreeMap<i64, i64> = self
             .pr_runs(repo, sha)?
             .into_iter()
             .map(|(suite, wf, _)| (suite, wf))
             .collect();
-        let mut latest: BTreeMap<(i64, String, i64), (String, String)> = BTreeMap::new();
+        let mut latest: BTreeMap<(i64, String, i64), (String, String, i64)> = BTreeMap::new();
         // filter=all: the default keeps one run per name, and a push run can hide the PR's.
         for r in self.lines(
             &format!("repos/{repo}/commits/{sha}/check-runs?filter=all&per_page=100"),
-            ".check_runs[] | {app: .app.id, name, conclusion, completed_at, suite: .check_suite.id}",
+            ".check_runs[] | {app: .app.id, name, conclusion, completed_at, suite: .check_suite.id, id}",
         )? {
             let suite = r["suite"].as_i64().unwrap_or(-1);
             let (Some(wf), Some(done)) = (workflow.get(&suite), r["completed_at"].as_str()) else {
@@ -961,12 +999,16 @@ impl Ci {
                 r["name"].as_str().unwrap_or_default().to_string(),
                 *wf,
             );
-            if latest.get(&key).is_none_or(|(at, _)| done > at.as_str()) {
+            if latest.get(&key).is_none_or(|(at, _, _)| done > at.as_str()) {
                 let c = r["conclusion"].as_str().unwrap_or_default().to_string();
-                latest.insert(key, (done.to_string(), c));
+                let id = r["id"].as_i64().unwrap_or(-1);
+                latest.insert(key, (done.to_string(), c, id));
             }
         }
-        Ok(latest.into_iter().map(|(k, (_, c))| (k, c)).collect())
+        Ok(latest
+            .into_iter()
+            .map(|(k, (_, c, id))| (k, (c, id)))
+            .collect())
     }
 
     /// The base SHAs the runs `pr_runs` selected were made against.
@@ -977,7 +1019,65 @@ impl Ci {
             .flat_map(|(_, _, b)| b)
             .collect())
     }
+
+    /// The log of the Actions job `id` (Issue 591), read as prwatch reads a failed job's log
+    /// (Issue 327) but whole: a log longer than `LOG_KEEP` is refused, never read in part.
+    pub fn job_log(&mut self, repo: &str, id: i64) -> Result<String, Reject> {
+        let path = format!("repos/{repo}/actions/jobs/{id}/logs");
+        let what = format!("cannot read {path} from GitHub");
+        let program = self.program.clone();
+        let read = with_tries(|| {
+            let never = AtomicBool::new(false);
+            match gh::run_gh_tail(&program, &["api", &path], &never, LOG_KEEP) {
+                Ok(r) => Try::Done(Ok(r)),
+                Err(e) => match gh_failure(&program, e) {
+                    (why, true) => Try::Again(format!("{what}: {why}")),
+                    (why, false) => Try::Done(Err(Fault::Unavailable(format!("{what}: {why}")))),
+                },
+            }
+        });
+        let (raw, cut) = match read {
+            Ok(r) => r,
+            Err(f) => {
+                if let Fault::Unavailable(why) = &f {
+                    self.unavailable = Some(why.clone());
+                }
+                return Err(Reject::from(f));
+            }
+        };
+        if cut {
+            return reject(format!(
+                "the acceptance job's log {id} is longer than 4 MiB: not read"
+            ));
+        }
+        String::from_utf8(raw)
+            .map_err(|_| Reject(format!("the acceptance job's log {id} is not UTF-8")))
+    }
+
+    /// Everything CI shows at `head`, as prwatch reads it (Issue 591): every check run and
+    /// commit status, and whether a workflow run of it has not finished.
+    pub fn head_surface(&mut self, repo: &str, head: &str) -> Result<(Vec<Value>, bool), Reject> {
+        let mut all = self.lines(
+            &format!("repos/{repo}/commits/{head}/check-runs?per_page=100"),
+            ".check_runs[] | {name, status, conclusion, id, app: .app.slug}",
+        )?;
+        all.extend(self.lines(
+            &format!("repos/{repo}/commits/{head}/status?per_page=100"),
+            ".statuses[] | {context, state}",
+        )?);
+        let going = self
+            .lines(
+                &format!("repos/{repo}/actions/runs?head_sha={head}&per_page=100"),
+                ".workflow_runs[] | {status}",
+            )?
+            .iter()
+            .any(|r| super::prwatch::run_unfinished(r["status"].as_str().unwrap_or("")));
+        Ok((all, going))
+    }
 }
+
+/// The most of a job's log the gate reads (prwatch's `LOG_KEEP`, Issue 327).
+const LOG_KEEP: usize = 4 << 20;
 
 // ---- the verdict ---------------------------------------------------------------------------------
 
@@ -1008,6 +1108,10 @@ pub struct Verdict {
     pub merge_order: MergeOrder,
     /// The language check's files the PR's own changes touch (Issue 339); the door decides.
     pub language_change: Vec<LanguageEntry>,
+    /// Issue 591: the failure set of a head whose acceptance check failed by construction
+    /// (`evaluate_failed`), each record `changed <path>` or `ignored <path> <n>`, sorted bytewise;
+    /// empty on every other path.
+    pub acceptance_failures: Vec<String>,
 }
 
 /// A path the gate names for the person's key, with the object ids it was judged from, in the
@@ -1473,32 +1577,11 @@ pub fn evaluate(
     failed_at: FailedAt,
     v: &mut Verdict,
 ) -> Result<(), Reject> {
-    let Some((msha, manifest)) = find_manifest(repo, base, head)? else {
-        if let Some(p) = pin {
-            return reject(format!(
-                "no commit declares {TRAILER} any more, but this PR had one ({}) when the gate first saw it: the test commit was removed - ask the person",
-                &p.commit[..p.commit.len().min(12)]
-            ));
-        }
+    let Some((msha, manifest)) = manifest_of(repo, base, head, pin, v)? else {
         v.result = "no_manifest".into();
         v.reason = format!("no commit in base..head has an {TRAILER} trailer");
         return Ok(());
     };
-    let digest = manifest_digest(repo, &msha, &manifest)?;
-    v.manifest_commit = Some(msha.clone());
-    v.paths = manifest.clone();
-    v.manifest_digest = Some(digest.clone());
-    if let Some(p) = pin
-        && p.digest != digest
-    {
-        return reject(format!(
-            "the test commit was rewritten since the gate first saw it ({} -> {}, paths {} -> {:?}) - ask the person",
-            &p.commit[..p.commit.len().min(12)],
-            &msha[..12],
-            p.paths,
-            manifest
-        ));
-    }
     v.merged_tests = check_protected(repo, &msha, base, head, &manifest)?;
     check_first(repo, &msha, base, head)?;
     let check = repo_check(repo, base)?;
@@ -1559,6 +1642,291 @@ pub fn evaluate(
         &msha[..12],
         &bases_m.iter().next().map_or("", |b| &b[..b.len().min(12)])
     );
+    Ok(())
+}
+
+/// The test commit and its declared paths, recorded in `v` with their digest and held to the
+/// pin; `None` when no commit declares a test and the PR has no pin.
+fn manifest_of(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    pin: Option<&Pin>,
+    v: &mut Verdict,
+) -> Result<Option<(String, Vec<String>)>, Reject> {
+    let Some((msha, manifest)) = find_manifest(repo, base, head)? else {
+        if let Some(p) = pin {
+            return reject(format!(
+                "no commit declares {TRAILER} any more, but this PR had one ({}) when the gate first saw it: the test commit was removed - ask the person",
+                &p.commit[..p.commit.len().min(12)]
+            ));
+        }
+        return Ok(None);
+    };
+    let digest = manifest_digest(repo, &msha, &manifest)?;
+    v.manifest_commit = Some(msha.clone());
+    v.paths = manifest.clone();
+    v.manifest_digest = Some(digest.clone());
+    if let Some(p) = pin
+        && p.digest != digest
+    {
+        return reject(format!(
+            "the test commit was rewritten since the gate first saw it ({} -> {}, paths {} -> {:?}) - ask the person",
+            &p.commit[..p.commit.len().min(12)],
+            &msha[..12],
+            p.paths,
+            manifest
+        ));
+    }
+    Ok(Some((msha, manifest)))
+}
+
+// ---- a head whose acceptance failed by construction (Issue 591) --------------------------------
+
+/// The acceptance checker, whose change after the test commit is an approvable kind (c).
+const CHECKER_PATH: &str = "scripts/acceptance-check.sh";
+
+/// One token of a record: bytes 0x21 to 0x7e only (docs/design/acceptance-approval.md 4.1).
+fn plain_token(t: &str) -> bool {
+    !t.is_empty() && t.bytes().all(|b| (0x21..=0x7e).contains(&b))
+}
+
+/// The failure set the acceptance checker printed in a downloaded job log (4.1, 4.4 (1)), sorted
+/// bytewise and unique. A byte order mark at the start and a `\r` at a line's end are dropped;
+/// each line loses exactly one leading runner timestamp (RFC 3339, ending in `Z`) and the one
+/// space after it, and a line without one is not read. Only a line that then starts with
+/// `acceptance-check: ` at column 0 is the checker's: an indented line is the output of a test.
+/// `acceptance-check: not approvable`, a malformed `approvable` record or no record refuses.
+pub fn acceptance_records(log: &str) -> Result<Vec<String>, Reject> {
+    let log = log.strip_prefix('\u{feff}').unwrap_or(log);
+    let mut set = BTreeSet::new();
+    for raw in log.split('\n') {
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let Some((stamp, rest)) = line.split_once(' ') else {
+            continue;
+        };
+        if !stamp.ends_with('Z') || super::prwatch::parse_time(stamp).is_none() {
+            continue;
+        }
+        let Some(text) = rest.strip_prefix("acceptance-check: ") else {
+            continue;
+        };
+        if text == "not approvable" {
+            return reject(
+                "the acceptance check failed for a reason that is not approvable (acceptance-check: not approvable): the owner's lift",
+            );
+        }
+        let Some(record) = text.strip_prefix("approvable ") else {
+            continue;
+        };
+        let words: Vec<&str> = record.split(' ').collect();
+        let ok = match words.as_slice() {
+            ["changed", p] => plain_token(p),
+            ["ignored", p, n] => {
+                plain_token(p) && !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit())
+            }
+            _ => false,
+        };
+        if !ok {
+            return reject(format!(
+                "a malformed approvable record in the acceptance job's log: {record:?}"
+            ));
+        }
+        set.insert(record.to_string());
+    }
+    if set.is_empty() {
+        return reject("no approvable record in the acceptance job's log");
+    }
+    Ok(set.into_iter().collect())
+}
+
+/// A Cargo test target's file as the checker's `rs_name` reads it: `tests/<name>.rs` or
+/// `tests/<name>/main.rs`.
+fn is_cargo_target(p: &str) -> bool {
+    let Some(r) = p.strip_prefix("tests/") else {
+        return false;
+    };
+    let name = r.strip_suffix("/main.rs").or_else(|| r.strip_suffix(".rs"));
+    name.is_some_and(|n| !n.is_empty() && !n.contains('/'))
+}
+
+/// Whether the declared path `p` names a Cargo test target in the test commit's tree `t`, as the
+/// checker's `classify` reads it there: a file that is a target, or a folder whose `main.rs` is
+/// one (the checker then names the folder in its `ignored` record).
+fn declares_cargo_target(t: &Tree, p: &str) -> bool {
+    let file = |q: &str| t.get(q).is_some_and(|(mode, _)| mode.starts_with("100"));
+    let main = format!("{p}/main.rs");
+    (file(p) && is_cargo_target(p)) || (file(&main) && is_cargo_target(&main))
+}
+
+/// The first of the pull request's checks (`Ci::check_run_ids`), other than `check`, whose latest
+/// completed run did not pass by prwatch's buckets (success, skipped and neutral pass), named
+/// with its conclusion.
+fn other_failed(runs: &BTreeMap<CheckKey, (String, i64)>, check: &str) -> Option<String> {
+    runs.iter()
+        .find(|(k, (c, _))| {
+            let entry = json!({"status": "completed", "conclusion": c});
+            k.1 != check && !matches!(super::prwatch::bucket(&entry), "pass" | "skipping")
+        })
+        .map(|(k, (c, _))| format!("{:?} ({c})", k.1))
+}
+
+/// The warning the answer carries for a head whose acceptance failed by construction.
+pub fn acceptance_warning(set: &[String]) -> String {
+    format!("acceptance fails by construction: {}", set.join("; "))
+}
+
+/// Whether `path` changed after the test commit `msha` as the PR's own change, by condition
+/// (a)'s rule: it differs between the test commit and head, and not only as the base changed it.
+fn own_change(repo: &Path, msha: &str, base: &str, head: &str, path: &str) -> Result<bool, Reject> {
+    let at = |sha: &str| -> Result<Option<(String, String)>, Reject> {
+        Ok(tree(repo, sha)?.remove(path))
+    };
+    let (pm, ph) = (at(msha)?, at(head)?);
+    let (pp, pb) = (at(&format!("{msha}^"))?, at(base)?);
+    Ok(pm != ph && !(pm == pp && ph == pb))
+}
+
+/// The gate for a head whose repository's acceptance check failed (Issue 591,
+/// docs/design/acceptance-approval.md 4.4 (1)): it allows only when that check is the one thing
+/// that failed at head, nothing under `.github/` differs from the base, and the failed job's log
+/// holds only approvable records, each valid by section 5 as git shows it. Condition (a) runs
+/// with its refusals for exactly the `changed` records' paths held back; condition (b) is not
+/// judged, so neither of its routes can stand in for the failed check. The set is
+/// `v.acceptance_failures`; the person decides the landing on its warning.
+pub fn evaluate_failed(
+    repo: &Path,
+    base: &str,
+    head: &str,
+    slug: &str,
+    pin: Option<&Pin>,
+    ci: &mut Ci,
+    v: &mut Verdict,
+) -> Result<(), Reject> {
+    let Some((msha, manifest)) = manifest_of(repo, base, head, pin, v)? else {
+        return reject(format!(
+            "a head whose acceptance check failed has no test commit ({TRAILER}), so no failure there is by construction: the owner's lift"
+        ));
+    };
+    check_first(repo, &msha, base, head)?;
+    let Some(check) = repo_check(repo, base)? else {
+        return reject(format!(
+            "the base names no acceptance check ({REPO_CHECK}): a failed one is not judged"
+        ));
+    };
+    let h12 = &head[..head.len().min(12)];
+    let (surface, going) = ci.head_surface(slug, head)?;
+    if going {
+        return reject(format!(
+            "a workflow run at head {h12} has not finished: ask again once CI has finished"
+        ));
+    }
+    let mut failed = 0;
+    for e in &surface {
+        let name = e["name"]
+            .as_str()
+            .or(e["context"].as_str())
+            .unwrap_or_default();
+        match (name == check, super::prwatch::bucket(e)) {
+            (_, "pending") => {
+                return reject(format!(
+                    "the check {name:?} at head {h12} has not finished: ask again once CI has finished"
+                ));
+            }
+            (true, "fail") => failed += 1,
+            (true, _) => {
+                return reject(format!(
+                    "the repository's acceptance check {check:?} did not fail at head {h12} (a run of it did not fail)"
+                ));
+            }
+            (false, "pass" | "skipping") => {}
+            (false, _) => {
+                return reject(format!(
+                    "another check than the acceptance check failed at head {h12}: {name:?}"
+                ));
+            }
+        }
+    }
+    // The head surface reads GitHub's latest run per name, where a push run can hide a pull
+    // request's: the pull request's own runs (filter=all, as condition (b) reads them) are judged
+    // too. A run of them still going is a workflow run not finished, refused above.
+    let selected = ci.check_run_ids(slug, head)?;
+    if let Some(other) = other_failed(&selected, &check) {
+        return reject(format!(
+            "another check than the acceptance check failed at head {h12} in this pull request's workflow runs: {other}"
+        ));
+    }
+    let runs: Vec<(String, i64)> = selected
+        .into_iter()
+        .filter(|(k, _)| k.1 == check)
+        .map(|(_, r)| r)
+        .collect();
+    if failed == 0 || runs.is_empty() || runs.iter().any(|(c, id)| c != "failure" || *id < 0) {
+        return reject(format!(
+            "the repository's acceptance check {check:?} did not fail at head {h12} in this pull request's workflow runs"
+        ));
+    }
+    let github = |sha: &str| -> Result<Tree, Reject> {
+        Ok(tree(repo, sha)?
+            .into_iter()
+            .filter(|(p, _)| under(p, ".github"))
+            .collect())
+    };
+    if github(base)? != github(head)? {
+        return reject(format!(
+            "a path under .github/ differs between the base and head {h12}: a head whose acceptance failed is judged only with .github/ as the base holds it (the workflow runs the verification): the owner's lift"
+        ));
+    }
+    let mut set: Option<Vec<String>> = None;
+    for (_, id) in &runs {
+        let records = acceptance_records(&ci.job_log(slug, *id)?)?;
+        if set.as_ref().is_some_and(|s| *s != records) {
+            return reject(format!(
+                "the failed runs of the acceptance check {check:?} at head {h12} name different failure sets"
+            ));
+        }
+        set = Some(records);
+    }
+    let set = set.unwrap_or_default();
+    let touched = changed_by(repo, &msha)?;
+    let mtree = tree(repo, &msha)?;
+    let declared = |p: &str| manifest.iter().any(|m| under(p, m));
+    let mut held = BTreeSet::new();
+    for record in &set {
+        let words: Vec<&str> = record.split(' ').collect();
+        let ok = match words.as_slice() {
+            ["changed", p] => {
+                *p == CHECKER_PATH
+                    || ((declared(p) || touched.contains(*p))
+                        && !under(p, ".github")
+                        && !is_infra(p))
+            }
+            ["ignored", p, _] => {
+                manifest.iter().any(|m| m == p) && declares_cargo_target(&mtree, p)
+            }
+            _ => false,
+        };
+        if !ok {
+            return reject(format!(
+                "the acceptance job's log names a record not approvable by section 5 of docs/design/acceptance-approval.md: {record:?}"
+            ));
+        }
+        if let ["changed", p] = words.as_slice() {
+            held.insert(p.to_string());
+        }
+    }
+    if !held.contains(CHECKER_PATH) && own_change(repo, &msha, base, head, CHECKER_PATH)? {
+        return reject(format!(
+            "{CHECKER_PATH} changed after the test commit, but the acceptance job's log names no record of it"
+        ));
+    }
+    v.merged_tests = check_protected_held(repo, &msha, base, head, &manifest, &held)?;
+    v.result = "passed".into();
+    v.reason = format!(
+        "the repository's acceptance check {check:?} ({REPO_CHECK} at base) failed at head {h12} by construction ({} approvable record(s)); condition (b) is not judged on this path",
+        set.len()
+    );
+    v.acceptance_failures = set;
     Ok(())
 }
 
@@ -2009,5 +2377,62 @@ mod tests {
         assert_eq!(merged[0].path, "tests/test_b.py");
         let id = |rev: &str| run(&dir, &["rev-parse", &format!("{rev}:tests/test_b.py")]);
         assert_eq!(merged[0].ids, vec![id(&m), id(&base), id(&head)]);
+    }
+
+    /// Issue 591: an `ignored` record names a declared Cargo target as the checker's `classify`
+    /// names it: a target file, or a declared folder whose `main.rs` is one.
+    #[test]
+    fn a_declared_folder_with_main_rs_is_a_cargo_target() {
+        let blob = |p: &str| (p.to_string(), ("100644".to_string(), "x".to_string()));
+        let t: Tree = [
+            blob("tests/dir/main.rs"),
+            blob("tests/dir/part.rs"),
+            blob("tests/file.rs"),
+            blob("tests/common/mod.rs"),
+            blob("src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        for p in ["tests/dir", "tests/dir/main.rs", "tests/file.rs"] {
+            assert!(declares_cargo_target(&t, p), "{p}");
+        }
+        for p in [
+            "tests/common",
+            "tests/dir/part.rs",
+            "tests/missing.rs",
+            "tests/missing",
+            "src/lib.rs",
+            "src",
+        ] {
+            assert!(!declares_cargo_target(&t, p), "{p}");
+        }
+    }
+
+    /// Issue 591, diff review round 2: a pull request's own check that failed is found among its
+    /// runs even when the latest run of that name at head (a push run) succeeded.
+    #[test]
+    fn another_failed_check_of_the_pull_request_is_found() {
+        let key = |name: &str| (15368, name.to_string(), 1);
+        let runs = |list: &[(&str, &str)]| -> BTreeMap<CheckKey, (String, i64)> {
+            list.iter()
+                .enumerate()
+                .map(|(i, (n, c))| (key(n), (c.to_string(), i as i64)))
+                .collect()
+        };
+        let ok = runs(&[
+            ("acceptance", "failure"),
+            ("tests", "success"),
+            ("lint", "skipped"),
+            ("docs", "neutral"),
+        ]);
+        assert_eq!(other_failed(&ok, "acceptance"), None);
+        for c in ["failure", "cancelled", "timed_out", "action_required", ""] {
+            let bad = runs(&[("acceptance", "failure"), ("tests", c)]);
+            assert_eq!(
+                other_failed(&bad, "acceptance"),
+                Some(format!("\"tests\" ({c})")),
+                "{c}"
+            );
+        }
     }
 }
