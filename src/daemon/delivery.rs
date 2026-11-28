@@ -574,7 +574,7 @@ pub fn send_typed(
         Ok(()) => {
             w.confirm_push(event, recipient).map_err(|e| failed(&e))?;
             // Typed and taken: a run in review is sent back to work (Issue 654). A refusal below
-            // deletes the message and moves nothing.
+            // deletes the message and moves nothing; an unknown outcome moves it.
             super::door::sent_back(w, recipient).map_err(|e| failed(&e))?;
             Ok(id)
         }
@@ -590,10 +590,15 @@ pub fn send_typed(
                 .map_err(|e| failed(&e))?;
             Err(TypedError::Conflict(e.to_string()))
         }
-        // A timeout or the like: it may have been typed. Kept `pending`, never sent again.
-        Err(e) => Err(TypedError::Failed(format!(
-            "message {id}: the outcome of the send is not known: {e}"
-        ))),
+        // A timeout or the like: it may have been typed. Kept `pending`, never sent again. A run
+        // in review is sent back to work all the same (Issue 654): a worker that took the text is
+        // at work, and one that did not is counted until its next report, never too few.
+        Err(e) => {
+            super::door::sent_back(w, recipient).map_err(|e| failed(&e))?;
+            Err(TypedError::Failed(format!(
+                "message {id}: the outcome of the send is not known: {e}"
+            )))
+        }
     }
 }
 
@@ -744,5 +749,63 @@ mod tests {
         d.wake_pass(&w, &base).unwrap();
         assert!(d.woken.contains_key("w-b"));
         assert!(!d.woken.contains_key("w-a"));
+    }
+
+    /// Issue 654 (diff review): a typed message to the worker of a run in review sends the run
+    /// back to work when the base takes it and when its outcome is not known (it may have been
+    /// typed); a definitive refusal deletes the message and moves nothing.
+    #[test]
+    fn a_typed_send_moves_a_run_in_review_unless_the_base_refused_it() {
+        use crate::base::stub::Stub;
+        use crate::base::{Base, LaunchSpec};
+        use crate::db::writer::RunUpsert;
+        let dir = tempfile::tempdir().unwrap();
+        let w = StateWriter::open(&dir.path().join("state.db")).unwrap();
+        w.ensure_project("p", None, None).unwrap();
+        let status = |task: &str| -> String {
+            w.conn()
+                .query_row("SELECT status FROM runs WHERE task_id = ?1", [task], |r| {
+                    r.get(0)
+                })
+                .unwrap()
+        };
+        let base = Stub::scripted(&["> "]);
+        let mut terminals = Vec::new();
+        for task in ["a", "b", "c"] {
+            w.upsert_run(&RunUpsert {
+                task_id: task,
+                project_slug: "p",
+                title: Some("T"),
+                status: Some("review"),
+                ..Default::default()
+            })
+            .unwrap();
+            let t = base
+                .launch(&LaunchSpec {
+                    argv: Vec::new(),
+                    cwd: ".".into(),
+                    name: format!("w-{task}"),
+                    tags: [("makiba.role", "worker"), ("makiba.task_id", task)]
+                        .map(|(k, v)| (k.to_string(), v.to_string()))
+                        .into(),
+                    env: Default::default(),
+                    unset: Vec::new(),
+                })
+                .unwrap();
+            base.set_state(&t, State::Idle);
+            terminals.push(t);
+        }
+        // Taken.
+        send_typed(&w, &base, "secretary", "w-a", "message", "Write the fix.").unwrap();
+        assert_eq!(status("a"), "in_use");
+        // Refused: the terminal is blocked on a prompt.
+        base.set_state(&terminals[1], State::Blocked);
+        assert!(send_typed(&w, &base, "secretary", "w-b", "message", "x").is_err());
+        assert_eq!(status("b"), "review");
+        // Not known: typed, then the answer timed out.
+        base.fail_sends_after_typing();
+        let r = send_typed(&w, &base, "secretary", "w-c", "message", "Write the fix.");
+        assert!(matches!(r, Err(TypedError::Failed(_))), "{r:?}");
+        assert_eq!(status("c"), "in_use");
     }
 }

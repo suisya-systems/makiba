@@ -22,6 +22,8 @@ struct Entry {
 struct Inner {
     terminals: BTreeMap<String, Entry>,
     subscribers: Vec<Sender<BaseEvent>>,
+    /// `send` types the text, then fails as a timeout would (`fail_sends_after_typing`).
+    fail_after_typing: bool,
 }
 
 impl Inner {
@@ -119,6 +121,12 @@ impl Stub {
         self.organization
             .as_ref()
             .is_none_or(|org| t.tags.get("makiba.org") == Some(org))
+    }
+
+    /// From now on `send` types the text and then fails with `unavailable`, as a base whose answer
+    /// timed out after the text was taken: the outcome is not known to the caller.
+    pub fn fail_sends_after_typing(&self) {
+        self.lock().fail_after_typing = true;
     }
 
     /// Script a change of state, as the program in the terminal would report it.
@@ -282,6 +290,13 @@ impl Base for Stub {
             ));
         }
         e.screen.extend(text.lines().map(String::from));
+        if inner.fail_after_typing {
+            return Err(error(
+                BaseError::Unavailable,
+                "unavailable",
+                "the answer timed out",
+            ));
+        }
         Ok(())
     }
 
