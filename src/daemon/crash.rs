@@ -7,6 +7,9 @@
 //! stop before. There the daemon's thread writes `<state>/makibad.held` and waits until the test
 //! removes it, once, so the test changes a row while the pass holds what it read.
 //!
+//! Pass holds (Issue 624): `pass:<name>` in `makibad.hold-at` holds the loop's pass `<name>` the
+//! same way, inside the time the loop measures for that pass, so a test can make one tick slow.
+//!
 //! Only a debug build reads the files; in a release build `arm`, `point` and `hold` do nothing.
 
 use std::path::Path;
@@ -70,6 +73,24 @@ pub fn hold(step: &str) {
     }
     #[cfg(not(debug_assertions))]
     let _ = step;
+}
+
+/// As `hold`, before the loop's pass `name`: armed by `pass:<name>` in `makibad.hold-at`.
+#[inline(always)]
+pub fn hold_pass(name: &str) {
+    #[cfg(debug_assertions)]
+    {
+        let armed = HOLD.with(|h| {
+            h.borrow()
+                .as_ref()
+                .is_some_and(|(at, _)| at.strip_prefix("pass:") == Some(name))
+        });
+        if armed {
+            hold(&format!("pass:{name}"));
+        }
+    }
+    #[cfg(not(debug_assertions))]
+    let _ = name;
 }
 
 #[cfg(test)]
