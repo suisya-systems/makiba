@@ -334,6 +334,15 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
     with_ledger(&dir, |w| {
         person_key::ensure(w, &crate::cli::person_key_path()).map_err(|e| (ErrorKind::Internal, e))
     })?;
+    // Issue 590: outside the ledger's lock, so ssh-keygen never lengthens a hold of it. Every agent
+    // runs in a terminal of a base on this machine, of this organization or of another that may
+    // share the key's place. With the stand-in (`MAKIBA_BASE=stub`) nothing was probed and no
+    // base is read.
+    let on_base = match &probe {
+        None => Ok(Vec::new()),
+        Some(_) => base_agents_that_may_read(&dir),
+    };
+    approval_key(&dir, on_base);
     let internal = |e: crate::db::Error| (ErrorKind::Internal, e.to_string());
     // Suspended before the base is back: a makibad still running would otherwise see the stopped
     // workers' terminals missing on its reconnect and fail their runs first.
@@ -418,6 +427,182 @@ pub(crate) fn run(secretary: bool) -> Result<(), Failure> {
         );
     }
     Ok(())
+}
+
+/// The approval key (Issue 590, docs/design/acceptance-approval.md section 3): kept private when
+/// it exists, made when it is absent and nothing that could read it runs, its line printed. `up`
+/// goes on whatever happens here: without the key no approval can be signed. `on_base`: the
+/// agents running on a base of this machine that may read it (`base_agents_that_may_read`).
+fn approval_key(dir: &Path, on_base: Result<Vec<String>, String>) {
+    let key = crate::cli::approval_key_path();
+    let staging = crate::cli::approval_staging_path();
+    let way = "run makiba down --secretary, then makiba up";
+    // The live agents whose settings do not deny the key, as the ledger knows them.
+    let lacking = match read_only(dir) {
+        None => Ok(Vec::new()),
+        Some(c) => person_key::agents_without_approval_deny(&c, &dir.join("settings"), &key)
+            .map_err(|e| format!("cannot read the agents of the ledger: {e}")),
+    };
+    let print = |how: &str| match crate::cli::approval_signer_line(&key) {
+        Ok(line) => println!(
+            "approval key: {} ({how}); its line for .github/acceptance-approvers: {line}",
+            key.display()
+        ),
+        Err(e) => eprintln!("approval key: {} ({how}); {e}", key.display()),
+    };
+    match person_key::keep_approval(&key, &staging) {
+        Ok(true) => {
+            print("kept");
+            match &lacking {
+                Ok(ids) if ids.is_empty() => {}
+                Ok(ids) => println!(
+                    "approval key: warning: agents launched without its deny rule: {}; {way}",
+                    ids.join(" ")
+                ),
+                Err(e) => println!("approval key: warning: {e}"),
+            }
+            match &on_base {
+                Ok(agents) if agents.is_empty() => {}
+                Ok(agents) => println!(
+                    "approval key: warning: agents on the base may read it: {}; {way}",
+                    agents.join(", ")
+                ),
+                Err(e) => println!("approval key: warning: {e}"),
+            }
+        }
+        Ok(false) => {
+            // A makibad already running may be one from before the key, whose launches would
+            // not deny it: the key is made only by an `up` that starts makibad itself.
+            let not_made = if !matches!(daemon_running(dir), Ok(false)) {
+                Some("makibad is running".to_string())
+            } else if let Err(e) = &on_base {
+                Some(e.clone())
+            } else if let Ok(agents) = &on_base
+                && !agents.is_empty()
+            {
+                // Their launches may come from a makiba before the key, or from another
+                // organization, whose ledger this `up` does not read.
+                Some(format!(
+                    "agents on the base may read it: {}",
+                    agents.join(", ")
+                ))
+            } else {
+                match &lacking {
+                    Ok(ids) if ids.is_empty() => None,
+                    Ok(ids) => Some(format!(
+                        "agents launched without its deny rule: {}",
+                        ids.join(" ")
+                    )),
+                    Err(e) => Some(e.clone()),
+                }
+            };
+            match not_made {
+                Some(why) => println!("approval key: not made: {why}; {way}"),
+                None => match person_key::make_approval(&key, &staging) {
+                    Ok(()) => print("created"),
+                    Err(e) => eprintln!(
+                        "approval key: cannot make {}: {e}; makiba merge approve cannot sign an \
+                         acceptance approval until it exists",
+                        key.display()
+                    ),
+                },
+            }
+        }
+        Err(e) => eprintln!("approval key: {e}"),
+    }
+}
+
+/// This organization's `makiba.org` tag: the state folder's absolute path, as `makibad` and
+/// `down` write and read it.
+fn organization(dir: &Path) -> String {
+    std::fs::canonicalize(dir)
+        .unwrap_or_else(|_| dir.to_path_buf())
+        .to_string_lossy()
+        .into_owned()
+}
+
+/// The makiba agents running in the base's terminals, of every session on this machine, that may
+/// read the approval key: a terminal is what runs, whatever the ledger says of its key (`down`
+/// revokes a key before it ends the terminal). A session nothing listens at runs none; any other
+/// failure to list one is an error, so the key is not made.
+fn base_agents_that_may_read(dir: &Path) -> Result<Vec<String>, String> {
+    let mut per_session = Vec::new();
+    for session in base::sessions()? {
+        // Only a socket nothing listens at, or one gone, is a stopped session: the base's own
+        // error names every failure to connect alike, so the socket is tried here first.
+        if let Err(e) = std::os::unix::net::UnixStream::connect(base::session_socket(&session)) {
+            if stopped_session(e.kind()) {
+                continue;
+            }
+            return Err(format!("cannot connect to session {session}: {e}"));
+        }
+        match base::connect_session(&session, Duration::from_secs(5)).list() {
+            Ok(ts) => per_session.push((session, ts)),
+            Err(e) => {
+                return Err(format!(
+                    "cannot list the terminals of session {session}: {e}"
+                ));
+            }
+        }
+    }
+    let conn = read_only(dir);
+    let key = crate::cli::approval_key_path();
+    let settings = dir.join("settings");
+    let denies = |spawn: &str| {
+        conn.as_ref().is_some_and(|c| {
+            person_key::launch_denies_approval(c, &settings, spawn, &key).unwrap_or(false)
+        })
+    };
+    Ok(agents_that_may_read(
+        &per_session,
+        &organization(dir),
+        &denies,
+    ))
+}
+
+/// Whether a failure to connect to a session's socket means the session is stopped: refused (no
+/// listener) or the socket gone. Any other (denied, out of resources) leaves it unknown.
+fn stopped_session(kind: std::io::ErrorKind) -> bool {
+    matches!(
+        kind,
+        std::io::ErrorKind::ConnectionRefused | std::io::ErrorKind::NotFound
+    )
+}
+
+/// Of the terminals of each session, the makiba agents (a live program in a terminal with a
+/// `makiba.role` tag) that may read the approval key: every one of another organization (another
+/// `makiba.org` tag, or none), and one of `org` whose launch (`makiba.spawn`) `denies` says does
+/// not deny it. Each as `<session>: <name>`, with the organization when it is another.
+fn agents_that_may_read(
+    per_session: &[(String, Vec<base::Terminal>)],
+    org: &str,
+    denies: &dyn Fn(&str) -> bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for (session, terminals) in per_session {
+        for t in terminals {
+            if !t.alive || !t.tags.contains_key(crate::spec::TAG_ROLE) {
+                continue;
+            }
+            match t.tags.get(crate::spec::TAG_ORG) {
+                Some(theirs) if theirs == org => {
+                    let ok = t
+                        .tags
+                        .get(crate::spec::TAG_SPAWN)
+                        .is_some_and(|s| denies(s));
+                    if !ok {
+                        out.push(format!("{session}: {}", t.name));
+                    }
+                }
+                theirs => out.push(format!(
+                    "{session}: {} of organization {}",
+                    t.name,
+                    theirs.map_or("(none)", String::as_str)
+                )),
+            }
+        }
+    }
+    out
 }
 
 fn read_only(dir: &Path) -> Option<rusqlite::Connection> {
@@ -575,6 +760,83 @@ mod tests {
             .unwrap();
         std::fs::write(dir.path().join("makibad.lock"), lock_pid.to_string()).unwrap();
         dir
+    }
+
+    /// Issue 590: only a refused or a missing socket is a stopped session; a socket this user may
+    /// not reach, or any other failure, leaves the session unknown, so the approval key is not
+    /// made (a sandbox that refuses every socket, `PermissionDenied`, is such a case).
+    #[test]
+    fn only_a_refused_or_missing_socket_is_a_stopped_session() {
+        use std::io::ErrorKind as K;
+        assert!(stopped_session(K::ConnectionRefused));
+        assert!(stopped_session(K::NotFound));
+        for kind in [K::PermissionDenied, K::OutOfMemory, K::TimedOut, K::Other] {
+            assert!(!stopped_session(kind), "{kind:?}");
+        }
+    }
+
+    /// Issue 590: every agent of another organization, in any session, and every agent of this
+    /// one whose launch does not deny the approval key, is named, whatever the ledger says of its
+    /// key; this organization's agents that deny it, a shell a stopped core left in a kept
+    /// terminal, and a terminal that is no makiba agent are not.
+    #[test]
+    fn the_agents_on_a_base_that_may_read_the_approval_key_are_named() {
+        use crate::base::{Terminal, TerminalRef};
+        let t = |name: &str, alive: bool, tags: &[(&str, &str)]| Terminal {
+            id: TerminalRef(name.into()),
+            name: name.into(),
+            tags: tags
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
+            status: None,
+            turn: None,
+            alive,
+            exit_code: None,
+        };
+        use crate::spec::{TAG_ORG as ORG, TAG_ROLE as ROLE, TAG_SPAWN as SPAWN};
+        let ours = vec![
+            t(
+                "secretary",
+                true,
+                &[(ROLE, "secretary"), (ORG, "/org/a"), (SPAWN, "s-new")],
+            ),
+            t(
+                "w-old",
+                true,
+                &[(ROLE, "worker"), (ORG, "/org/a"), (SPAWN, "s-old")],
+            ),
+            t("w-nospawn", true, &[(ROLE, "worker"), (ORG, "/org/a")]),
+            t(
+                "w-shell",
+                false,
+                &[(ROLE, "worker"), (ORG, "/org/a"), (SPAWN, "s-old")],
+            ),
+            t("a shell", true, &[]),
+        ];
+        let theirs = vec![
+            t(
+                "secretary",
+                true,
+                &[(ROLE, "secretary"), (ORG, "/org/b"), (SPAWN, "s-new")],
+            ),
+            t("curator", true, &[(ROLE, "curator")]),
+        ];
+        let denies = |spawn: &str| spawn == "s-new";
+        let per_session = vec![("makiba".to_string(), ours), ("other".to_string(), theirs)];
+        assert_eq!(
+            agents_that_may_read(&per_session, "/org/a", &denies),
+            vec![
+                "makiba: w-old".to_string(),
+                "makiba: w-nospawn".to_string(),
+                "other: secretary of organization /org/b".to_string(),
+                "other: curator of organization (none)".to_string(),
+            ]
+        );
+        assert_eq!(
+            agents_that_may_read(&per_session[..1], "/org/a", &|_: &str| true),
+            vec!["makiba: w-nospawn".to_string()]
+        );
     }
 
     /// Issue 563: a stale row is a stall only when it is the lock holder's; a makibad that has

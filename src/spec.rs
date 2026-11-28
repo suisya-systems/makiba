@@ -190,6 +190,7 @@ pub enum Verb {
     Range,
     Review,
     Merge,
+    ApprovalKey,
 }
 
 impl Verb {
@@ -222,6 +223,7 @@ impl Verb {
         Verb::Range,
         Verb::Review,
         Verb::Merge,
+        Verb::ApprovalKey,
     ];
 
     pub fn as_str(self) -> &'static str {
@@ -254,6 +256,7 @@ impl Verb {
             Verb::Range => "range",
             Verb::Review => "review",
             Verb::Merge => "merge",
+            Verb::ApprovalKey => "approval-key",
         }
     }
 }

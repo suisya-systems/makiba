@@ -84,6 +84,43 @@ pub fn worker_denies() -> BaseDenies {
     herdr::denies(runtime.as_deref(), &crate::cli::base_config_home())
 }
 
+/// The sessions whose socket is in the base's socket folder (`$XDG_RUNTIME_DIR/herdr-core/`),
+/// sorted: every organization's base on this machine, a stopped one's left socket included. No
+/// folder: none.
+pub fn sessions() -> Result<Vec<String>, String> {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    let socket = herdr::socket_path(runtime.as_deref(), "x");
+    let dir = socket.parent().unwrap_or(Path::new("/"));
+    sessions_in(dir)
+}
+
+/// The socket of `session`: `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`.
+pub fn session_socket(session: &str) -> PathBuf {
+    let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
+    herdr::socket_path(runtime.as_deref(), session)
+}
+
+/// The sessions whose socket (`<session>.sock`) is in `dir`, sorted.
+fn sessions_in(dir: &Path) -> Result<Vec<String>, String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(format!("cannot read {}: {e}", dir.display())),
+    };
+    let mut out: Vec<String> = entries
+        .flatten()
+        .filter_map(|e| {
+            e.file_name()
+                .to_str()
+                .and_then(|n| n.strip_suffix(".sock"))
+                .filter(|s| !s.is_empty())
+                .map(String::from)
+        })
+        .collect();
+    out.sort();
+    Ok(out)
+}
+
 /// The real base of `session`, at `$XDG_RUNTIME_DIR/herdr-core/<session>.sock`.
 pub fn connect_session(session: &str, timeout: Duration) -> Box<dyn Base> {
     let runtime = std::env::var_os("XDG_RUNTIME_DIR").map(PathBuf::from);
@@ -261,4 +298,27 @@ pub trait Base: Send + Sync {
         }))
     }
     fn worker_denies(&self) -> BaseDenies;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Issue 590: every `<session>.sock` in the socket folder is a session; nothing else is, and
+    /// no folder is no session.
+    #[test]
+    fn the_sessions_are_the_sockets_of_the_folder() {
+        let dir = tempfile::tempdir().unwrap();
+        for f in ["makiba.sock", "other.sock", "notes.txt", ".sock"] {
+            std::fs::write(dir.path().join(f), "").unwrap();
+        }
+        assert_eq!(
+            sessions_in(dir.path()).unwrap(),
+            vec!["makiba".to_string(), "other".to_string()]
+        );
+        assert_eq!(
+            sessions_in(&dir.path().join("absent")).unwrap(),
+            Vec::<String>::new()
+        );
+    }
 }

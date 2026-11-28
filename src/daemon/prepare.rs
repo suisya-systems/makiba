@@ -438,6 +438,8 @@ impl Prepare {
                     &self.denies.resolved[..],
                     &self.denies.folders[..],
                     &cred_dirs[..],
+                    // The approval key's staging folder (Issue 590), for every role.
+                    &[crate::cli::approval_staging_path()][..],
                 ]
                 .concat(),
             )?,
@@ -446,6 +448,7 @@ impl Prepare {
                     &[
                         crate::cli::person_key_path(),
                         crate::cli::gate_key_path(),
+                        crate::cli::approval_key_path(),
                         PathBuf::from(&state_db),
                         PathBuf::from(format!("{state_db}-wal")),
                         PathBuf::from(format!("{state_db}-shm")),

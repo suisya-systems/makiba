@@ -823,10 +823,14 @@ fn same_settings(places: &Places, snap: &Snapshot) -> Result<PathBuf, String> {
     let db = places.state_db.display().to_string();
     let task = TaskSettings {
         write_dirs: vec![scratch],
-        deny_dirs: abs(cred_dirs),
+        deny_dirs: abs(cred_dirs
+            .into_iter()
+            .chain([crate::cli::approval_staging_path()])
+            .collect()),
         deny_files: abs([
             crate::cli::person_key_path(),
             crate::cli::gate_key_path(),
+            crate::cli::approval_key_path(),
             PathBuf::from(&db),
             PathBuf::from(format!("{db}-wal")),
             PathBuf::from(format!("{db}-shm")),
@@ -885,7 +889,12 @@ fn config_dir(var: &str, home: Option<&Path>, default: &str) -> Option<PathBuf> 
 /// state folder, the person's credentials, the base's folders and both readers' configuration.
 fn denied(places: &Places, home: Option<&Path>) -> Vec<PathBuf> {
     let (cred_dirs, cred_files) = super::prepare::credentials();
-    let mut out: Vec<PathBuf> = vec![crate::cli::person_key_path(), crate::cli::gate_key_path()];
+    let mut out: Vec<PathBuf> = vec![
+        crate::cli::person_key_path(),
+        crate::cli::gate_key_path(),
+        crate::cli::approval_key_path(),
+        crate::cli::approval_staging_path(),
+    ];
     if let Some(state) = places.state_db.parent() {
         out.push(state.to_path_buf());
     }
@@ -1455,6 +1464,7 @@ pub fn secret_in(text: &str) -> Option<String> {
         .iter()
         .filter_map(|p| std::fs::read_to_string(p).ok())
         .map(|k| k.trim().to_string())
+        .chain(super::person_key::approval_key_literals())
         .filter(|k| k.len() >= 16)
         .collect();
     crate::hooks::git_hook::find(text.as_bytes())

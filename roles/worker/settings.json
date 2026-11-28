@@ -14,6 +14,10 @@
       "Edit(~/.config/makiba/base/**)",
       "Read(~/.config/makiba/person.key)",
       "Edit(~/.config/makiba/person.key)",
+      "Read(~/.config/makiba/approval.key)",
+      "Edit(~/.config/makiba/approval.key)",
+      "Read(~/.config/makiba/approval.key.new/**)",
+      "Edit(~/.config/makiba/approval.key.new/**)",
       "Edit(~/.local/share/makiba/**)",
       "Edit(~/.claude/settings.json)",
       "Edit(.claude/settings*.json)",
@@ -84,6 +88,8 @@
         "~/.config/herdr-app",
         "~/.local/state/herdr-core",
         "~/.config/makiba/base",
+        "~/.config/makiba/approval.key",
+        "~/.config/makiba/approval.key.new",
         "~/.config/makiba/person.key",
         "~/.config/gh/hosts.yml"
       ],
@@ -92,6 +98,8 @@
         "~/.config/herdr-app",
         "~/.local/state/herdr-core",
         "~/.config/makiba/base",
+        "~/.config/makiba/approval.key",
+        "~/.config/makiba/approval.key.new",
         "~/.config/makiba/person.key",
         "~/.local/share/makiba"
       ]

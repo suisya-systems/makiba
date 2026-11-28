@@ -1,5 +1,5 @@
 //! The person's command (spec section 12), defined with clap. The verbs other than `up`, `down`,
-//! `status` and `events` (run locally by `main.rs`) talk to
+//! `status`, `events` and `approval-key` (run locally by `main.rs`) talk to
 //! `makibad` over the person's socket only, with the content of the person key file as its key;
 //! with no file it sends no key. It never opens `state.db` (only `src/status_local.rs` does, for
 //! `status` and `events`), so it uses no database module.
@@ -72,6 +72,80 @@ const GATE_WAIT: Duration = Duration::from_secs(840);
 /// the redactions and deny rules still cover an old file on disk (docs/design/merge-act.md section 8).
 pub fn gate_key_path() -> PathBuf {
     env_path("MAKIBA_GATE_KEY").unwrap_or_else(|| person_key_path().with_file_name("gate.key"))
+}
+
+/// `$MAKIBA_APPROVAL_KEY`, default `approval.key` beside the person key (by default
+/// `${XDG_CONFIG_HOME:-~/.config}/makiba/approval.key`): the ed25519 key the person's
+/// `makiba merge approve` signs an acceptance approval with (docs/design/acceptance-approval.md
+/// section 3). Every agent role's settings deny it, with its staging folder.
+pub fn approval_key_path() -> PathBuf {
+    env_path("MAKIBA_APPROVAL_KEY")
+        .unwrap_or_else(|| person_key_path().with_file_name("approval.key"))
+}
+
+/// The folder `makiba up` makes the approval key in before it puts it in place: `<key>.new`.
+pub fn approval_staging_path() -> PathBuf {
+    let mut staged = approval_key_path().into_os_string();
+    staged.push(".new");
+    PathBuf::from(staged)
+}
+
+/// The namespace an acceptance approval is signed in, and the head of the allowed-signers line.
+pub const APPROVAL_NAMESPACE: &str = "makiba-acceptance-approval";
+
+/// The approval key's line for `.github/acceptance-approvers`, from the private key itself
+/// (`ssh-keygen -y`): `makiba-owner namespaces="makiba-acceptance-approval" <type> <base64>`.
+/// Here, not in `daemon::person_key`, so that the person's command reaches no database module.
+pub fn approval_signer_line(path: &Path) -> Result<String, String> {
+    let out = std::process::Command::new("ssh-keygen")
+        .arg("-y")
+        .arg("-f")
+        .arg(path)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run ssh-keygen: {e}"))?;
+    if !out.status.success() {
+        return Err(format!(
+            "ssh-keygen cannot read {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&out.stderr).trim()
+        ));
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    let fields: Vec<&str> = text.split_whitespace().take(2).collect();
+    if fields.len() < 2 {
+        return Err(format!(
+            "ssh-keygen printed no public key for {}",
+            path.display()
+        ));
+    }
+    Ok(format!(
+        "makiba-owner namespaces=\"{APPROVAL_NAMESPACE}\" {}",
+        fields.join(" ")
+    ))
+}
+
+/// `makiba approval-key`: the approval key's line for `.github/acceptance-approvers`, read from
+/// the key; it makes, changes and removes nothing.
+pub fn approval_key_main() -> ExitCode {
+    let path = approval_key_path();
+    if !path.exists() {
+        eprintln!(
+            "makiba approval-key: no approval key at {}: makiba up makes it",
+            path.display()
+        );
+        return exit(ErrorKind::NotFound.exit_code());
+    }
+    match approval_signer_line(&path) {
+        Ok(line) => {
+            println!("{line}");
+            exit(EXIT_OK)
+        }
+        Err(e) => {
+            eprintln!("makiba approval-key: {e}");
+            exit(ErrorKind::Unavailable.exit_code())
+        }
+    }
 }
 
 /// `$MAKIBA_GOALS_DIR`, default `${XDG_CONFIG_HOME:-~/.config}/makiba/goals`: the goal ledgers,
@@ -423,6 +497,8 @@ pub enum Command {
         #[arg(long, value_parser = ["human", "acceptance"])]
         mode: Option<String>,
     },
+    /// Print the approval key's line for `.github/acceptance-approvers`; changes nothing.
+    ApprovalKey,
     /// Run the acceptance gate for a pull request at a head; merges nothing.
     Gate {
         #[arg(long)]
@@ -462,7 +538,8 @@ pub fn request(c: Command) -> Result<(&'static str, Value), String> {
         | Command::Down { .. }
         | Command::Base { .. }
         | Command::Status { .. }
-        | Command::Events { .. } => {
+        | Command::Events { .. }
+        | Command::ApprovalKey => {
             return Err("this verb runs locally, not over the door".into());
         }
         Command::Dispatch {
