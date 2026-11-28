@@ -110,27 +110,32 @@ pub const WAITING: &str = concat!(
                           WHERE lu.run_id = r.id AND lu.kind = 'run_unparked'), 0))))"
 );
 
-/// A run `r` in `review` whose fix is due (Issue 654): it counts in both counts. Its newest
-/// recorded head (a push that succeeded, `branch_pushed`, or a head recorded with `pr`,
-/// `pr_opened` / `fix_pushed`) is none while it has a done report, or is its test commit pushed
-/// alone (a `push` with that `head`, Issue 307) and newer than its newest done report. So a run
-/// counts from a done report until its first head, and from the push of its test commit alone
-/// until its next done report; after the fix's done it waits for its push and CI, and does not
-/// count. The done report is read from its message, which `report` writes before the belt fills.
-pub const FIX_DUE: &str = "(r.status = 'review' AND (
+/// A run `r` in `review` whose fix is due (Issue 654): it counts in both counts. Only a code run
+/// (its newest launch `code`): a document run pushes nothing. Either it has a done report and no
+/// head recorded at all (no `branch_pushed`, no `pr_opened` / `fix_pushed`), or its newest
+/// `branch_pushed` (a push that succeeded) is of its test commit alone (`test_commit`, read by
+/// push.rs; or a `push` with that `head`, Issue 307) and newer than its newest done report. So a
+/// run counts from a done report until its first head, and from the push of its test commit
+/// alone until its next done report; after the fix's done it waits for its push and CI, and does
+/// not count, whatever head `pr` records later. The done report is read from its message, which
+/// `report` writes before the belt fills.
+pub const FIX_DUE: &str = "(r.status = 'review'
+  AND (SELECT fl.kind FROM run_launch fl WHERE fl.run_id = r.id ORDER BY fl.id DESC LIMIT 1)
+      = 'code'
+  AND (
     (NOT EXISTS (SELECT 1 FROM events fp WHERE fp.run_id = r.id
                  AND fp.kind IN ('branch_pushed', 'pr_opened', 'fix_pushed'))
      AND EXISTS (SELECT 1 FROM messages fm WHERE fm.run_id = r.id AND fm.kind = 'report_done'))
     OR EXISTS (SELECT 1 FROM events fp WHERE fp.id = (
                    SELECT max(fq.id) FROM events fq WHERE fq.run_id = r.id
-                   AND fq.kind IN ('branch_pushed', 'pr_opened', 'fix_pushed'))
+                   AND fq.kind = 'branch_pushed')
                AND fp.id > coalesce((SELECT max(fm.event_id) FROM messages fm
                                      WHERE fm.run_id = r.id AND fm.kind = 'report_done'), 0)
-               AND EXISTS (SELECT 1 FROM commands fc WHERE fc.verb = 'push'
-                           AND json_extract(fc.args_json, '$.task') = r.task_id
-                           AND json_extract(fc.args_json, '$.head')
-                               = coalesce(json_extract(fp.payload_json, '$.head'),
-                                          json_extract(fp.payload_json, '$.head_oid'))))))";
+               AND (json_extract(fp.payload_json, '$.test_commit') = 1
+                    OR EXISTS (SELECT 1 FROM commands fc WHERE fc.verb = 'push'
+                               AND json_extract(fc.args_json, '$.task') = r.task_id
+                               AND json_extract(fc.args_json, '$.head')
+                                   = json_extract(fp.payload_json, '$.head'))))))";
 
 /// `chain`: the range `?1` and every range it replaced (each `ended` `replaced`). Their runs stay
 /// theirs (where a run came from), and count for the range that replaced them.
@@ -4247,6 +4252,101 @@ pub(in crate::daemon) mod tests {
                 params![task, range],
             )
             .unwrap();
+    }
+
+    /// Issue 654 (diff review): which runs in review `FIX_DUE` counts. A plain push of the test
+    /// commit alone (`test_commit` true, no `head`) keeps the fix due; a `pr` record of the test
+    /// commit's head after the fix's done does not make it due again; a document run, which
+    /// pushes nothing, is never due.
+    #[test]
+    fn fix_due_follows_the_push_of_the_test_commit_on_a_code_run_only() {
+        let (_dir, w) = org();
+        let id = active_range(&w, None);
+        let due = |task: &str| -> bool {
+            w.conn()
+                .query_row(
+                    &format!("SELECT {FIX_DUE} FROM runs r WHERE r.task_id = ?1"),
+                    [task],
+                    |r| r.get(0),
+                )
+                .unwrap()
+        };
+        let launch = |task: &str, kind: &str| {
+            w.conn()
+                .execute(
+                    "INSERT INTO run_launch (run_id, spawn_id, kind, agent, brief, worktree, stage)
+                     VALUES ((SELECT id FROM runs WHERE task_id = ?1), ?1, ?2, 'fake', 'b', 'w',
+                             'verified')",
+                    params![task, kind],
+                )
+                .unwrap();
+        };
+        let done = |task: &str| {
+            let e = event(&w, "message_sent", "w", Some(task), json!({})).unwrap();
+            w.conn()
+                .execute(
+                    "INSERT INTO messages (event_id, sender, recipient, kind, run_id, body)
+                     VALUES (?1, 'w', 'secretary', 'report_done',
+                             (SELECT id FROM runs WHERE task_id = ?2), 'done')",
+                    params![e, task],
+                )
+                .unwrap();
+            w.conn()
+                .execute(
+                    "UPDATE runs SET status = 'review' WHERE task_id = ?1",
+                    [task],
+                )
+                .unwrap();
+        };
+        let pushed = |task: &str, head: &str, test_commit: bool| {
+            event(
+                &w,
+                "branch_pushed",
+                "makibad",
+                Some(task),
+                json!({"task_id": task, "branch": "b", "head": head, "test_commit": test_commit}),
+            )
+            .unwrap();
+        };
+        let (m, f) = ("1".repeat(40), "2".repeat(40));
+
+        // A code run: done with its test commit, pushed alone by a plain push.
+        run_of(&w, id, "c");
+        launch("c", "code");
+        done("c");
+        assert!(due("c"), "nothing pushed yet");
+        pushed("c", &m, true);
+        assert!(due("c"), "its test commit pushed alone");
+        // The fix's done: no longer due, and a late record of the test commit's head with `pr`
+        // does not make it due again.
+        done("c");
+        assert!(!due("c"), "the fix is done");
+        // Even with a `push` that named the test commit as its `head`.
+        w.conn()
+            .execute(
+                "INSERT INTO commands (actor, verb, args_json, status)
+                 VALUES ('secretary', 'push', json_object('task', 'c', 'head', ?1), 'done')",
+                [&m],
+            )
+            .unwrap();
+        event(
+            &w,
+            "pr_opened",
+            "secretary",
+            Some("c"),
+            json!({"repo": "o/p", "pr": 1, "head_oid": m}),
+        )
+        .unwrap();
+        assert!(!due("c"), "a pr record is no push");
+        // The fix pushed: the whole branch, no test commit.
+        pushed("c", &f, false);
+        assert!(!due("c"));
+
+        // A document run done: nothing to push, never due.
+        run_of(&w, id, "d");
+        launch("d", "document");
+        done("d");
+        assert!(!due("d"), "a document run");
     }
 
     fn status_of(w: &StateWriter, id: i64) -> String {

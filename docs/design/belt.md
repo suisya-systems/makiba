@@ -103,7 +103,7 @@ A slot is free when both of these are below their limit:
 
 A run that comes back (answered, unparked, sent back to rework) counts again at once, even above the limit; nothing new goes in until the count is below it.
 
-A run reworking its pull request counts in both counts (Issue 654). A run in `review` counts while its fix is due (`belt::FIX_DUE`): from a done report until its first push that succeeded (`branch_pushed`), and from the push of its test commit alone (`push` with `head`) until its next done report. A message to its worker (a `send`, an `answer`, typed or not) moves a run in `review` to `in_use`, as `report start` does, so it counts until its next `done`; a `blocked` report leaves it `in_use`. A run in `review` after the done report of its fix (waiting for its push, CI or its landing) counts in neither.
+A run reworking its pull request counts in both counts (Issue 654). A code run in `review` counts while its fix is due (`belt::FIX_DUE`): from a done report until its first recorded head (`branch_pushed`, or a head recorded with `pr`), and from a push that succeeded of its test commit alone (`branch_pushed` with `test_commit`, with `head` or not) until its next done report; a later `pr` record of the test commit's head does not make it due again. A document run, which pushes nothing, is never due. A message to its worker (a `send`, an `answer`, typed or not) moves a run in `review` to `in_use`, as `report start` does, so it counts until its next `done`; a `blocked` report leaves it `in_use`. A run in `review` after the done report of its fix (waiting for its push, CI or its landing) counts in neither.
 
 ### 3.3 Reading the candidates
 
