@@ -1750,6 +1750,15 @@ fn is_cargo_target(p: &str) -> bool {
     name.is_some_and(|n| !n.is_empty() && !n.contains('/'))
 }
 
+/// Whether the declared path `p` names a Cargo test target in the test commit's tree `t`, as the
+/// checker's `classify` reads it there: a file that is a target, or a folder whose `main.rs` is
+/// one (the checker then names the folder in its `ignored` record).
+fn declares_cargo_target(t: &Tree, p: &str) -> bool {
+    let file = |q: &str| t.get(q).is_some_and(|(mode, _)| mode.starts_with("100"));
+    let main = format!("{p}/main.rs");
+    (file(p) && is_cargo_target(p)) || (file(&main) && is_cargo_target(&main))
+}
+
 /// The warning the answer carries for a head whose acceptance failed by construction.
 pub fn acceptance_warning(set: &[String]) -> String {
     format!("acceptance fails by construction: {}", set.join("; "))
@@ -1860,6 +1869,7 @@ pub fn evaluate_failed(
     }
     let set = set.unwrap_or_default();
     let touched = changed_by(repo, &msha)?;
+    let mtree = tree(repo, &msha)?;
     let declared = |p: &str| manifest.iter().any(|m| under(p, m));
     let mut held = BTreeSet::new();
     for record in &set {
@@ -1871,7 +1881,9 @@ pub fn evaluate_failed(
                         && !under(p, ".github")
                         && !is_infra(p))
             }
-            ["ignored", p, _] => manifest.iter().any(|m| m == p) && is_cargo_target(p),
+            ["ignored", p, _] => {
+                manifest.iter().any(|m| m == p) && declares_cargo_target(&mtree, p)
+            }
             _ => false,
         };
         if !ok {
@@ -2345,5 +2357,34 @@ mod tests {
         assert_eq!(merged[0].path, "tests/test_b.py");
         let id = |rev: &str| run(&dir, &["rev-parse", &format!("{rev}:tests/test_b.py")]);
         assert_eq!(merged[0].ids, vec![id(&m), id(&base), id(&head)]);
+    }
+
+    /// Issue 591: an `ignored` record names a declared Cargo target as the checker's `classify`
+    /// names it: a target file, or a declared folder whose `main.rs` is one.
+    #[test]
+    fn a_declared_folder_with_main_rs_is_a_cargo_target() {
+        let blob = |p: &str| (p.to_string(), ("100644".to_string(), "x".to_string()));
+        let t: Tree = [
+            blob("tests/dir/main.rs"),
+            blob("tests/dir/part.rs"),
+            blob("tests/file.rs"),
+            blob("tests/common/mod.rs"),
+            blob("src/lib.rs"),
+        ]
+        .into_iter()
+        .collect();
+        for p in ["tests/dir", "tests/dir/main.rs", "tests/file.rs"] {
+            assert!(declares_cargo_target(&t, p), "{p}");
+        }
+        for p in [
+            "tests/common",
+            "tests/dir/part.rs",
+            "tests/missing.rs",
+            "tests/missing",
+            "src/lib.rs",
+            "src",
+        ] {
+            assert!(!declares_cargo_target(&t, p), "{p}");
+        }
     }
 }
